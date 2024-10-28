@@ -1,23 +1,25 @@
 {
     "graph": {
-        "nodes": [
+        "stages": [
             {
-                "name": "Task A",
-                "task": {
-                    "args": "2",
-                    "output": true
-                },
-                "successors": "Task B",
-                "dependents": ""
-            },
-            {
-                "name": "Task B",
-                "task": {
-                    "args": "1",
-                    "output": true
-                },
-                "successors": "",
-                "dependents": "Task A"
+                "nodes": [
+                    {
+                        "name": "Task A",
+                        "task": {
+                            "args": 2,
+                            "output": true
+                        },
+                        "successors": "Task B"
+                    },
+                    {
+                        "name": "Task B",
+                        "task": {
+                            "args": 1,
+                            "output": true
+                        },
+                        "successors": ""
+                    }
+                ]
             }
         ]
     }

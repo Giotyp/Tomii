@@ -1,0 +1,81 @@
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use std::fs::File;
+use std::io::Read;
+
+use crate::graph_struct::*;
+use serde::Deserialize;
+use serde_json;
+
+#[derive(Debug, Deserialize)]
+struct TaskJson {
+    args: i32,
+    output: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct NodeJson {
+    name: String,
+    task: TaskJson,
+    successors: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct StageJson {
+    nodes: Vec<NodeJson>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphJson {
+    stages: Vec<StageJson>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RootJson {
+    graph: GraphJson,
+}
+
+pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
+
+    let mut file = File::open(graph_json).unwrap();
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).unwrap();
+    let root: RootJson = serde_json::from_str(&contents)?;
+    
+    let mut graph = Graph::new();
+
+    let mut node_stages: HashMap<String, usize> = HashMap::new();
+
+    for (stage_no, stage_json) in root.graph.stages.iter().enumerate() {
+        let mut stage = Stage::new();
+
+        for node_json in stage_json.nodes.iter() {
+            let task = Task::new(node_json.task.args, node_json.task.output);
+            let node = Arc::new(RwLock::new(Node::new(node_json.name.clone(), task)));
+            stage.add_node(node);
+            node_stages.insert(node_json.name.clone(), stage_no);
+        }
+
+        graph.add_stage(stage);
+    }
+
+    for (stage_no, stage_json) in root.graph.stages.iter().enumerate() {
+        for node_json in stage_json.nodes.iter() {
+            let node_name = node_json.name.clone();
+
+            if !node_json.successors.is_empty() {
+                for successor_name in node_json.successors.split(",") {
+                    let succ_stage = *node_stages.get(successor_name).unwrap();
+
+                    let succ_node = graph.stage(succ_stage).node(successor_name).unwrap();
+                    let node = graph.stage(stage_no).node(&node_name).unwrap();
+
+                    node.write().unwrap().add_successor(succ_node.clone());
+                    succ_node.write().unwrap().add_dependent(node.clone());
+                }
+            }
+        }
+    }
+
+    Ok(graph)
+}
