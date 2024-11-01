@@ -4,13 +4,16 @@ use std::fs::File;
 use std::io::Read;
 
 use crate::graph_struct::*;
+use crate::custom::*;
 use serde::Deserialize;
 use serde_json;
 
 #[derive(Debug, Deserialize)]
 struct TaskJson {
-    args: i32,
-    output: bool,
+    arg_types: Vec<String>,
+    args: Vec<String>,
+    function_path: String,
+    function_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +38,14 @@ struct RootJson {
     graph: GraphJson,
 }
 
+fn parse_task(task_json: &TaskJson) -> Task {
+    let mut args = Vec::new();
+    for (arg_type, arg) in task_json.arg_types.iter().zip(task_json.args.iter()) {
+        args.push(string_to_primitive(arg_type.clone(), arg.clone()).unwrap());
+    }
+    Task::new(args, task_json.function_path.clone(), task_json.function_name.clone())
+}
+
 pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
 
     let mut file = File::open(graph_json).unwrap();
@@ -50,7 +61,7 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
         let mut stage = Stage::new();
 
         for node_json in stage_json.nodes.iter() {
-            let task = Task::new(node_json.task.args, node_json.task.output);
+            let task = parse_task(&node_json.task);
             let node = Arc::new(RwLock::new(Node::new(node_json.name.clone(), task)));
             stage.add_node(node);
             node_stages.insert(node_json.name.clone(), stage_no);

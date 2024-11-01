@@ -1,22 +1,20 @@
+use crate::custom::CmTypes;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 pub struct Task {
-    args: i32,
-    output: bool,
+    args: Vec<CmTypes>,
+    function_path: String,
+    function_name: String,
 }
 
 impl Task {
-    pub fn new(args: i32, output: bool) -> Task {
-        Task { args, output }
-    }
-
-    pub fn args(&self) -> i32 {
-        self.args
-    }
-
-    pub fn output(&self) -> bool {
-        self.output
+    pub fn new(args: Vec<CmTypes>, function_path: String, function_name: String) -> Task {
+        Task {
+            args,
+            function_path,
+            function_name,
+        }
     }
 }
 
@@ -91,21 +89,43 @@ impl Graph {
     pub fn add_stage(&mut self, stage: Stage) {
         self.stages.push(stage);
     }
+}
 
+
+// Display functions
+impl Graph {
     pub fn generate_dot(&self) -> String {
         let mut dot = String::from("digraph {\n");
-    
+
         for stage in self.stages.iter() {
             for node in stage.nodes.values() {
                 let node_read = node.read().unwrap();
                 for successor in &node_read.successors {
                     let successor_name = successor.read().unwrap().name().clone();
-                    dot.push_str(&format!("    \"{}\" -> \"{}\";\n", node_read.name, successor_name));
+                    dot.push_str(&format!(
+                        "    \"{}\" -> \"{}\";\n",
+                        node_read.name, successor_name
+                    ));
                 }
             }
         }
-    
+
         dot.push_str("}\n");
         dot
+    }
+
+    pub fn print_graph(&self) {
+        println!("Graph: ");
+        for (stage_no, stage) in self.stages.iter().enumerate() {
+            println!("  Stage {}: ", stage_no);
+            for node in stage.nodes.values() {
+                let node_read = node.read().unwrap();
+                println!("      Node: {}", node_read.name);
+                println!("          Task: {}::{}", node_read.task.function_path, node_read.task.function_name);
+                println!("              Args: {:?}", node_read.task.args);
+                println!("          Successors: {:?}", node_read.successors.iter().map(|s| s.read().unwrap().name().clone()).collect::<Vec<String>>());
+                println!("          Dependents: {:?}", node_read.dependents.iter().map(|d| d.read().unwrap().name().clone()).collect::<Vec<String>>());
+            }
+        }
     }
 }
