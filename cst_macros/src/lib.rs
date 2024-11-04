@@ -1,40 +1,49 @@
 extern crate proc_macro;
+
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, LitStr, Token, punctuated::Punctuated};
-
-struct ImportCallArgs {
-    fn_path: LitStr,
-    fn_name: LitStr,
-}
-
-impl syn::parse::Parse for ImportCallArgs {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let content: Punctuated<LitStr, Token![,]> = Punctuated::parse_terminated(input)?;
-        let mut iter = content.into_iter();
-
-        let fn_path = iter.next().ok_or_else(|| syn::Error::new(input.span(), "expected function path"))?;
-        let fn_name = iter.next().ok_or_else(|| syn::Error::new(input.span(), "expected function name"))?;
-        
-        Ok(ImportCallArgs { fn_path, fn_name })
-    }
-}
+use std::env;
+use syn::{parse_macro_input, LitStr, Token};
 
 #[proc_macro]
-pub fn import_and_call(input: TokenStream) -> TokenStream {
-    let ImportCallArgs { fn_path, fn_name } = parse_macro_input!(input as ImportCallArgs);
+pub fn execute_function(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as ExecuteFunctionInput);
 
-    let fn_path_value = fn_path.value();
-    let fn_name_ident = syn::Ident::new(&fn_name.value(), fn_name.span());
+    let path = input.path.value();
+    // break path in '/', take the last part and remove .rs
+    let path_name = path.split('/').last().unwrap().split('.').next().unwrap();
+    let name = input.name.value();
 
-    let generated_code = quote! {
+    // Use cargo manifest to point to the project's root directory
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let full_path = format!("{}/{}", manifest_dir, path);
+
+    let module_name = syn::Ident::new(&path_name, proc_macro2::Span::call_site());
+    let function_name = syn::Ident::new(&name, proc_macro2::Span::call_site());
+
+    let expanded = quote! {
         {
-            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/", #fn_path_value);
-            println!("Importing and calling function from: {}", path);
-            include!(path);
-            #fn_name_ident()
+            #[allow(dead_code)]
+            #[path = #full_path]
+            mod #module_name;
+            #module_name::#function_name()
         }
     };
 
-    TokenStream::from(generated_code)
+    expanded.into()
+}
+
+struct ExecuteFunctionInput {
+    path: LitStr,
+    name: LitStr,
+}
+
+impl syn::parse::Parse for ExecuteFunctionInput {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let path: LitStr = input.parse()?;
+        let _: Token![,] = input.parse()?;
+        let name: LitStr = input.parse()?;
+
+        Ok(ExecuteFunctionInput { path, name })
+    }
 }
