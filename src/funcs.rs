@@ -1,3 +1,7 @@
+pub fn dummy() {
+    println!("This is a dummy function");
+}
+
 pub fn task_a (x: usize, y:usize, op: &str) -> usize {
     match op {
         "add" => x + y,
