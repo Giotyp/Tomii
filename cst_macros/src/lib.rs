@@ -3,7 +3,9 @@ extern crate proc_macro;
 use proc_macro::TokenStream;
 use quote::quote;
 use std::env;
-use syn::{parse_macro_input, LitStr, Token};
+use syn::{parse::{Parse, ParseStream}, parse_macro_input, punctuated::Punctuated, Expr, ExprArray, LitStr, Token};
+
+use shared::*;
 
 #[proc_macro]
 pub fn execute_function(input: TokenStream) -> TokenStream {
@@ -47,3 +49,54 @@ impl syn::parse::Parse for ExecuteFunctionInput {
         Ok(ExecuteFunctionInput { path, name })
     }
 }
+
+// #[proc_macro]
+// pub fn execute_function_args(input: TokenStream) -> TokenStream {
+//     let ExecuteFunctionArgsInput { path, name, args } = parse_macro_input!(input as ExecuteFunctionArgsInput);
+
+//     let path_value = path.value();
+//     let name_ident = syn::Ident::new(&name.value(), name.span());
+
+//     let elements = args.iter().map(|e| {
+//         quote! {
+//             println!("{:?}", #e);
+//         }
+//     });
+
+//     let expanded = quote! {
+//         {
+//             mod temp_module {
+//                 #[path = #path_value]
+//                 pub mod imported {
+//                     pub use super::*;
+//                     pub fn imported_function() {
+//                         #( #elements )*
+//                     }
+//                 }
+//             }
+//             temp_module::imported::imported_function();
+//         }
+//     };
+
+//     TokenStream::from(expanded)
+// }
+
+// struct ExecuteFunctionArgsInput {
+//     path: LitStr,
+//     name: LitStr,
+//     args: Punctuated<Expr, Token![,]>,
+// }
+
+// impl Parse for ExecuteFunctionArgsInput {
+//     fn parse(input: ParseStream) -> syn::Result<Self> {
+//         let path: LitStr = input.parse()?;
+//         let _: Token![,] = input.parse()?;
+//         let name: LitStr = input.parse()?;
+//         let _: Token![,] = input.parse()?;
+//         let content;
+//         let _ = syn::bracketed!(content in input);
+//         let args = Punctuated::<Expr, Token![,]>::parse_terminated(&content)?;
+
+//         Ok(ExecuteFunctionArgsInput { path, name, args })
+//     }
+// }

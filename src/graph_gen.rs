@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::Read;
 
 use crate::graph_struct::*;
-use crate::custom::*;
+use shared::*;
 use serde::Deserialize;
 use serde_json;
 
