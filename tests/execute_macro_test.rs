@@ -11,10 +11,10 @@ mod tests {
         execute_function!("src/funcs.rs", "dummy");
     }
 
-    // #[test]
-    // fn test_task_a() {
-    //     let arg_vec = vec![CmTypes::Usize(10), CmTypes::Usize(5), CmTypes::String("add".to_string())];
-    //     let result = execute_function_args!("src/funcs.rs", "task_a", [CmTypes::Usize(10), CmTypes::Usize(5), CmTypes::String("add".to_string())]);
-    //     // assert_eq!(result, 15);
-    // }
+    #[test]
+    fn test_task_a() {
+        let arg_vec = vec![CmTypes::Usize(10), CmTypes::Usize(5), CmTypes::String("add".to_string())];
+        let result = execute_function_args!("src/funcs.rs", "task_a", arg_vec);
+        assert_eq!(result, 15);
+    }
 }
