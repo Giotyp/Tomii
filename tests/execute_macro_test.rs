@@ -17,4 +17,11 @@ mod tests {
         let result = execute_function_args!("src/funcs.rs", "task_a", arg_vec);
         assert_eq!(result, 15);
     }
+
+    #[test]
+    fn test_task_b() {
+        let arg_vec = vec![CmTypes::Usize(10), CmTypes::Usize(5)];
+        let result = execute_function_args!("src/funcs.rs", "task_b", arg_vec);
+        assert_eq!(result, false);
+    }
 }

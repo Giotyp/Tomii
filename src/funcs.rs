@@ -29,6 +29,15 @@ pub fn task_a (args: Vec<CmTypes>) -> usize {
 }
 
 
-pub fn task_b (x: usize, lim: usize) -> bool {
+pub fn task_b (args: Vec<CmTypes>) -> bool {
+    let x = match args[0] {
+        CmTypes::Usize(x) => x.clone(),
+        _ => panic!("Invalid argument type"),
+    };
+    let lim = match args[1] {
+        CmTypes::Usize(lim) => lim.clone(),
+        _ => panic!("Invalid argument type"),
+    };
+
     x < lim
 }
