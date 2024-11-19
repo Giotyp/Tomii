@@ -1,11 +1,8 @@
-use shared::CmTypes;
-
 pub fn dummy() {
     println!("This is a dummy function");
 }
 
-pub fn task_a(x: usize, y: usize, op: String) 
--> usize {
+pub fn task_a(x: usize, y: usize, op: String) -> usize {
     match op.as_str() {
         "add" => x + y,
         "sub" => x - y,
@@ -16,43 +13,5 @@ pub fn task_a(x: usize, y: usize, op: String)
 }
 
 pub fn task_b(x: usize, lim: usize) -> bool {
-    x < lim
-}
-
-pub fn task_a_cm(args: Vec<CmTypes>) -> usize {
-
-    let x = match args[0] {
-        CmTypes::Usize(x) => x.clone(),
-        _ => panic!("Invalid argument type"),
-    };
-    let y = match args[1] {
-        CmTypes::Usize(y) => y.clone(),
-        _ => panic!("Invalid argument type"),
-    };
-    let op = match &args[2] {
-        CmTypes::String(op) => op.clone(),
-        _ => panic!("Invalid argument type"),
-    };
-
-    match op.as_str() {
-        "add" => x + y,
-        "sub" => x - y,
-        "mul" => x * y,
-        "div" => x / y,
-        _ => panic!("Invalid operation"),
-    }
-}
-
-
-pub fn task_b_cm(args: Vec<CmTypes>) -> bool {
-    let x = match args[0] {
-        CmTypes::Usize(x) => x.clone(),
-        _ => panic!("Invalid argument type"),
-    };
-    let lim = match args[1] {
-        CmTypes::Usize(lim) => lim.clone(),
-        _ => panic!("Invalid argument type"),
-    };
-
     x < lim
 }
