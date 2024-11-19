@@ -4,6 +4,9 @@ name = "jraph"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "jraph"
+path = "src/lib.rs"
 
 [dependencies]
 cst_macros = { path = "./cst_macros" }
