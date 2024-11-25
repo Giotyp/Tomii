@@ -13,8 +13,13 @@ fn main() {
 
     let dest_path = PathBuf::from(func_path).join("wrappers.rs");
 
+    let file_name = path.file_name().unwrap().to_str().unwrap();
+    // remove the extension
+    let file_name = file_name.split(".").collect::<Vec<&str>>()[0];
+    let file_extension = path.extension().unwrap().to_str().unwrap();
 
-     // Call the Python script to generate the wrappers
+
+    // Call the Python script to generate the wrappers
     let status = Command::new("python3")
         .arg("translator.py")
         .arg(func_file)
@@ -24,5 +29,16 @@ fn main() {
 
     if !status.success() {
         panic!("Python script failed");
+    }
+
+    // If given function file is a .h header
+    // linkage with lib<file>.so is required
+
+    if file_extension == "h" {
+        println!("cargo:rustc-link-lib=dylib=stdc++");
+        println!("cargo:rustc-link-search=native={}", func_path);
+        println!("cargo:rustc-link-lib=dylib={}", file_name);
+        // Add RPATH to the build output
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", func_path);
     }
 }
