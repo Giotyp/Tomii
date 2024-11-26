@@ -1,6 +1,7 @@
 use std::process::Command;
 use std::path::PathBuf;
 use std::env;
+use build_print::info;
 
 fn main() {
 
@@ -9,7 +10,7 @@ fn main() {
 
     // Extract the path to function file
     let func_path = path.parent().unwrap().to_str().unwrap_or("");
-    println!("Generating wrappers for functions in {}", func_path);
+    info!("Generating wrappers for functions in {}", func_path);
 
     let dest_path = PathBuf::from(func_path).join("wrappers.rs");
 
@@ -17,6 +18,8 @@ fn main() {
     // remove the extension
     let file_name = file_name.split(".").collect::<Vec<&str>>()[0];
     let file_extension = path.extension().unwrap().to_str().unwrap();
+
+    info!("File name: {}.{}", file_name, file_extension);
 
 
     // Call the Python script to generate the wrappers
@@ -35,6 +38,7 @@ fn main() {
     // linkage with lib<file>.so is required
 
     if file_extension == "h" {
+        info!("Linking with {}/{}", func_path, file_name);
         println!("cargo:rustc-link-lib=dylib=stdc++");
         println!("cargo:rustc-link-search=native={}", func_path);
         println!("cargo:rustc-link-lib=dylib={}", file_name);

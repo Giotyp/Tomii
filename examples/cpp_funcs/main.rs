@@ -12,4 +12,5 @@ fn test_adder() {
 
 fn main() {
     test_adder();
+    println!("All tests passed!");
 }
