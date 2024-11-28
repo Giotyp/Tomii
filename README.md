@@ -17,14 +17,14 @@ Currently, functions can be given in the following way:
 
     * The environment variable `FUNC_PATH` needs to point to the function file.
 
-    * The function file must be a Rust **.rs** file.
+    * The function file can either be a Rust **.rs** file or a C/C++ header **.h** file.
 
-    * Wrapper functions are generated in the same directory as the functino file provided and import those Rust functions.
+    * The wrapper functions are generated in the same direction as the function file.
+
+    * If the functions are given in Rust, the wrappers import those Rust functions. An example is given in [rust_funcs](examples/rust_funcs/)
+
+    * If the functions are given in a C/C++ header, they must be accompanied by a respected **.so** shared library file. During compilation, the *build.rs* links with the **.so** library and the generate wrappers call the functions defined. An example is given in [cpp_funcs](examples/cpp_funcs/)
 
 ## Future Work
 
-1. Wrapper functions should link with the respective binaries.
-
-2. Translator support for **C/C++** binaries and given header files. 
-
-3. Executor that creates an environment with available CPU threads and schedules tasks of the graph.
+1. Executor that creates an environment with available CPU threads and schedules tasks of the graph.
