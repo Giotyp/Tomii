@@ -87,6 +87,8 @@ def generate_wrapper(fn_name, args_signature, return_type, mode='rust'):
         for arg_tp in arg_list:
             externC += f'\t{arg_tp},\n'
         externC += f') -> {return_type_str};\n'
+    else:
+        externC = f'fn {fn_name}() -> {return_type_str};\n'
 
     if cmtypes == []:
         return(
@@ -94,11 +96,18 @@ def generate_wrapper(fn_name, args_signature, return_type, mode='rust'):
         f'\t{fn_name}({arg_names_str})\n'
         f'}}\n', externC)
     else:
-        return(
-        f'pub fn {fn_name}_wrap(args: Vec<CmTypes>) -> {return_type_str} {{\n'
-        f'{match_arms_str}\n\n'
-        f'\tunsafe{{{fn_name}({arg_names_str})}}\n'
-        f'}}\n', externC)
+        if mode == 'cpp':
+            return(
+            f'pub fn {fn_name}_wrap(args: Vec<CmTypes>) -> {return_type_str} {{\n'
+            f'{match_arms_str}\n\n'
+            f'\tunsafe{{{fn_name}({arg_names_str})}}\n'
+            f'}}\n', externC)
+        else:
+            return(
+            f'pub fn {fn_name}_wrap(args: Vec<CmTypes>) -> {return_type_str} {{\n'
+            f'{match_arms_str}\n\n'
+            f'\t{fn_name}({arg_names_str})\n'
+            f'}}\n', externC)
 
 
 def handle_rust(content, output_file):
