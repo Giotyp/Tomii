@@ -16,6 +16,18 @@ impl Task {
             function_name,
         }
     }
+
+    pub fn args(&self) -> &Vec<CmTypes> {
+        &self.args
+    }
+
+    pub fn function_path(&self) -> &String {
+        &self.function_path
+    }
+
+    pub fn function_name(&self) -> &String {
+        &self.function_name
+    }
 }
 
 pub struct Node {
@@ -91,7 +103,6 @@ impl Graph {
     }
 }
 
-
 // Display functions
 impl Graph {
     pub fn generate_dot(&self) -> String {
@@ -121,10 +132,27 @@ impl Graph {
             for node in stage.nodes.values() {
                 let node_read = node.read().unwrap();
                 println!("      Node: {}", node_read.name);
-                println!("          Task: {}::{}", node_read.task.function_path, node_read.task.function_name);
+                println!(
+                    "          Task: {}::{}",
+                    node_read.task.function_path, node_read.task.function_name
+                );
                 println!("              Args: {:?}", node_read.task.args);
-                println!("          Successors: {:?}", node_read.successors.iter().map(|s| s.read().unwrap().name().clone()).collect::<Vec<String>>());
-                println!("          Dependents: {:?}", node_read.dependents.iter().map(|d| d.read().unwrap().name().clone()).collect::<Vec<String>>());
+                println!(
+                    "          Successors: {:?}",
+                    node_read
+                        .successors
+                        .iter()
+                        .map(|s| s.read().unwrap().name().clone())
+                        .collect::<Vec<String>>()
+                );
+                println!(
+                    "          Dependents: {:?}",
+                    node_read
+                        .dependents
+                        .iter()
+                        .map(|d| d.read().unwrap().name().clone())
+                        .collect::<Vec<String>>()
+                );
             }
         }
     }

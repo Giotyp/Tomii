@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::fmt;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub enum CmTypes {
   Bool(bool),
   I8(i8),
