@@ -12,7 +12,8 @@ fn main() {
     let func_path = path.parent().unwrap().to_str().unwrap_or("");
     info!("Generating wrappers for functions in {}", func_path);
 
-    let dest_path = PathBuf::from(func_path).join("wrappers.rs");
+    let wrapper_path = PathBuf::from(func_path).join("wrappers.rs");
+    let registry_path = PathBuf::from(func_path).join("func_reg.rs");
 
     let file_name = path.file_name().unwrap().to_str().unwrap();
     // remove the extension
@@ -26,7 +27,8 @@ fn main() {
     let status = Command::new("python3")
         .arg("translator.py")
         .arg(func_file)
-        .arg(dest_path.to_str().unwrap())
+        .arg(wrapper_path.to_str().unwrap())
+        .arg(registry_path.to_str().unwrap())
         .status()
         .expect("Failed to execute Python script");
 

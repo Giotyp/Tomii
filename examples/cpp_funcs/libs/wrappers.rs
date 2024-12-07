@@ -8,7 +8,7 @@ extern "C" {
 	) -> usize;
 }
 
-pub fn adder_wrap(args: Vec<CmTypes>) -> usize {
+pub fn adder_wrap(args: Vec<CmTypes>) -> CmTypes {
 	let a = match args[0] {
 		CmTypes::Usize(a) => a.clone(),
 		_ => panic!("Invalid argument type"),
@@ -19,5 +19,5 @@ pub fn adder_wrap(args: Vec<CmTypes>) -> usize {
 		_ => panic!("Invalid argument type"),
 	};
 
-	unsafe{adder(a, b)}
+	CmTypes::Usize(unsafe{adder(a, b)})
 }

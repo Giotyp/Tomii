@@ -3,6 +3,8 @@ import sys
 import textwrap
 from pathlib import Path
 
+func_reg = []
+
 def map_arg(arg):
     if '*' not in arg:
         return 'usize'
@@ -44,9 +46,9 @@ def generate_wrapper(fn_name, args_signature, return_type, mode='rust'):
     args = [arg.strip() for arg in args_signature.split(
         ',') if arg.strip()] if args_signature else []
     arg_names = []
-    cmtypes = []
+    arguments = []
 
-    arg_list = []
+    carg_list = []
 
     for index, arg in enumerate(args):
 
@@ -59,7 +61,7 @@ def generate_wrapper(fn_name, args_signature, return_type, mode='rust'):
             arg_name = arg_details[1].strip()
             arg_type = map_arg(arg_details[0].strip())
 
-            arg_list.append(f'{arg_name}: {arg_type}')
+            carg_list.append(f'{arg_name}: {arg_type}')
 
         arg_names.append(arg_name)
 
@@ -68,46 +70,49 @@ def generate_wrapper(fn_name, args_signature, return_type, mode='rust'):
         
         ref = "&" if clean_type == "String" else ""
 
-        cmtypes.append(
+        arguments.append(
             f'\tlet {arg_name} = match {ref}args[{index}] {{\n'
             f'\t\tCmTypes::{clean_type.capitalize()}({arg_name}) => {arg_name}.clone(),\n'
             f'\t\t_ => panic!("Invalid argument type"),\n'
             f'\t}};')
 
     arg_names_str = ', '.join(arg_names)
-    match_arms_str = '\n\n'.join(cmtypes)
+    match_arms_str = '\n\n'.join(arguments)
 
     if mode == 'cpp':
         return_type = map_arg(return_type)
     return_type_str = return_type if return_type else '()'
 
 
-    if len(arg_list) > 0:
+    if len(carg_list) > 0:
         externC = f'fn {fn_name}(\n'
-        for arg_tp in arg_list:
+        for arg_tp in carg_list:
             externC += f'\t{arg_tp},\n'
         externC += f') -> {return_type_str};\n'
     else:
         externC = f'fn {fn_name}() -> {return_type_str};\n'
 
-    if cmtypes == []:
-        return(
-        f'pub fn {fn_name}_wrap() -> {return_type_str} {{\n'
-        f'\t{fn_name}({arg_names_str})\n'
-        f'}}\n', externC)
+
+    arg_sign = "args: Vec<CmTypes>" if len(arguments) > 0 else ""
+    signature = f'pub fn {fn_name}_wrap({arg_sign}) -> CmTypes {{\n'
+    if arguments == []:
+        func_call = f'\t{fn_name}({arg_names_str});\n'
+        ret_cm = f'\tCmTypes::None()\n}}\n'
+        complete = signature + func_call + ret_cm
     else:
+        body = f'{match_arms_str}\n\n'
         if mode == 'cpp':
-            return(
-            f'pub fn {fn_name}_wrap(args: Vec<CmTypes>) -> {return_type_str} {{\n'
-            f'{match_arms_str}\n\n'
-            f'\tunsafe{{{fn_name}({arg_names_str})}}\n'
-            f'}}\n', externC)
+            # unsafe call for C++ functions
+            func_call = f'\tCmTypes::{return_type_str.capitalize()}(unsafe{{{fn_name}({arg_names_str})}})\n}}\n'
+            # func_call = f'\tunsafe{{{fn_name}({arg_names_str})}}\n}}\n'
         else:
-            return(
-            f'pub fn {fn_name}_wrap(args: Vec<CmTypes>) -> {return_type_str} {{\n'
-            f'{match_arms_str}\n\n'
-            f'\t{fn_name}({arg_names_str})\n'
-            f'}}\n', externC)
+            func_call = f'\tCmTypes::{return_type_str.capitalize()}({fn_name}({arg_names_str}))\n}}\n'
+        complete = signature + body + func_call
+
+    has_args = True if len(arguments) > 0 else False
+    func_reg.append((fn_name, f'{fn_name}_wrap', has_args))
+
+    return complete, externC
 
 
 def handle_rust(content, output_file):
@@ -116,10 +121,10 @@ def handle_rust(content, output_file):
     wrapper_code, _ = generate_wrappers(function_signatures, mode)
 
     with output_file.open('w') as f:
-        # include shared::CmTypes
-        f.write("use shared::CmTypes;\n")
         # include the original function files
         f.write(f"use crate::{input_file.stem}::*;\n\n")
+        # include shared::CmTypes
+        f.write("use shared::CmTypes;\n")
         f.write(wrapper_code)
 
 def handle_cpp(content, file_name, output_file):
@@ -143,14 +148,37 @@ def handle_cpp(content, file_name, output_file):
         f.write("\n")
         f.write(wrapper_code)
 
+def create_func_registry(wrapper_file, registry_file):
+    with registry_file.open('w') as f:
+        # include generated wrappers
+        f.write(f"use crate::{wrapper_file.stem}::*;\n")
+        # include shared::CmTypes
+        f.write("use shared::CmTypes;\n\n")
+        # function signature
+        f.write("pub fn call_func(func_name: &str, arg_opt: Option<Vec<CmTypes>>) -> CmTypes {\n")
+        # match arms
+        f.write("\tmatch func_name {\n")
+        for fn_name, fn_wrap, has_args in func_reg:
+            f.write(f'\t\t"{fn_name}" => {{\n')
+            if has_args:
+                f.write(f'\t\t\tlet args = arg_opt.unwrap();\n')
+                f.write(f'\t\t\t{fn_wrap}(args)\n')
+            else:
+                f.write(f'\t\t\t{fn_wrap}()\n')
+            f.write("\t\t},\n")
+        # write last arm
+        f.write("\t\t_ => panic!(\"Function not found\"),\n")
+        f.write("\t}\n")
+        f.write("}\n")
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: translator.py <input_file> <output_file>")
+    if len(sys.argv) != 4:
+        print("Usage: translator.py <function_file> <wrapper_file> <registry_file>")
         exit(1)
 
     input_file = Path(sys.argv[1])
     output_file = Path(sys.argv[2])
+    registry_file = Path(sys.argv[3])
 
     with input_file.open('r') as f:
         content = f.read()
@@ -162,3 +190,5 @@ if __name__ == "__main__":
         handle_rust(content, output_file)
     elif file_extension == '.h':
         handle_cpp(content, file_name, output_file)
+
+    create_func_registry(output_file, registry_file)

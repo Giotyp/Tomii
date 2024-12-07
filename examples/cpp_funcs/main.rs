@@ -7,7 +7,11 @@ fn test_adder() {
         CmTypes::Usize(5),
     ];
     let result = execute_function_args!("examples/cpp_funcs/libs/wrappers.rs", "adder_wrap", arg_vec);
-    assert_eq!(result, 15);
+    let res_usize = match result {
+        CmTypes::Usize(x) => x,
+        _ => panic!("Invalid return type"),
+    };
+    assert_eq!(res_usize, 15);
 }
 
 fn main() {

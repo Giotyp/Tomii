@@ -19,6 +19,7 @@ pub enum CmTypes {
   Char(char),
   Usize(usize),
   String(String),
+  None()
 }
 
 #[derive(Debug)]
