@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use shared::*;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -6,14 +8,16 @@ pub struct Task {
     args: Vec<CmTypes>,
     function_path: String,
     function_name: String,
+    func_ptr: CmPtr,
 }
 
 impl Task {
-    pub fn new(args: Vec<CmTypes>, function_path: String, function_name: String) -> Task {
+    pub fn new(args: Vec<CmTypes>, function_path: String, function_name: String, func_ptr: CmPtr) -> Task {
         Task {
             args,
             function_path,
             function_name,
+            func_ptr
         }
     }
 

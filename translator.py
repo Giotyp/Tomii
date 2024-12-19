@@ -93,7 +93,7 @@ def generate_wrapper(fn_name, args_signature, return_type, mode='rust'):
         externC = f'fn {fn_name}() -> {return_type_str};\n'
 
 
-    arg_sign = "args: Vec<CmTypes>" if len(arguments) > 0 else ""
+    arg_sign = "args: Vec<CmTypes>" if len(arguments) > 0 else "_args: Vec<CmTypes>"
     signature = f'pub fn {fn_name}_wrap({arg_sign}) -> CmTypes {{\n'
     if arguments == []:
         func_call = f'\t{fn_name}({arg_names_str});\n'
@@ -153,7 +153,7 @@ def create_func_registry(wrapper_file, registry_file):
         # include generated wrappers
         f.write(f"use crate::{wrapper_file.stem}::*;\n")
         # include shared::CmTypes
-        f.write("use shared::CmTypes;\n\n")
+        f.write("use shared::*;\n\n")
         # function signature
         f.write("pub fn call_func(func_name: &str, arg_opt: Option<Vec<CmTypes>>) -> CmTypes {\n")
         # match arms
@@ -164,12 +164,29 @@ def create_func_registry(wrapper_file, registry_file):
                 f.write(f'\t\t\tlet args = arg_opt.unwrap();\n')
                 f.write(f'\t\t\t{fn_wrap}(args)\n')
             else:
-                f.write(f'\t\t\t{fn_wrap}()\n')
+                f.write(f'\t\t\t{fn_wrap}(vec![CmTypes::None()])\n')
             f.write("\t\t},\n")
         # write last arm
         f.write("\t\t_ => panic!(\"Function not found\"),\n")
         f.write("\t}\n")
         f.write("}\n")
+
+        f.write("\n")
+
+        # registry to retrieve functino pointers
+        # function signature
+        f.write("pub fn get_func(func_name: &str) -> CmPtr {\n")
+        # match arms
+        f.write("\tmatch func_name {\n")
+        for fn_name, fn_wrap, has_args in func_reg:
+            f.write(f'\t\t"{fn_name}" => {{\n')
+            f.write(f'\t\t\t{fn_wrap}\n')
+            f.write("\t\t},\n")
+        # write last arm
+        f.write("\t\t_ => panic!(\"Function not found\"),\n")
+        f.write("\t}\n")
+        f.write("}\n")
+
 
 if __name__ == "__main__":
     if len(sys.argv) != 4:

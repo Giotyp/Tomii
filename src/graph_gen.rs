@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::Read;
 
 use crate::graph_struct::*;
+use crate::func_reg::*;
 use shared::*;
 use serde::Deserialize;
 use serde_json;
@@ -43,7 +44,8 @@ fn parse_task(task_json: &TaskJson) -> Task {
     for (arg_type, arg) in task_json.arg_types.iter().zip(task_json.args.iter()) {
         args.push(string_to_primitive(arg_type.clone(), arg.clone()).unwrap());
     }
-    Task::new(args, task_json.function_path.clone(), task_json.function_name.clone())
+    let func_ptr = get_func(&task_json.function_name);
+    Task::new(args, task_json.function_path.clone(), task_json.function_name.clone(), func_ptr)
 }
 
 pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {

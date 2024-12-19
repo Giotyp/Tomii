@@ -22,6 +22,8 @@ pub enum CmTypes {
   None()
 }
 
+pub type CmPtr = fn(Vec<CmTypes>) -> CmTypes;
+
 #[derive(Debug)]
 pub struct CustomError {
     details: String,

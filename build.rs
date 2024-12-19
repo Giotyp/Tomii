@@ -1,6 +1,6 @@
 use std::process::Command;
 use std::path::PathBuf;
-use std::env;
+use std::{env, fs};
 use build_print::info;
 
 fn main() {
@@ -12,8 +12,6 @@ fn main() {
     let func_path = path.parent().unwrap().to_str().unwrap_or("");
     info!("Generating wrappers for functions in {}", func_path);
 
-    let wrapper_path = PathBuf::from(func_path).join("wrappers.rs");
-    let registry_path = PathBuf::from(func_path).join("func_reg.rs");
 
     let file_name = path.file_name().unwrap().to_str().unwrap();
     // remove the extension
@@ -22,11 +20,23 @@ fn main() {
 
     info!("File name: {}.{}", file_name, file_extension);
 
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    // copy func_file to OUT_DIR
+    let name_funcs = "funcs.rs";
+    let dest_path = out_dir.join(name_funcs); // Destination in OUT_DIR
+
+    fs::copy(&func_file, &dest_path)
+        .unwrap_or_else(|err| panic!("Failed to copy func.rs to OUT_DIR: {}", err));
+
+    let wrapper_path = out_dir.join("wrappers.rs");
+    let registry_path = out_dir.join("func_reg.rs");
+
 
     // Call the Python script to generate the wrappers
     let status = Command::new("python3")
         .arg("translator.py")
-        .arg(func_file)
+        .arg(dest_path)
         .arg(wrapper_path.to_str().unwrap())
         .arg(registry_path.to_str().unwrap())
         .status()
