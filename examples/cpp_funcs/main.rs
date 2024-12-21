@@ -1,12 +1,30 @@
-use cst_macros::*;
+use jraph::func_reg::*;
 use shared::CmTypes;
 
-fn test_adder() {
+fn test_call_func() {
     let arg_vec = vec![
         CmTypes::Usize(10),
         CmTypes::Usize(5),
     ];
-    let result = execute_function_args!("examples/cpp_funcs/libs/wrappers.rs", "adder_wrap", arg_vec);
+    let name = "adder";
+    let result = call_func(&name, Some(arg_vec));
+
+    let res_usize = match result {
+        CmTypes::Usize(x) => x,
+        _ => panic!("Invalid return type"),
+    };
+    assert_eq!(res_usize, 15);
+}
+
+fn test_get_func() {
+    let arg_vec = vec![
+        CmTypes::Usize(10),
+        CmTypes::Usize(5),
+    ];
+    let name = "adder";
+    let adder_f = get_func(&name);
+    let result = adder_f(arg_vec);
+
     let res_usize = match result {
         CmTypes::Usize(x) => x,
         _ => panic!("Invalid return type"),
@@ -15,6 +33,7 @@ fn test_adder() {
 }
 
 fn main() {
-    test_adder();
+    test_call_func();
+    test_get_func();
     println!("All tests passed!");
 }

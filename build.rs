@@ -6,6 +6,7 @@ use build_print::info;
 fn main() {
 
     let func_file = env::var("FUNC_PATH").expect("FUNC_PATH environment variable is not set");
+    println!("cargo:rerun-if-changed={}", func_file);
     let path = PathBuf::from(func_file.clone());
 
     // Extract the path to function file
@@ -13,32 +14,51 @@ fn main() {
     info!("Generating wrappers for functions in {}", func_path);
 
 
-    let file_name = path.file_name().unwrap().to_str().unwrap();
+    let mut file_name = path.file_name().unwrap().to_str().unwrap();
     // remove the extension
-    let file_name = file_name.split(".").collect::<Vec<&str>>()[0];
+    file_name = file_name.split(".").collect::<Vec<&str>>()[0];
     let file_extension = path.extension().unwrap().to_str().unwrap();
 
     info!("File name: {}.{}", file_name, file_extension);
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // copy func_file to OUT_DIR
     let name_funcs = "funcs.rs";
-    let dest_path = out_dir.join(name_funcs); // Destination in OUT_DIR
+    let copied_file = out_dir.join(name_funcs); 
+    let mut wrapper_file = out_dir.join("wrappers.rs");
+    let mut registry_file = out_dir.join("func_reg.rs");
 
-    fs::copy(&func_file, &dest_path)
-        .unwrap_or_else(|err| panic!("Failed to copy func.rs to OUT_DIR: {}", err));
+    if file_extension == "rs" {
+        // copy func_file to OUT_DIR for easy linking
+        fs::copy(&func_file, &copied_file)
+            .unwrap_or_else(|err| panic!("Failed to copy func.rs to OUT_DIR: {}", err));
+    } else if file_extension == "h" {
+        // Generate an empty module
+        let empty_module = r#"
+        pub mod funcs {
+            // Placeholder for .h files
+        }
+        "#;
 
-    let wrapper_path = out_dir.join("wrappers.rs");
-    let registry_path = out_dir.join("func_reg.rs");
+        fs::write(&copied_file, empty_module)
+            .unwrap_or_else(|err| panic!("Failed to write empty module to OUT_DIR: {}", err));
+    } else {
+        panic!("Unsupported file extension: {}", file_extension);
+    }
+
+    let input_path = if file_extension == "rs" {
+        copied_file 
+    } else {
+        PathBuf::from(func_file.clone())
+    };
 
 
-    // Call the Python script to generate the wrappers
+    // Call the translator script to generate the wrappers
     let status = Command::new("python3")
         .arg("translator.py")
-        .arg(dest_path)
-        .arg(wrapper_path.to_str().unwrap())
-        .arg(registry_path.to_str().unwrap())
+        .arg(input_path)
+        .arg(wrapper_file.to_str().unwrap())
+        .arg(registry_file.to_str().unwrap())
         .status()
         .expect("Failed to execute Python script");
 
