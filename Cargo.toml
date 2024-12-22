@@ -7,6 +7,7 @@ edition = "2021"
 [lib]
 name = "jraph"
 path = "src/lib.rs"
+crate-type = ["cdylib"]
 
 [dependencies]
 cst_macros = { path = "./cst_macros" }
@@ -16,6 +17,7 @@ serde_json = "1.0.116"
 libc = "0.2.165"
 rayon = "1.10.0"
 core_affinity = "0.8.1"
+pyo3 = { version = "0.23.3", features = ["extension-module"] }
 
 [build-dependencies]
 build-print = "0.1.1"

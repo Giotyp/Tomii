@@ -25,8 +25,8 @@ fn main() {
 
     let name_funcs = "funcs.rs";
     let copied_file = out_dir.join(name_funcs); 
-    let mut wrapper_file = out_dir.join("wrappers.rs");
-    let mut registry_file = out_dir.join("func_reg.rs");
+    let wrapper_file = out_dir.join("wrappers.rs");
+    let registry_file = out_dir.join("func_reg.rs");
 
     if file_extension == "rs" {
         // copy func_file to OUT_DIR for easy linking
