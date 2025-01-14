@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
-use crate::graph_struct::*;
-use crate::graph_gen::from_json as rust_from_json;
+use jraph_core::graph_struct::*;
+use jraph_core::graph_gen::from_json as rust_from_json;
 
 #[pyfunction]
 fn from_json(graph_json: &str) -> PyResult<PyGraph> {
@@ -28,7 +28,7 @@ impl PyGraph {
 }
 
 #[pymodule]
-fn jraph(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn pyjraph(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(from_json, m)?)?;
     m.add_class::<PyGraph>()?;
     Ok(())

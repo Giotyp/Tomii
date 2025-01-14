@@ -1,4 +1,4 @@
-use jraph::func_reg::*;
+use jraph_core::func_reg::*;
 use shared::CmTypes;
 
 fn test_call_func() {

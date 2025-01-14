@@ -1,0 +1,48 @@
+{
+    "graph": {
+        "stages": [
+            {
+                "nodes": [
+                    {
+                        "name": "Task A",
+                        "task": {
+                            "arg_types": [
+                                "usize",
+                                "usize",
+                                "String"
+                            ],
+                            "args": [
+                                "2",
+                                "4",
+                                "mul"
+                            ],
+                            "function_path": "src/funcs.rs",
+                            "function_name": "task_a"
+                        },
+                        "successors": "Task B"
+                    }
+                ]
+            },
+            {
+                "nodes": [
+                    {
+                        "name": "Task B",
+                        "task": {
+                            "arg_types": [
+                                "usize",
+                                "usize"
+                            ],
+                            "args": [
+                                "8",
+                                "100"
+                            ],
+                            "function_path": "src/funcs.rs",
+                            "function_name": "task_b"
+                        },
+                        "successors": ""
+                    }
+                ]
+            }
+        ]
+    }
+}

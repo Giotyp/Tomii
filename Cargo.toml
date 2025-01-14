@@ -1,23 +1,8 @@
-workspace = { members = ["cst_macros", "shared"] }
-[package]
-name = "jraph"
-version = "0.1.0"
-edition = "2021"
-
-[lib]
-name = "jraph"
-path = "src/lib.rs"
-crate-type = ["cdylib"]
-
-[dependencies]
-cst_macros = { path = "./cst_macros" }
-shared = { path = "./shared" }
-serde = { version = "1.0.198", features = ["derive"] }
-serde_json = "1.0.116"
-libc = "0.2.165"
-rayon = "1.10.0"
-core_affinity = "0.8.1"
-pyo3 = { version = "0.23.3", features = ["extension-module"] }
-
-[build-dependencies]
-build-print = "0.1.1"
+[workspace]
+members = [
+    "cst_macros", 
+    "shared", 
+    "jraph-core", 
+    "jraph-py"
+]
+resolver = "2"
