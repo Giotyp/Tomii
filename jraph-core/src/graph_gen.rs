@@ -21,7 +21,9 @@ struct TaskJson {
 struct NodeJson {
     name: String,
     task: TaskJson,
+    mult_factor: usize,
     successors: String,
+    successors_index: String
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,7 +46,15 @@ fn parse_task(task_json: &TaskJson) -> Task {
     for (arg_type, arg) in task_json.arg_types.iter().zip(task_json.args.iter()) {
         args.push(string_to_primitive(arg_type.clone(), arg.clone()).unwrap());
     }
-    let func_ptr = get_func(&task_json.function_name);
+
+    // read environment variable to determine if the function is in python
+    let func_path = std::env::var("FUNC_PATH").unwrap();
+    let python: bool = func_path == "python";
+
+    let mut func_ptr = None;
+    if !python {
+      func_ptr = Some(get_func(&task_json.function_name));
+    }
     Task::new(args, task_json.function_path.clone(), task_json.function_name.clone(), func_ptr)
 }
 
@@ -64,7 +74,8 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
 
         for node_json in stage_json.nodes.iter() {
             let task = parse_task(&node_json.task);
-            let node = Arc::new(RwLock::new(Node::new(node_json.name.clone(), task)));
+            let mult_factor: usize = node_json.mult_factor;
+            let node = Arc::new(RwLock::new(Node::new(node_json.name.clone(), task, mult_factor)));
             stage.add_node(node);
             node_stages.insert(node_json.name.clone(), stage_no);
         }
@@ -86,6 +97,12 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
                     node.write().unwrap().add_successor(succ_node.clone());
                     succ_node.write().unwrap().add_dependent(node.clone());
                 }
+                for successor_index in node_json.successors_index.split(",") {
+
+                  let node = graph.stage(stage_no).node(&node_name).unwrap();
+
+                  node.write().unwrap().add_successor_index(successor_index.to_string());
+              }
             }
         }
     }

@@ -8,11 +8,11 @@ pub struct Task {
     args: Vec<CmTypes>,
     function_path: String,
     function_name: String,
-    func_ptr: CmPtr,
+    func_ptr: Option<CmPtr>,
 }
 
 impl Task {
-    pub fn new(args: Vec<CmTypes>, function_path: String, function_name: String, func_ptr: CmPtr) -> Task {
+    pub fn new(args: Vec<CmTypes>, function_path: String, function_name: String, func_ptr: Option<CmPtr>) -> Task {
         Task {
             args,
             function_path,
@@ -37,15 +37,19 @@ impl Task {
 pub struct Node {
     name: String,
     task: Task,
+    mult_factor: usize,
+    successors_index: Vec<String>,
     successors: Vec<Arc<RwLock<Node>>>,
     dependents: Vec<Arc<RwLock<Node>>>,
 }
 
 impl Node {
-    pub fn new(name: String, task: Task) -> Node {
+    pub fn new(name: String, task: Task, mult_factor: usize) -> Node {
         Node {
             name,
             task,
+            mult_factor,
+            successors_index: Vec::new(),
             successors: Vec::new(),
             dependents: Vec::new(),
         }
@@ -59,24 +63,60 @@ impl Node {
         &self.task
     }
 
+    pub fn mult_factor(&self) -> usize {
+        self.mult_factor
+    }
+
+    pub fn successors_index(&self) -> &Vec<String> {
+        &self.successors_index
+    }
+
+    pub fn add_successor_index(&mut self, successor_index: String) {
+        self.successors_index.push(successor_index);
+    }
+
     pub fn add_successor(&mut self, successor: Arc<RwLock<Node>>) {
         self.successors.push(successor);
+    }
+
+    pub fn successors_names(&self) -> Vec<String> {
+        self.successors
+            .iter()
+            .map(|s| s.read().unwrap().name().clone())
+            .collect()
     }
 
     pub fn add_dependent(&mut self, dependent: Arc<RwLock<Node>>) {
         self.dependents.push(dependent);
     }
+
+    pub fn dependents_names(&self) -> Vec<String> {
+        self.dependents
+            .iter()
+            .map(|d| d.read().unwrap().name().clone())
+            .collect()
+    }
 }
 
 pub struct Stage {
     nodes: HashMap<String, Arc<RwLock<Node>>>,
+    node_names: Vec<String>,
 }
 
 impl Stage {
     pub fn new() -> Stage {
         Stage {
             nodes: HashMap::new(),
+            node_names: Vec::new(),
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn node_names(&self) -> &Vec<String> {
+        &self.node_names
     }
 
     pub fn node(&self, node_name: &str) -> Option<&Arc<RwLock<Node>>> {
@@ -85,7 +125,8 @@ impl Stage {
 
     pub fn add_node(&mut self, node: Arc<RwLock<Node>>) {
         let node_name = node.read().unwrap().name().clone();
-        self.nodes.insert(node_name, node);
+        self.nodes.insert(node_name.clone(), node);
+        self.node_names.push(node_name);
     }
 }
 
@@ -96,6 +137,10 @@ pub struct Graph {
 impl Graph {
     pub fn new() -> Graph {
         Graph { stages: Vec::new() }
+    }
+
+    pub fn len(&self) -> usize {
+        self.stages.len()
     }
 
     pub fn stage(&self, stage_no: usize) -> &Stage {
@@ -136,6 +181,10 @@ impl Graph {
             for node in stage.nodes.values() {
                 let node_read = node.read().unwrap();
                 println!("      Node: {}", node_read.name);
+                println!(
+                  "          Mult-Factor: {}",
+                  node_read.mult_factor
+              );
                 println!(
                     "          Task: {}::{}",
                     node_read.task.function_path, node_read.task.function_name

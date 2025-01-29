@@ -9,6 +9,11 @@ fn main() {
     println!("cargo:rerun-if-changed={}", func_file);
     let path = PathBuf::from(func_file.clone());
 
+    if func_file == "python" {
+      info!("Skipping build.rs for Python package");
+      return;
+    }
+
     // Extract the path to function file
     let func_path = path.parent().unwrap().to_str().unwrap_or("");
     info!("Generating wrappers for functions in {}", func_path);
