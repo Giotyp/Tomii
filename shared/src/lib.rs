@@ -19,7 +19,36 @@ pub enum CmTypes {
   Char(char),
   Usize(usize),
   String(String),
+  Ref(String),
+  Res(String),
   None()
+}
+
+// implement Display for CmTypes
+impl fmt::Display for CmTypes {
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    match self {
+      CmTypes::Bool(x) => write!(f, "{}", x),
+      CmTypes::I8(x) => write!(f, "{}", x),
+      CmTypes::I16(x) => write!(f, "{}", x),
+      CmTypes::I32(x) => write!(f, "{}", x),
+      CmTypes::I64(x) => write!(f, "{}", x),
+      CmTypes::I128(x) => write!(f, "{}", x),
+      CmTypes::U8(x) => write!(f, "{}", x),
+      CmTypes::U16(x) => write!(f, "{}", x),
+      CmTypes::U32(x) => write!(f, "{}", x),
+      CmTypes::U64(x) => write!(f, "{}", x),
+      CmTypes::U128(x) => write!(f, "{}", x),
+      CmTypes::F32(x) => write!(f, "{}", x),
+      CmTypes::F64(x) => write!(f, "{}", x),
+      CmTypes::Char(x) => write!(f, "{}", x),
+      CmTypes::Usize(x) => write!(f, "{}", x),
+      CmTypes::String(x) => write!(f, "{}", x),
+      CmTypes::Ref(x) => write!(f, "{}", x),
+      CmTypes::Res(x) => write!(f, "{}", x),
+      CmTypes::None() => write!(f, "None"),
+    }
+  }
 }
 
 pub type CmPtr = fn(Vec<CmTypes>) -> CmTypes;
@@ -98,6 +127,12 @@ pub fn string_to_primitive(tp: String, arg: String) -> Result<CmTypes, CustomErr
       "String" => arg.parse::<String>()
           .map(CmTypes::String)
           .map_err(|_| CustomError::new("Failed to parse String")),
+      "$ref" => arg.parse::<String>()
+          .map(CmTypes::Ref)
+          .map_err(|_| CustomError::new("Failed to parse Ref")),
+      "$res" => arg.parse::<String>()
+          .map(CmTypes::Res)
+          .map_err(|_| CustomError::new("Failed to parse Res")),
       _ => Err(CustomError::new(&format!("Unsupported type: {}", tp))),
   }
 }
