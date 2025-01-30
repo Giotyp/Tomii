@@ -31,7 +31,7 @@
                 "$ref"
               ],
               "args": [
-                "FFT"
+                "fft_buffers"
               ],
               "function_path": "",
               "function_name": "vector_to_matrix"

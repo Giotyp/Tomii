@@ -80,6 +80,17 @@ def generate_set_complex_float_array(n, dtype=np.complex64):
     return array.astype(dtype)
 
 @ray.remote
+def vector_to_matrix(vector):
+    n = int(np.sqrt(len(vector)))
+
+    # case where len(vector) is a perfect square
+    if n*n == len(vector):
+        return vector.reshape((n, n))
+    else:
+       print(f'Length used: {len(vector)}')
+       raise ValueError('Length of vector is not a perfect square')
+
+@ray.remote
 class FFTActor:
   def __init__(self, size):
       self.mkl_fft = MKLFFT(size)

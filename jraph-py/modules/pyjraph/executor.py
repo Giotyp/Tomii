@@ -24,8 +24,6 @@ def execute(graph):
   num_stages = graph.len()
   stage_dict = { stage: [] for stage in range(num_stages) }
 
-  stage_results = [[] for _ in range(num_stages)]
-
   for stage in range(num_stages):
     node_names = graph.get_nodes(stage)
     for node in node_names:
@@ -47,6 +45,8 @@ def execute(graph):
         function_file = function_path.split('/')[-1].split('.')[0]
         sys.path.append(function_path)
         functions = importlib.import_module(function_file)
+        # import all functions from funtions
+        globals().update({name: getattr(functions, name) for name in dir(functions) if callable(getattr(functions, name))})
 
       stage_dict[stage].append(node_dict)
 
@@ -71,8 +71,18 @@ def execute(graph):
   fft_actor = functions.FFTActor.options(max_concurrency=max_concurr).remote(size)
 
   # Execute graph by scheduling nodes at each stage after predeccors are done
+  stage_results = [[] for _ in range(num_stages)]
+  scheduled_ids = [{} for _ in range(num_stages)]
+  completed_ids = [[] for _ in range(num_stages)]
 
-  for stage in range(1):
+  successors_stage = []
+
+  barrier_sched = {
+    # barrier only for stage 1
+    1: set(range(mult_factor))
+  }
+
+  for stage in range(2):
     nodes = stage_dict[stage]
 
     for node in nodes:
@@ -81,7 +91,10 @@ def execute(graph):
         # function on an actor
         func = getattr(locals()[node_func[0]], node_func[1])  
       else:
-        func = locals()[node_func[0]]
+        func = globals()[node_func[0]]
+
+      successors_index = node['successors_index']
+      successors_stage.append([int(succ) for succ in successors_index])
 
       node_args = node['task']['args']
       if len(node_args) == 0:
@@ -93,33 +106,43 @@ def execute(graph):
       else:
         raise ValueError("Number of arguments cannot be less than 0")
 
-      for i in range(node['mult_factor']):
+      if stage == 0:
+        for i in range(node['mult_factor']):
 
-        if len(node_args) == 0:
-          compute = func.remote()
-        elif len(node_args) == 1:
-
-          if stage == 0:
+          if len(node_args) == 0:
+            compute = func.remote()
+          elif len(node_args) == 1:
             # first stage
             compute = func.remote(arg_vec[i])
 
-        stage_results[stage].append(compute)
+          stage_results[stage].append(compute)
+          scheduled_ids[stage][compute] = i
+      else:
+        # barrier here for $ref arg type
+        while len(barrier_sched[stage]) > 0:
+          ready_refs, stage_results[stage-1] = ray.wait(stage_results[stage-1], num_returns=1, timeout=None)
+          index = scheduled_ids[stage-1][ready_refs[0]]
+          completed_ids[stage-1].append(index)
 
+          successor = successors_stage[stage-1][0] # only one successor
 
-  # # Compute
-  # for i in range(mult_factor):
-  #   compute = fft_actor.compute_fft.remote(buffer_refs[i])
-  #   stage_res.append(compute)
-  #   ids_enum_map[compute] = i
+          scheduled = []
+          for sched in barrier_sched[stage]:
+            if sched in completed_ids[stage-1]:
+              if len(node_args) == 0:
+                compute = func.remote()
+              elif len(node_args) == 1:
+                compute = func.remote(arg_vec[sched - successor])
 
-  # # Wait for results
-  # while len(stage_res) > 0:
-  #   done_id, stage_res = ray.wait(stage_res)
+              stage_results[stage].append(compute)
+              scheduled_ids[stage][compute] = i
+              scheduled.append(sched)
+          barrier_sched[stage].difference_update(scheduled)
 
   # Retrieve results from last stage
   results = []
-  while len(stage_results[-1]) > 0:
-    ready_refs, res_refs = ray.wait(res_refs, num_returns=1, timeout=None)
+  while len(stage_results[1]) > 0:
+    ready_refs, stage_results[1] = ray.wait(stage_results[1], num_returns=1, timeout=None)
     results.append(ray.get(ready_refs[0]))
 
   ray.shutdown()
