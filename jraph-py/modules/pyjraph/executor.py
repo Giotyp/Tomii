@@ -82,7 +82,7 @@ def execute(graph):
     1: set(range(mult_factor))
   }
 
-  for stage in range(2):
+  for stage in range(num_stages):
     nodes = stage_dict[stage]
 
     for node in nodes:
@@ -93,18 +93,19 @@ def execute(graph):
       else:
         func = globals()[node_func[0]]
 
-      successors_index = node['successors_index']
-      successors_stage.append([int(succ) for succ in successors_index])
+      if stage != num_stages - 1:
+        successors_index = node['successors_index']
+        successors_stage.append([int(succ) for succ in successors_index])
 
       node_args = node['task']['args']
-      if len(node_args) == 0:
+      if len(node_args) == 0 and stage!= num_stages-1:
         arg_vec = []
-      elif len(node_args) == 1:
+      elif len(node_args) == 1 and stage!= num_stages-1:
         arg_vec = locals()[node_args[0]]
-      elif len(node_args) > 1:
+      elif len(node_args) > 1 and stage!= num_stages-1:
         arg_vec = [locals()[arg] for arg in node_args]
-      else:
-        raise ValueError("Number of arguments cannot be less than 0")
+    
+      arg_types = graph.get_arg_types(stage, node['name'])
 
       if stage == 0:
         for i in range(node['mult_factor']):
@@ -117,7 +118,7 @@ def execute(graph):
 
           stage_results[stage].append(compute)
           scheduled_ids[stage][compute] = i
-      else:
+      elif arg_types[0] == '$ref':
         # barrier here for $ref arg type
         while len(barrier_sched[stage]) > 0:
           ready_refs, stage_results[stage-1] = ray.wait(stage_results[stage-1], num_returns=1, timeout=None)
@@ -138,11 +139,23 @@ def execute(graph):
               scheduled_ids[stage][compute] = i
               scheduled.append(sched)
           barrier_sched[stage].difference_update(scheduled)
+      elif arg_types[0] == '$res':
+        # no barrier for $res
+        successor = successors_stage[stage-1][0]
+        for i in range(node['mult_factor']):
+          if len(node_args) == 0:
+            compute = func.remote()
+          elif len(node_args) == 1:
+            # first stage
+            compute = func.remote(stage_results[stage-1][i-successor], stage_results[stage-1][i-successor])
+
+            stage_results[stage].append(compute)
+
 
   # Retrieve results from last stage
   results = []
-  while len(stage_results[1]) > 0:
-    ready_refs, stage_results[1] = ray.wait(stage_results[1], num_returns=1, timeout=None)
+  while len(stage_results[-1]) > 0:
+    ready_refs, stage_results[-1] = ray.wait(stage_results[-1], num_returns=1, timeout=None)
     results.append(ray.get(ready_refs[0]))
 
   ray.shutdown()

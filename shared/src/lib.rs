@@ -24,6 +24,32 @@ pub enum CmTypes {
   None()
 }
 
+impl CmTypes {
+    pub fn arg_name(&self) -> String {
+        match self {
+            CmTypes::Bool(_) => "bool".to_string(),
+            CmTypes::I8(_) => "i8".to_string(),
+            CmTypes::I16(_) => "i16".to_string(),
+            CmTypes::I32(_) => "i32".to_string(),
+            CmTypes::I64(_) => "i64".to_string(),
+            CmTypes::I128(_) => "i128".to_string(),
+            CmTypes::U8(_) => "u8".to_string(),
+            CmTypes::U16(_) => "u16".to_string(),
+            CmTypes::U32(_) => "u32".to_string(),
+            CmTypes::U64(_) => "u64".to_string(),
+            CmTypes::U128(_) => "u128".to_string(),
+            CmTypes::F32(_) => "f32".to_string(),
+            CmTypes::F64(_) => "f64".to_string(),
+            CmTypes::Char(_) => "char".to_string(),
+            CmTypes::Usize(_) => "usize".to_string(),
+            CmTypes::String(_) => "String".to_string(),
+            CmTypes::Ref(_) => "$ref".to_string(),
+            CmTypes::Res(_) => "$res".to_string(),
+            CmTypes::None() => "None".to_string(),
+        }
+    }
+}
+
 // implement Display for CmTypes
 impl fmt::Display for CmTypes {
   fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

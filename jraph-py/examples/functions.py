@@ -98,3 +98,17 @@ class FFTActor:
   def compute_fft(self, data):
       self.mkl_fft.compute_forward(data)
       return True 
+
+@ray.remote
+def scipy_cgemm(A, B, C=None):
+    import scipy.linalg.blas as blas
+
+    # Compute the matrix product C = alpha * A * B + beta * C
+    alpha = 1.0 + 0.0j
+    beta = 0.0 + 0.0j
+    if C is None:
+        C = blas.cgemm(alpha, A, B, beta=beta)
+    else:
+        C = blas.cgemm(alpha, A, B, beta=beta, c=C)
+
+    return C

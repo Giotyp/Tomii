@@ -27,6 +27,15 @@ impl PyGraph {
         self.graph.stage(stage_no).node_names()
     }
 
+    fn get_arg_types(&self, stage_no: usize, node_name: &str) -> Vec<String> {
+        let node = self.graph.stage(stage_no).node(node_name).unwrap();
+        let node = node.read().unwrap();
+        let task = node.task();
+        let args_enum = task.args();
+        let args_vec: Vec<String> = args_enum.iter().map(|x| x.arg_name()).collect();
+        args_vec
+    }
+
     fn node_info(&self, stage_no: usize, node_name: &str) -> HashMap<String, String> {
         let node = self.graph.stage(stage_no).node(node_name).unwrap();
         let node = node.read().unwrap();
