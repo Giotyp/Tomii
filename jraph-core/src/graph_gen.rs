@@ -89,6 +89,7 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
 
             if !node_json.successors.is_empty() {
                 for successor_name in node_json.successors.split(",") {
+                    let successor_name = successor_name.trim();
                     let succ_stage = *node_stages.get(successor_name).unwrap();
 
                     let succ_node = graph.stage(succ_stage).node(successor_name).unwrap();

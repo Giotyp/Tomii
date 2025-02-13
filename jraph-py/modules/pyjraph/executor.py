@@ -106,27 +106,31 @@ def execute(graph):
                 successors_stage.append([int(succ) for succ in successors_index])
 
             node_args = node["task"]["args"]
-            if len(node_args) == 0 and stage != num_stages - 1:
-                arg_vec = []
-            elif len(node_args) == 1 and stage != num_stages - 1:
-                arg_vec = locals()[node_args[0]]
-            elif len(node_args) > 1 and stage != num_stages - 1:
-                arg_vec = [locals()[arg] for arg in node_args]
 
             arg_types = graph.get_arg_types(stage, node["name"])
 
             if stage == 0:
+
+                arg_vec = []
+                for arg in node_args:
+                    arg_vec.append(locals()[arg])
+
                 for i in range(node["mult_factor"]):
 
                     if len(node_args) == 0:
                         compute = func.remote()
                     elif len(node_args) == 1:
                         # first stage
-                        compute = func.remote(arg_vec[i])
+                        compute = func.remote(arg_vec[0][i])
 
                     stage_results[stage].append(compute)
                     scheduled_ids[stage][compute] = i
-            elif arg_types[0] == "$ref":
+            elif "$ref" in arg_types:
+
+                arg_vec = []
+                for arg in node_args:
+                    arg_vec.append(locals()[arg])
+                    
                 # barrier here for $ref arg type
                 while len(barrier_sched[stage]) > 0:
                     ready_refs, stage_results[stage - 1] = ray.wait(
@@ -135,7 +139,7 @@ def execute(graph):
                     index = scheduled_ids[stage - 1][ready_refs[0]]
                     completed_ids[stage - 1].append(index)
 
-                    successor = successors_stage[stage - 1][0]  # only one successor
+                    successors = successors_stage[stage - 1]
 
                     scheduled = []
                     for sched in barrier_sched[stage]:
@@ -143,24 +147,23 @@ def execute(graph):
                             if len(node_args) == 0:
                                 compute = func.remote()
                             elif len(node_args) == 1:
-                                compute = func.remote(arg_vec[sched - successor])
+                                call_args = [arg_vec[0][sched - succ_idx] for succ_idx in successors]
+                                compute = func.remote(*call_args)
 
                             stage_results[stage].append(compute)
                             scheduled_ids[stage][compute] = i
                             scheduled.append(sched)
                     barrier_sched[stage].difference_update(scheduled)
-            elif arg_types[0] == "$res":
+            elif "$res" in arg_types:
                 # no barrier for $res
-                successor = successors_stage[stage - 1][0]
+                successors = successors_stage[stage - 1]
                 for i in range(node["mult_factor"]):
                     if len(node_args) == 0:
                         compute = func.remote()
                     elif len(node_args) == 1:
                         # first stage
-                        compute = func.remote(
-                            stage_results[stage - 1][i - successor],
-                            stage_results[stage - 1][i - successor],
-                        )
+                        call_args = [stage_results[stage - 1][i - succ_idx] for succ_idx in successors]
+                        compute = func.remote(*call_args)
 
                         stage_results[stage].append(compute)
 
