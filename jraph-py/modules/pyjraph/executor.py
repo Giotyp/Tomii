@@ -84,11 +84,9 @@ def execute(graph):
     completed_ids = [[] for _ in range(num_stages)]
 
     successors_stage = []
+    successors_idxs = []
 
-    barrier_sched = {
-        # barrier only for stage 1
-        1: set(range(mult_factor))
-    }
+    barrier_sched = {}
 
     for stage in range(num_stages):
         nodes = stage_dict[stage]
@@ -102,12 +100,23 @@ def execute(graph):
                 func = globals()[node_func[0]]
 
             if stage != num_stages - 1:
+                # Get successors and successors index
+                # if a task is precedded by e.g. 0-4
+                # we have to account for multiple dependecies
                 successors_index = node["successors_index"]
-                successors_stage.append([int(succ) for succ in successors_index])
+                stage_idx= []
+                for idx in successors_index:
+                    ids = idx.split("-")
+                    stage_idx.extend([int(i) for i in ids])
+                successors_idxs.append(stage_idx)
+                successors_stage.append(node["successors"])
 
             node_args = node["task"]["args"]
 
             arg_types = graph.get_arg_types(stage, node["name"])
+
+            if "$ref" in arg_types:
+                barrier_sched[stage] = set(range(node["mult_factor"]))
 
             if stage == 0:
 
@@ -139,7 +148,7 @@ def execute(graph):
                     index = scheduled_ids[stage - 1][ready_refs[0]]
                     completed_ids[stage - 1].append(index)
 
-                    successors = successors_stage[stage - 1]
+                    successors = successors_idxs[stage - 1]
 
                     scheduled = []
                     for sched in barrier_sched[stage]:
@@ -157,14 +166,22 @@ def execute(graph):
             elif "$res" in arg_types:
                 # no barrier for $res
                 successors = successors_stage[stage - 1]
+                succ_idx = successors_idxs[stage - 1]
+
                 for i in range(node["mult_factor"]):
                     if len(node_args) == 0:
                         compute = func.remote()
                     elif len(node_args) == 1:
                         # first stage
-                        call_args = [stage_results[stage - 1][i - succ_idx] for succ_idx in successors]
+                        # Find Call Args
+                        call_args = []
+                        if len(successors) == len(succ_idx):
+                            call_args = [stage_results[stage - 1][i - idx] for idx in succ_idx]
+                        else:
+                            for idx in range(succ_idx[0], succ_idx[1]):
+                                call_args.append(stage_results[stage - 1][i - idx])
+                        
                         compute = func.remote(*call_args)
-
                         stage_results[stage].append(compute)
 
     # Retrieve results from last stage
