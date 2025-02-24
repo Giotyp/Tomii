@@ -9,9 +9,31 @@ fn main() {
     println!("cargo:rerun-if-changed={}", func_file);
     let path = PathBuf::from(func_file.clone());
 
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    let name_funcs = "funcs.rs";
+    let copied_file = out_dir.join(name_funcs); 
+    let wrapper_file = out_dir.join("wrappers.rs");
+    let registry_file = out_dir.join("func_reg.rs");
+
     if func_file == "python" {
-      info!("Skipping build.rs for Python package");
-      return;
+        info!("Python API");
+        let status = Command::new("python3")
+        .arg("translator.py")
+        .arg("a")
+        .arg("b")
+        .arg(registry_file.to_str().unwrap())
+        .arg("True")
+        .status()
+        .expect("Failed to execute Python script");
+
+        if !status.success() {
+            panic!("Python script failed");
+        }
+        fs::write(&wrapper_file, "").expect("Failed to create empty wrappers.rs file");
+        fs::write(&copied_file, "").expect("Failed to create empty function file");
+        return;
     }
 
     // Extract the path to function file
@@ -25,13 +47,6 @@ fn main() {
     let file_extension = path.extension().unwrap().to_str().unwrap();
 
     info!("File name: {}.{}", file_name, file_extension);
-
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-
-    let name_funcs = "funcs.rs";
-    let copied_file = out_dir.join(name_funcs); 
-    let wrapper_file = out_dir.join("wrappers.rs");
-    let registry_file = out_dir.join("func_reg.rs");
 
     if file_extension == "rs" {
         // copy func_file to OUT_DIR for easy linking
@@ -64,6 +79,7 @@ fn main() {
         .arg(input_path)
         .arg(wrapper_file.to_str().unwrap())
         .arg(registry_file.to_str().unwrap())
+        .arg("False")
         .status()
         .expect("Failed to execute Python script");
 
@@ -82,4 +98,17 @@ fn main() {
         // Add RPATH to the build output
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", func_path);
     }
+
+    // link with libraries meant to be done by project
+    // Link against the MKL library
+    println!("cargo:rerun-if-env-changed=MKLROOT");
+    println!("cargo:rustc-link-search=native=/opt/intel/oneapi/mkl/2024.0/lib/");
+    println!("cargo:rustc-link-lib=static=mkl_intel_lp64");
+    println!("cargo:rustc-link-lib=dylib=mkl_core");
+    println!("cargo:rustc-link-lib=dylib=mkl_sequential");
+    println!("cargo:rustc-link-search=native=/lib/x86_64-linux-gnu/");
+    println!("cargo:rustc-link-lib=dylib=pthread");
+    println!("cargo:rustc-link-lib=dylib=m");
+    println!("cargo:rustc-link-lib=dylib=dl");
+    println!("cargo:rustc-link-lib=dylib=stdc++");
 }

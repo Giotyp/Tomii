@@ -175,27 +175,42 @@ def create_func_registry(wrapper_file, registry_file):
 
         # registry to retrieve functino pointers
         # function signature
-        f.write("pub fn get_func(func_name: &str) -> CmPtr {\n")
+        f.write("pub fn get_func(func_name: &str) -> Option<CmPtr> {\n")
         # match arms
         f.write("\tmatch func_name {\n")
         for fn_name, fn_wrap, has_args in func_reg:
             f.write(f'\t\t"{fn_name}" => {{\n')
-            f.write(f'\t\t\t{fn_wrap}\n')
+            f.write(f'\t\t\tSome({fn_wrap})\n')
             f.write("\t\t},\n")
         # write last arm
         f.write("\t\t_ => panic!(\"Function not found\"),\n")
         f.write("\t}\n")
         f.write("}\n")
 
+def create_emtpy_registry(registry_file):
+    with registry_file.open('w') as f:
+        # include shared::CmTypes
+        f.write("use shared::*;\n\n")
+        # function signature
+        f.write("pub fn get_func(_func_name: &str) -> Option<CmPtr> {\n")
+        f.write("\tNone\n")
+        f.write("}\n")
+
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4:
-        print("Usage: translator.py <function_file> <wrapper_file> <registry_file>")
+    if len(sys.argv) != 5:
+        print("Usage: translator.py <function_file> <wrapper_file> <registry_file> <python>")
         exit(1)
 
     input_file = Path(sys.argv[1])
     output_file = Path(sys.argv[2])
     registry_file = Path(sys.argv[3])
+
+    python_version = Path(sys.argv[4])
+    if str(python_version) == "True":
+        print("Creating empty registry")
+        create_emtpy_registry(registry_file)
+        exit(0)
 
     with input_file.open('r') as f:
         content = f.read()

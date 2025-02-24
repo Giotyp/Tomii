@@ -51,9 +51,9 @@ fn parse_task(task_json: &TaskJson) -> Task {
     let func_path = std::env::var("FUNC_PATH").unwrap();
     let python: bool = func_path == "python";
 
-    let mut func_ptr = None;
+    let mut func_ptr: Option<CmPtr> = None;
     if !python {
-      func_ptr = Some(get_func(&task_json.function_name));
+      func_ptr = get_func(&task_json.function_name); 
     }
     Task::new(args, task_json.function_path.clone(), task_json.function_name.clone(), func_ptr)
 }
