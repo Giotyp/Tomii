@@ -148,7 +148,7 @@ def multiple_cgemm(*arrays):
     C0 = blas.cgemm(alpha, arrays[0], arrays[0], beta=beta)
     c_res.append(C0)
 
-    for i in range(1):
+    for i in range(1, len(arrays)):
         Ci = blas.cgemm(alpha, arrays[i], arrays[i], beta=beta, c=c_res[i - 1])
         c_res.append(Ci)
 

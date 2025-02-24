@@ -60,20 +60,6 @@ impl PyGraph {
         info
     }
 
-    fn get_func(&self, stage_no: usize, node_name: &str) -> String {
-        let node = self.graph.stage(stage_no).node(node_name).unwrap();
-        node.read().unwrap().task().function_name().clone()
-    }
-
-    // fn execute(&self, stage_no: usize, node_name: &str){
-    //     let node = self.graph.stage(stage_no).node(node_name).unwrap().read().unwrap();
-    //     let task = node.task();
-    //     let arg_vec = task.args().clone();
-    //     let name = task.function_name().clone();
-    //     // let result = call_func(&name, Some(arg_vec));
-    //     println!("{:?}", result);
-    // }
-
     fn generate_dot(&self) -> String {
         self.graph.generate_dot()
     }

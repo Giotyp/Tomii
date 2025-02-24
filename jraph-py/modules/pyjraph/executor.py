@@ -3,6 +3,7 @@ import importlib
 import sys
 import os
 import ray
+import time
 
 
 def print_stages(stage_dict):
@@ -18,7 +19,7 @@ def print_stages(stage_dict):
             print(f"{sep*2}Successors Index: ", node["successors_index"])
 
 
-def execute(graph):
+def execute(graph, timing=False):
 
     # Info for every stage
     functions = None
@@ -60,10 +61,10 @@ def execute(graph):
 
     # Ray Init
     cpu_count = os.cpu_count()
-    ray.init(num_cpus=cpu_count // 4)
+    ray.init(num_cpus=64)
 
     # The following inits must be done from graph (Init stage)
-    size = 1600
+    size = 10000
     max_concurr = 16
 
     # Initializations
@@ -88,10 +89,13 @@ def execute(graph):
 
     barrier_sched = {}
 
+    t_comp = []
+    t1 = time.time()
     for stage in range(num_stages):
         nodes = stage_dict[stage]
 
         for node in nodes:
+            # do the inits in a separate class
             node_func = node["task"]["function_name"].split(".")
             if len(node_func) == 2:
                 # function on an actor
@@ -99,6 +103,7 @@ def execute(graph):
             else:
                 func = globals()[node_func[0]]
 
+            print(f"Stage {stage} Func called: ", node_func)
             if stage != num_stages - 1:
                 # Get successors and successors index
                 # if a task is precedded by e.g. 0-4
@@ -124,6 +129,7 @@ def execute(graph):
                 for arg in node_args:
                     arg_vec.append(locals()[arg])
 
+                t1_comp = time.time()
                 for i in range(node["mult_factor"]):
 
                     if len(node_args) == 0:
@@ -134,40 +140,39 @@ def execute(graph):
 
                     stage_results[stage].append(compute)
                     scheduled_ids[stage][compute] = i
+
+                t_comp.append(time.time() - t1_comp)
             elif "$ref" in arg_types:
 
                 arg_vec = []
                 for arg in node_args:
                     arg_vec.append(locals()[arg])
-                    
+                
+                t1_comp = time.time()
                 # barrier here for $ref arg type
-                while len(barrier_sched[stage]) > 0:
+                while len(stage_results[stage-1]) > 0:
                     ready_refs, stage_results[stage - 1] = ray.wait(
                         stage_results[stage - 1], num_returns=1, timeout=None
                     )
                     index = scheduled_ids[stage - 1][ready_refs[0]]
-                    completed_ids[stage - 1].append(index)
+                    
+                    if len(node_args) == 0:
+                        compute = func.remote()
+                    elif len(node_args) == 1:
+                        call_args = arg_vec[0][index]
+                        compute = func.remote(call_args)
 
-                    successors = successors_idxs[stage - 1]
+                    stage_results[stage].append(compute)
+                    scheduled_ids[stage][compute] = i
 
-                    scheduled = []
-                    for sched in barrier_sched[stage]:
-                        if sched in completed_ids[stage - 1]:
-                            if len(node_args) == 0:
-                                compute = func.remote()
-                            elif len(node_args) == 1:
-                                call_args = [arg_vec[0][sched - succ_idx] for succ_idx in successors]
-                                compute = func.remote(*call_args)
+                t_comp.append(time.time() - t1_comp)
 
-                            stage_results[stage].append(compute)
-                            scheduled_ids[stage][compute] = i
-                            scheduled.append(sched)
-                    barrier_sched[stage].difference_update(scheduled)
             elif "$res" in arg_types:
                 # no barrier for $res
                 successors = successors_stage[stage - 1]
                 succ_idx = successors_idxs[stage - 1]
 
+                t1_comp = time.time()
                 for i in range(node["mult_factor"]):
                     if len(node_args) == 0:
                         compute = func.remote()
@@ -178,20 +183,36 @@ def execute(graph):
                         if len(successors) == len(succ_idx):
                             call_args = [stage_results[stage - 1][i - idx] for idx in succ_idx]
                         else:
-                            for idx in range(succ_idx[0], succ_idx[1]):
+                            for idx in range(succ_idx[0], succ_idx[1]+1):
                                 call_args.append(stage_results[stage - 1][i - idx])
                         
                         compute = func.remote(*call_args)
                         stage_results[stage].append(compute)
+                        scheduled_ids[stage][compute] = i
+
+                t_comp.append(time.time() - t1_comp)
 
     # Retrieve results from last stage
-    results = []
+    results = [0 for i in range(mult_factor)]
+    t1_comp = time.time()
     while len(stage_results[-1]) > 0:
         ready_refs, stage_results[-1] = ray.wait(
             stage_results[-1], num_returns=1, timeout=None
         )
-        results.append(ray.get(ready_refs[0]))
+        index = scheduled_ids[-1][ready_refs[0]]
+        results[index] = ray.get(ready_refs[0])
+
+    print("Time collect: ", time.time() - t1_comp)
+    t_comp.append(time.time() - t1_comp)
+    t2 = time.time()
+
+    total_time = t2 - t1
+    compute_time = sum(t_comp)
+    load_time = total_time - compute_time
 
     ray.shutdown()
 
-    return results
+    if timing:
+        return results, (compute_time, load_time)
+    else:
+        return results

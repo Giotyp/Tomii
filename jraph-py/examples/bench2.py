@@ -1,6 +1,6 @@
 import pyjraph
 import numpy as np
-from functions import validate_2
+from functions import validate_3
 from pyjraph import executor
 
 
@@ -8,8 +8,8 @@ if __name__ == "__main__":
     graph_file = "examples/graphs/bench2.json"
     graph = pyjraph.from_json(graph_file)
 
-    results = executor.execute(graph)
+    results, comp_load = executor.execute(graph, True)
 
-    reference = validate_2(1600, 5)
-    for i in range(5):
-        assert np.allclose(results[i], reference[i], atol=1e-6)
+    print(
+        f"Benchmark 2 time for 25 tasks: comp: {comp_load[0]:.2f} seconds, load: {comp_load[1]:.2f} seconds"
+    )

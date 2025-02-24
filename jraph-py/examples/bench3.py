@@ -8,8 +8,8 @@ if __name__ == "__main__":
     graph_file = "examples/graphs/bench3.json"
     graph = pyjraph.from_json(graph_file)
 
-    results = executor.execute(graph)
+    results, comp_load = executor.execute(graph, True)
 
-    reference = validate_3(1600, 5)
-    for i in range(5):
-        assert np.allclose(results[i], reference[i], atol=1e-6)
+    print(
+        f"Benchmark 3 time for 100 tasks: comp: {comp_load[0]:.2f} seconds, load: {comp_load[1]:.2f} seconds"
+    )

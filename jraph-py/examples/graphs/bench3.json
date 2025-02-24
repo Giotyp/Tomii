@@ -41,7 +41,7 @@
                 "nodes": [
                     {
                         "name": "FFT",
-                        "mult_factor": 5,
+                        "mult_factor": 100,
                         "task": {
                             "arg_types": [
                                 "$ref"
@@ -61,7 +61,7 @@
                 "nodes": [
                     {
                         "name": "Vec2Mat",
-                        "mult_factor": 5,
+                        "mult_factor": 100,
                         "task": {
                             "arg_types": [
                                 "$ref"
@@ -73,7 +73,7 @@
                             "function_name": "vector_to_matrix"
                         },
                         "successors": "Cgemm",
-                        "successors_index": "0-4"
+                        "successors_index": "0-99"
                     }
                 ]
             },
@@ -81,7 +81,7 @@
                 "nodes": [
                     {
                         "name": "Cgemm",
-                        "mult_factor": 5,
+                        "mult_factor": 100,
                         "task": {
                             "arg_types": [
                                 "$res"
