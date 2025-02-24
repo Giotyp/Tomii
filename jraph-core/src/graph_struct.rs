@@ -2,31 +2,28 @@
 
 use shared::*;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 
 pub struct Task {
     args: Vec<CmTypes>,
-    function_path: String,
     function_name: String,
     func_ptr: Option<CmPtr>,
 }
 
 impl Task {
-    pub fn new(args: Vec<CmTypes>, function_path: String, function_name: String, func_ptr: Option<CmPtr>) -> Task {
+    pub fn new(
+        args: Vec<CmTypes>,
+        function_name: String,
+        func_ptr: Option<CmPtr>,
+    ) -> Task {
         Task {
             args,
-            function_path,
             function_name,
-            func_ptr
+            func_ptr,
         }
     }
 
     pub fn args(&self) -> &Vec<CmTypes> {
         &self.args
-    }
-
-    pub fn function_path(&self) -> &String {
-        &self.function_path
     }
 
     pub fn function_name(&self) -> &String {
@@ -42,9 +39,9 @@ pub struct Node {
     name: String,
     task: Task,
     mult_factor: usize,
-    successors_index: Vec<String>,
-    successors: Vec<Arc<RwLock<Node>>>,
-    dependents: Vec<Arc<RwLock<Node>>>,
+    successors_index: HashMap<String, Vec<usize>>,
+    successors: Vec<(String, usize)>,
+    dependents: Vec<(String, usize)>,
 }
 
 impl Node {
@@ -53,7 +50,7 @@ impl Node {
             name,
             task,
             mult_factor,
-            successors_index: Vec::new(),
+            successors_index: HashMap::new(),
             successors: Vec::new(),
             dependents: Vec::new(),
         }
@@ -71,39 +68,37 @@ impl Node {
         self.mult_factor
     }
 
-    pub fn successors_index(&self) -> &Vec<String> {
+    pub fn successors(&self) -> &Vec<(String, usize)> {
+        &self.successors
+    }
+
+    pub fn successors_index(&self) -> &HashMap<String, Vec<usize>> {
         &self.successors_index
     }
 
-    pub fn add_successor_index(&mut self, successor_index: String) {
-        self.successors_index.push(successor_index);
+    pub fn dependents(&self) -> &Vec<(String, usize)> {
+        &self.dependents
     }
 
-    pub fn add_successor(&mut self, successor: Arc<RwLock<Node>>) {
-        self.successors.push(successor);
+    pub fn add_successor(&mut self, successor: String, stage_no: usize) {
+        self.successors.push((successor, stage_no));
     }
 
-    pub fn successors_names(&self) -> Vec<String> {
-        self.successors
-            .iter()
-            .map(|s| s.read().unwrap().name().clone())
-            .collect()
+    pub fn add_successor_index(&mut self, successor_name: String, successor_index: usize) {
+        self.successors_index
+            .entry(successor_name)
+            .or_insert(Vec::new())
+            .push(successor_index);
     }
 
-    pub fn add_dependent(&mut self, dependent: Arc<RwLock<Node>>) {
-        self.dependents.push(dependent);
+    pub fn add_dependent(&mut self, dependent: String, stage_no: usize) {
+        self.dependents.push((dependent, stage_no));
     }
 
-    pub fn dependents_names(&self) -> Vec<String> {
-        self.dependents
-            .iter()
-            .map(|d| d.read().unwrap().name().clone())
-            .collect()
-    }
 }
 
 pub struct Stage {
-    nodes: HashMap<String, Arc<RwLock<Node>>>,
+    nodes: HashMap<String, Node>,
     node_names: Vec<String>,
 }
 
@@ -123,12 +118,16 @@ impl Stage {
         &self.node_names
     }
 
-    pub fn node(&self, node_name: &str) -> Option<&Arc<RwLock<Node>>> {
-        self.nodes.get(node_name)
+    pub fn node(&self, node_name: &str) -> &Node {
+        &self.nodes[node_name]
     }
 
-    pub fn add_node(&mut self, node: Arc<RwLock<Node>>) {
-        let node_name = node.read().unwrap().name().clone();
+    pub fn node_mut(&mut self, node_name: &str) -> &mut Node {
+        self.nodes.get_mut(node_name).unwrap()
+    }
+
+    pub fn add_node(&mut self, node: Node) {
+        let node_name = node.name.clone();
         self.nodes.insert(node_name.clone(), node);
         self.node_names.push(node_name);
     }
@@ -151,34 +150,12 @@ impl Graph {
         &self.stages[stage_no]
     }
 
-    pub fn add_stage(&mut self, stage: Stage) {
-        self.stages.push(stage);
+    pub fn stage_mut(&mut self, stage_no: usize) -> &mut Stage {
+        &mut self.stages[stage_no]
     }
 
-    pub fn node_info(&self, stage_no: usize, node_name: &str) -> HashMap<String, String> {
-        let node = self.stage(stage_no).node(node_name).unwrap();
-        let node = node.read().unwrap();
-        let task = node.task();
-
-        let mult_factor = node.mult_factor();
-        let succ_index = node.successors_index();
-        let succ_names = node.successors_names();
-        let dep_names = node.dependents_names();
-        let function_name = task.function_name();
-        let function_path = task.function_path();
-        let args_enum = task.args();
-        let args_vec: Vec<String> = args_enum.iter().map(|x| x.to_string()).collect();
-
-        let info = HashMap::from([
-            ("mult_factor".to_string(), mult_factor.to_string()),
-            ("function_path".to_string(), function_path.clone()),
-            ("function_name".to_string(), function_name.clone()),
-            ("successors_index".to_string(), succ_index.join(", ")),
-            ("successors_names".to_string(), succ_names.join(", ")),
-            ("dependents_names".to_string(), dep_names.join(", ")),
-            ("args".to_string(), args_vec.join(", "))
-        ]);
-        info
+    pub fn add_stage(&mut self, stage: Stage) {
+        self.stages.push(stage);
     }
 }
 
@@ -187,14 +164,12 @@ impl Graph {
     pub fn generate_dot(&self) -> String {
         let mut dot = String::from("digraph {\n");
 
-        for stage in self.stages.iter() {
-            for node in stage.nodes.values() {
-                let node_read = node.read().unwrap();
-                for successor in &node_read.successors {
-                    let successor_name = successor.read().unwrap().name().clone();
+        for (stage_idx, stage) in self.stages.iter().enumerate() {
+            for (node_name, node) in &stage.nodes {
+                for (successor_name, _) in &node.successors {
                     dot.push_str(&format!(
-                        "    \"{}\" -> \"{}\";\n",
-                        node_read.name, successor_name
+                        "    \"Stage{}::{}\" -> \"Stage{}::{}\";\n",
+                        stage_idx, node_name, stage_idx + 1, successor_name
                     ));
                 }
             }
@@ -205,37 +180,18 @@ impl Graph {
     }
 
     pub fn print_graph(&self) {
-        println!("Graph: ");
+        println!("Graph:");
         for (stage_no, stage) in self.stages.iter().enumerate() {
             println!("  Stage {}: ", stage_no);
-            for node in stage.nodes.values() {
-                let node_read = node.read().unwrap();
-                println!("      Node: {}", node_read.name);
-                println!(
-                  "          Mult-Factor: {}",
-                  node_read.mult_factor
-              );
-                println!(
-                    "          Task: {}::{}",
-                    node_read.task.function_path, node_read.task.function_name
-                );
-                println!("              Args: {:?}", node_read.task.args);
-                println!(
-                    "          Successors: {:?}",
-                    node_read
-                        .successors
-                        .iter()
-                        .map(|s| s.read().unwrap().name().clone())
-                        .collect::<Vec<String>>()
-                );
-                println!(
-                    "          Dependents: {:?}",
-                    node_read
-                        .dependents
-                        .iter()
-                        .map(|d| d.read().unwrap().name().clone())
-                        .collect::<Vec<String>>()
-                );
+            for node_name in stage.node_names() {
+                let node = &stage.nodes[node_name];
+                println!("      Node: {}", node.name);
+                println!("          Mult-Factor: {}", node.mult_factor);
+                println!("          Task: {}", node.task.function_name);
+                println!("              Args: {:?}", node.task.args);
+                println!("          Successors: {:?}", node.successors);
+                println!("          Successors Index: {:?}", node.successors_index);
+                println!("          Dependents: {:?}", node.dependents);
             }
         }
     }

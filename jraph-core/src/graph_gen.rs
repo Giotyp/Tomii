@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 use std::fs::File;
 use std::io::Read;
 
@@ -10,10 +9,15 @@ use serde::Deserialize;
 use serde_json;
 
 #[derive(Debug, Deserialize)]
+struct SuccessorsJson {
+    task: String,
+    indexes: String
+}
+
+#[derive(Debug, Deserialize)]
 struct TaskJson {
     arg_types: Vec<String>,
     args: Vec<String>,
-    function_path: String,
     function_name: String,
 }
 
@@ -22,8 +26,7 @@ struct NodeJson {
     name: String,
     task: TaskJson,
     mult_factor: usize,
-    successors: String,
-    successors_index: String
+    successors: Vec<SuccessorsJson>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,7 +58,7 @@ fn parse_task(task_json: &TaskJson) -> Task {
     if !python {
       func_ptr = get_func(&task_json.function_name); 
     }
-    Task::new(args, task_json.function_path.clone(), task_json.function_name.clone(), func_ptr)
+    Task::new(args, task_json.function_name.clone(), func_ptr)
 }
 
 pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
@@ -63,47 +66,76 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
     let mut file = File::open(graph_json).unwrap();
     let mut contents = String::new();
     file.read_to_string(&mut contents).unwrap();
+
+    // Parse JSON file with defined structure 
     let root: RootJson = serde_json::from_str(&contents)?;
     
+    // Create a new Graph
     let mut graph = Graph::new();
 
     let mut node_stages: HashMap<String, usize> = HashMap::new();
 
     for (stage_no, stage_json) in root.graph.stages.iter().enumerate() {
+        // Create a new Stage
         let mut stage = Stage::new();
 
+        // Iterate through parsed JSON Nodes and populate stage
         for node_json in stage_json.nodes.iter() {
             let task = parse_task(&node_json.task);
             let mult_factor: usize = node_json.mult_factor;
-            let node = Arc::new(RwLock::new(Node::new(node_json.name.clone(), task, mult_factor)));
+            let node = Node::new(node_json.name.clone(), task, mult_factor);
             stage.add_node(node);
             node_stages.insert(node_json.name.clone(), stage_no);
         }
-
+        // Add stage to graph
         graph.add_stage(stage);
     }
 
     for (stage_no, stage_json) in root.graph.stages.iter().enumerate() {
+        // Iterate through stages to add successors/dependents
         for node_json in stage_json.nodes.iter() {
+            // Get node name
             let node_name = node_json.name.clone();
 
             if !node_json.successors.is_empty() {
-                for successor_name in node_json.successors.split(",") {
-                    let successor_name = successor_name.trim();
-                    let succ_stage = *node_stages.get(successor_name).unwrap();
+                // Iterate through successors 
+                for succ_json in node_json.successors.iter() {
+                    let succ_task = succ_json.task.clone();
 
-                    let succ_node = graph.stage(succ_stage).node(successor_name).unwrap();
-                    let node = graph.stage(stage_no).node(&node_name).unwrap();
+                    // Add successor task name to node
+                    let succ_stage = *node_stages.get(&succ_task).unwrap();
+                    let node = graph.stage_mut(stage_no).node_mut(&node_name);
+                    node.add_successor(succ_task.clone(), succ_stage);
 
-                    node.write().unwrap().add_successor(succ_node.clone());
-                    succ_node.write().unwrap().add_dependent(node.clone());
+                    // Find successor node and add current node as dependent
+                    let succ_node = graph.stage_mut(succ_stage).node_mut(&succ_task);
+                    succ_node.add_dependent(node_name.clone(), stage_no);
+
+                    // Add successor indexes to node
+                    let succ_indexes = succ_json.indexes.clone();
+
+                    // 1st case: little indexes ',' separated
+                    if succ_indexes.contains(',') {
+                        for successor_index in succ_indexes.split(",") {
+                            let node = graph.stage_mut(stage_no).node_mut(&node_name);
+                            node.add_successor_index(succ_task.clone(), successor_index.parse::<usize>().unwrap());
+                        }
+                    }
+                    // 2nd case: range indexes '-' separated
+                    else if succ_indexes.contains('-') {
+                        let range: Vec<&str> = succ_indexes.split("-").collect();
+                        let start = range[0].parse::<usize>().unwrap();
+                        let end = range[1].parse::<usize>().unwrap();
+                        for i in start..end+1 {
+                            let node = graph.stage_mut(stage_no).node_mut(&node_name);
+                            node.add_successor_index(succ_task.clone(), i);
+                        }
+                    } else{
+                        // single successor
+                        let node = graph.stage_mut(stage_no).node_mut(&node_name);
+                        node.add_successor_index(succ_task.clone(), succ_indexes.parse::<usize>().unwrap());
+                    }
                 }
-                for successor_index in node_json.successors_index.split(",") {
-
-                  let node = graph.stage(stage_no).node(&node_name).unwrap();
-
-                  node.write().unwrap().add_successor_index(successor_index.to_string());
-              }
             }
         }
     }

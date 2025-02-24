@@ -5,6 +5,7 @@
                 "nodes": [
                     {
                         "name": "Task A",
+                        "mult_factor": 1,
                         "task": {
                             "arg_types": [
                                 "usize",
@@ -16,10 +17,14 @@
                                 "4",
                                 "mul"
                             ],
-                            "function_path": "src/funcs.rs",
                             "function_name": "task_a"
                         },
-                        "successors": "Task B"
+                        "successors": [
+                            {
+                                "task": "Task B",
+                                "indexes": "0"
+                            }
+                        ]
                     }
                 ]
             },
@@ -27,6 +32,7 @@
                 "nodes": [
                     {
                         "name": "Task B",
+                        "mult_factor": 1,
                         "task": {
                             "arg_types": [
                                 "usize",
@@ -36,10 +42,9 @@
                                 "8",
                                 "100"
                             ],
-                            "function_path": "src/funcs.rs",
                             "function_name": "task_b"
                         },
-                        "successors": ""
+                        "successors": []
                     }
                 ]
             }
