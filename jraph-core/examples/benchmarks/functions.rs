@@ -1,23 +1,34 @@
-
-use num_complex::{Complex, Complex32};
 use nalgebra::*;
-use lapack::*;
+use num_complex::Complex32;
 extern crate intel_mkl_src;
 
-pub fn vec_to_mat(vector: Vec<Complex32>) -> DMatrix<Complex32> {
+pub fn task_a(x: usize, y: usize, op: String) -> usize {
+    match op.as_str() {
+        "add" => x + y,
+        "sub" => x - y,
+        "mul" => x * y,
+        "div" => x / y,
+        _ => panic!("Invalid operation"),
+    }
+}
+
+pub fn task_b(x: usize, lim: usize) -> bool {
+    x < lim
+}
+
+pub fn vec_to_mat(vector: &Vec<Complex32>) -> DMatrix<Complex32> {
     let len = vector.len();
     let n = (len as f64).sqrt() as usize;
 
     // Check if len is a perfect square
     if n * n == len {
-        DMatrix::from_vec(n, n, vector)
+        DMatrix::from_vec(n, n, vector.to_vec())
     } else {
         panic!("Length of vector is not a perfect square")
     }
 }
 
-pub fn blas_cgemm( a: &DMatrix<Complex32>, b: &DMatrix<Complex32>,) 
--> DMatrix<Complex32> {
+pub fn blas_cgemm(a: &DMatrix<Complex32>, b: &DMatrix<Complex32>) -> DMatrix<Complex32> {
     let m = a.nrows();
     let n = b.ncols();
     let k = a.ncols();
@@ -33,21 +44,26 @@ pub fn blas_cgemm( a: &DMatrix<Complex32>, b: &DMatrix<Complex32>,)
 
     unsafe {
         cblas::cgemm(
-            cblas::Layout::ColumnMajor, 
-            cblas::Transpose::None, 
+            cblas::Layout::ColumnMajor,
             cblas::Transpose::None,
-            m as i32, n as i32, k as i32,
-            alpha, a_slice, m as i32,
-            b_slice, k as i32, beta,
-            &mut c_slice, m as i32,
+            cblas::Transpose::None,
+            m as i32,
+            n as i32,
+            k as i32,
+            alpha,
+            a_slice,
+            m as i32,
+            b_slice,
+            k as i32,
+            beta,
+            &mut c_slice,
+            m as i32,
         );
     }
     c
 }
 
-pub fn multiple_cgemm( vectors: Vec<&DMatrix<Complex32>>) 
--> DMatrix<Complex32> {
-
+pub fn multiple_cgemm(vectors: Vec<&DMatrix<Complex32>>) -> DMatrix<Complex32> {
     let mut c_res = Vec::new();
 
     let alpha = Complex32::new(1.0, 0.0);
@@ -67,25 +83,31 @@ pub fn multiple_cgemm( vectors: Vec<&DMatrix<Complex32>>)
     let mut c0 = DMatrix::<Complex32>::zeros(m, n);
     let mut c0_slice: &mut [Complex32] = c0.as_mut_slice();
 
-
     unsafe {
         cblas::cgemm(
-            cblas::Layout::ColumnMajor, 
-            cblas::Transpose::None, 
+            cblas::Layout::ColumnMajor,
             cblas::Transpose::None,
-            m as i32, n as i32, k as i32,
-            alpha, a_slice, m as i32,
-            b_slice, k as i32, beta,
-            &mut c0_slice, m as i32,
+            cblas::Transpose::None,
+            m as i32,
+            n as i32,
+            k as i32,
+            alpha,
+            a_slice,
+            m as i32,
+            b_slice,
+            k as i32,
+            beta,
+            &mut c0_slice,
+            m as i32,
         );
     }
-    
+
     c_res.push(c0);
 
     for i in 1..vectors.len() {
         let a = vectors[i];
         let b = vectors[i];
-        let mut c_prev = &c_res[i-1];
+        let mut c_prev = c_res[i - 1].clone();
 
         let m = a.nrows();
         let n = b.ncols();
@@ -98,16 +120,23 @@ pub fn multiple_cgemm( vectors: Vec<&DMatrix<Complex32>>)
 
         unsafe {
             cblas::cgemm(
-                cblas::Layout::ColumnMajor, 
-                cblas::Transpose::None, 
+                cblas::Layout::ColumnMajor,
                 cblas::Transpose::None,
-                m as i32, n as i32, k as i32,
-                alpha, a_slice, m as i32,
-                b_slice, k as i32, beta,
-                &mut c_prev, m as i32,
+                cblas::Transpose::None,
+                m as i32,
+                n as i32,
+                k as i32,
+                alpha,
+                a_slice,
+                m as i32,
+                b_slice,
+                k as i32,
+                beta,
+                &mut c_slice,
+                m as i32,
             );
         }
         c_res.push(c_prev.clone());
     }
-    c_res[c_res.len()-1]
+    c_res[c_res.len() - 1].clone()
 }

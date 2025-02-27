@@ -71,16 +71,19 @@ pub struct Fft {
     domain: u32,
     dim: i64,
     sizes: i64,
-    nelems: usize,
+    fft_buf: Vec<Complex32>,
 }
+unsafe impl Send for Fft {}
+unsafe impl Sync for Fft {}
 
 impl Fft {
-    pub fn new(ofdm_ca_num: usize) -> Self {
+    pub fn new(fft_size: usize) -> Self {
         unsafe {
             // allocate memory for aligned fft_inout
-            let n_elems = 2 * ofdm_ca_num;
 
-            let fft_conf = FftConfig::new(ofdm_ca_num);
+            let fft_conf = FftConfig::new(fft_size);
+
+            let fft_buf = generate_set_complex_float_array(fft_size);
 
             let mut mkl_handle: DFTI_DESCRIPTOR_HANDLE = std::ptr::null_mut();
             DftiCreateDescriptor(
@@ -100,13 +103,17 @@ impl Fft {
                 domain: fft_conf.dfti_complex,
                 dim: fft_conf.dim,
                 sizes: fft_conf.fft_size,
-                nelems: n_elems,
+                fft_buf: fft_buf,
             }
         }
     }
 
-    pub fn computefft(&mut self, data: &mut Vec<Complex32>) {
-        let input_data = data.as_mut_ptr();
+    pub fn get_buf(&self) -> Vec<Complex32> {
+        self.fft_buf.clone()
+    }
+
+    pub fn computefft(&mut self) {
+        let input_data = self.fft_buf.as_mut_ptr();
 
         unsafe {
             DftiComputeForward(self.desc, input_data as *mut libc::c_void);

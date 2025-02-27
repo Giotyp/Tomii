@@ -1,35 +1,36 @@
-use std::process::Command;
-use std::path::PathBuf;
-use std::{env, fs};
 use build_print::info;
+use std::path::PathBuf;
+use std::process::Command;
+use std::{env, fs};
 
 fn main() {
-
     let func_file = env::var("FUNC_PATH").expect("FUNC_PATH environment variable is not set");
     println!("cargo:rerun-if-changed={}", func_file);
     let path = PathBuf::from(func_file.clone());
 
-
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     let name_funcs = "funcs.rs";
-    let copied_file = out_dir.join(name_funcs); 
+    let copied_file = out_dir.join(name_funcs);
     let wrapper_file = out_dir.join("wrappers.rs");
     let registry_file = out_dir.join("func_reg.rs");
 
     if func_file == "python" {
         info!("Python API");
-        let status = Command::new("python3")
-        .arg("translator.py")
-        .arg("a")
-        .arg("b")
-        .arg(registry_file.to_str().unwrap())
-        .arg("True")
-        .status()
-        .expect("Failed to execute Python script");
+        let output = Command::new("python3")
+            .arg("translator.py")
+            .arg("a")
+            .arg("b")
+            .arg(registry_file.to_str().unwrap())
+            .arg("True")
+            .output()
+            .expect("Failed to execute Python script");
 
-        if !status.success() {
+        if !output.status.success() {
             panic!("Python script failed");
+        } else {
+            let python_output = std::str::from_utf8(&output.stdout).unwrap();
+            info!("Python output:\n{}", python_output);
         }
         fs::write(&wrapper_file, "").expect("Failed to create empty wrappers.rs file");
         fs::write(&copied_file, "").expect("Failed to create empty function file");
@@ -39,7 +40,6 @@ fn main() {
     // Extract the path to function file
     let func_path = path.parent().unwrap().to_str().unwrap_or("");
     info!("Generating wrappers for functions in {}", func_path);
-
 
     let mut file_name = path.file_name().unwrap().to_str().unwrap();
     // remove the extension
@@ -67,24 +67,27 @@ fn main() {
     }
 
     let input_path = if file_extension == "rs" {
-        copied_file 
+        copied_file
     } else {
         PathBuf::from(func_file.clone())
     };
 
-
     // Call the translator script to generate the wrappers
-    let status = Command::new("python3")
+    let output = Command::new("python3")
         .arg("translator.py")
         .arg(input_path)
         .arg(wrapper_file.to_str().unwrap())
         .arg(registry_file.to_str().unwrap())
         .arg("False")
-        .status()
+        .output()
         .expect("Failed to execute Python script");
 
-    if !status.success() {
-        panic!("Python script failed");
+    if !output.status.success() {
+        let error_output = std::str::from_utf8(&output.stderr).unwrap();
+        panic!("Python script failed: {}", error_output);
+    } else {
+        let python_output = std::str::from_utf8(&output.stdout).unwrap();
+        info!("Python output:\n{}", python_output);
     }
 
     // If given function file is a .h header
