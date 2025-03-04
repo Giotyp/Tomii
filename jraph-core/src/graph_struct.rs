@@ -10,11 +10,7 @@ pub struct Task {
 }
 
 impl Task {
-    pub fn new(
-        args: Vec<CmTypes>,
-        function_name: String,
-        func_ptr: Option<CmPtr>,
-    ) -> Task {
+    pub fn new(args: Vec<CmTypes>, function_name: String, func_ptr: Option<CmPtr>) -> Task {
         Task {
             args,
             function_name,
@@ -94,19 +90,16 @@ impl Node {
     pub fn add_dependent(&mut self, dependent: String, stage_no: usize) {
         self.dependents.push((dependent, stage_no));
     }
-
 }
 
 pub struct Stage {
     nodes: HashMap<String, Node>,
-    node_names: Vec<String>,
 }
 
 impl Stage {
     pub fn new() -> Stage {
         Stage {
             nodes: HashMap::new(),
-            node_names: Vec::new(),
         }
     }
 
@@ -114,12 +107,16 @@ impl Stage {
         self.nodes.len()
     }
 
-    pub fn node_names(&self) -> &Vec<String> {
-        &self.node_names
+    pub fn node_names(&self) -> Vec<String> {
+        self.nodes.keys().cloned().collect()
     }
 
     pub fn node(&self, node_name: &str) -> &Node {
         &self.nodes[node_name]
+    }
+
+    pub fn nodes_map(&self) -> &HashMap<String, Node> {
+        &self.nodes
     }
 
     pub fn node_mut(&mut self, node_name: &str) -> &mut Node {
@@ -129,7 +126,6 @@ impl Stage {
     pub fn add_node(&mut self, node: Node) {
         let node_name = node.name.clone();
         self.nodes.insert(node_name.clone(), node);
-        self.node_names.push(node_name);
     }
 }
 
@@ -169,7 +165,10 @@ impl Graph {
                 for (successor_name, _) in &node.successors {
                     dot.push_str(&format!(
                         "    \"Stage{}::{}\" -> \"Stage{}::{}\";\n",
-                        stage_idx, node_name, stage_idx + 1, successor_name
+                        stage_idx,
+                        node_name,
+                        stage_idx + 1,
+                        successor_name
                     ));
                 }
             }
@@ -184,7 +183,7 @@ impl Graph {
         for (stage_no, stage) in self.stages.iter().enumerate() {
             println!("  Stage {}: ", stage_no);
             for node_name in stage.node_names() {
-                let node = &stage.nodes[node_name];
+                let node = &stage.nodes[&node_name];
                 println!("      Node: {}", node.name);
                 println!("          Mult-Factor: {}", node.mult_factor);
                 println!("          Task: {}", node.task.function_name);

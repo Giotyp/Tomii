@@ -2,16 +2,16 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 
-use crate::graph_struct::*;
 use crate::func_reg::*;
-use shared::*;
+use crate::graph_struct::*;
 use serde::Deserialize;
 use serde_json;
+use shared::*;
 
 #[derive(Debug, Deserialize)]
 struct SuccessorsJson {
     task: String,
-    indexes: String
+    indexes: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,20 +56,19 @@ fn parse_task(task_json: &TaskJson) -> Task {
 
     let mut func_ptr: Option<CmPtr> = None;
     if !python {
-      func_ptr = get_func(&task_json.function_name); 
+        func_ptr = get_func(&task_json.function_name);
     }
     Task::new(args, task_json.function_name.clone(), func_ptr)
 }
 
 pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
-
     let mut file = File::open(graph_json).unwrap();
     let mut contents = String::new();
     file.read_to_string(&mut contents).unwrap();
 
-    // Parse JSON file with defined structure 
+    // Parse JSON file with defined structure
     let root: RootJson = serde_json::from_str(&contents)?;
-    
+
     // Create a new Graph
     let mut graph = Graph::new();
 
@@ -98,7 +97,7 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
             let node_name = node_json.name.clone();
 
             if !node_json.successors.is_empty() {
-                // Iterate through successors 
+                // Iterate through successors
                 for succ_json in node_json.successors.iter() {
                     let succ_task = succ_json.task.clone();
 
@@ -117,8 +116,13 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
                     // 1st case: little indexes ',' separated
                     if succ_indexes.contains(',') {
                         for successor_index in succ_indexes.split(",") {
+                            // strip to remove whitespace
+                            let successor_index = successor_index.trim();
                             let node = graph.stage_mut(stage_no).node_mut(&node_name);
-                            node.add_successor_index(succ_task.clone(), successor_index.parse::<usize>().unwrap());
+                            node.add_successor_index(
+                                succ_task.clone(),
+                                successor_index.parse::<usize>().unwrap(),
+                            );
                         }
                     }
                     // 2nd case: range indexes '-' separated
@@ -126,14 +130,17 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
                         let range: Vec<&str> = succ_indexes.split("-").collect();
                         let start = range[0].parse::<usize>().unwrap();
                         let end = range[1].parse::<usize>().unwrap();
-                        for i in start..end+1 {
+                        for i in start..end + 1 {
                             let node = graph.stage_mut(stage_no).node_mut(&node_name);
                             node.add_successor_index(succ_task.clone(), i);
                         }
-                    } else{
+                    } else {
                         // single successor
                         let node = graph.stage_mut(stage_no).node_mut(&node_name);
-                        node.add_successor_index(succ_task.clone(), succ_indexes.parse::<usize>().unwrap());
+                        node.add_successor_index(
+                            succ_task.clone(),
+                            succ_indexes.parse::<usize>().unwrap(),
+                        );
                     }
                 }
             }

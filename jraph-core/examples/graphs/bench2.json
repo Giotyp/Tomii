@@ -13,11 +13,14 @@
                             "args": [
                                 "fft_buffers"
                             ],
-                            "function_path": "../examples/benchmarks/functions.rs",
                             "function_name": "vec_to_mat"
                         },
-                        "successors": "Vec2Mat",
-                        "successors_index": "0"
+                        "successors": [
+                            {
+                                "task": "Vec2Mat",
+                                "indexes": "0"
+                            }
+                        ]
                     }
                 ]
             },
@@ -33,11 +36,14 @@
                             "args": [
                                 "fft_buffers"
                             ],
-                            "function_path": "",
                             "function_name": "vec_to_mat"
                         },
-                        "successors": "Cgemm, Cgemm",
-                        "successors_index": "0, 1"
+                        "successors": [
+                            {
+                                "task": "Cgemm",
+                                "indexes": "0, 1"
+                            }
+                        ]
                     }
                 ]
             },
@@ -56,8 +62,7 @@
                             "function_path": "",
                             "function_name": "blas_cgemm"
                         },
-                        "successors": "",
-                        "successors_index": ""
+                        "successors": []
                     }
                 ]
             }

@@ -1,6 +1,6 @@
+pub mod executor;
 pub mod graph_gen;
 pub mod graph_struct;
-pub mod executor;
 pub mod temp_funcs;
 pub mod utils_rdtsc;
 

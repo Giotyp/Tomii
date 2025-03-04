@@ -56,38 +56,8 @@ impl Executor {
 
         // Initializations that need to be done from graph
 
-        let mut stage_dict: Vec<Vec<HashMap<String, String>>> = vec![Vec::new(); num_stages];
-
-        for i in 0..num_stages {
-            let mut stage_vec = vec![];
-            let node_names = graph.stage(i).node_names().clone();
-            for node in node_names {
-                let info = graph.node_info(i, &node);
-                let task_dict = HashMap::from([
-                    ("name".to_string(), node.clone()),
-                    ("mult_factor".to_string(), info["mult_factor"].clone()),
-                    ("function_name".to_string(), info["function_name"].clone()),
-                    (
-                        "successors_index".to_string(),
-                        info["successors_index"].clone(),
-                    ),
-                    (
-                        "successors_names".to_string(),
-                        info["successors_names"].clone(),
-                    ),
-                    (
-                        "dependents_names".to_string(),
-                        info["dependents_names"].clone(),
-                    ),
-                    ("args".to_string(), info["args"].clone()),
-                ]);
-                stage_vec.push(task_dict);
-            }
-            stage_dict[i] = stage_vec;
-        }
-
         let fft_size = 10000;
-        let mult_factor = stage_dict[0][0]["mult_factor"].parse::<usize>().unwrap();
+        let mult_factor = graph.stage(0).node("FFT").mult_factor();
 
         let mut fft_buffers: Vec<Arc<Mutex<Fft>>> = Vec::new();
         for _ in 0..mult_factor {
@@ -109,25 +79,11 @@ impl Executor {
                     let scheduled = stage_scheduled.lock().unwrap();
                     if scheduled[stage] < mult_factor {
                         drop(scheduled);
-                        for nodes in stage_dict[stage].iter() {
-                            let node_args = graph
-                                .stage(stage)
-                                .node(&nodes["name"])
-                                .unwrap()
-                                .read()
-                                .unwrap()
-                                .task()
-                                .args()
-                                .clone();
+                        let nodes_map = graph.stage(stage).nodes_map();
+                        for (node_name, node) in nodes_map {
+                            let node_args = node.task().args();
 
-                            let func_opt = graph
-                                .stage(stage)
-                                .node(&nodes["name"])
-                                .unwrap()
-                                .read()
-                                .unwrap()
-                                .task()
-                                .func_ptr();
+                            let func_opt = node.task().func_ptr();
 
                             if stage == 0 {
                                 fft_buffers.par_iter().enumerate().for_each(
@@ -140,12 +96,19 @@ impl Executor {
                                     },
                                 );
                             } else if node_args[0].arg_name() == "$ref" {
-                                let dependents_index: Vec<usize> = stage_dict[stage - 1][0]
-                                    ["successors_index"]
-                                    .split(',')
-                                    .map(|x| x.trim().parse::<usize>().unwrap())
-                                    .collect();
+                                let dependencies: HashMap<String, Vec<usize>> = {
+                                    let mut map = HashMap::new();
+                                    let dependents = node.dependents();
+                                    for dependent in dependents {
+                                        let dep_node = graph.stage(dependent.1).node(&dependent.0);
+                                        let successors_index =
+                                            dep_node.successors_index()[&node_name.clone()].clone();
+                                        map.insert(dep_node.name().clone(), successors_index);
+                                    }
+                                    map
+                                };
 
+                                let dependents_index: Vec<usize> = dependencies["FFT"].clone();
                                 let completed_indices: Vec<usize> =
                                     stage_completed.lock().unwrap()[stage - 1].clone();
 
@@ -183,31 +146,19 @@ impl Executor {
                                     stage_results.lock().unwrap()[stage][index] = vecmat;
                                 });
                             } else if node_args[0].arg_name() == "$res" {
-                                let dependents_index: Vec<usize> = {
-                                    let indexes =
-                                        stage_dict[stage - 1][0]["successors_index"].clone();
-
-                                    // check if ',' is present in indexes
-                                    if indexes.contains(',') {
-                                        indexes
-                                            .split(',')
-                                            .map(|x| x.trim().parse::<usize>().unwrap())
-                                            .collect()
-                                    } else if indexes.contains('-') {
-                                        // - is present so range of nodes is required
-                                        let mut vec = Vec::new();
-                                        let range: Vec<usize> = indexes
-                                            .split('-')
-                                            .map(|x| x.trim().parse::<usize>().unwrap())
-                                            .collect();
-                                        for i in range[0]..(range[1]+1) {
-                                            vec.push(i);
-                                        }
-                                        vec
-                                    } else {
-                                        vec![indexes.trim().parse::<usize>().unwrap()]
+                                let dependencies: HashMap<String, Vec<usize>> = {
+                                    let mut map = HashMap::new();
+                                    let dependents = node.dependents();
+                                    for dependent in dependents {
+                                        let dep_node = graph.stage(dependent.1).node(&dependent.0);
+                                        let successors_index =
+                                            dep_node.successors_index()[&node_name.clone()].clone();
+                                        map.insert(dep_node.name().clone(), successors_index);
                                     }
+                                    map
                                 };
+
+                                let dependents_index: Vec<usize> = dependencies["Vec2Mat"].clone();
 
                                 let mut arg_vecs = Vec::new();
                                 let completed_indices: Vec<usize> =
