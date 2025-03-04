@@ -214,7 +214,7 @@ pub fn multiple_cgemm(vectors: Vec<DMatrix<Complex32>>) -> DMatrix<Complex32> {
     for i in 1..vectors.len() {
         let a = &vectors[i];
         let b = &vectors[i];
-        let mut c_prev = &mut c_res[i - 1].clone();
+        let c_prev = &mut c_res[i - 1].clone();
 
         let m = a.nrows();
         let n = b.ncols();

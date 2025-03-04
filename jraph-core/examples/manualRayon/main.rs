@@ -18,7 +18,11 @@ fn find_index(idx: isize, mult_factor: usize) -> usize {
     }
 }
 
-fn bench1(threadpool: &ThreadPool, mult_factor: usize, results: &mut Vec<DMatrix<Complex32>>) -> u64{
+fn bench1(
+    threadpool: &ThreadPool,
+    mult_factor: usize,
+    results: &mut Vec<DMatrix<Complex32>>,
+) -> u64 {
     let fft_size = 10000;
     let num_stages = 3;
 
@@ -91,7 +95,8 @@ fn bench1(threadpool: &ThreadPool, mult_factor: usize, results: &mut Vec<DMatrix
 
                             // Check if all dependencies are present in completed_indices
                             if completed_indices.contains(&index_needed) {
-                                if let Some(vecmat) = &vecmat_results.lock().unwrap()[index_needed]{
+                                if let Some(vecmat) = &vecmat_results.lock().unwrap()[index_needed]
+                                {
                                     arg_vecs.push((vecmat.clone(), task_idx));
                                 }
                             }
@@ -116,7 +121,11 @@ fn bench1(threadpool: &ThreadPool, mult_factor: usize, results: &mut Vec<DMatrix
     end_time - start_time
 }
 
-fn bench2(threadpool: &ThreadPool, mult_factor: usize, results: &mut Vec<DMatrix<Complex32>>) -> u64{
+fn bench2(
+    threadpool: &ThreadPool,
+    mult_factor: usize,
+    results: &mut Vec<DMatrix<Complex32>>,
+) -> u64 {
     let fft_size = 10000;
     let num_stages = 3;
 
@@ -194,9 +203,14 @@ fn bench2(threadpool: &ThreadPool, mult_factor: usize, results: &mut Vec<DMatrix
                             };
 
                             // Check if all dependencies are present in completed_indices
-                            if indices.iter().all(|&index_needed| completed_indices.contains(&index_needed)) {
+                            if indices
+                                .iter()
+                                .all(|&index_needed| completed_indices.contains(&index_needed))
+                            {
                                 for index_needed in indices {
-                                    if let Some(vecmat) = &vecmat_results.lock().unwrap()[index_needed]{
+                                    if let Some(vecmat) =
+                                        &vecmat_results.lock().unwrap()[index_needed]
+                                    {
                                         arg_vecs.push((vecmat.clone(), task_idx));
                                     }
                                 }
@@ -222,7 +236,11 @@ fn bench2(threadpool: &ThreadPool, mult_factor: usize, results: &mut Vec<DMatrix
     end_time - start_time
 }
 
-fn bench3(threadpool: &ThreadPool, mult_factor: usize, results: &mut Vec<DMatrix<Complex32>>) -> u64{
+fn bench3(
+    threadpool: &ThreadPool,
+    mult_factor: usize,
+    results: &mut Vec<DMatrix<Complex32>>,
+) -> u64 {
     let fft_size = 10000;
     let num_stages = 3;
 
@@ -300,10 +318,15 @@ fn bench3(threadpool: &ThreadPool, mult_factor: usize, results: &mut Vec<DMatrix
                             };
 
                             // Check if all dependencies are present in completed_indices
-                            if indices.iter().all(|&index_needed| completed_indices.contains(&index_needed)) {
+                            if indices
+                                .iter()
+                                .all(|&index_needed| completed_indices.contains(&index_needed))
+                            {
                                 let mut res_vector = Vec::new();
                                 for index_needed in indices {
-                                    if let Some(vecmat) = &vecmat_results.lock().unwrap()[index_needed]{
+                                    if let Some(vecmat) =
+                                        &vecmat_results.lock().unwrap()[index_needed]
+                                    {
                                         res_vector.push(vecmat.clone());
                                     }
                                 }
@@ -330,12 +353,12 @@ fn bench3(threadpool: &ThreadPool, mult_factor: usize, results: &mut Vec<DMatrix
     end_time - start_time
 }
 
-
 fn main() {
     let core_offset = 0;
-    let workers = 64;
+    let workers = 4;
     let mut core_ids = core_affinity::get_core_ids().unwrap();
     core_ids.sort();
+    println!("Core IDs: {:?}", core_ids);
     let cores_to_use: Vec<core_affinity::CoreId> =
         core_ids[core_offset..core_offset + workers].to_vec();
     let threadpool = ThreadPoolBuilder::new()
@@ -356,31 +379,28 @@ fn main() {
         // Bench 1
         let duration = bench1(&threadpool, factor, &mut results);
 
-        let time = cycles_to_sec(duration);
+        let time = cycles_to_ms(duration);
         println!(
-            "Bench 1 Execution Time for {} tasks: {:.2?} seconds",
-            factor,
-            time
+            "Bench 1 Execution Time for {} tasks: {:.4?} ms",
+            factor, time
         );
 
         // Bench 2
         let duration = bench2(&threadpool, factor, &mut results);
 
-        let time = cycles_to_sec(duration);
+        let time = cycles_to_ms(duration);
         println!(
-            "Bench 2 Execution Time for {} tasks: {:.2?} seconds",
-            factor,
-            time
+            "Bench 2 Execution Time for {} tasks: {:.4?} ms",
+            factor, time
         );
 
         // Bench 2
         let duration = bench3(&threadpool, factor, &mut results);
 
-        let time = cycles_to_sec(duration);
+        let time = cycles_to_ms(duration);
         println!(
-            "Bench 3 Execution Time for {} tasks: {:.2?} seconds",
-            factor,
-            time
+            "Bench 3 Execution Time for {} tasks: {:.4?} ms",
+            factor, time
         );
         println!("");
     }
