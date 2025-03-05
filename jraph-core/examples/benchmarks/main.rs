@@ -1,7 +1,14 @@
+mod bindings;
+mod functions;
+mod validation;
+
 use jraph_core::executor::Executor;
 use jraph_core::graph_gen::from_json;
+use nalgebra::DMatrix;
+use num_complex::Complex32;
 use shared::CmTypes;
 
+use crate::validation::*;
 use jraph_core::utils_rdtsc::*;
 
 fn main() {
@@ -19,7 +26,27 @@ fn main() {
         let executor = Executor::new(0, 4);
         let duration = executor.execute(&graph, &mut results);
 
-        //println!("Results Len: {:?}", results.len());
+        let val = {
+            match i {
+                0 => validate1(mult_factor),
+                1 => validate2(mult_factor),
+                2 => validate3(mult_factor),
+                _ => Vec::new(),
+            }
+        };
+
+        for i in 0..mult_factor {
+            let valid: &DMatrix<Complex32> = &val[i];
+            let res = {
+                match &results[i] {
+                    CmTypes::DMatrixC32(x) => x,
+                    _ => panic!("Invalid result type"),
+                }
+            };
+            let res_ref: &DMatrix<Complex32> = &res;
+            assert_eq!(valid, res_ref);
+        }
+
         for res in results.iter() {
             let len = match res {
                 CmTypes::DMatrixC32(x) => x.data.len(),

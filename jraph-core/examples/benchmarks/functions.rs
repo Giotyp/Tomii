@@ -2,20 +2,6 @@ use nalgebra::*;
 use num_complex::Complex32;
 extern crate intel_mkl_src;
 
-pub fn task_a(x: usize, y: usize, op: String) -> usize {
-    match op.as_str() {
-        "add" => x + y,
-        "sub" => x - y,
-        "mul" => x * y,
-        "div" => x / y,
-        _ => panic!("Invalid operation"),
-    }
-}
-
-pub fn task_b(x: usize, lim: usize) -> bool {
-    x < lim
-}
-
 pub fn vec_to_mat(vector: &Vec<Complex32>) -> DMatrix<Complex32> {
     let len = vector.len();
     let n = (len as f64).sqrt() as usize;

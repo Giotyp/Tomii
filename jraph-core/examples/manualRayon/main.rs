@@ -1,4 +1,5 @@
 mod funcs;
+mod validation;
 
 use core_affinity;
 use funcs::*;
@@ -7,6 +8,7 @@ use num_complex::Complex32;
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::sync::{Arc, Mutex};
+use validation::*;
 
 use jraph_core::utils_rdtsc::*;
 
@@ -379,6 +381,13 @@ fn main() {
         // Bench 1
         let duration = bench1(&threadpool, factor, &mut results);
 
+        let val1 = validate1(factor);
+
+        // assert results == val1
+        for i in 0..factor {
+            assert_eq!(results[i], val1[i]);
+        }
+
         let time = cycles_to_ms(duration);
         println!(
             "Bench 1 Execution Time for {} tasks: {:.4?} ms",
@@ -386,7 +395,15 @@ fn main() {
         );
 
         // Bench 2
+        results.clear();
         let duration = bench2(&threadpool, factor, &mut results);
+
+        let val2 = validate2(factor);
+
+        // assert results == val2
+        for i in 0..factor {
+            assert_eq!(results[i], val2[i]);
+        }
 
         let time = cycles_to_ms(duration);
         println!(
@@ -394,8 +411,16 @@ fn main() {
             factor, time
         );
 
-        // Bench 2
+        // Bench 3
+        results.clear();
         let duration = bench3(&threadpool, factor, &mut results);
+
+        let val3 = validate3(factor);
+
+        // assert results == val3
+        for i in 0..factor {
+            assert_eq!(results[i], val3[i]);
+        }
 
         let time = cycles_to_ms(duration);
         println!(
