@@ -33,8 +33,8 @@ fn bench1(
         fft_buffers.push(Arc::new(Mutex::new(Fft::new(fft_size))));
     }
 
-    let vecmat_results: Arc<Mutex<Vec<Option<DMatrix<Complex32>>>>> =
-        Arc::new(Mutex::new(vec![None; mult_factor]));
+    let vecmat_results: Arc<Mutex<Vec<DMatrix<Complex32>>>> =
+        Arc::new(Mutex::new(vec![DMatrix::<Complex32>::zeros(1,1); mult_factor]));
 
     let cgemm_results: Arc<Mutex<Vec<DMatrix<Complex32>>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -44,23 +44,25 @@ fn bench1(
 
     let start_time = rdtsc();
     threadpool.install(|| {
-        // schedule fft
-        fft_buffers
-            .par_iter()
-            .enumerate()
-            .for_each(|(index, fft_struct)| {
-                let mut fft_struct = fft_struct.lock().unwrap();
-                fft_struct.computefft();
-                // task index at stage 0 is completed
-                stage_completed.lock().unwrap()[0].push(index);
-                stage_scheduled.lock().unwrap()[0] += 1;
-            });
-
         while stage_completed.lock().unwrap()[num_stages - 1].len() < mult_factor {
-            for stage in 1..num_stages {
+            for stage in 0..num_stages {
                 let scheduled = stage_scheduled.lock().unwrap();
                 if scheduled[stage] < mult_factor {
                     drop(scheduled);
+
+                    if stage == 0 {
+                        // fft
+                        fft_buffers
+                            .par_iter()
+                            .enumerate()
+                            .for_each(|(index, fft_struct)| {
+                                let mut fft_struct = fft_struct.lock().unwrap();
+                                fft_struct.computefft();
+                                // task index at stage 0 is completed
+                                stage_completed.lock().unwrap()[stage].push(index);
+                                stage_scheduled.lock().unwrap()[stage] += 1;
+                            });
+                    }
 
                     if stage == 1 {
                         // vec to mat
@@ -79,11 +81,11 @@ fn bench1(
                         }
                         arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                             let index = *index;
-                            let vecmat = vec_to_mat(arg_vec.to_vec());
+                            let vecmat = vec_to_mat(arg_vec);
                             // task index at stage 1 is completed
                             stage_completed.lock().unwrap()[stage].push(index);
                             stage_scheduled.lock().unwrap()[stage] += 1;
-                            vecmat_results.lock().unwrap()[index] = Some(vecmat);
+                            vecmat_results.lock().unwrap()[index] = vecmat;
                         });
                     } else if stage == 2 {
                         // blas cgemm
@@ -97,10 +99,8 @@ fn bench1(
 
                             // Check if all dependencies are present in completed_indices
                             if completed_indices.contains(&index_needed) {
-                                if let Some(vecmat) = &vecmat_results.lock().unwrap()[index_needed]
-                                {
-                                    arg_vecs.push((vecmat.clone(), task_idx));
-                                }
+                                let vecmat = &vecmat_results.lock().unwrap()[index_needed];
+                                arg_vecs.push((vecmat.clone(), task_idx));
                             }
                         }
                         arg_vecs.par_iter().for_each(|(arg_vec, index)| {
@@ -136,8 +136,8 @@ fn bench2(
         fft_buffers.push(Arc::new(Mutex::new(Fft::new(fft_size))));
     }
 
-    let vecmat_results: Arc<Mutex<Vec<Option<DMatrix<Complex32>>>>> =
-        Arc::new(Mutex::new(vec![None; mult_factor]));
+    let vecmat_results: Arc<Mutex<Vec<DMatrix<Complex32>>>> =
+        Arc::new(Mutex::new(vec![DMatrix::<Complex32>::zeros(1,1); mult_factor]));
 
     let cgemm_results: Arc<Mutex<Vec<DMatrix<Complex32>>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -147,23 +147,25 @@ fn bench2(
 
     let start_time = rdtsc();
     threadpool.install(|| {
-        // schedule fft
-        fft_buffers
-            .par_iter()
-            .enumerate()
-            .for_each(|(index, fft_struct)| {
-                let mut fft_struct = fft_struct.lock().unwrap();
-                fft_struct.computefft();
-                // task index at stage 0 is completed
-                stage_completed.lock().unwrap()[0].push(index);
-                stage_scheduled.lock().unwrap()[0] += 1;
-            });
-
         while stage_completed.lock().unwrap()[num_stages - 1].len() < mult_factor {
-            for stage in 1..num_stages {
+            for stage in 0..num_stages {
                 let scheduled = stage_scheduled.lock().unwrap();
                 if scheduled[stage] < mult_factor {
                     drop(scheduled);
+
+                    if stage == 0 {
+                        // fft
+                        fft_buffers
+                            .par_iter()
+                            .enumerate()
+                            .for_each(|(index, fft_struct)| {
+                                let mut fft_struct = fft_struct.lock().unwrap();
+                                fft_struct.computefft();
+                                // task index at stage 0 is completed
+                                stage_completed.lock().unwrap()[stage].push(index);
+                                stage_scheduled.lock().unwrap()[stage] += 1;
+                            });
+                    }
 
                     if stage == 1 {
                         // vec to mat
@@ -182,11 +184,11 @@ fn bench2(
                         }
                         arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                             let index = *index;
-                            let vecmat = vec_to_mat(arg_vec.to_vec());
+                            let vecmat = vec_to_mat(arg_vec);
                             // task index at stage 1 is completed
                             stage_completed.lock().unwrap()[stage].push(index);
                             stage_scheduled.lock().unwrap()[stage] += 1;
-                            vecmat_results.lock().unwrap()[index] = Some(vecmat);
+                            vecmat_results.lock().unwrap()[index] = vecmat;
                         });
                     } else if stage == 2 {
                         // blas cgemm
@@ -210,11 +212,8 @@ fn bench2(
                                 .all(|&index_needed| completed_indices.contains(&index_needed))
                             {
                                 for index_needed in indices {
-                                    if let Some(vecmat) =
-                                        &vecmat_results.lock().unwrap()[index_needed]
-                                    {
-                                        arg_vecs.push((vecmat.clone(), task_idx));
-                                    }
+                                    let vecmat = &vecmat_results.lock().unwrap()[index_needed];
+                                    arg_vecs.push((vecmat.clone(), task_idx));
                                 }
                             }
                         }
@@ -251,8 +250,8 @@ fn bench3(
         fft_buffers.push(Arc::new(Mutex::new(Fft::new(fft_size))));
     }
 
-    let vecmat_results: Arc<Mutex<Vec<Option<DMatrix<Complex32>>>>> =
-        Arc::new(Mutex::new(vec![None; mult_factor]));
+    let vecmat_results: Arc<Mutex<Vec<DMatrix<Complex32>>>> =
+        Arc::new(Mutex::new(vec![DMatrix::<Complex32>::zeros(1,1); mult_factor]));
 
     let cgemm_results: Arc<Mutex<Vec<DMatrix<Complex32>>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -262,23 +261,25 @@ fn bench3(
 
     let start_time = rdtsc();
     threadpool.install(|| {
-        // schedule fft
-        fft_buffers
-            .par_iter()
-            .enumerate()
-            .for_each(|(index, fft_struct)| {
-                let mut fft_struct = fft_struct.lock().unwrap();
-                fft_struct.computefft();
-                // task index at stage 0 is completed
-                stage_completed.lock().unwrap()[0].push(index);
-                stage_scheduled.lock().unwrap()[0] += 1;
-            });
-
         while stage_completed.lock().unwrap()[num_stages - 1].len() < mult_factor {
-            for stage in 1..num_stages {
+            for stage in 0..num_stages {
                 let scheduled = stage_scheduled.lock().unwrap();
                 if scheduled[stage] < mult_factor {
                     drop(scheduled);
+
+                    if stage == 0 {
+                        // fft
+                        fft_buffers
+                            .par_iter()
+                            .enumerate()
+                            .for_each(|(index, fft_struct)| {
+                                let mut fft_struct = fft_struct.lock().unwrap();
+                                fft_struct.computefft();
+                                // task index at stage 0 is completed
+                                stage_completed.lock().unwrap()[stage].push(index);
+                                stage_scheduled.lock().unwrap()[stage] += 1;
+                            });
+                    }
 
                     if stage == 1 {
                         // vec to mat
@@ -297,11 +298,11 @@ fn bench3(
                         }
                         arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                             let index = *index;
-                            let vecmat = vec_to_mat(arg_vec.to_vec());
+                            let vecmat = vec_to_mat(arg_vec);
                             // task index at stage 1 is completed
                             stage_completed.lock().unwrap()[stage].push(index);
                             stage_scheduled.lock().unwrap()[stage] += 1;
-                            vecmat_results.lock().unwrap()[index] = Some(vecmat);
+                            vecmat_results.lock().unwrap()[index] = vecmat;
                         });
                     } else if stage == 2 {
                         // blas cgemm
@@ -326,18 +327,16 @@ fn bench3(
                             {
                                 let mut res_vector = Vec::new();
                                 for index_needed in indices {
-                                    if let Some(vecmat) =
-                                        &vecmat_results.lock().unwrap()[index_needed]
-                                    {
-                                        res_vector.push(vecmat.clone());
-                                    }
+                                    let vecmat = &vecmat_results.lock().unwrap()[index_needed];
+                                    res_vector.push(vecmat.clone());
                                 }
                                 arg_vecs.push((res_vector, task_idx));
                             }
                         }
                         arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                             let index = *index;
-                            let cmat = multiple_cgemm(arg_vec.to_vec());
+                            let refmats: Vec<&DMatrix<Complex32>> = arg_vec.iter().collect();
+                            let cmat = multiple_cgemm(refmats);
                             // task index at stage 2 is completed
                             stage_completed.lock().unwrap()[stage].push(index);
                             stage_scheduled.lock().unwrap()[stage] += 1;
@@ -374,59 +373,59 @@ fn main() {
         .unwrap();
 
     let factors = vec![25, 50, 75, 100];
+    let repeat = 10;
+    let mut times = vec![Vec::new(); 3];
 
     for factor in factors {
-        let mut results: Vec<DMatrix<Complex32>> = Vec::new();
+        for _ in 0..repeat {
+            let mut results: Vec<DMatrix<Complex32>> = Vec::new();
 
-        // Bench 1
-        let duration = bench1(&threadpool, factor, &mut results);
+            // Bench 1
+            let duration = bench1(&threadpool, factor, &mut results);
 
-        let val1 = validate1(factor);
+            let val1 = validate1(factor);
 
-        // assert results == val1
-        for i in 0..factor {
-            assert_eq!(results[i], val1[i]);
+            // assert results == val1
+            for i in 0..factor {
+                assert_eq!(results[i], val1[i]);
+            }
+
+            let time = cycles_to_ms(duration);
+            times[0].push(time);
+
+            // Bench 2
+            results.clear();
+            let duration = bench2(&threadpool, factor, &mut results);
+
+            let val2 = validate2(factor);
+
+            // assert results == val2
+            for i in 0..factor {
+                assert_eq!(results[i], val2[i]);
+            }
+
+            let time = cycles_to_ms(duration);
+            times[1].push(time);
+
+            // Bench 3
+            results.clear();
+            let duration = bench3(&threadpool, factor, &mut results);
+
+            let val3 = validate3(factor);
+
+            // assert results == val3
+            for i in 0..factor {
+                assert_eq!(results[i], val3[i]);
+            }
+
+            let time = cycles_to_ms(duration);
+            times[2].push(time);
         }
-
-        let time = cycles_to_ms(duration);
-        println!(
-            "Bench 1 Execution Time for {} tasks: {:.4?} ms",
-            factor, time
-        );
-
-        // Bench 2
-        results.clear();
-        let duration = bench2(&threadpool, factor, &mut results);
-
-        let val2 = validate2(factor);
-
-        // assert results == val2
-        for i in 0..factor {
-            assert_eq!(results[i], val2[i]);
+        // Average times
+        for i in 0..3 {
+            let avg_time: f64 = times[i].iter().sum::<f64>() / times[i].len() as f64;
+            println!("Bench {} Average Time({}) for {} tasks: {:.4?} ms", i + 1, repeat, factor, avg_time);
         }
-
-        let time = cycles_to_ms(duration);
-        println!(
-            "Bench 2 Execution Time for {} tasks: {:.4?} ms",
-            factor, time
-        );
-
-        // Bench 3
-        results.clear();
-        let duration = bench3(&threadpool, factor, &mut results);
-
-        let val3 = validate3(factor);
-
-        // assert results == val3
-        for i in 0..factor {
-            assert_eq!(results[i], val3[i]);
-        }
-
-        let time = cycles_to_ms(duration);
-        println!(
-            "Bench 3 Execution Time for {} tasks: {:.4?} ms",
-            factor, time
-        );
-        println!("");
+        println!();
     }
 }

@@ -123,13 +123,13 @@ impl Fft {
     }
 }
 
-pub fn vec_to_mat(vector: Vec<Complex32>) -> DMatrix<Complex32> {
+pub fn vec_to_mat(vector: &Vec<Complex32>) -> DMatrix<Complex32> {
     let len = vector.len();
     let n = (len as f64).sqrt() as usize;
 
     // Check if len is a perfect square
     if n * n == len {
-        DMatrix::from_vec(n, n, vector)
+        DMatrix::from_vec(n, n, vector.to_vec())
     } else {
         panic!("Length of vector is not a perfect square")
     }
@@ -170,15 +170,15 @@ pub fn blas_cgemm(a: &DMatrix<Complex32>, b: &DMatrix<Complex32>) -> DMatrix<Com
     c
 }
 
-pub fn multiple_cgemm(vectors: Vec<DMatrix<Complex32>>) -> DMatrix<Complex32> {
+pub fn multiple_cgemm(vectors: Vec<&DMatrix<Complex32>>) -> DMatrix<Complex32> {
     let mut c_res = Vec::new();
 
     let alpha = Complex32::new(1.0, 0.0);
     let beta = Complex32::new(0.0, 0.0);
 
     // first matrix
-    let a = &vectors[0];
-    let b = &vectors[1];
+    let a = vectors[0];
+    let b = vectors[1];
 
     let m = a.nrows();
     let n = b.ncols();
@@ -212,9 +212,9 @@ pub fn multiple_cgemm(vectors: Vec<DMatrix<Complex32>>) -> DMatrix<Complex32> {
     c_res.push(c0);
 
     for i in 1..vectors.len() {
-        let a = &vectors[i];
-        let b = &vectors[i];
-        let c_prev = &mut c_res[i - 1].clone();
+        let a = vectors[i];
+        let b = vectors[i];
+        let mut c_prev = c_res[i - 1].clone();
 
         let m = a.nrows();
         let n = b.ncols();
@@ -247,3 +247,4 @@ pub fn multiple_cgemm(vectors: Vec<DMatrix<Complex32>>) -> DMatrix<Complex32> {
     }
     c_res[c_res.len() - 1].clone()
 }
+
