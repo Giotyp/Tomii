@@ -6,6 +6,7 @@ use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::sync::{Arc, Mutex};
 
 use crate::graph_struct::*;
+use crate::time_buffer::TimeBuffer;
 use shared::CmTypes;
 use std::collections::HashMap;
 
@@ -51,7 +52,13 @@ impl Executor {
         }
     }
 
-    pub fn execute(&self, graph: &Graph, results: &mut Vec<CmTypes>) -> u64 {
+    pub fn execute(
+        &self,
+        graph: &Graph,
+        results: &mut Vec<CmTypes>,
+        arc_timebuf: Arc<Mutex<TimeBuffer>>,
+        run_idx: usize,
+    ) -> u64 {
         let num_stages = graph.len();
 
         // Initializations that need to be done from graph
@@ -89,7 +96,12 @@ impl Executor {
                                 fft_buffers.par_iter().enumerate().for_each(
                                     |(index, fft_struct)| {
                                         let mut fft_struct = fft_struct.lock().unwrap();
+                                        let t1 = rdtsc();
                                         fft_struct.computefft();
+                                        let t2 = rdtsc();
+                                        let mut tb = arc_timebuf.lock().unwrap();
+                                        tb.add_time("FFT-Comp", run_idx, t2 - t1);
+                                        drop(tb);
                                         // task index at stage 0 is completed
                                         stage_completed.lock().unwrap()[stage].push(index);
                                         stage_scheduled.lock().unwrap()[stage] += 1;
@@ -139,7 +151,12 @@ impl Executor {
                                 arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                                     let index = *index;
                                     let func = func_opt.unwrap();
+                                    let t1_comp = rdtsc();
                                     let vecmat = func(arg_vec.to_vec());
+                                    let t2_comp = rdtsc();
+                                    let mut tb = arc_timebuf.lock().unwrap();
+                                    tb.add_time("VecMat-Comp", run_idx, t2_comp - t1_comp);
+                                    drop(tb);
                                     // task index at stage 1 is completed
                                     stage_completed.lock().unwrap()[stage].push(index);
                                     stage_scheduled.lock().unwrap()[stage] += 1;
@@ -192,10 +209,16 @@ impl Executor {
                                         arg_vecs.push((arg_vect, task_idx));
                                     }
                                 }
+
                                 arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                                     let index = *index;
                                     let func = func_opt.unwrap();
+                                    let t1_comp = rdtsc();
                                     let cmat = func(arg_vec.to_vec());
+                                    let t2_comp = rdtsc();
+                                    let mut tb = arc_timebuf.lock().unwrap();
+                                    tb.add_time("CGEMM-Comp", run_idx, t2_comp - t1_comp);
+                                    drop(tb);
                                     // task index at stage 2 is completed
                                     stage_completed.lock().unwrap()[stage].push(index);
                                     stage_scheduled.lock().unwrap()[stage] += 1;
@@ -207,12 +230,16 @@ impl Executor {
                 }
             }
         });
-
         // Collect results from last stage
+        let t1 = rdtsc();
+        let last_stage_results = &stage_results.lock().unwrap()[num_stages - 1];
         for i in 0..mult_factor {
-            results.push(stage_results.lock().unwrap()[num_stages - 1][i].clone());
+            results.push(last_stage_results[i].clone());
         }
         let end_time = rdtsc();
+        let mut tb = arc_timebuf.lock().unwrap();
+        tb.add_time("CmRetrieve", run_idx, end_time - t1);
+        drop(tb);
         end_time - start_time
     }
 }

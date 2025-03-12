@@ -2,6 +2,7 @@ pub mod executor;
 pub mod graph_gen;
 pub mod graph_struct;
 pub mod temp_funcs;
+pub mod time_buffer;
 pub mod utils_rdtsc;
 
 pub mod funcs {
