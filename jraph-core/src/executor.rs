@@ -4,6 +4,7 @@ use core_affinity;
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::graph_struct::*;
 use crate::time_buffer::TimeBuffer;
@@ -58,7 +59,7 @@ impl Executor {
         results: &mut Vec<CmTypes>,
         arc_timebuf: Arc<Mutex<TimeBuffer>>,
         run_idx: usize,
-    ) -> u64 {
+    ) -> Duration {
         let num_stages = graph.len();
 
         // Initializations that need to be done from graph
@@ -79,9 +80,9 @@ impl Executor {
         let stage_completed: Arc<Mutex<Vec<Vec<usize>>>> =
             Arc::new(Mutex::new(vec![Vec::new(); num_stages]));
 
-        let start_time = rdtsc();
+        let start_time = Instant::now();
         self.threadpool.install(|| {
-            while stage_completed.lock().unwrap()[num_stages - 1].len() < mult_factor {
+            while stage_scheduled.lock().unwrap()[num_stages - 1] < mult_factor {
                 for stage in 0..num_stages {
                     let scheduled = stage_scheduled.lock().unwrap();
                     if scheduled[stage] < mult_factor {
@@ -96,11 +97,12 @@ impl Executor {
                                 fft_buffers.par_iter().enumerate().for_each(
                                     |(index, fft_struct)| {
                                         let mut fft_struct = fft_struct.lock().unwrap();
-                                        let t1 = rdtsc();
+                                        let t1 = Instant::now();
                                         fft_struct.computefft();
-                                        let t2 = rdtsc();
+                                        let t2 = Instant::now();
                                         let mut tb = arc_timebuf.lock().unwrap();
-                                        tb.add_time("FFT-Comp", run_idx, t2 - t1);
+                                        let worker_index = rayon::current_thread_index().unwrap();
+                                        tb.add_time("FFT-Comp", run_idx, worker_index, t2 - t1);
                                         drop(tb);
                                         // task index at stage 0 is completed
                                         stage_completed.lock().unwrap()[stage].push(index);
@@ -120,16 +122,28 @@ impl Executor {
                                     map
                                 };
 
-                                let dependents_index: Vec<usize> = dependencies["FFT"].clone();
+                                let dependents_index: Vec<usize> =
+                                    dependencies[&node.dependents()[0].0].clone();
                                 let completed_indices: Vec<usize> =
                                     stage_completed.lock().unwrap()[stage - 1].clone();
 
+                                let remaining = {
+                                    let stage_finished = &stage_completed.lock().unwrap()[stage];
+                                    let mut vec = Vec::new();
+                                    for i in 0..mult_factor {
+                                        if !stage_finished.contains(&i) {
+                                            vec.push(i);
+                                        }
+                                    }
+                                    vec
+                                };
+
                                 let mut arg_vecs = Vec::new();
-                                for task_idx in 0..mult_factor {
+                                for task_idx in remaining.iter() {
                                     let deps = {
                                         let mut vec = Vec::new();
                                         for i in dependents_index.iter() {
-                                            let req_idx = (task_idx as isize) - (*i as isize);
+                                            let req_idx = (*task_idx as isize) - (*i as isize);
                                             vec.push(find_index(req_idx, mult_factor));
                                         }
                                         vec
@@ -144,18 +158,24 @@ impl Executor {
                                             );
                                             arg_vect.push(arg);
                                         }
-                                        arg_vecs.push((arg_vect, task_idx));
+                                        arg_vecs.push((arg_vect, *task_idx));
                                     }
                                 }
 
                                 arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                                     let index = *index;
                                     let func = func_opt.unwrap();
-                                    let t1_comp = rdtsc();
+                                    let t1_comp = Instant::now();
                                     let vecmat = func(arg_vec.to_vec());
-                                    let t2_comp = rdtsc();
+                                    let t2_comp = Instant::now();
                                     let mut tb = arc_timebuf.lock().unwrap();
-                                    tb.add_time("VecMat-Comp", run_idx, t2_comp - t1_comp);
+                                    let worker_index = rayon::current_thread_index().unwrap();
+                                    tb.add_time(
+                                        "VecMat-Comp",
+                                        run_idx,
+                                        worker_index,
+                                        t2_comp - t1_comp,
+                                    );
                                     drop(tb);
                                     // task index at stage 1 is completed
                                     stage_completed.lock().unwrap()[stage].push(index);
@@ -177,15 +197,26 @@ impl Executor {
 
                                 let dependents_index: Vec<usize> = dependencies["Vec2Mat"].clone();
 
+                                let remaining = {
+                                    let stage_finished = &stage_completed.lock().unwrap()[stage];
+                                    let mut vec = Vec::new();
+                                    for i in 0..mult_factor {
+                                        if !stage_finished.contains(&i) {
+                                            vec.push(i);
+                                        }
+                                    }
+                                    vec
+                                };
+
                                 let mut arg_vecs = Vec::new();
                                 let completed_indices: Vec<usize> =
                                     stage_completed.lock().unwrap()[stage - 1].clone();
 
-                                for task_idx in 0..mult_factor {
+                                for task_idx in remaining.iter() {
                                     let deps = {
                                         let mut vec = Vec::new();
                                         for i in dependents_index.iter() {
-                                            let req_idx = (task_idx as isize) - (*i as isize);
+                                            let req_idx = (*task_idx as isize) - (*i as isize);
                                             vec.push(find_index(req_idx, mult_factor));
                                         }
                                         vec
@@ -206,18 +237,24 @@ impl Executor {
                                             let arg = CmTypes::DMatrixC32(res.clone());
                                             arg_vect.push(arg);
                                         }
-                                        arg_vecs.push((arg_vect, task_idx));
+                                        arg_vecs.push((arg_vect, *task_idx));
                                     }
                                 }
 
                                 arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                                     let index = *index;
                                     let func = func_opt.unwrap();
-                                    let t1_comp = rdtsc();
+                                    let t1_comp = Instant::now();
                                     let cmat = func(arg_vec.to_vec());
-                                    let t2_comp = rdtsc();
+                                    let t2_comp = Instant::now();
                                     let mut tb = arc_timebuf.lock().unwrap();
-                                    tb.add_time("CGEMM-Comp", run_idx, t2_comp - t1_comp);
+                                    let worker_index = rayon::current_thread_index().unwrap();
+                                    tb.add_time(
+                                        "CGEMM-Comp",
+                                        run_idx,
+                                        worker_index,
+                                        t2_comp - t1_comp,
+                                    );
                                     drop(tb);
                                     // task index at stage 2 is completed
                                     stage_completed.lock().unwrap()[stage].push(index);
@@ -231,15 +268,17 @@ impl Executor {
             }
         });
         // Collect results from last stage
-        let t1 = rdtsc();
+        let t1 = Instant::now();
         let last_stage_results = &stage_results.lock().unwrap()[num_stages - 1];
         for i in 0..mult_factor {
+            // pushing Arc references
             results.push(last_stage_results[i].clone());
         }
-        let end_time = rdtsc();
+        let t2 = Instant::now();
         let mut tb = arc_timebuf.lock().unwrap();
-        tb.add_time("CmRetrieve", run_idx, end_time - t1);
+        tb.add_time("CmRetrieve", run_idx, 0, t2 - t1);
         drop(tb);
+        let end_time = Instant::now();
         end_time - start_time
     }
 }

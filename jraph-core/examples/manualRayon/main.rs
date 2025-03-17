@@ -9,10 +9,10 @@ use num_complex::Complex32;
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use validation::*;
 
 use jraph_core::time_buffer::TimeBuffer;
-use jraph_core::utils_rdtsc::*;
 
 fn find_index(idx: isize, mult_factor: usize) -> usize {
     if idx >= 0 {
@@ -21,14 +21,13 @@ fn find_index(idx: isize, mult_factor: usize) -> usize {
         mult_factor - idx.abs() as usize
     }
 }
-
 fn bench1(
     threadpool: &ThreadPool,
     mult_factor: usize,
     cgemm_results: Arc<Mutex<Vec<DMatrix<Complex32>>>>,
     arc_timebuf: Arc<Mutex<TimeBuffer>>,
     run_idx: usize,
-) -> u64 {
+) -> Duration {
     let fft_size = 10000;
     let num_stages = 3;
 
@@ -47,9 +46,9 @@ fn bench1(
     let stage_completed: Arc<Mutex<Vec<Vec<usize>>>> =
         Arc::new(Mutex::new(vec![Vec::new(); num_stages]));
 
-    let start_time = rdtsc();
+    let start_time = Instant::now();
     threadpool.install(|| {
-        while stage_completed.lock().unwrap()[num_stages - 1].len() < mult_factor {
+        while stage_scheduled.lock().unwrap()[num_stages - 1] < mult_factor {
             for stage in 0..num_stages {
                 let scheduled = stage_scheduled.lock().unwrap();
                 if scheduled[stage] < mult_factor {
@@ -63,11 +62,12 @@ fn bench1(
                             .enumerate()
                             .for_each(|(index, fft_struct)| {
                                 let mut fft_struct = fft_struct.lock().unwrap();
-                                let t1 = rdtsc();
+                                let t1 = Instant::now();
                                 fft_struct.computefft();
-                                let t2 = rdtsc();
+                                let t2 = Instant::now();
                                 let mut tb = arc_timebuf.lock().unwrap();
-                                tb.add_time("FFT-Comp", run_idx, t2 - t1);
+                                let worker_index = rayon::current_thread_index().unwrap();
+                                tb.add_time("FFT-Comp", run_idx, worker_index, t2 - t1);
                                 drop(tb);
                                 // task index at stage 0 is completed
                                 stage_completed.lock().unwrap()[stage].push(index);
@@ -80,23 +80,35 @@ fn bench1(
                         let completed_indices: Vec<usize> =
                             stage_completed.lock().unwrap()[stage - 1].clone();
 
+                        let remaining = {
+                            let stage_finished = &stage_completed.lock().unwrap()[stage];
+                            let mut vec = Vec::new();
+                            for i in 0..mult_factor {
+                                if !stage_finished.contains(&i) {
+                                    vec.push(i);
+                                }
+                            }
+                            vec
+                        };
+
                         let mut arg_vecs = Vec::new();
-                        for task_idx in 0..mult_factor {
+                        for task_idx in remaining.iter() {
                             let req_idx = (task_idx - 0) as isize;
                             let index_needed = find_index(req_idx, mult_factor);
 
                             if completed_indices.contains(&index_needed) {
                                 let arg = fft_buffers[index_needed].lock().unwrap().get_buf();
-                                arg_vecs.push((arg, task_idx));
+                                arg_vecs.push((arg, *task_idx));
                             }
                         }
                         arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                             let index = *index;
-                            let t1 = rdtsc();
+                            let t1 = Instant::now();
                             let vecmat = vec_to_mat(arg_vec);
-                            let t2 = rdtsc();
+                            let t2 = Instant::now();
                             let mut tb = arc_timebuf.lock().unwrap();
-                            tb.add_time("VecMat-Comp", run_idx, t2 - t1);
+                            let worker_index = rayon::current_thread_index().unwrap();
+                            tb.add_time("VecMat-Comp", run_idx, worker_index, t2 - t1);
                             drop(tb);
                             // task index at stage 1 is completed
                             stage_completed.lock().unwrap()[stage].push(index);
@@ -109,23 +121,35 @@ fn bench1(
                         let completed_indices: Vec<usize> =
                             stage_completed.lock().unwrap()[stage - 1].clone();
 
-                        for task_idx in 0..mult_factor {
-                            let req_idx = (task_idx - 0) as isize;
+                        let remaining = {
+                            let stage_finished = &stage_completed.lock().unwrap()[stage];
+                            let mut vec = Vec::new();
+                            for i in 0..mult_factor {
+                                if !stage_finished.contains(&i) {
+                                    vec.push(i);
+                                }
+                            }
+                            vec
+                        };
+
+                        for task_idx in remaining.iter() {
+                            let req_idx = (*task_idx - 0) as isize;
                             let index_needed = find_index(req_idx, mult_factor);
 
                             // Check if all dependencies are present in completed_indices
                             if completed_indices.contains(&index_needed) {
                                 let vecmat = &vecmat_results.lock().unwrap()[index_needed];
-                                arg_vecs.push((vecmat.clone(), task_idx));
+                                arg_vecs.push((vecmat.clone(), *task_idx));
                             }
                         }
                         arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                             let index = *index;
-                            let t1 = rdtsc();
+                            let t1 = Instant::now();
                             let cmat = blas_cgemm(arg_vec, arg_vec);
-                            let t2 = rdtsc();
+                            let t2 = Instant::now();
                             let mut tb = arc_timebuf.lock().unwrap();
-                            tb.add_time("CGEMM-Comp", run_idx, t2 - t1);
+                            let worker_index = rayon::current_thread_index().unwrap();
+                            tb.add_time("CGEMM-Comp", run_idx, worker_index, t2 - t1);
                             drop(tb);
                             // task index at stage 2 is completed
                             stage_completed.lock().unwrap()[stage].push(index);
@@ -137,7 +161,8 @@ fn bench1(
             }
         }
     });
-    let end_time = rdtsc();
+    // join threadpool
+    let end_time = Instant::now();
     end_time - start_time
 }
 
@@ -147,7 +172,7 @@ fn bench2(
     cgemm_results: Arc<Mutex<Vec<DMatrix<Complex32>>>>,
     arc_timebuf: Arc<Mutex<TimeBuffer>>,
     run_idx: usize,
-) -> u64 {
+) -> Duration {
     let fft_size = 10000;
     let num_stages = 3;
 
@@ -166,9 +191,9 @@ fn bench2(
     let stage_completed: Arc<Mutex<Vec<Vec<usize>>>> =
         Arc::new(Mutex::new(vec![Vec::new(); num_stages]));
 
-    let start_time = rdtsc();
+    let start_time = Instant::now();
     threadpool.install(|| {
-        while stage_completed.lock().unwrap()[num_stages - 1].len() < mult_factor {
+        while stage_scheduled.lock().unwrap()[num_stages - 1] < mult_factor {
             for stage in 0..num_stages {
                 let scheduled = stage_scheduled.lock().unwrap();
                 if scheduled[stage] < mult_factor {
@@ -181,11 +206,12 @@ fn bench2(
                             .enumerate()
                             .for_each(|(index, fft_struct)| {
                                 let mut fft_struct = fft_struct.lock().unwrap();
-                                let t1 = rdtsc();
+                                let t1 = Instant::now();
                                 fft_struct.computefft();
-                                let t2 = rdtsc();
+                                let t2 = Instant::now();
                                 let mut tb = arc_timebuf.lock().unwrap();
-                                tb.add_time("FFT-Comp", run_idx, t2 - t1);
+                                let worker_index = rayon::current_thread_index().unwrap();
+                                tb.add_time("FFT-Comp", run_idx, worker_index, t2 - t1);
                                 drop(tb);
                                 // task index at stage 0 is completed
                                 stage_completed.lock().unwrap()[stage].push(index);
@@ -198,23 +224,35 @@ fn bench2(
                         let completed_indices: Vec<usize> =
                             stage_completed.lock().unwrap()[stage - 1].clone();
 
+                        let remaining = {
+                            let stage_finished = &stage_completed.lock().unwrap()[stage];
+                            let mut vec = Vec::new();
+                            for i in 0..mult_factor {
+                                if !stage_finished.contains(&i) {
+                                    vec.push(i);
+                                }
+                            }
+                            vec
+                        };
+
                         let mut arg_vecs = Vec::new();
-                        for task_idx in 0..mult_factor {
+                        for task_idx in remaining.iter() {
                             let req_idx = (task_idx - 0) as isize;
                             let index_needed = find_index(req_idx, mult_factor);
 
                             if completed_indices.contains(&index_needed) {
                                 let arg = fft_buffers[index_needed].lock().unwrap().get_buf();
-                                arg_vecs.push((arg, task_idx));
+                                arg_vecs.push((arg, *task_idx));
                             }
                         }
                         arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                             let index = *index;
-                            let t1 = rdtsc();
+                            let t1 = Instant::now();
                             let vecmat = vec_to_mat(arg_vec);
-                            let t2 = rdtsc();
+                            let t2 = Instant::now();
                             let mut tb = arc_timebuf.lock().unwrap();
-                            tb.add_time("VecMat-Comp", run_idx, t2 - t1);
+                            let worker_index = rayon::current_thread_index().unwrap();
+                            tb.add_time("VecMat-Comp", run_idx, worker_index, t2 - t1);
                             drop(tb);
                             // task index at stage 1 is completed
                             stage_completed.lock().unwrap()[stage].push(index);
@@ -227,11 +265,22 @@ fn bench2(
                         let completed_indices: Vec<usize> =
                             stage_completed.lock().unwrap()[stage - 1].clone();
 
-                        for task_idx in 0..mult_factor {
+                        let remaining = {
+                            let stage_finished = &stage_completed.lock().unwrap()[stage];
+                            let mut vec = Vec::new();
+                            for i in 0..mult_factor {
+                                if !stage_finished.contains(&i) {
+                                    vec.push(i);
+                                }
+                            }
+                            vec
+                        };
+
+                        for task_idx in remaining.iter() {
                             let indices = {
                                 let mut vec_idx = Vec::new();
                                 for i in 0..2 {
-                                    let req_idx = (task_idx as isize) - (i as isize);
+                                    let req_idx = (*task_idx as isize) - (i as isize);
                                     vec_idx.push(find_index(req_idx, mult_factor));
                                 }
                                 vec_idx
@@ -244,17 +293,18 @@ fn bench2(
                             {
                                 for index_needed in indices {
                                     let vecmat = &vecmat_results.lock().unwrap()[index_needed];
-                                    arg_vecs.push((vecmat.clone(), task_idx));
+                                    arg_vecs.push((vecmat.clone(), *task_idx));
                                 }
                             }
                         }
                         arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                             let index = *index;
-                            let t1 = rdtsc();
+                            let t1 = Instant::now();
                             let cmat = blas_cgemm(arg_vec, arg_vec);
-                            let t2 = rdtsc();
+                            let t2 = Instant::now();
                             let mut tb = arc_timebuf.lock().unwrap();
-                            tb.add_time("CGEMM-Comp", run_idx, t2 - t1);
+                            let worker_index = rayon::current_thread_index().unwrap();
+                            tb.add_time("CGEMM-Comp", run_idx, worker_index, t2 - t1);
                             drop(tb);
                             // task index at stage 2 is completed
                             stage_completed.lock().unwrap()[stage].push(index);
@@ -266,7 +316,7 @@ fn bench2(
             }
         }
     });
-    let end_time = rdtsc();
+    let end_time = Instant::now();
     end_time - start_time
 }
 
@@ -276,7 +326,7 @@ fn bench3(
     cgemm_results: Arc<Mutex<Vec<DMatrix<Complex32>>>>,
     arc_timebuf: Arc<Mutex<TimeBuffer>>,
     run_idx: usize,
-) -> u64 {
+) -> Duration {
     let fft_size = 10000;
     let num_stages = 3;
 
@@ -295,9 +345,9 @@ fn bench3(
     let stage_completed: Arc<Mutex<Vec<Vec<usize>>>> =
         Arc::new(Mutex::new(vec![Vec::new(); num_stages]));
 
-    let start_time = rdtsc();
+    let start_time = Instant::now();
     threadpool.install(|| {
-        while stage_completed.lock().unwrap()[num_stages - 1].len() < mult_factor {
+        while stage_scheduled.lock().unwrap()[num_stages - 1] < mult_factor {
             for stage in 0..num_stages {
                 let scheduled = stage_scheduled.lock().unwrap();
                 if scheduled[stage] < mult_factor {
@@ -310,11 +360,12 @@ fn bench3(
                             .enumerate()
                             .for_each(|(index, fft_struct)| {
                                 let mut fft_struct = fft_struct.lock().unwrap();
-                                let t1 = rdtsc();
+                                let t1 = Instant::now();
                                 fft_struct.computefft();
-                                let t2 = rdtsc();
+                                let t2 = Instant::now();
                                 let mut tb = arc_timebuf.lock().unwrap();
-                                tb.add_time("FFT-Comp", run_idx, t2 - t1);
+                                let worker_index = rayon::current_thread_index().unwrap();
+                                tb.add_time("FFT-Comp", run_idx, worker_index, t2 - t1);
                                 drop(tb);
                                 // task index at stage 0 is completed
                                 stage_completed.lock().unwrap()[stage].push(index);
@@ -327,23 +378,35 @@ fn bench3(
                         let completed_indices: Vec<usize> =
                             stage_completed.lock().unwrap()[stage - 1].clone();
 
+                        let remaining = {
+                            let stage_finished = &stage_completed.lock().unwrap()[stage];
+                            let mut vec = Vec::new();
+                            for i in 0..mult_factor {
+                                if !stage_finished.contains(&i) {
+                                    vec.push(i);
+                                }
+                            }
+                            vec
+                        };
+
                         let mut arg_vecs = Vec::new();
-                        for task_idx in 0..mult_factor {
+                        for task_idx in remaining.iter() {
                             let req_idx = (task_idx - 0) as isize;
                             let index_needed = find_index(req_idx, mult_factor);
 
                             if completed_indices.contains(&index_needed) {
                                 let arg = fft_buffers[index_needed].lock().unwrap().get_buf();
-                                arg_vecs.push((arg, task_idx));
+                                arg_vecs.push((arg, *task_idx));
                             }
                         }
                         arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                             let index = *index;
-                            let t1 = rdtsc();
+                            let t1 = Instant::now();
                             let vecmat = vec_to_mat(arg_vec);
-                            let t2 = rdtsc();
+                            let t2 = Instant::now();
                             let mut tb = arc_timebuf.lock().unwrap();
-                            tb.add_time("VecMat-Comp", run_idx, t2 - t1);
+                            let worker_index = rayon::current_thread_index().unwrap();
+                            tb.add_time("VecMat-Comp", run_idx, worker_index, t2 - t1);
                             drop(tb);
                             // task index at stage 1 is completed
                             stage_completed.lock().unwrap()[stage].push(index);
@@ -356,11 +419,22 @@ fn bench3(
                         let completed_indices: Vec<usize> =
                             stage_completed.lock().unwrap()[stage - 1].clone();
 
-                        for task_idx in 0..mult_factor {
+                        let remaining = {
+                            let stage_finished = &stage_completed.lock().unwrap()[stage];
+                            let mut vec = Vec::new();
+                            for i in 0..mult_factor {
+                                if !stage_finished.contains(&i) {
+                                    vec.push(i);
+                                }
+                            }
+                            vec
+                        };
+
+                        for task_idx in remaining.iter() {
                             let indices = {
                                 let mut vec_idx = Vec::new();
                                 for i in 0..mult_factor {
-                                    let req_idx = (task_idx as isize) - (i as isize);
+                                    let req_idx = (*task_idx as isize) - (i as isize);
                                     vec_idx.push(find_index(req_idx, mult_factor));
                                 }
                                 vec_idx
@@ -376,17 +450,18 @@ fn bench3(
                                     let vecmat = &vecmat_results.lock().unwrap()[index_needed];
                                     res_vector.push(vecmat.clone());
                                 }
-                                arg_vecs.push((res_vector, task_idx));
+                                arg_vecs.push((res_vector, *task_idx));
                             }
                         }
                         arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                             let index = *index;
                             let refmats: Vec<&DMatrix<Complex32>> = arg_vec.iter().collect();
-                            let t1_comp = rdtsc();
+                            let t1 = Instant::now();
                             let cmat = multiple_cgemm(refmats);
-                            let t2 = rdtsc();
+                            let t2 = Instant::now();
                             let mut tb = arc_timebuf.lock().unwrap();
-                            tb.add_time("CGEMM-Comp", run_idx, t2 - t1_comp);
+                            let worker_index = rayon::current_thread_index().unwrap();
+                            tb.add_time("CGEMM-Comp", run_idx, worker_index, t2 - t1);
                             drop(tb);
                             // task index at stage 2 is completed
                             stage_completed.lock().unwrap()[stage].push(index);
@@ -398,13 +473,13 @@ fn bench3(
             }
         }
     });
-    let end_time = rdtsc();
+    let end_time = Instant::now();
     end_time - start_time
 }
 
 fn main() {
     let core_offset = 1;
-    let workers = 1;
+    let workers = 10;
     let mut core_ids = core_affinity::get_core_ids().unwrap();
     core_ids.sort();
     let cores_to_use: Vec<core_affinity::CoreId> =
@@ -419,22 +494,20 @@ fn main() {
         .build()
         .unwrap();
 
+    println!("Using {:?} workers", workers);
     let factors = vec![100];
-    let repeat = 50;
+    let repeat = 100;
 
     for bench in 0..3 {
         for factor in &factors {
             let factor = *factor;
-            let mut timebuf = TimeBuffer::new();
-            timebuf.init_task("Total", repeat);
-            timebuf.init_task("FFT-Comp", repeat);
-            timebuf.init_task("VecMat", repeat);
-            timebuf.init_task("CGEMM", repeat);
-            timebuf.init_task("VecMat-Comp", repeat);
-            timebuf.init_task("CGEMM-Comp", repeat);
+            let mut timebuf = TimeBuffer::new(workers, repeat);
+            timebuf.init_task("FFT-Comp");
+            timebuf.init_task("VecMat-Comp");
+            timebuf.init_task("CGEMM-Comp");
             let arc_timebuf = Arc::new(Mutex::new(timebuf));
 
-            let mut results: Vec<DMatrix<Complex32>> = Vec::with_capacity(factor);
+            let results: Vec<DMatrix<Complex32>> = Vec::with_capacity(factor);
             let cgemm_results = Arc::new(Mutex::new(results));
 
             for run_idx in 0..repeat {
@@ -465,44 +538,35 @@ fn main() {
                             arc_timebuf.clone(),
                             run_idx,
                         ),
-                        _ => 0,
+                        _ => Duration::ZERO,
                     }
                 };
 
-                // let val = {
-                //     match bench {
-                //         0 => validate1(factor),
-                //         1 => validate2(factor),
-                //         2 => validate3(factor),
-                //         _ => Vec::new(),
-                //     }
-                // };
+                let val = {
+                    match bench {
+                        0 => validate1(factor),
+                        1 => validate2(factor),
+                        2 => validate3(factor),
+                        _ => Vec::new(),
+                    }
+                };
 
-                // for i in 0..factor {
-                //     assert_eq!(results[i], val[i]);
-                // }
+                // Validate run
+                let results = cgemm_results.lock().unwrap();
+                for i in 0..factor {
+                    let res = &results[i];
+                    let valid = &val[i];
+                    assert_eq!(res, valid);
+                }
+
                 let mut timebuf = arc_timebuf.lock().unwrap();
-                timebuf.add_time("Total", run_idx, duration);
+                timebuf.add_total_time(run_idx, duration);
                 drop(timebuf);
             }
             // Average times
             let timebuf = arc_timebuf.lock().unwrap();
-            let avg_total = timebuf.task_average("Total", "ms");
-            let avg_fft = timebuf.task_average("FFT-Comp", "ms");
-            let avg_vecmat_comp = timebuf.task_average("VecMat-Comp", "ms");
-            let avg_cgemm_comp = timebuf.task_average("CGEMM-Comp", "ms");
-            println!(
-                "Bench {} Average Total Time({}) for {} tasks: {:.4?} ms",
-                bench + 1,
-                repeat,
-                factor,
-                avg_total
-            );
-            println!(
-                "FFT-Comp: {:.4?} ms, VecMat-Comp: {:.4?} ms, CGEMM-Comp: {:.4?} ms",
-                avg_fft, avg_vecmat_comp, avg_cgemm_comp
-            );
-            println!();
+            let bench = &format!("Bench-{}", bench + 1);
+            timebuf.print_stats(bench, None);
         }
     }
 }

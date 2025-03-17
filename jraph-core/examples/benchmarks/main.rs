@@ -3,11 +3,11 @@ mod functions;
 mod validation;
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use jraph_core::executor::Executor;
 use jraph_core::graph_gen::from_json;
 use jraph_core::time_buffer::TimeBuffer;
-use jraph_core::utils_rdtsc::rdtsc;
 use nalgebra::DMatrix;
 use num_complex::Complex32;
 use shared::CmTypes;
@@ -21,7 +21,11 @@ fn main() {
 
     let graphs = vec![graph1_file, graph2_file, graph3_file];
 
-    let repeat = 50;
+    let repeat = 100;
+
+    let core_offset = 1;
+    let workers = 10;
+    println!("Using {} workers", workers);
 
     for i in 0..graphs.len() {
         let graph = from_json(graphs[i]).unwrap();
@@ -29,14 +33,13 @@ fn main() {
 
         let mut results: Vec<CmTypes> = Vec::new();
         let mut results_mat: Vec<DMatrix<Complex32>> = Vec::new();
-        let executor = Executor::new(2, 1);
+        let executor = Executor::new(core_offset, workers);
 
-        let mut timebuf = TimeBuffer::new();
-        timebuf.init_task("Total", repeat);
-        timebuf.init_task("FFT-Comp", repeat);
-        timebuf.init_task("CmRetrieve", repeat);
-        timebuf.init_task("VecMat-Comp", repeat);
-        timebuf.init_task("CGEMM-Comp", repeat);
+        let mut timebuf = TimeBuffer::new(workers, repeat);
+        timebuf.init_task("FFT-Comp");
+        timebuf.init_task("CmRetrieve");
+        timebuf.init_task("VecMat-Comp");
+        timebuf.init_task("CGEMM-Comp");
 
         let arc_timebuf = Arc::new(Mutex::new(timebuf));
         for run_idx in 0..repeat {
@@ -54,7 +57,7 @@ fn main() {
             };
 
             // retrieve buffers
-            let t1_ret = rdtsc();
+            let t1_ret = Instant::now();
             for i in 0..mult_factor {
                 let res: Arc<DMatrix<Complex32>> = {
                     match &results[i] {
@@ -65,10 +68,9 @@ fn main() {
                 let res_ref: &DMatrix<Complex32> = &res;
                 results_mat.push(res_ref.clone());
             }
-            let t2_ret = rdtsc();
+            let t2_ret = Instant::now();
             let mut tb = arc_timebuf.lock().unwrap();
-            tb.add_time("CmRetrieve", run_idx, t2_ret - t1_ret);
-            drop(tb);
+            tb.add_time("CmRetrieve", run_idx, 0, t2_ret - t1_ret);
 
             for i in 0..mult_factor {
                 let res = &results_mat[i];
@@ -76,27 +78,11 @@ fn main() {
                 assert_eq!(res, valid);
             }
 
-            let mut tb = arc_timebuf.lock().unwrap();
-            tb.add_time("Total", run_idx, duration);
+            tb.add_total_time(run_idx, duration);
             drop(tb);
         }
         let tb = arc_timebuf.lock().unwrap();
-        let avg_total = tb.task_average("Total", "ms");
-        let avg_fft = tb.task_average("FFT-Comp", "ms");
-        let avg_vecmat_comp = tb.task_average("VecMat-Comp", "ms");
-        let avg_cgemm_comp = tb.task_average("CGEMM-Comp", "ms");
-        let avg_results = tb.task_average("CmRetrieve", "ms");
-        drop(tb);
-        println!(
-            "Bench {} Average Total Time({}) for {} tasks: {:.4?} ms",
-            i + 1,
-            repeat,
-            mult_factor,
-            avg_total
-        );
-        println!(
-            "FFT-Comp: {:.4?} ms, VecMat-Comp: {:.4?} ms, CGEMM-Comp: {:.4?} ms, CmRetrieve: {:.4?} ms",
-            avg_fft,  avg_vecmat_comp, avg_cgemm_comp, avg_results
-        );
+        let bench = &format!("Bench-{}", i + 1);
+        tb.print_stats(bench, None);
     }
 }
