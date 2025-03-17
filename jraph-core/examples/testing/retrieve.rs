@@ -3,6 +3,7 @@ use nalgebra::DMatrix;
 use num_complex::Complex32;
 use shared::CmTypes;
 use std::sync::Arc;
+use std::time::Instant;
 
 use jraph_core::time_buffer::TimeBuffer;
 use jraph_core::utils_rdtsc::*;
@@ -22,34 +23,32 @@ pub fn retrieve() {
         buf_cm.push(arg);
     }
 
-
     let repeat = 50;
 
-    let mut timebuf = TimeBuffer::new();
-    timebuf.init_task("Mat-Retrieve", repeat);
-    timebuf.init_task("Mat-Clone", repeat);
-    timebuf.init_task("CmT-Retrieve", repeat);
-    timebuf.init_task("CmT-Clone", repeat);
-
+    let mut timebuf = TimeBuffer::new(1, repeat);
+    timebuf.init_task("Mat-Retrieve");
+    timebuf.init_task("Mat-Clone");
+    timebuf.init_task("CmT-Retrieve");
+    timebuf.init_task("CmT-Clone");
 
     for run_idx in 0..repeat {
         let mut res_cm: Vec<DMatrix<Complex32>> = Vec::new();
         let mut res_mat: Vec<DMatrix<Complex32>> = Vec::new();
 
         // retrieve matrices from buf_mat
-        let tmat_start = rdtsc();
+        let tmat_start = Instant::now();
         for i in 0..factor {
             let mat = &buf_mat[i];
-            let t1_clone = rdtsc();
+            let t1_clone = Instant::now();
             res_mat.push(mat.clone());
-            let t2_clone = rdtsc();
-            timebuf.add_time("Mat-Clone", run_idx, t2_clone - t1_clone);
+            let t2_clone = Instant::now();
+            timebuf.add_time("Mat-Clone", run_idx, 0, t2_clone - t1_clone);
         }
-        let tmat_end = rdtsc();
-        timebuf.add_time("Mat-Retrieve", run_idx, tmat_end - tmat_start);
+        let tmat_end = Instant::now();
+        timebuf.add_time("Mat-Retrieve", run_idx, 0, tmat_end - tmat_start);
 
         // retrieve matrices from buf_cm
-        let tcm_start = rdtsc();
+        let tcm_start = Instant::now();
         for i in 0..factor {
             let cm = &buf_cm[i];
             let res = match &cm {
@@ -57,23 +56,15 @@ pub fn retrieve() {
                 _ => panic!("Invalid type"),
             };
             let res_ref: &DMatrix<Complex32> = &res;
-            let t1_clone = rdtsc();
+            let t1_clone = Instant::now();
             res_cm.push(res_ref.clone());
-            let t2_clone = rdtsc();
-            timebuf.add_time("CmT-Clone", run_idx, t2_clone - t1_clone);
+            let t2_clone = Instant::now();
+            timebuf.add_time("CmT-Clone", run_idx, 0, t2_clone - t1_clone);
         }
-        let tcm_end = rdtsc();
-        timebuf.add_time("CmT-Retrieve", run_idx, tcm_end - tcm_start);
+        let tcm_end = Instant::now();
+        timebuf.add_time("CmT-Retrieve", run_idx, 0, tcm_end - tcm_start);
     }
 
-    let avg_mat = timebuf.task_average("Mat-Retrieve", "ms");
-    let avg_mat_clone = timebuf.task_average("Mat-Clone", "ms");
-    let avg_cmt = timebuf.task_average("CmT-Retrieve", "ms");
-    let avg_cmt_clone = timebuf.task_average("CmT-Clone", "ms");
-
-    println!("Avg ({}) for matrix retrieval: {:.4?} ms", repeat, avg_mat);
-    println!("Mat Retrieval Clone Time: {:.4?} ms", avg_mat_clone);
-    println!();
-    println!("Avg ({}) for CmTypes retrieval: {:.4?} ms", repeat, avg_cmt);
-    println!("CmTypes Retrieval Clone Time: {:.4?} ms", avg_cmt_clone);
+    let bench = "CmTypes Retrieve Comparison";
+    timebuf.print_stats(bench, None);
 }

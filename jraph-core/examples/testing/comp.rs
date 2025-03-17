@@ -4,8 +4,9 @@ use jraph_core::time_buffer::TimeBuffer;
 use jraph_core::utils_rdtsc::*;
 use num_complex::Complex32;
 use shared::CmTypes;
+use std::time::Instant;
 
-const BUF_SIZE: usize = 100;
+const BUF_SIZE: usize = 225;
 const BUF_NUM: usize = 500;
 const REPEAT: usize = 100;
 
@@ -19,21 +20,18 @@ pub fn vec_mat() {
         vec
     };
 
-    let mut timebuffer = TimeBuffer::new();
-    timebuffer.init_task("Man-Vec-Mat", REPEAT);
+    let mut timebuffer = TimeBuffer::new(1, REPEAT);
+    timebuffer.init_task("Man-Vec-Mat");
 
     for run_idx in 0..REPEAT {
         for factor in 0..BUF_NUM {
             let data = &bufs[factor];
-            let t1 = rdtsc();
+            let t1 = Instant::now();
             let _ = vec_to_mat(data);
-            let t2 = rdtsc();
-            timebuffer.add_time("Man-Vec-Mat", run_idx, t2 - t1);
+            let t2 = Instant::now();
+            timebuffer.add_time("Man-Vec-Mat", run_idx, 0, t2 - t1);
         }
     }
-
-    let avg = timebuffer.task_average("Man-Vec-Mat", "ms");
-    println!("Manual Vec-Mat Avg({}): {:.4?} ms", REPEAT, avg);
 
     let cmt_vec = {
         let mut vec = Vec::new();
@@ -45,75 +43,84 @@ pub fn vec_mat() {
         vec
     };
 
-    timebuffer.init_task("Cmt-Vec-Mat", REPEAT);
+    timebuffer.init_task("Cmt-Vec-Mat");
     let func = get_func("vec_to_mat").unwrap();
 
     for run_idx in 0..REPEAT {
         for factor in 0..BUF_NUM {
             let data = &cmt_vec[factor];
             let args = vec![data.clone()];
-            let t1 = rdtsc();
+            let t1 = Instant::now();
             let _ = func(args);
-            let t2 = rdtsc();
-            timebuffer.add_time("Cmt-Vec-Mat", run_idx, t2 - t1);
+            let t2 = Instant::now();
+            timebuffer.add_time("Cmt-Vec-Mat", run_idx, 0, t2 - t1);
         }
     }
 
-    let avg = timebuffer.task_average("Cmt-Vec-Mat", "ms");
-    println!("CmTypes Vec-Mat Avg({}): {:.4?} ms", REPEAT, avg);
+    timebuffer.print_stats("Vec-mat direct vs wrapper call", None);
 }
 
 pub fn mt_cgemm() {
-    let bufs = {
-        let mut vec = Vec::new();
-        for _ in 0..BUF_NUM {
-            let data = generate_set_complex_dmatrix(BUF_SIZE);
-            vec.push(data);
-        }
-        vec
-    };
+    let buf_nums = vec![100, 200, 300, 400, 500];
 
-    let mut timebuffer = TimeBuffer::new();
-    timebuffer.init_task("Man-MultCgemm", REPEAT);
+    for numbuf in buf_nums {
+        let bufs = {
+            let mut vec = Vec::new();
+            for _ in 0..numbuf {
+                let data = generate_set_complex_dmatrix(BUF_SIZE);
+                vec.push(data);
+            }
+            vec
+        };
 
-    for run_idx in 0..REPEAT {
-        for factor in 0..BUF_NUM {
+        // warmup
+        for factor in 0..10 {
             let buf_vec = vec![bufs[factor].clone(), bufs[factor].clone()];
-            let args = buf_vec.iter().collect();
-            let t1 = rdtsc();
-            let _ = multiple_cgemm(args);
-            let t2 = rdtsc();
-            timebuffer.add_time("Man-MultCgemm", run_idx, t2 - t1);
+            let _ = multiple_cgemm(buf_vec.iter().collect());
         }
+
+        let mut timebuffer = TimeBuffer::new(1, REPEAT);
+        timebuffer.init_task("Man-MultCgemm");
+
+        for run_idx in 0..REPEAT {
+            for factor in 0..numbuf {
+                let buf_vec = vec![bufs[factor].clone(), bufs[factor].clone()];
+                let args = buf_vec.iter().collect();
+                let t1 = Instant::now();
+                let _ = multiple_cgemm(args);
+                let t2 = Instant::now();
+                timebuffer.add_time("Man-MultCgemm", run_idx, 0, t2 - t1);
+            }
+        }
+
+        let cmt_vec = {
+            let mut vec = Vec::new();
+            for i in 0..numbuf {
+                let data = generate_set_complex_dmatrix(BUF_SIZE);
+                let cmt = CmTypes::DMatrixC32(data.into());
+                vec.push(cmt);
+            }
+            vec
+        };
+
+        timebuffer.init_task("Cmt-MultCgemm");
+        let func = get_func("multiple_cgemm").unwrap();
+
+        for run_idx in 0..REPEAT {
+            for factor in 0..numbuf {
+                let data = &cmt_vec[factor];
+                let args = vec![data.clone(), data.clone()];
+                let t1 = Instant::now();
+                let _ = func(args);
+                let t2 = Instant::now();
+                timebuffer.add_time("Cmt-MultCgemm", run_idx, 0, t2 - t1);
+            }
+        }
+
+        let bench = &format!(
+            "MultCgemm direct vs wrapper call for BUF_SIZE({})-BUF_NUM({})",
+            BUF_SIZE, numbuf
+        );
+        timebuffer.print_stats(bench, None);
     }
-
-    let avg = timebuffer.task_average("Man-MultCgemm", "ms");
-    println!("Manual MultCgemm Avg({}): {:.4?} ms", REPEAT, avg);
-
-    let cmt_vec = {
-        let mut vec = Vec::new();
-        for i in 0..BUF_NUM {
-            let data = generate_set_complex_dmatrix(BUF_SIZE);
-            let cmt = CmTypes::DMatrixC32(data.into());
-            vec.push(cmt);
-        }
-        vec
-    };
-
-    timebuffer.init_task("Cmt-MultCgemm", REPEAT);
-    let func = get_func("multiple_cgemm").unwrap();
-
-    for run_idx in 0..REPEAT {
-        for factor in 0..BUF_NUM {
-            let data = &cmt_vec[factor];
-            let args = vec![data.clone(), data.clone()];
-            let t1 = rdtsc();
-            let _ = func(args);
-            let t2 = rdtsc();
-            timebuffer.add_time("Cmt-MultCgemm", run_idx, t2 - t1);
-        }
-    }
-
-    let avg = timebuffer.task_average("Cmt-MultCgemm", "ms");
-    println!("CmTypes MultCgemm Avg({}): {:.4?} ms", REPEAT, avg);
 }
