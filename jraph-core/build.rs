@@ -28,9 +28,6 @@ fn main() {
 
         if !output.status.success() {
             panic!("Python script failed");
-        } else {
-            let python_output = std::str::from_utf8(&output.stdout).unwrap();
-            info!("Python output:\n{}", python_output);
         }
         fs::write(&wrapper_file, "").expect("Failed to create empty wrappers.rs file");
         fs::write(&copied_file, "").expect("Failed to create empty function file");
@@ -85,9 +82,6 @@ fn main() {
     if !output.status.success() {
         let error_output = std::str::from_utf8(&output.stderr).unwrap();
         panic!("Python script failed: {}", error_output);
-    } else {
-        let python_output = std::str::from_utf8(&output.stdout).unwrap();
-        info!("Python output:\n{}", python_output);
     }
 
     // If given function file is a .h header
