@@ -10,6 +10,8 @@ fn main() {
     println!("");
     comp::mt_cgemm();
     println!("");
+    comp::rayon_gemm();
+    println!("");
     multithread::multi_sleep();
     println!("");
 }
