@@ -5,7 +5,7 @@
                 "nodes": [
                     {
                         "name": "FFT",
-                        "mult_factor": 25,
+                        "mult_factor": 100,
                         "task": {
                             "arg_types": [
                                 "$ref"
@@ -28,7 +28,7 @@
                 "nodes": [
                     {
                         "name": "Vec2Mat",
-                        "mult_factor": 25,
+                        "mult_factor": 100,
                         "task": {
                             "arg_types": [
                                 "$ref"
@@ -51,7 +51,7 @@
                 "nodes": [
                     {
                         "name": "Cgemm",
-                        "mult_factor": 25,
+                        "mult_factor": 100,
                         "task": {
                             "arg_types": [
                                 "$res"
