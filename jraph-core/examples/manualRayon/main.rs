@@ -22,12 +22,15 @@ fn find_index(idx: isize, mult_factor: usize) -> usize {
     }
 }
 fn bench1(
-    threadpool: &ThreadPool,
+    core_offset: usize,
+    workers: usize,
     mult_factor: usize,
     cgemm_results: Arc<Mutex<Vec<DMatrix<Complex32>>>>,
     arc_timebuf: Arc<Mutex<TimeBuffer>>,
     run_idx: usize,
 ) -> Duration {
+    let threadpool = create_threadpool(core_offset, workers);
+
     let fft_size = 10000;
     let num_stages = 3;
 
@@ -137,10 +140,15 @@ fn bench1(
                             let index_needed = find_index(req_idx, mult_factor);
 
                             // Check if all dependencies are present in completed_indices
+                            let t1_clone = Instant::now();
                             if completed_indices.contains(&index_needed) {
                                 let vecmat = &vecmat_results.lock().unwrap()[index_needed];
                                 arg_vecs.push((vecmat.clone(), *task_idx));
                             }
+                            let t2_clone = Instant::now();
+                            let mut tb = arc_timebuf.lock().unwrap();
+                            tb.add_time("Stage2-Clone", run_idx, 0, t2_clone - t1_clone);
+                            drop(tb);
                         }
                         arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                             let index = *index;
@@ -167,12 +175,15 @@ fn bench1(
 }
 
 fn bench2(
-    threadpool: &ThreadPool,
+    core_offset: usize,
+    workers: usize,
     mult_factor: usize,
     cgemm_results: Arc<Mutex<Vec<DMatrix<Complex32>>>>,
     arc_timebuf: Arc<Mutex<TimeBuffer>>,
     run_idx: usize,
 ) -> Duration {
+    let threadpool = create_threadpool(core_offset, workers);
+
     let fft_size = 10000;
     let num_stages = 3;
 
@@ -279,13 +290,14 @@ fn bench2(
                         for task_idx in remaining.iter() {
                             let indices = {
                                 let mut vec_idx = Vec::new();
-                                for i in 0..2 {
+                                for i in 0..1 {
                                     let req_idx = (*task_idx as isize) - (i as isize);
                                     vec_idx.push(find_index(req_idx, mult_factor));
                                 }
                                 vec_idx
                             };
 
+                            let t1_clone = Instant::now();
                             // Check if all dependencies are present in completed_indices
                             if indices
                                 .iter()
@@ -296,6 +308,10 @@ fn bench2(
                                     arg_vecs.push((vecmat.clone(), *task_idx));
                                 }
                             }
+                            let t2_clone = Instant::now();
+                            let mut tb = arc_timebuf.lock().unwrap();
+                            tb.add_time("Stage2-Clone", run_idx, 0, t2_clone - t1_clone);
+                            drop(tb);
                         }
                         arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                             let index = *index;
@@ -321,12 +337,15 @@ fn bench2(
 }
 
 fn bench3(
-    threadpool: &ThreadPool,
+    core_offset: usize,
+    workers: usize,
     mult_factor: usize,
     cgemm_results: Arc<Mutex<Vec<DMatrix<Complex32>>>>,
     arc_timebuf: Arc<Mutex<TimeBuffer>>,
     run_idx: usize,
 ) -> Duration {
+    let threadpool = create_threadpool(core_offset, workers);
+
     let fft_size = 10000;
     let num_stages = 3;
 
@@ -401,11 +420,11 @@ fn bench3(
                         }
                         arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                             let index = *index;
+                            let worker_index = rayon::current_thread_index().unwrap();
                             let t1 = Instant::now();
                             let vecmat = vec_to_mat(arg_vec);
                             let t2 = Instant::now();
                             let mut tb = arc_timebuf.lock().unwrap();
-                            let worker_index = rayon::current_thread_index().unwrap();
                             tb.add_time("VecMat-Comp", run_idx, worker_index, t2 - t1);
                             drop(tb);
                             // task index at stage 1 is completed
@@ -440,6 +459,7 @@ fn bench3(
                                 vec_idx
                             };
 
+                            let t1_clone = Instant::now();
                             // Check if all dependencies are present in completed_indices
                             if indices
                                 .iter()
@@ -452,15 +472,19 @@ fn bench3(
                                 }
                                 arg_vecs.push((res_vector, *task_idx));
                             }
+                            let t2_clone = Instant::now();
+                            let mut tb = arc_timebuf.lock().unwrap();
+                            tb.add_time("Stage2-Clone", run_idx, 0, t2_clone - t1_clone);
+                            drop(tb);
                         }
                         arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                             let index = *index;
                             let refmats: Vec<&DMatrix<Complex32>> = arg_vec.iter().collect();
+                            let worker_index = rayon::current_thread_index().unwrap();
                             let t1 = Instant::now();
                             let cmat = multiple_cgemm(refmats);
                             let t2 = Instant::now();
                             let mut tb = arc_timebuf.lock().unwrap();
-                            let worker_index = rayon::current_thread_index().unwrap();
                             tb.add_time("CGEMM-Comp", run_idx, worker_index, t2 - t1);
                             drop(tb);
                             // task index at stage 2 is completed
@@ -477,14 +501,12 @@ fn bench3(
     end_time - start_time
 }
 
-fn main() {
-    let core_offset = 1;
-    let workers = 10;
+fn create_threadpool(core_offset: usize, workers: usize) -> ThreadPool {
     let mut core_ids = core_affinity::get_core_ids().unwrap();
     core_ids.sort();
     let cores_to_use: Vec<core_affinity::CoreId> =
         core_ids[core_offset..core_offset + workers].to_vec();
-    let threadpool = ThreadPoolBuilder::new()
+    ThreadPoolBuilder::new()
         .num_threads(workers)
         .start_handler(move |thread_index| {
             // Pin each thread to a specific core
@@ -492,19 +514,25 @@ fn main() {
             core_affinity::set_for_current(core_id);
         })
         .build()
-        .unwrap();
+        .unwrap()
+}
+
+fn main() {
+    let core_offset = 12;
+    let workers = 10;
 
     println!("Using {:?} workers", workers);
     let factors = vec![100];
     let repeat = 100;
 
-    for bench in 0..3 {
+    for bench in 1..4 {
         for factor in &factors {
             let factor = *factor;
             let mut timebuf = TimeBuffer::new(workers, repeat);
             timebuf.init_task("FFT-Comp");
             timebuf.init_task("VecMat-Comp");
             timebuf.init_task("CGEMM-Comp");
+            timebuf.init_task("Stage2-Clone");
             let arc_timebuf = Arc::new(Mutex::new(timebuf));
 
             let results: Vec<DMatrix<Complex32>> = Vec::with_capacity(factor);
@@ -517,22 +545,25 @@ fn main() {
 
                 let duration = {
                     match bench {
-                        0 => bench1(
-                            &threadpool,
+                        1 => bench1(
+                            core_offset,
+                            workers,
                             factor,
                             cgemm_results.clone(),
                             arc_timebuf.clone(),
                             run_idx,
                         ),
-                        1 => bench2(
-                            &threadpool,
+                        2 => bench2(
+                            core_offset,
+                            workers,
                             factor,
                             cgemm_results.clone(),
                             arc_timebuf.clone(),
                             run_idx,
                         ),
-                        2 => bench3(
-                            &threadpool,
+                        3 => bench3(
+                            core_offset,
+                            workers,
                             factor,
                             cgemm_results.clone(),
                             arc_timebuf.clone(),
@@ -544,9 +575,9 @@ fn main() {
 
                 let val = {
                     match bench {
-                        0 => validate1(factor),
-                        1 => validate2(factor),
-                        2 => validate3(factor),
+                        1 => validate1(factor),
+                        2 => validate2(factor),
+                        3 => validate3(factor),
                         _ => Vec::new(),
                     }
                 };
@@ -565,7 +596,7 @@ fn main() {
             }
             // Average times
             let timebuf = arc_timebuf.lock().unwrap();
-            let bench = &format!("Bench-{}", bench + 1);
+            let bench = &format!("Bench-{}", bench);
             timebuf.print_stats(bench, None);
         }
     }

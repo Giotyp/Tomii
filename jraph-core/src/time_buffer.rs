@@ -97,7 +97,7 @@ impl TimeBuffer {
 
             let stat_output = &format!(
                 "Task {}:\n\
-            \tTotal Tasks: {}, Worker Assignments (last run): {:?}\n\
+            \tTotal Tasks: {},\n\tWorker Assignments (last run): {:?}\n\
             \tAverage per Run: {:.4?}\n\
             \tAverage per Run, Worker: {:.4?}\n\
             \tAverage per Run, Task: {:.4?}\n\

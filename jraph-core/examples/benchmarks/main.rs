@@ -23,7 +23,7 @@ fn main() {
 
     let repeat = 100;
 
-    let core_offset = 1;
+    let core_offset = 12;
     let workers = 10;
     println!("Using {} workers", workers);
 
@@ -40,6 +40,7 @@ fn main() {
         timebuf.init_task("CmRetrieve");
         timebuf.init_task("VecMat-Comp");
         timebuf.init_task("CGEMM-Comp");
+        timebuf.init_task("Stage2-Clone");
 
         let arc_timebuf = Arc::new(Mutex::new(timebuf));
         for run_idx in 0..repeat {

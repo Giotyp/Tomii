@@ -225,6 +225,7 @@ impl Executor {
                                     // Check if all dependencies are present in completed_indices
                                     if deps.iter().all(|&dep| completed_indices.contains(&dep)) {
                                         let mut arg_vect = Vec::new();
+                                        let t1_clone = Instant::now();
                                         for dep in deps.iter() {
                                             let vecmat = stage_results.lock().unwrap()[stage - 1]
                                                 [*dep]
@@ -237,18 +238,27 @@ impl Executor {
                                             let arg = CmTypes::DMatrixC32(res.clone());
                                             arg_vect.push(arg);
                                         }
+                                        let t2_clone = Instant::now();
+                                        let mut tb = arc_timebuf.lock().unwrap();
+                                        tb.add_time(
+                                            "Stage2-Clone",
+                                            run_idx,
+                                            0,
+                                            t2_clone - t1_clone,
+                                        );
+                                        drop(tb);
                                         arg_vecs.push((arg_vect, *task_idx));
                                     }
                                 }
 
                                 arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                                     let index = *index;
+                                    let worker_index = rayon::current_thread_index().unwrap();
                                     let func = func_opt.unwrap();
                                     let t1_comp = Instant::now();
                                     let cmat = func(arg_vec.to_vec());
                                     let t2_comp = Instant::now();
                                     let mut tb = arc_timebuf.lock().unwrap();
-                                    let worker_index = rayon::current_thread_index().unwrap();
                                     tb.add_time(
                                         "CGEMM-Comp",
                                         run_idx,
