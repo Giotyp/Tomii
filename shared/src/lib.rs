@@ -4,7 +4,7 @@ use std::sync::Arc;
 use nalgebra::*;
 use num_complex::Complex32;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub enum CmTypes {
     Bool(bool),
     I8(i8),
