@@ -67,7 +67,7 @@ impl Executor {
         let fft_size = 10000;
         let mult_factor = graph.stage(0).node("FFT").mult_factor();
 
-        let mut fft_buffers: Vec<Arc<Mutex<Fft>>> = Vec::new();
+        let mut fft_buffers: Vec<Arc<Mutex<Fft>>> = Vec::with_capacity(mult_factor);
         for _ in 0..mult_factor {
             fft_buffers.push(Arc::new(Mutex::new(Fft::new(fft_size))));
         }
@@ -223,9 +223,10 @@ impl Executor {
                                     };
 
                                     // Check if all dependencies are present in completed_indices
+
+                                    let t1_clone = Instant::now();
                                     if deps.iter().all(|&dep| completed_indices.contains(&dep)) {
                                         let mut arg_vect = Vec::new();
-                                        let t1_clone = Instant::now();
                                         for dep in deps.iter() {
                                             let vecmat = stage_results.lock().unwrap()[stage - 1]
                                                 [*dep]
@@ -234,21 +235,15 @@ impl Executor {
                                                 CmTypes::DMatrixC32(x) => x,
                                                 _ => panic!("Invalid return type"),
                                             };
-
                                             let arg = CmTypes::DMatrixC32(res.clone());
                                             arg_vect.push(arg);
                                         }
-                                        let t2_clone = Instant::now();
-                                        let mut tb = arc_timebuf.lock().unwrap();
-                                        tb.add_time(
-                                            "Stage2-Clone",
-                                            run_idx,
-                                            0,
-                                            t2_clone - t1_clone,
-                                        );
-                                        drop(tb);
                                         arg_vecs.push((arg_vect, *task_idx));
                                     }
+                                    let t2_clone = Instant::now();
+                                    let mut tb = arc_timebuf.lock().unwrap();
+                                    tb.add_time("Stage2-Clone", run_idx, 0, t2_clone - t1_clone);
+                                    drop(tb);
                                 }
 
                                 arg_vecs.par_iter().for_each(|(arg_vec, index)| {
