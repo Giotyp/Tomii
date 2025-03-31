@@ -22,15 +22,12 @@ fn find_index(idx: isize, mult_factor: usize) -> usize {
     }
 }
 fn bench1(
-    core_offset: usize,
-    workers: usize,
     mult_factor: usize,
     cgemm_results: Arc<Mutex<Vec<DMatrix<Complex32>>>>,
     arc_timebuf: Arc<Mutex<TimeBuffer>>,
     run_idx: usize,
+    threadpool: &ThreadPool,
 ) -> Duration {
-    let threadpool = create_threadpool(core_offset, workers);
-
     let fft_size = 10000;
     let num_stages = 3;
 
@@ -39,9 +36,8 @@ fn bench1(
         fft_buffers.push(Arc::new(Mutex::new(Fft::new(fft_size))));
     }
 
-    let vecmat_results: Arc<Mutex<Vec<DMatrix<Complex32>>>> =
-        Arc::new(Mutex::new(vec![
-            DMatrix::<Complex32>::zeros(1, 1);
+    let vecmat_results: Arc<Mutex<Vec<Arc<DMatrix<Complex32>>>>> = Arc::new(Mutex::new(vec![
+            Arc::new(DMatrix::<Complex32>::zeros(1, 1));
             mult_factor
         ]));
 
@@ -116,7 +112,7 @@ fn bench1(
                             // task index at stage 1 is completed
                             stage_completed.lock().unwrap()[stage].push(index);
                             stage_scheduled.lock().unwrap()[stage] += 1;
-                            vecmat_results.lock().unwrap()[index] = vecmat;
+                            vecmat_results.lock().unwrap()[index] = Arc::new(vecmat);
                         });
                     } else if stage == 2 {
                         // blas cgemm
@@ -175,15 +171,12 @@ fn bench1(
 }
 
 fn bench2(
-    core_offset: usize,
-    workers: usize,
     mult_factor: usize,
     cgemm_results: Arc<Mutex<Vec<DMatrix<Complex32>>>>,
     arc_timebuf: Arc<Mutex<TimeBuffer>>,
     run_idx: usize,
+    threadpool: &ThreadPool,
 ) -> Duration {
-    let threadpool = create_threadpool(core_offset, workers);
-
     let fft_size = 10000;
     let num_stages = 3;
 
@@ -192,9 +185,8 @@ fn bench2(
         fft_buffers.push(Arc::new(Mutex::new(Fft::new(fft_size))));
     }
 
-    let vecmat_results: Arc<Mutex<Vec<DMatrix<Complex32>>>> =
-        Arc::new(Mutex::new(vec![
-            DMatrix::<Complex32>::zeros(1, 1);
+    let vecmat_results: Arc<Mutex<Vec<Arc<DMatrix<Complex32>>>>> = Arc::new(Mutex::new(vec![
+            Arc::new(DMatrix::<Complex32>::zeros(1, 1));
             mult_factor
         ]));
 
@@ -268,7 +260,7 @@ fn bench2(
                             // task index at stage 1 is completed
                             stage_completed.lock().unwrap()[stage].push(index);
                             stage_scheduled.lock().unwrap()[stage] += 1;
-                            vecmat_results.lock().unwrap()[index] = vecmat;
+                            vecmat_results.lock().unwrap()[index] = Arc::new(vecmat);
                         });
                     } else if stage == 2 {
                         // blas cgemm
@@ -337,28 +329,22 @@ fn bench2(
 }
 
 fn bench3(
-    core_offset: usize,
-    workers: usize,
     mult_factor: usize,
     cgemm_results: Arc<Mutex<Vec<DMatrix<Complex32>>>>,
     arc_timebuf: Arc<Mutex<TimeBuffer>>,
     run_idx: usize,
+    threadpool: &ThreadPool,
 ) -> Duration {
-    let threadpool = create_threadpool(core_offset, workers);
-
     let fft_size = 10000;
     let num_stages = 3;
 
-    let mut fft_buffers: Vec<Arc<Mutex<Fft>>> = Vec::new();
+    let mut fft_buffers: Vec<Arc<Mutex<Fft>>> = Vec::with_capacity(mult_factor);
     for _ in 0..mult_factor {
         fft_buffers.push(Arc::new(Mutex::new(Fft::new(fft_size))));
     }
 
-    let vecmat_results: Arc<Mutex<Vec<DMatrix<Complex32>>>> =
-        Arc::new(Mutex::new(vec![
-            DMatrix::<Complex32>::zeros(1, 1);
-            mult_factor
-        ]));
+    let vecmat_results: Arc<Mutex<Vec<Arc<Option<DMatrix<Complex32>>>>>> =
+        Arc::new(Mutex::new(vec![Arc::new(None); mult_factor]));
 
     let stage_scheduled: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(vec![0; num_stages]));
     let stage_completed: Arc<Mutex<Vec<Vec<usize>>>> =
@@ -430,7 +416,7 @@ fn bench3(
                             // task index at stage 1 is completed
                             stage_completed.lock().unwrap()[stage].push(index);
                             stage_scheduled.lock().unwrap()[stage] += 1;
-                            vecmat_results.lock().unwrap()[index] = vecmat;
+                            vecmat_results.lock().unwrap()[index] = Arc::new(Some(vecmat));
                         });
                     } else if stage == 2 {
                         // blas cgemm
@@ -465,7 +451,7 @@ fn bench3(
                                 .iter()
                                 .all(|&index_needed| completed_indices.contains(&index_needed))
                             {
-                                let mut res_vector = Vec::new();
+                                let mut res_vector = Vec::with_capacity(indices.len());
                                 for index_needed in indices {
                                     let vecmat = &vecmat_results.lock().unwrap()[index_needed];
                                     res_vector.push(vecmat.clone());
@@ -479,7 +465,15 @@ fn bench3(
                         }
                         arg_vecs.par_iter().for_each(|(arg_vec, index)| {
                             let index = *index;
-                            let refmats: Vec<&DMatrix<Complex32>> = arg_vec.iter().collect();
+                            let refmats: Vec<&DMatrix<Complex32>> = {
+                                let mut vec = Vec::with_capacity(arg_vec.len());
+                                for mat in arg_vec.iter() {
+                                    if let Some(mat) = mat.as_ref() {
+                                        vec.push(mat);
+                                    }
+                                }
+                                vec
+                            };
                             let worker_index = rayon::current_thread_index().unwrap();
                             let t1 = Instant::now();
                             let cmat = multiple_cgemm(refmats);
@@ -518,14 +512,15 @@ fn create_threadpool(core_offset: usize, workers: usize) -> ThreadPool {
 }
 
 fn main() {
-    let core_offset = 12;
+    let core_offset = 0;
     let workers = 10;
 
     println!("Using {:?} workers", workers);
     let factors = vec![100];
     let repeat = 100;
 
-    for bench in 1..4 {
+    for bench in 3..4 {
+        let threadpool = create_threadpool(core_offset, workers);
         for factor in &factors {
             let factor = *factor;
             let mut timebuf = TimeBuffer::new(workers, repeat);
@@ -546,28 +541,25 @@ fn main() {
                 let duration = {
                     match bench {
                         1 => bench1(
-                            core_offset,
-                            workers,
                             factor,
                             cgemm_results.clone(),
                             arc_timebuf.clone(),
                             run_idx,
+                            &threadpool,
                         ),
                         2 => bench2(
-                            core_offset,
-                            workers,
                             factor,
                             cgemm_results.clone(),
                             arc_timebuf.clone(),
                             run_idx,
+                            &threadpool,
                         ),
                         3 => bench3(
-                            core_offset,
-                            workers,
                             factor,
                             cgemm_results.clone(),
                             arc_timebuf.clone(),
                             run_idx,
+                            &threadpool,
                         ),
                         _ => Duration::ZERO,
                     }
@@ -598,6 +590,11 @@ fn main() {
             let timebuf = arc_timebuf.lock().unwrap();
             let bench = &format!("Bench-{}", bench);
             timebuf.print_stats(bench, None);
+            // let stats_name = format!("examples/manualRayon/results/worker_stats_{}.txt", bench);
+            // timebuf.export_worker_stats(bench, &stats_name);
+
+            let times_name = format!("examples/manualRayon/results/worker_raw_man_{}.txt", bench);
+            timebuf.export_worker_times(bench, &times_name);
         }
     }
 }

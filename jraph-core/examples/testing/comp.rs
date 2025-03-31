@@ -146,7 +146,7 @@ pub fn rayon_gemm() {
         .build()
         .unwrap();
 
-    let buf_nums = vec![100, 200, 300, 400, 500];
+    let buf_nums = vec![100];
 
     for numbuf in buf_nums {
         let bufs = {
@@ -166,8 +166,7 @@ pub fn rayon_gemm() {
         for run_idx in 0..REPEAT {
             let mut arg_vecs = Vec::new();
             for factor in 0..numbuf {
-                let buf_vec = vec![bufs[factor].clone(), bufs[factor].clone()];
-                arg_vecs.push(buf_vec);
+                arg_vecs.push(bufs.clone());
             }
 
             threadpool.install(|| {
@@ -199,9 +198,7 @@ pub fn rayon_gemm() {
         for run_idx in 0..REPEAT {
             let mut arg_vecs = Vec::new();
             for factor in 0..numbuf {
-                let data = &cmt_vec[factor];
-                let args = vec![data.clone(), data.clone()];
-                arg_vecs.push(args);
+                arg_vecs.push(cmt_vec.clone());
             }
 
             threadpool.install(|| {

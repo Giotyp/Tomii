@@ -27,7 +27,7 @@ fn main() {
     let workers = 10;
     println!("Using {} workers", workers);
 
-    for i in 0..graphs.len() {
+    for i in 2..graphs.len() {
         let graph = from_json(graphs[i]).unwrap();
         let mult_factor = graph.stage(0).node("FFT").mult_factor();
 
@@ -82,8 +82,11 @@ fn main() {
             tb.add_total_time(run_idx, duration);
             drop(tb);
         }
-        let tb = arc_timebuf.lock().unwrap();
+        let timebuf = arc_timebuf.lock().unwrap();
         let bench = &format!("Bench-{}", i + 1);
-        tb.print_stats(bench, None);
+        timebuf.print_stats(bench, None);
+
+        let times_name = format!("examples/benchmarks/results/worker_raw_JRaph_{}.txt", bench);
+        timebuf.export_worker_times(bench, &times_name);
     }
 }

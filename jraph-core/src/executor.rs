@@ -244,26 +244,25 @@ impl Executor {
 
                                 let mut count = 0;
                                 let t1_clone = Instant::now();
-                                // Check if all dependencies are present in completed_indices
                                 if deps.iter().all(|&dep| completed_indices.contains(&dep)) {
                                     let mut arg_vect = Vec::new();
                                     for dep in deps.iter() {
-                                        let vecmat =
-                                            stage_results.lock().unwrap()[stage - 1][*dep].clone();
+                                        let vecmat = stage_results.lock().unwrap()[stage - 1]
+                                            [*dep]
+                                            .clone();
                                         let res = match vecmat {
                                             CmTypes::DMatrixC32(x) => x,
                                             _ => panic!("Invalid return type"),
                                         };
-
                                         let arg = CmTypes::DMatrixC32(res.clone());
                                         arg_vect.push(arg);
-                                        count += 1;
                                     }
+                                    count += 1;
                                     arg_vecs.push((arg_vect, *task_idx));
                                 }
                                 let t2_clone = Instant::now();
-                                let mut tb = arc_timebuf.lock().unwrap();
                                 if count > 0 {
+                                    let mut tb = arc_timebuf.lock().unwrap();
                                     tb.add_time("Stage2-Clone", run_idx, 0, t2_clone - t1_clone);
                                 }
                                 drop(tb);
