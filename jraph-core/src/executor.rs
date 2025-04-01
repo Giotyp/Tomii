@@ -183,7 +183,7 @@ impl Executor {
                                 }
                             }
 
-                            let tasks = self.execute_vecmat_tasks(
+                            self.execute_vecmat_tasks(
                                 arg_vecs,
                                 func_opt.unwrap(),
                                 stage_results.clone(),
@@ -264,11 +264,11 @@ impl Executor {
                                 if count > 0 {
                                     let mut tb = arc_timebuf.lock().unwrap();
                                     tb.add_time("Stage2-Clone", run_idx, 0, t2_clone - t1_clone);
+                                    drop(tb);
                                 }
-                                drop(tb);
                             }
 
-                            let tasks = self.execute_cgemm_tasks(
+                            self.execute_cgemm_tasks(
                                 arg_vecs,
                                 func_opt.unwrap(),
                                 stage_results.clone(),
