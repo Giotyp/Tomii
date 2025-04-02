@@ -300,7 +300,7 @@ impl Executor {
         end_time - start_time
     }
 
-    fn execute<F>(&self, task_clos: F, task_counter: Arc<AtomicUsize>)
+    fn spawn_task<F>(&self, task_clos: F, task_counter: Arc<AtomicUsize>)
     where
         F: FnOnce() + Send + 'static,
     {
