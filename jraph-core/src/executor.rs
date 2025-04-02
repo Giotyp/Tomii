@@ -84,13 +84,8 @@ impl Executor {
         let stage_completed: Arc<Mutex<Vec<Vec<usize>>>> =
             Arc::new(Mutex::new(vec![Vec::new(); num_stages]));
 
-        // Create a channel for task submission
-        let (task_sender, task_receiver) =
-            bounded::<Box<dyn FnOnce() + Send>>(num_stages * mult_factor);
-
         // Atomic counter to track task completion
         let task_counter = Arc::new(AtomicUsize::new(0));
-        self.task_thread(task_receiver, task_counter.clone());
 
         let start_time = Instant::now();
         while stage_scheduled.lock().unwrap()[num_stages - 1].len() < mult_factor {
@@ -120,7 +115,6 @@ impl Executor {
                                 arc_timebuf.clone(),
                                 run_idx,
                                 stage,
-                                &task_sender,
                                 task_counter.clone(),
                             );
                         } else if node_args[0].arg_name() == "$ref" {
@@ -183,7 +177,7 @@ impl Executor {
                                 }
                             }
 
-                            self.execute_vecmat_tasks(
+                            self.execute_tasks_res(
                                 arg_vecs,
                                 func_opt.unwrap(),
                                 stage_results.clone(),
@@ -192,8 +186,8 @@ impl Executor {
                                 arc_timebuf.clone(),
                                 run_idx,
                                 stage,
-                                &task_sender,
                                 task_counter.clone(),
+                                "VecMat-Comp".to_string()
                             );
                         } else if node_args[0].arg_name() == "$res" {
                             let dependencies: HashMap<String, Vec<usize>> = {
@@ -268,7 +262,7 @@ impl Executor {
                                 }
                             }
 
-                            self.execute_cgemm_tasks(
+                            self.execute_tasks_res(
                                 arg_vecs,
                                 func_opt.unwrap(),
                                 stage_results.clone(),
@@ -277,8 +271,8 @@ impl Executor {
                                 arc_timebuf.clone(),
                                 run_idx,
                                 stage,
-                                &task_sender,
                                 task_counter.clone(),
+                                "CGEMM-Comp".to_string()
                             );
                         }
                     }
@@ -306,17 +300,14 @@ impl Executor {
         end_time - start_time
     }
 
-    fn task_thread(
-        &self,
-        task_receiver: Receiver<Box<dyn FnOnce() + Send>>,
-        task_counter: Arc<AtomicUsize>,
-    ) {
-        // Spawn Rayon tasks to process incoming work
+    fn execute<F>(&self, task_clos: F, task_counter: Arc<AtomicUsize>)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        // Spawn Rayon tasks to process the given closure
         self.threadpool.spawn(move || {
-            task_receiver.into_iter().par_bridge().for_each(|task| {
-                task();
-                task_counter.fetch_sub(1, Ordering::SeqCst);
-            });
+            task_clos();
+            task_counter.fetch_sub(1, Ordering::SeqCst);
         });
     }
 
@@ -328,10 +319,8 @@ impl Executor {
         arc_timebuf: Arc<Mutex<TimeBuffer>>,
         run_idx: usize,
         stage: usize,
-        task_sender: &Sender<Box<dyn FnOnce() + Send>>,
         task_counter: Arc<AtomicUsize>,
     ) {
-        let mut tasks = Vec::new();
 
         for (index, fft_struct) in fft_buffers.iter().enumerate() {
             let fft_struct = Arc::clone(fft_struct);
@@ -353,16 +342,12 @@ impl Executor {
                 stage_completed.lock().unwrap()[stage].push(index);
             };
 
-            tasks.push(task);
-        }
-
-        for task in tasks {
             task_counter.fetch_add(1, Ordering::SeqCst);
-            task_sender.send(Box::new(task)).unwrap();
+            self.execute(task, task_counter.clone());
         }
     }
 
-    fn execute_vecmat_tasks(
+    fn execute_tasks_res(
         &self,
         arg_vecs: Vec<(Vec<CmTypes>, usize)>,
         func: fn(Vec<CmTypes>) -> CmTypes,
@@ -372,10 +357,11 @@ impl Executor {
         arc_timebuf: Arc<Mutex<TimeBuffer>>,
         run_idx: usize,
         stage: usize,
-        task_sender: &Sender<Box<dyn FnOnce() + Send>>,
         task_counter: Arc<AtomicUsize>,
+        dbg_msg: String,
     ) {
-        let mut tasks = Vec::new();
+
+        let dbg_msg_cloned = dbg_msg.to_owned();
 
         for (arg_vec, index) in arg_vecs {
             let arc_timebuf = arc_timebuf.clone();
@@ -383,70 +369,24 @@ impl Executor {
             let stage_completed = stage_completed.clone();
             stage_scheduled.lock().unwrap()[stage].push(index);
 
-            let task = move || {
+            let task = {
+                let msg = dbg_msg_cloned.clone();
+                move || {
                 let worker_index = rayon::current_thread_index().unwrap_or(0);
                 let t1_comp = Instant::now();
-                let vecmat = func(arg_vec);
+                let res = func(arg_vec);
                 let t2_comp = Instant::now();
 
                 let mut tb = arc_timebuf.lock().unwrap();
-                tb.add_time("VecMat-Comp", run_idx, worker_index, t2_comp - t1_comp);
+                tb.add_time(&msg, run_idx, worker_index, t2_comp - t1_comp);
                 drop(tb);
 
                 stage_completed.lock().unwrap()[stage].push(index);
-                stage_results.lock().unwrap()[stage][index] = vecmat;
-            };
+                stage_results.lock().unwrap()[stage][index] = res;
+            }};
 
-            tasks.push(task);
-        }
-
-        for task in tasks {
             task_counter.fetch_add(1, Ordering::SeqCst);
-            task_sender.send(Box::new(task)).unwrap();
-        }
-    }
-
-    fn execute_cgemm_tasks(
-        &self,
-        arg_vecs: Vec<(Vec<CmTypes>, usize)>,
-        func: fn(Vec<CmTypes>) -> CmTypes,
-        stage_results: Arc<Mutex<Vec<Vec<CmTypes>>>>,
-        stage_completed: Arc<Mutex<Vec<Vec<usize>>>>,
-        stage_scheduled: Arc<Mutex<Vec<Vec<usize>>>>,
-        arc_timebuf: Arc<Mutex<TimeBuffer>>,
-        run_idx: usize,
-        stage: usize,
-        task_sender: &Sender<Box<dyn FnOnce() + Send>>,
-        task_counter: Arc<AtomicUsize>,
-    ) {
-        let mut tasks = Vec::new();
-
-        for (arg_vec, index) in arg_vecs {
-            let arc_timebuf = arc_timebuf.clone();
-            let stage_results = stage_results.clone();
-            let stage_completed = stage_completed.clone();
-            stage_scheduled.lock().unwrap()[stage].push(index);
-
-            let task = move || {
-                let worker_index = rayon::current_thread_index().unwrap_or(0);
-                let t1_comp = Instant::now();
-                let cmat = func(arg_vec);
-                let t2_comp = Instant::now();
-
-                let mut tb = arc_timebuf.lock().unwrap();
-                tb.add_time("CGEMM-Comp", run_idx, worker_index, t2_comp - t1_comp);
-                drop(tb);
-
-                stage_completed.lock().unwrap()[stage].push(index);
-                stage_results.lock().unwrap()[stage][index] = cmat;
-            };
-
-            tasks.push(task);
-        }
-
-        for task in tasks {
-            task_counter.fetch_add(1, Ordering::SeqCst);
-            task_sender.send(Box::new(task)).unwrap();
+            self.execute(task, task_counter.clone());
         }
     }
 }
