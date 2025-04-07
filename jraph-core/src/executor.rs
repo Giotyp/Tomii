@@ -108,15 +108,29 @@ impl Executor {
                         let func_opt = node.task().func_ptr();
 
                         if stage == 0 {
-                            self.execute_fft_tasks(
-                                &fft_buffers,
-                                stage_completed.clone(),
-                                stage_scheduled.clone(),
-                                arc_timebuf.clone(),
-                                run_idx,
-                                stage,
-                                task_counter.clone(),
-                            );
+                            for (index, fft_struct) in fft_buffers.iter().enumerate() {
+                                let fft_struct = Arc::clone(fft_struct);
+                                let arc_timebuf = arc_timebuf.clone();
+                                let stage_completed = stage_completed.clone();
+                                stage_scheduled.lock().unwrap()[stage].push(index);
+                    
+                                let task = move || {
+                                    let mut fft_struct = fft_struct.lock().unwrap();
+                    
+                                    let worker_index = rayon::current_thread_index().unwrap_or(0);
+                                    let t1 = Instant::now();
+                                    fft_struct.computefft();
+                                    let t2 = Instant::now();
+                    
+                                    let mut tb = arc_timebuf.lock().unwrap();
+                                    tb.add_time("FFT-Comp", run_idx, worker_index, t2 - t1);
+                                    drop(tb);
+                                    stage_completed.lock().unwrap()[stage].push(index);
+                                };
+                    
+                                task_counter.fetch_add(1, Ordering::SeqCst);
+                                self.spawn_task(task, task_counter.clone());
+                            }
                         } else if node_args[0].arg_name() == "$ref" {
                             let dependencies: HashMap<String, Vec<usize>> = {
                                 let mut map = HashMap::new();
@@ -177,18 +191,31 @@ impl Executor {
                                 }
                             }
 
-                            self.execute_tasks_res(
-                                arg_vecs,
-                                func_opt.unwrap(),
-                                stage_results.clone(),
-                                stage_completed.clone(),
-                                stage_scheduled.clone(),
-                                arc_timebuf.clone(),
-                                run_idx,
-                                stage,
-                                task_counter.clone(),
-                                "VecMat-Comp".to_string()
-                            );
+                            let func = func_opt.unwrap();
+                            for (arg_vec, index) in arg_vecs {
+                                let arc_timebuf = arc_timebuf.clone();
+                                let stage_results = stage_results.clone();
+                                let stage_completed = stage_completed.clone();
+                                stage_scheduled.lock().unwrap()[stage].push(index);
+                    
+                                let task = {
+                                    move || {
+                                    let worker_index = rayon::current_thread_index().unwrap_or(0);
+                                    let t1_comp = Instant::now();
+                                    let res = func(arg_vec);
+                                    let t2_comp = Instant::now();
+                    
+                                    let mut tb = arc_timebuf.lock().unwrap();
+                                    tb.add_time("VecMat-Comp", run_idx, worker_index, t2_comp - t1_comp);
+                                    drop(tb);
+                    
+                                    stage_completed.lock().unwrap()[stage].push(index);
+                                    stage_results.lock().unwrap()[stage][index] = res;
+                                }};
+                    
+                                task_counter.fetch_add(1, Ordering::SeqCst);
+                                self.spawn_task(task, task_counter.clone());
+                            }
                         } else if node_args[0].arg_name() == "$res" {
                             let dependencies: HashMap<String, Vec<usize>> = {
                                 let mut map = HashMap::new();
@@ -262,18 +289,31 @@ impl Executor {
                                 }
                             }
 
-                            self.execute_tasks_res(
-                                arg_vecs,
-                                func_opt.unwrap(),
-                                stage_results.clone(),
-                                stage_completed.clone(),
-                                stage_scheduled.clone(),
-                                arc_timebuf.clone(),
-                                run_idx,
-                                stage,
-                                task_counter.clone(),
-                                "CGEMM-Comp".to_string()
-                            );
+                            let func = func_opt.unwrap();
+                            for (arg_vec, index) in arg_vecs {
+                                let arc_timebuf = arc_timebuf.clone();
+                                let stage_results = stage_results.clone();
+                                let stage_completed = stage_completed.clone();
+                                stage_scheduled.lock().unwrap()[stage].push(index);
+                    
+                                let task = {
+                                    move || {
+                                    let worker_index = rayon::current_thread_index().unwrap_or(0);
+                                    let t1_comp = Instant::now();
+                                    let res = func(arg_vec);
+                                    let t2_comp = Instant::now();
+                    
+                                    let mut tb = arc_timebuf.lock().unwrap();
+                                    tb.add_time("CGEMM-Comp", run_idx, worker_index, t2_comp - t1_comp);
+                                    drop(tb);
+                    
+                                    stage_completed.lock().unwrap()[stage].push(index);
+                                    stage_results.lock().unwrap()[stage][index] = res;
+                                }};
+                    
+                                task_counter.fetch_add(1, Ordering::SeqCst);
+                                self.spawn_task(task, task_counter.clone());
+                            }
                         }
                     }
                 }
@@ -309,84 +349,5 @@ impl Executor {
             task_clos();
             task_counter.fetch_sub(1, Ordering::SeqCst);
         });
-    }
-
-    fn execute_fft_tasks(
-        &self,
-        fft_buffers: &[Arc<Mutex<Fft>>],
-        stage_completed: Arc<Mutex<Vec<Vec<usize>>>>,
-        stage_scheduled: Arc<Mutex<Vec<Vec<usize>>>>,
-        arc_timebuf: Arc<Mutex<TimeBuffer>>,
-        run_idx: usize,
-        stage: usize,
-        task_counter: Arc<AtomicUsize>,
-    ) {
-
-        for (index, fft_struct) in fft_buffers.iter().enumerate() {
-            let fft_struct = Arc::clone(fft_struct);
-            let arc_timebuf = arc_timebuf.clone();
-            let stage_completed = stage_completed.clone();
-            stage_scheduled.lock().unwrap()[stage].push(index);
-
-            let task = move || {
-                let mut fft_struct = fft_struct.lock().unwrap();
-
-                let worker_index = rayon::current_thread_index().unwrap_or(0);
-                let t1 = Instant::now();
-                fft_struct.computefft();
-                let t2 = Instant::now();
-
-                let mut tb = arc_timebuf.lock().unwrap();
-                tb.add_time("FFT-Comp", run_idx, worker_index, t2 - t1);
-                drop(tb);
-                stage_completed.lock().unwrap()[stage].push(index);
-            };
-
-            task_counter.fetch_add(1, Ordering::SeqCst);
-            self.execute(task, task_counter.clone());
-        }
-    }
-
-    fn execute_tasks_res(
-        &self,
-        arg_vecs: Vec<(Vec<CmTypes>, usize)>,
-        func: fn(Vec<CmTypes>) -> CmTypes,
-        stage_results: Arc<Mutex<Vec<Vec<CmTypes>>>>,
-        stage_completed: Arc<Mutex<Vec<Vec<usize>>>>,
-        stage_scheduled: Arc<Mutex<Vec<Vec<usize>>>>,
-        arc_timebuf: Arc<Mutex<TimeBuffer>>,
-        run_idx: usize,
-        stage: usize,
-        task_counter: Arc<AtomicUsize>,
-        dbg_msg: String,
-    ) {
-
-        let dbg_msg_cloned = dbg_msg.to_owned();
-
-        for (arg_vec, index) in arg_vecs {
-            let arc_timebuf = arc_timebuf.clone();
-            let stage_results = stage_results.clone();
-            let stage_completed = stage_completed.clone();
-            stage_scheduled.lock().unwrap()[stage].push(index);
-
-            let task = {
-                let msg = dbg_msg_cloned.clone();
-                move || {
-                let worker_index = rayon::current_thread_index().unwrap_or(0);
-                let t1_comp = Instant::now();
-                let res = func(arg_vec);
-                let t2_comp = Instant::now();
-
-                let mut tb = arc_timebuf.lock().unwrap();
-                tb.add_time(&msg, run_idx, worker_index, t2_comp - t1_comp);
-                drop(tb);
-
-                stage_completed.lock().unwrap()[stage].push(index);
-                stage_results.lock().unwrap()[stage][index] = res;
-            }};
-
-            task_counter.fetch_add(1, Ordering::SeqCst);
-            self.execute(task, task_counter.clone());
-        }
     }
 }
