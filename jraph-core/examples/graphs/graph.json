@@ -1,4 +1,36 @@
 {
+    "initializations": [
+        {
+            "name": "buffer_size",
+            "func": "",
+            "arg_types": [
+                "usize"
+            ],
+            "args": [
+                "10"
+            ]
+        },
+        {
+            "name": "buf_a",
+            "func": "create_buffer",
+            "args": [
+                "buffer_size"
+            ],
+            "arg_types": [
+                "usize"
+            ]
+        },
+        {
+            "name": "fft_buf",
+            "func": "Fft",
+            "args": [
+                "buffer_size"
+            ],
+            "arg_types": [
+                "usize"
+            ]
+        }
+    ],
     "graph": {
         "stages": [
             {

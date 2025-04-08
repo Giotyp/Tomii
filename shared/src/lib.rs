@@ -4,7 +4,12 @@ use std::sync::Arc;
 use nalgebra::*;
 use num_complex::Complex32;
 
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+// Define the Init module with all the necessary initialization functions/structs
+pub mod init_funcs {
+    include!(concat!(env!("OUT_DIR"), "/init_funcs.rs"));
+}
+
+#[derive(Deserialize, Clone)]
 pub enum CmTypes {
     Bool(bool),
     I8(i8),
@@ -21,6 +26,7 @@ pub enum CmTypes {
     F64(f64),
     Char(char),
     Usize(usize),
+    VecUsize(Vec<usize>),
     String(String),
     VecC32(Vec<Complex32>),
     #[serde(with = "dvector_arc_serde")]
@@ -30,6 +36,9 @@ pub enum CmTypes {
     Ref(String),
     Res(String),
     None(),
+    // Space for Custom structs/types
+    #[serde[skip]]
+    FftStr(Arc<init_funcs::Fft>)
 }
 
 mod dvector_arc_serde {
@@ -79,6 +88,37 @@ impl CmTypes {
             CmTypes::Res(_) => "$res".to_string(),
             CmTypes::None() => "None".to_string(),
             _ => "Unsupported type".to_string(),
+        }
+    }
+}
+
+impl std::fmt::Debug for CmTypes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CmTypes::Bool(val) => write!(f, "Bool({:?})", val),
+            CmTypes::I8(val) => write!(f, "I8({:?})", val),
+            CmTypes::I16(val) => write!(f, "I16({:?})", val),
+            CmTypes::I32(val) => write!(f, "I32({:?})", val),
+            CmTypes::I64(val) => write!(f, "I64({:?})", val),
+            CmTypes::I128(val) => write!(f, "I128({:?})", val),
+            CmTypes::U8(val) => write!(f, "U8({:?})", val),
+            CmTypes::U16(val) => write!(f, "U16({:?})", val),
+            CmTypes::U32(val) => write!(f, "U32({:?})", val),
+            CmTypes::U64(val) => write!(f, "U64({:?})", val),
+            CmTypes::U128(val) => write!(f, "U128({:?})", val),
+            CmTypes::F32(val) => write!(f, "F32({:?})", val),
+            CmTypes::F64(val) => write!(f, "F64({:?})", val),
+            CmTypes::Char(val) => write!(f, "Char({:?})", val),
+            CmTypes::Usize(val) => write!(f, "Usize({:?})", val),
+            CmTypes::VecUsize(val) => write!(f, "VecUsize({:?})", val),
+            CmTypes::String(val) => write!(f, "String({:?})", val),
+            CmTypes::VecC32(val) => write!(f, "VecC32({:?})", val),
+            CmTypes::DVectorC32(val) => write!(f, "DVectorC32({:?})", val),
+            CmTypes::DMatrixC32(val) => write!(f, "DMatrixC32({:?})", val),
+            CmTypes::Ref(val) => write!(f, "Ref({:?})", val),
+            CmTypes::Res(val) => write!(f, "Res({:?})", val),
+            CmTypes::None() => write!(f, "None"),
+            CmTypes::FftStr(_) => write!(f, "FftStr(<excluded>)"), // Custom debug output or omit entirely
         }
     }
 }
@@ -215,5 +255,27 @@ pub fn string_to_primitive(tp: String, arg: String) -> Result<CmTypes, CustomErr
             .map(CmTypes::Res)
             .map_err(|_| CustomError::new("Failed to parse Res")),
         _ => Err(CustomError::new(&format!("Unsupported type: {}", tp))),
+    }
+}
+
+pub fn cmtype_object(object: String, args: Vec<CmTypes>) -> CmTypes {
+    let object = object.as_str();
+    match object {
+        "Fft" => {
+            let fft_size = match args[0] {
+                CmTypes::Usize(size) => size,
+                _ => panic!("Invalid argument type for Fft"),
+            };
+            let fft_obj = init_funcs::Fft::new(fft_size);
+            CmTypes::FftStr(Arc::new(fft_obj))
+        },
+        "create_buffer" => {
+            let size = match args[0] {
+                CmTypes::Usize(size) => size,
+                _ => panic!("Invalid argument type for create_buffer"),
+            };
+            CmTypes::VecUsize(init_funcs::create_buffer(size))
+        }
+        _ => panic!("Unsupported function: {}", object),
     }
 }
