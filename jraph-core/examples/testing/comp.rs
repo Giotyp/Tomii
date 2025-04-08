@@ -3,7 +3,7 @@ use jraph_core::func_reg::get_func;
 use jraph_core::time_buffer::TimeBuffer;
 use jraph_core::utils_rdtsc::*;
 use num_complex::Complex32;
-use shared::CmTypes;
+use jraph_core::cmtypes::CmTypes;
 use std::time::Instant;
 
 use rayon::prelude::*;

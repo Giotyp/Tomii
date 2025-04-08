@@ -14,4 +14,5 @@ fn main() {
     println!("");
     multithread::multi_sleep();
     println!("");
+    multithread::task_spawn();
 }

@@ -1,5 +1,5 @@
 use jraph_core::func_reg::*;
-use shared::CmTypes;
+use jraph_core::cmtypes::CmTypes;
 
 fn test_call_func() {
     let arg_vec = vec![

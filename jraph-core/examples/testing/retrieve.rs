@@ -1,7 +1,7 @@
 use crate::functions::generate_set_complex_dmatrix;
 use nalgebra::DMatrix;
 use num_complex::Complex32;
-use shared::CmTypes;
+use jraph_core::cmtypes::CmTypes;
 use std::sync::Arc;
 use std::time::Instant;
 

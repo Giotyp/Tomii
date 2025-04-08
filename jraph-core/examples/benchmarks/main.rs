@@ -10,7 +10,7 @@ use jraph_core::graph_gen::from_json;
 use jraph_core::time_buffer::TimeBuffer;
 use nalgebra::DMatrix;
 use num_complex::Complex32;
-use shared::CmTypes;
+use jraph_core::cmtypes::CmTypes;
 
 use crate::validation::*;
 
