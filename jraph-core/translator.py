@@ -202,7 +202,7 @@ def handle_rust(content, output_file):
         # include the original function files
         f.write(f"use crate::{input_file.stem}::*;\n\n")
         # include shared::CmTypes
-        f.write("use shared::CmTypes;\n")
+        f.write("use crate::cmtypes::CmTypes;\n")
         # include Complex32
         f.write("use num_complex::Complex32;\n")
         # include Arc
@@ -223,7 +223,7 @@ def handle_cpp(content, file_name, output_file):
 
     with output_file.open("w") as f:
         # include shared::CmTypes
-        f.write("use shared::CmTypes;\n\n")
+        f.write("use crate::cmtypes::CmTypes;\n\n")
         # link with .so file
         f.write(f'#[link(name = "{file_name}")]\n')
         # extern C clause
@@ -239,7 +239,7 @@ def create_func_registry(wrapper_file, registry_file):
         # include generated wrappers
         f.write(f"use crate::{wrapper_file.stem}::*;\n")
         # include shared::CmTypes
-        f.write("use shared::*;\n\n")
+        f.write("use crate::cmtypes::*;\n\n")
 
         # registry to retrieve function pointers
         # function signature
@@ -259,7 +259,7 @@ def create_func_registry(wrapper_file, registry_file):
 def create_emtpy_registry(registry_file):
     with registry_file.open("w") as f:
         # include shared::CmTypes
-        f.write("use shared::*;\n\n")
+        f.write("use crate::cmtypes::*;\n\n")
         # function signature
         f.write("pub fn get_func(_func_name: &str) -> Option<CmPtr> {\n")
         f.write("\tNone\n")

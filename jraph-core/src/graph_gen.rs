@@ -6,7 +6,7 @@ use crate::func_reg::*;
 use crate::graph_struct::*;
 use serde::Deserialize;
 use serde_json;
-use shared::*;
+use crate::cmtypes::*;
 
 #[derive(Debug, Deserialize)]
 struct SuccessorsJson {

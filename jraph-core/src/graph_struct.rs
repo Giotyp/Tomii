@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use shared::*;
+use crate::cmtypes::*;
 use std::collections::HashMap;
 
 pub struct Task {

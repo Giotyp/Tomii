@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::graph_struct::*;
 use crate::time_buffer::TimeBuffer;
-use shared::CmTypes;
+use crate::cmtypes::CmTypes;
 use std::collections::HashMap;
 
 use crate::temp_funcs::*;
@@ -268,15 +268,10 @@ impl Executor {
                                 if deps.iter().all(|&dep| completed_indices.contains(&dep)) {
                                     let mut arg_vect = Vec::new();
                                     for dep in deps.iter() {
-                                        let vecmat = stage_results.lock().unwrap()[stage - 1]
+                                        let prev_stage_res = stage_results.lock().unwrap()[stage - 1]
                                             [*dep]
                                             .clone();
-                                        let res = match vecmat {
-                                            CmTypes::DMatrixC32(x) => x,
-                                            _ => panic!("Invalid return type"),
-                                        };
-                                        let arg = CmTypes::DMatrixC32(res.clone());
-                                        arg_vect.push(arg);
+                                        arg_vect.push(prev_stage_res);
                                     }
                                     count += 1;
                                     arg_vecs.push((arg_vect, *task_idx));

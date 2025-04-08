@@ -5,6 +5,7 @@ pub mod graph_struct;
 pub mod temp_funcs;
 pub mod time_buffer;
 pub mod utils_rdtsc;
+pub mod cmtypes;
 
 pub mod funcs {
     include!(concat!(env!("OUT_DIR"), "/funcs.rs"));
@@ -16,4 +17,9 @@ pub mod wrappers {
 
 pub mod func_reg {
     include!(concat!(env!("OUT_DIR"), "/func_reg.rs"));
+}
+
+// Define the Init module with all the necessary initialization functions/structs
+pub mod init_funcs {
+    include!(concat!(env!("OUT_DIR"), "/init_funcs.rs"));
 }

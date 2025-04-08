@@ -69,6 +69,16 @@ fn main() {
         PathBuf::from(func_file.clone())
     };
 
+    // Initialization file
+    let init_file = env::var("INIT_PATH").expect("INIT_PATH environment variable is not set");
+    println!("cargo:rerun-if-changed={}", init_file);
+    let init_funcs = "init_funcs.rs";
+    let copied_init = out_dir.join(init_funcs);
+
+    info!("Generating init functions for {}", init_file);
+    fs::copy(&init_file, &copied_init)
+            .unwrap_or_else(|err| panic!("Failed to copy init_func.rs to OUT_DIR: {}", err));
+
     // Call the translator script to generate the wrappers
     let output = Command::new("python3")
         .arg("translator.py")
