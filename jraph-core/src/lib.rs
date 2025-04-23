@@ -1,4 +1,4 @@
-pub mod executor;
+pub mod scheduler;
 pub mod graph_gen;
 pub mod obj_gen;
 pub mod graph_struct;

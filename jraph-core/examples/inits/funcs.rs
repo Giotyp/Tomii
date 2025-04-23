@@ -3,21 +3,21 @@
 
 use num_complex::Complex32;
 
-pub const DFTI_CONFIG_VALUE_DFTI_SINGLE: DFTI_CONFIG_VALUE = 35;
-pub const DFTI_CONFIG_VALUE_DFTI_COMPLEX: DFTI_CONFIG_VALUE = 32;
+const DFTI_CONFIG_VALUE_DFTI_SINGLE: DFTI_CONFIG_VALUE = 35;
+const DFTI_CONFIG_VALUE_DFTI_COMPLEX: DFTI_CONFIG_VALUE = 32;
 #[allow(non_camel_case_types)]
-pub type DFTI_CONFIG_VALUE = ::std::os::raw::c_uint;
+type DFTI_CONFIG_VALUE = ::std::os::raw::c_uint;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct DFTI_DESCRIPTOR {
+struct DFTI_DESCRIPTOR {
     _unused: [u8; 0],
 }
 #[allow(non_camel_case_types)]
-pub type DFTI_DESCRIPTOR_HANDLE = *mut DFTI_DESCRIPTOR;
+type DFTI_DESCRIPTOR_HANDLE = *mut DFTI_DESCRIPTOR;
 
 extern "C" {
-    pub fn DftiCreateDescriptor(
+    fn DftiCreateDescriptor(
         arg1: *mut DFTI_DESCRIPTOR_HANDLE,
         arg2: DFTI_CONFIG_VALUE,
         arg3: DFTI_CONFIG_VALUE,
@@ -27,11 +27,11 @@ extern "C" {
 }
 
 extern "C" {
-    pub fn DftiCommitDescriptor(arg1: DFTI_DESCRIPTOR_HANDLE) -> ::std::os::raw::c_long;
+    fn DftiCommitDescriptor(arg1: DFTI_DESCRIPTOR_HANDLE) -> ::std::os::raw::c_long;
 }
 
 extern "C" {
-    pub fn DftiComputeForward(
+    fn DftiComputeForward(
         arg1: DFTI_DESCRIPTOR_HANDLE,
         arg2: *mut ::std::os::raw::c_void,
         ...

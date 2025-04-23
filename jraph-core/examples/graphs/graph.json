@@ -22,7 +22,7 @@
         },
         {
             "name": "fft_buf",
-            "func": "Fft",
+            "func": "Fft::new",
             "args": [
                 "buffer_size"
             ],

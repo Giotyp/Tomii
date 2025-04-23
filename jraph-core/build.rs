@@ -86,6 +86,7 @@ fn main() {
         .arg(wrapper_file.to_str().unwrap())
         .arg(registry_file.to_str().unwrap())
         .arg("False")
+        .arg(copied_init)
         .output()
         .expect("Failed to execute Python script");
 

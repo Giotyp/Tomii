@@ -4,6 +4,7 @@ use std::io::Read;
 use serde::Deserialize;
 use serde_json;
 use crate::cmtypes::*;
+use crate::func_reg::get_func;
 
 #[derive(Debug, Deserialize)]
 struct InitJson {
@@ -59,7 +60,8 @@ pub fn init_objects(graph_json: &str) -> Result<HashMap<String, CmTypes>, serde_
                 }
                 args
             };
-            let value: CmTypes = cmtype_object(func_name, args);
+            let func = get_func(&func_name).unwrap();
+            let value: CmTypes = func(args);
             init_objects.insert(name, value);
         }
     }

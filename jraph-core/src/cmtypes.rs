@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use nalgebra::*;
 use num_complex::Complex32;
 use crate::init_funcs;
@@ -34,7 +34,7 @@ pub enum CmTypes {
     None(),
     // Space for Custom structs/types
     #[serde[skip]]
-    FftStr(Arc<init_funcs::Fft>)
+    Fft(Arc<Mutex<init_funcs::Fft>>)
 }
 
 mod dvector_arc_serde {
@@ -114,7 +114,7 @@ impl std::fmt::Debug for CmTypes {
             CmTypes::Ref(val) => write!(f, "Ref({:?})", val),
             CmTypes::Res(val) => write!(f, "Res({:?})", val),
             CmTypes::None() => write!(f, "None"),
-            CmTypes::FftStr(_) => write!(f, "FftStr(<excluded>)"), // Custom debug output or omit entirely
+            CmTypes::Fft(_) => write!(f, "Fft(<excluded>)"), // Custom debug output or omit entirely
         }
     }
 }
@@ -251,27 +251,5 @@ pub fn string_to_primitive(tp: String, arg: String) -> Result<CmTypes, CustomErr
             .map(CmTypes::Res)
             .map_err(|_| CustomError::new("Failed to parse Res")),
         _ => Err(CustomError::new(&format!("Unsupported type: {}", tp))),
-    }
-}
-
-pub fn cmtype_object(object: String, args: Vec<CmTypes>) -> CmTypes {
-    let object = object.as_str();
-    match object {
-        "Fft" => {
-            let fft_size = match args[0] {
-                CmTypes::Usize(size) => size,
-                _ => panic!("Invalid argument type for Fft"),
-            };
-            let fft_obj = init_funcs::Fft::new(fft_size);
-            CmTypes::FftStr(Arc::new(fft_obj))
-        },
-        "create_buffer" => {
-            let size = match args[0] {
-                CmTypes::Usize(size) => size,
-                _ => panic!("Invalid argument type for create_buffer"),
-            };
-            CmTypes::VecUsize(init_funcs::create_buffer(size))
-        }
-        _ => panic!("Unsupported function: {}", object),
     }
 }
