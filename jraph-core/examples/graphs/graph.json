@@ -2,6 +2,7 @@
     "initializations": [
         {
             "name": "buffer_size",
+            "mult_factor": 1,
             "func": "",
             "arg_types": [
                 "usize"
@@ -12,6 +13,7 @@
         },
         {
             "name": "buf_a",
+            "mult_factor": 1,
             "func": "create_buffer",
             "args": [
                 "buffer_size"
@@ -21,7 +23,8 @@
             ]
         },
         {
-            "name": "fft_buf",
+            "name": "fft_bufs",
+            "mult_factor": 5,
             "func": "Fft::new",
             "args": [
                 "buffer_size"

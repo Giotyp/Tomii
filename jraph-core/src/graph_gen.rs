@@ -4,6 +4,7 @@ use std::io::Read;
 
 use crate::func_reg::*;
 use crate::graph_struct::*;
+use crate::obj_gen::init_objects;
 use serde::Deserialize;
 use serde_json;
 use crate::cmtypes::*;
@@ -145,6 +146,16 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
                 }
             }
         }
+    }
+
+    // Check for initializations in the graph
+    let init_objects = match init_objects(graph_json) {
+        Ok(init_objects) => Some(init_objects),
+        Err(_) => None,
+    };
+    // Set the initialized objects in the graph
+    if let Some(init_objects) = init_objects {
+        graph.set_init_objects(init_objects);
     }
 
     Ok(graph)

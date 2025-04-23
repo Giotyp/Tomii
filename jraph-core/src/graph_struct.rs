@@ -131,11 +131,12 @@ impl Stage {
 
 pub struct Graph {
     stages: Vec<Stage>,
+    init_objects: Option<HashMap<String, Vec<CmTypes>>>, 
 }
 
 impl Graph {
     pub fn new() -> Graph {
-        Graph { stages: Vec::new() }
+        Graph { stages: Vec::new(), init_objects: None }
     }
 
     pub fn len(&self) -> usize {
@@ -152,6 +153,14 @@ impl Graph {
 
     pub fn add_stage(&mut self, stage: Stage) {
         self.stages.push(stage);
+    }
+
+    pub fn init_objects(&self) -> Option<&HashMap<String, Vec<CmTypes>>> {
+        self.init_objects.as_ref()
+    }
+
+    pub fn set_init_objects(&mut self, init_objects: HashMap<String, Vec<CmTypes>>) {
+        self.init_objects = Some(init_objects);
     }
 }
 
@@ -192,6 +201,17 @@ impl Graph {
                 println!("          Successors Index: {:?}", node.successors_index);
                 println!("          Dependents: {:?}", node.dependents);
             }
+        }
+    }
+
+    pub fn print_init_objects(&self) {
+        if let Some(init_objects) = &self.init_objects {
+            println!("Initialized Objects:");
+            for (name, obj) in init_objects {
+                println!("  {}: {:?}", name, obj);
+            }
+        } else {
+            println!("No initialized objects.");
         }
     }
 }

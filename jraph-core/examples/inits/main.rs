@@ -9,7 +9,8 @@ fn main() {
     println!("Object map: {:?}\n", obj_map);
 
     // Call FFT.compute_fft()
-    let fft_str = obj_map.get("fft_buf").unwrap();
+    let fft_bufs = obj_map.get("fft_bufs").unwrap();
+    let fft_str = &fft_bufs[0];
 
     let get_buf = get_func("Fft::get_buf").unwrap();
     let compute_fft = get_func("Fft::computefft").unwrap();
