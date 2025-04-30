@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 
+use crate::cmtypes::*;
 use crate::func_reg::*;
 use crate::graph_struct::*;
 use crate::obj_gen::init_objects;
 use serde::Deserialize;
 use serde_json;
-use crate::cmtypes::*;
 
 #[derive(Debug, Deserialize)]
 struct SuccessorsJson {
@@ -19,6 +19,7 @@ struct SuccessorsJson {
 struct TaskJson {
     arg_types: Vec<String>,
     args: Vec<String>,
+    ref_tasks: Option<Vec<String>>,
     function_name: String,
 }
 
@@ -48,8 +49,16 @@ struct RootJson {
 fn parse_task(task_json: &TaskJson) -> Task {
     let mut args = Vec::new();
     for (arg_type, arg) in task_json.arg_types.iter().zip(task_json.args.iter()) {
-        args.push(string_to_primitive(arg_type.clone(), arg.clone()).unwrap());
+        args.push(string_to_cmtype(arg_type.clone(), arg.clone()).unwrap());
     }
+
+    let ref_tasks_opt = {
+        if let Some(ref_tasks) = &task_json.ref_tasks {
+            Some(ref_tasks.clone())
+        } else {
+            None
+        }
+    };
 
     // read environment variable to determine if the function is in python
     let func_path = std::env::var("FUNC_PATH").unwrap();
@@ -59,7 +68,12 @@ fn parse_task(task_json: &TaskJson) -> Task {
     if !python {
         func_ptr = get_func(&task_json.function_name);
     }
-    Task::new(args, task_json.function_name.clone(), func_ptr)
+    Task::new(
+        args,
+        ref_tasks_opt,
+        task_json.function_name.clone(),
+        func_ptr,
+    )
 }
 
 pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
@@ -114,7 +128,7 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
                     // Add successor indexes to node
                     let succ_indexes = succ_json.indexes.clone();
 
-                    // 1st case: little indexes ',' separated
+                    // 1st case: exact indexes ',' separated
                     if succ_indexes.contains(',') {
                         for successor_index in succ_indexes.split(",") {
                             // strip to remove whitespace
@@ -159,4 +173,16 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
     }
 
     Ok(graph)
+}
+
+pub fn re_init_objects(graph: &mut Graph, graph_json: &str) {
+    // Check for initializations in the graph
+    let init_objects = match init_objects(graph_json) {
+        Ok(init_objects) => Some(init_objects),
+        Err(_) => None,
+    };
+    // Set the initialized objects in the graph
+    if let Some(init_objects) = init_objects {
+        graph.set_init_objects(init_objects);
+    }
 }

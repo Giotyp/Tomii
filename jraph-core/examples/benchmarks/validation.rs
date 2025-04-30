@@ -11,9 +11,8 @@ fn find_index(idx: isize, mult_factor: usize) -> usize {
     }
 }
 
-pub fn validate1(mult_factor: usize) -> Vec<DMatrix<Complex32>> {
+pub fn validate1(mult_factor: usize, fft_size: usize) -> Vec<DMatrix<Complex32>> {
     let mut results: Vec<DMatrix<Complex32>> = Vec::new();
-    let fft_size = 10000;
     let mut fft_buffers: Vec<Fft> = Vec::new();
 
     for _ in 0..mult_factor {
@@ -30,9 +29,8 @@ pub fn validate1(mult_factor: usize) -> Vec<DMatrix<Complex32>> {
     results
 }
 
-pub fn validate2(mult_factor: usize) -> Vec<DMatrix<Complex32>> {
+pub fn validate2(mult_factor: usize, fft_size: usize) -> Vec<DMatrix<Complex32>> {
     let mut results: Vec<DMatrix<Complex32>> = Vec::new();
-    let fft_size = 10000;
     let mut fft_buffers: Vec<Fft> = Vec::new();
 
     for _ in 0..mult_factor {
@@ -57,9 +55,8 @@ pub fn validate2(mult_factor: usize) -> Vec<DMatrix<Complex32>> {
     results
 }
 
-pub fn validate3(mult_factor: usize) -> Vec<DMatrix<Complex32>> {
+pub fn validate3(mult_factor: usize, fft_size: usize) -> Vec<DMatrix<Complex32>> {
     let mut results: Vec<DMatrix<Complex32>> = Vec::new();
-    let fft_size = 10000;
     let mut fft_buffers: Vec<Fft> = Vec::new();
 
     for _ in 0..mult_factor {

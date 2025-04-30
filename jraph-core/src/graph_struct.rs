@@ -5,14 +5,21 @@ use std::collections::HashMap;
 
 pub struct Task {
     args: Vec<CmTypes>,
+    ref_tasks: Option<Vec<String>>,
     function_name: String,
     func_ptr: Option<CmPtr>,
 }
 
 impl Task {
-    pub fn new(args: Vec<CmTypes>, function_name: String, func_ptr: Option<CmPtr>) -> Task {
+    pub fn new(
+        args: Vec<CmTypes>,
+        ref_tasks: Option<Vec<String>>,
+        function_name: String,
+        func_ptr: Option<CmPtr>,
+    ) -> Task {
         Task {
             args,
+            ref_tasks,
             function_name,
             func_ptr,
         }
@@ -20,6 +27,10 @@ impl Task {
 
     pub fn args(&self) -> &Vec<CmTypes> {
         &self.args
+    }
+
+    pub fn ref_tasks(&self) -> Option<&Vec<String>> {
+        self.ref_tasks.as_ref()
     }
 
     pub fn function_name(&self) -> &String {
@@ -90,6 +101,16 @@ impl Node {
     pub fn add_dependent(&mut self, dependent: String, stage_no: usize) {
         self.dependents.push((dependent, stage_no));
     }
+
+    pub fn dependencies_map(&self, graph: &Graph) -> HashMap<String, Vec<usize>> {
+        let mut dependencies_map = HashMap::new();
+        for (dependent_name, stage_no) in &self.dependents {
+            let dep_node = graph.stages[*stage_no].node(dependent_name);
+            let successors_index = dep_node.successors_index[self.name()].clone();
+            dependencies_map.insert(dependent_name.clone(), successors_index);
+        }
+        dependencies_map
+    }
 }
 
 pub struct Stage {
@@ -127,16 +148,24 @@ impl Stage {
         let node_name = node.name.clone();
         self.nodes.insert(node_name.clone(), node);
     }
+
+    // Utility functions
+    pub fn total_nodes(&self) -> usize {
+        self.nodes.values().map(|node| node.mult_factor()).sum()
+    }
 }
 
 pub struct Graph {
     stages: Vec<Stage>,
-    init_objects: Option<HashMap<String, Vec<CmTypes>>>, 
+    init_objects: Option<HashMap<String, Vec<CmTypes>>>,
 }
 
 impl Graph {
     pub fn new() -> Graph {
-        Graph { stages: Vec::new(), init_objects: None }
+        Graph {
+            stages: Vec::new(),
+            init_objects: None,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -161,6 +190,20 @@ impl Graph {
 
     pub fn set_init_objects(&mut self, init_objects: HashMap<String, Vec<CmTypes>>) {
         self.init_objects = Some(init_objects);
+    }
+
+    pub fn node_dependencies_vecmap(&self) -> Vec<HashMap<String, HashMap<String, Vec<usize>>>> {
+        let mut dependencies_vecmap = vec![HashMap::new(); self.stages.len()];
+        for (stage_no, stage) in self.stages.iter().enumerate() {
+            if stage_no == 0 {
+                continue; // Skip the first stage
+            }
+            for node in stage.nodes.values() {
+                let dependencies_map = node.dependencies_map(self);
+                dependencies_vecmap[stage_no].insert(node.name.clone(), dependencies_map);
+            }
+        }
+        dependencies_vecmap
     }
 }
 
@@ -197,6 +240,9 @@ impl Graph {
                 println!("          Mult-Factor: {}", node.mult_factor);
                 println!("          Task: {}", node.task.function_name);
                 println!("              Args: {:?}", node.task.args);
+                if let Some(ref_tasks) = &node.task.ref_tasks {
+                    println!("              Ref Tasks: {:?}", ref_tasks);
+                }
                 println!("          Successors: {:?}", node.successors);
                 println!("          Successors Index: {:?}", node.successors_index);
                 println!("          Dependents: {:?}", node.dependents);

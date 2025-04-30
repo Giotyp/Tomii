@@ -1,15 +1,18 @@
 #![allow(unused_imports)]
 #![allow(dead_code)]
 use core_affinity;
-use rayon::prelude::*;
+use rayon::{prelude::*, vec};
 use rayon::{ThreadPool, ThreadPoolBuilder};
+use std::future::ready;
+use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::cmtypes::CmTypes;
 use crate::graph_struct::*;
 use crate::time_buffer::TimeBuffer;
-use crate::cmtypes::CmTypes;
 use std::collections::HashMap;
+use std::hint::spin_loop;
 
 use crate::temp_funcs::*;
 use crate::utils_rdtsc::*;
@@ -26,14 +29,143 @@ fn find_index(idx: isize, mult_factor: usize) -> usize {
     }
 }
 
-pub struct Executor {
+fn get_thread_idx() -> usize {
+    rayon::current_thread_index().unwrap_or(0)
+}
+
+fn spawn_task<F>(threadpool: &ThreadPool, task_clos: F, task_counter: Arc<AtomicUsize>)
+where
+    F: FnOnce() + Send + 'static,
+{
+    // Spawn Rayon tasks to process the given closure
+    threadpool.spawn(move || {
+        task_clos();
+        task_counter.fetch_sub(1, Ordering::SeqCst);
+    });
+}
+
+struct StageBuffer<T> {
+    buffer: Vec<HashMap<String, Vec<T>>>,
+}
+impl<T> StageBuffer<T> {
+    fn new(graph: &Graph) -> StageBuffer<T> {
+        let buffer = (0..graph.len())
+            .map(|stage_i| {
+                graph
+                    .stage(stage_i)
+                    // Get the nodes map for each stage
+                    .nodes_map()
+                    .keys()
+                    .cloned()
+                    // Create an empty Vec for each node
+                    .map(|name| (name, Vec::new()))
+                    .collect()
+            })
+            .collect();
+        StageBuffer { buffer }
+    }
+
+    fn new_empty() -> StageBuffer<T> {
+        StageBuffer { buffer: Vec::new() }
+    }
+
+    fn new_mfval(graph: &Graph, init_val: T) -> StageBuffer<T>
+    where
+        T: Clone,
+    {
+        let mut buffer = Vec::new();
+        for i in 0..graph.len() {
+            let mut map = HashMap::new();
+            // Get the nodes map for each stage
+            let nodes_map = graph.stage(i).nodes_map();
+            // iterate over the nodes map to create a vector for each node
+            for (node_name, node) in nodes_map {
+                let mult_factor = node.mult_factor();
+                let new_vec = vec![init_val.clone(); mult_factor];
+                map.insert(node_name.clone(), new_vec);
+            }
+            buffer.push(map);
+        }
+        StageBuffer { buffer }
+    }
+
+    fn search_node(&self, node_name: &str) -> Option<Vec<T>>
+    where
+        T: Clone,
+    {
+        for stage in &self.buffer {
+            if let Some(indices) = stage.get(node_name) {
+                return Some(indices.to_vec());
+            }
+        }
+        None
+    }
+
+    fn search_node_idx(&self, node_name: &str, index: usize) -> Option<T>
+    where
+        T: Clone,
+    {
+        for stage in &self.buffer {
+            if let Some(indices) = stage.get(node_name) {
+                if index < indices.len() {
+                    return Some(indices[index].clone());
+                }
+            }
+        }
+        None
+    }
+
+    fn add_elem(&mut self, stage: usize, node_name: String, elem: T) {
+        let stage_buffer = &mut self.buffer[stage];
+        if let Some(idx_vec) = stage_buffer.get_mut(&node_name) {
+            idx_vec.push(elem);
+        } else {
+            stage_buffer.insert(node_name, vec![elem]);
+        }
+    }
+
+    fn stage_buffer(&self, stage: usize) -> &HashMap<String, Vec<T>> {
+        &self.buffer[stage]
+    }
+    fn stage_buffer_mut(&mut self, stage: usize) -> &mut HashMap<String, Vec<T>> {
+        &mut self.buffer[stage]
+    }
+
+    fn clear_buffer(&mut self) {
+        for stage in &mut self.buffer {
+            for (_, idx_vec) in stage {
+                idx_vec.clear();
+            }
+        }
+    }
+
+    fn stage_total(&self, stage: usize) -> usize {
+        let stage_buffer = &self.buffer[stage];
+        let mut total = 0;
+        for (_, idx_vec) in stage_buffer {
+            total += idx_vec.len();
+        }
+        total
+    }
+
+    fn total(&self) -> usize {
+        let mut total = 0;
+        for i in 0..self.buffer.len() {
+            total += self.stage_total(i);
+        }
+        total
+    }
+}
+
+pub struct Scheduler {
     workers: usize,
     threadpool: ThreadPool,
+    stage_results: Arc<Mutex<StageBuffer<CmTypes>>>,
 }
 
 // Public API
-impl Executor {
-    pub fn new(core_offset: usize, workers: usize) -> Executor {
+impl Scheduler {
+    pub fn new(core_offset: usize, workers: usize) -> Scheduler {
         // Create threadpool and pin workers to cores
         let mut core_ids = core_affinity::get_core_ids().unwrap();
         core_ids.sort();
@@ -50,53 +182,58 @@ impl Executor {
             .build()
             .unwrap();
 
-        Executor {
+        let stage_results = Arc::new(Mutex::new(StageBuffer::new_empty()));
+
+        Scheduler {
             workers,
             threadpool,
+            stage_results,
         }
     }
 
-    pub fn execute(
-        &self,
+    pub fn get_stage_results(&self, stage_no: usize) -> HashMap<String, Vec<CmTypes>> {
+        let stage_results = self.stage_results.lock().unwrap();
+        stage_results.stage_buffer(stage_no).clone()
+    }
+
+    pub fn clear_stage_results(&mut self) {
+        let mut stage_results = self.stage_results.lock().unwrap();
+        stage_results.clear_buffer();
+    }
+
+    pub fn schedule(
+        &mut self,
         graph: &Graph,
-        results: &mut Vec<CmTypes>,
         arc_timebuf: Arc<Mutex<TimeBuffer>>,
         run_idx: usize,
     ) -> Duration {
         let num_stages = graph.len();
+        let init_objects_opt = graph.init_objects();
+        let last_stage_nodes = graph.stage(num_stages - 1).total_nodes();
 
-        // Initializations that need to be done from graph
+        let mut stage_scheduled = StageBuffer::<usize>::new(graph);
+        let stage_completed = StageBuffer::<usize>::new(graph);
+        let stage_completed = Arc::new(Mutex::new(stage_completed));
 
-        let fft_size = 10000;
-        let mult_factor = graph.stage(0).node("FFT").mult_factor();
+        let stage_results = StageBuffer::<CmTypes>::new_mfval(graph, CmTypes::None());
+        self.stage_results = Arc::new(Mutex::new(stage_results));
 
-        let mut fft_buffers: Vec<Arc<Mutex<Fft>>> = Vec::with_capacity(mult_factor);
-        for _ in 0..mult_factor {
-            fft_buffers.push(Arc::new(Mutex::new(Fft::new(fft_size))));
-        }
-
-        let stage_results: Arc<Mutex<Vec<Vec<CmTypes>>>> = Arc::new(Mutex::new(vec![
-                vec![CmTypes::None(); mult_factor];
-                num_stages
-            ]));
-        let stage_scheduled: Arc<Mutex<Vec<Vec<usize>>>> =
-            Arc::new(Mutex::new(vec![Vec::new(); num_stages]));
-        let stage_completed: Arc<Mutex<Vec<Vec<usize>>>> =
-            Arc::new(Mutex::new(vec![Vec::new(); num_stages]));
+        // Get dependencies for each node in each stage
+        let node_dependencies_vecmap: Vec<HashMap<String, HashMap<String, Vec<usize>>>> =
+            graph.node_dependencies_vecmap();
 
         // Atomic counter to track task completion
         let task_counter = Arc::new(AtomicUsize::new(0));
 
         let start_time = Instant::now();
-        while stage_scheduled.lock().unwrap()[num_stages - 1].len() < mult_factor {
+        while stage_scheduled.stage_total(num_stages - 1) < last_stage_nodes {
             for stage in 0..num_stages {
-                let scheduled = stage_scheduled.lock().unwrap();
-                if scheduled[stage].len() < mult_factor {
-                    drop(scheduled);
+                let stage_nodes = graph.stage(stage).total_nodes();
 
+                if stage_scheduled.stage_total(stage) < stage_nodes {
                     // Check if any task from the previous stage is completed
                     let completed = stage_completed.lock().unwrap();
-                    if stage > 0 && completed[stage - 1].len() == 0 {
+                    if stage > 0 && completed.stage_total(stage - 1) == 0 {
                         continue;
                     }
                     drop(completed);
@@ -104,210 +241,190 @@ impl Executor {
                     let nodes_map = graph.stage(stage).nodes_map();
                     for (node_name, node) in nodes_map {
                         let node_args = node.task().args();
+                        let mult_factor = node.mult_factor();
+                        let ref_task_opt = node.task().ref_tasks();
+
+                        let time_key = format!("{}-{}", stage, node_name);
 
                         let func_opt = node.task().func_ptr();
+                        let func = func_opt.unwrap();
 
                         if stage == 0 {
-                            for (index, fft_struct) in fft_buffers.iter().enumerate() {
-                                let fft_struct = Arc::clone(fft_struct);
-                                let arc_timebuf = arc_timebuf.clone();
-                                let stage_completed = stage_completed.clone();
-                                stage_scheduled.lock().unwrap()[stage].push(index);
-                    
-                                let task = move || {
-                                    let mut fft_struct = fft_struct.lock().unwrap();
-                    
-                                    let worker_index = rayon::current_thread_index().unwrap_or(0);
-                                    let t1 = Instant::now();
-                                    fft_struct.computefft();
-                                    let t2 = Instant::now();
-                    
-                                    let mut tb = arc_timebuf.lock().unwrap();
-                                    tb.add_time("FFT-Comp", run_idx, worker_index, t2 - t1);
-                                    drop(tb);
-                                    stage_completed.lock().unwrap()[stage].push(index);
-                                };
-                    
-                                task_counter.fetch_add(1, Ordering::SeqCst);
-                                self.spawn_task(task, task_counter.clone());
-                            }
-                        } else if node_args[0].arg_name() == "$ref" {
-                            let dependencies: HashMap<String, Vec<usize>> = {
-                                let mut map = HashMap::new();
-                                let dependents = node.dependents();
-                                for dependent in dependents {
-                                    let dep_node = graph.stage(dependent.1).node(&dependent.0);
-                                    let successors_index =
-                                        dep_node.successors_index()[&node_name.clone()].clone();
-                                    map.insert(dep_node.name().clone(), successors_index);
-                                }
-                                map
-                            };
+                            for index in 0..mult_factor {
+                                let mut arg_vec = Vec::new();
 
-                            let dependents_index: Vec<usize> =
-                                dependencies[&node.dependents()[0].0].clone();
-                            let completed_indices: Vec<usize> =
-                                stage_completed.lock().unwrap()[stage - 1].clone();
-                            let scheduled_indices = stage_scheduled.lock().unwrap()[stage].clone();
-
-                            let remaining = {
-                                let stage_finished = &stage_completed.lock().unwrap()[stage];
-                                let mut vec = Vec::new();
-                                for i in 0..mult_factor {
-                                    if !stage_finished.contains(&i)
-                                        && !scheduled_indices.contains(&i)
-                                    {
-                                        vec.push(i);
+                                for arg in node_args.iter() {
+                                    match arg {
+                                        CmTypes::Ref(obj_name) => {
+                                            let init_objects = init_objects_opt.as_ref().unwrap();
+                                            let obj = &init_objects[obj_name][index];
+                                            arg_vec.push(obj.clone());
+                                        }
+                                        _ => {
+                                            arg_vec.push(arg.clone());
+                                        }
                                     }
                                 }
-                                vec
+
+                                stage_scheduled.add_elem(stage, node_name.clone(), index);
+
+                                self.enqueue_task(
+                                    stage,
+                                    node_name.clone(),
+                                    index,
+                                    arg_vec,
+                                    func,
+                                    time_key.clone(),
+                                    run_idx,
+                                    arc_timebuf.clone(),
+                                    stage_completed.clone(),
+                                    self.stage_results.clone(),
+                                    task_counter.clone(),
+                                );
+                            }
+                        } else {
+                            // Check if there are remaining tasks for the current node
+                            let scheduled_indices: &Vec<usize> =
+                                &stage_scheduled.stage_buffer(stage)[node_name];
+
+                            let node_remaining: Vec<usize> = {
+                                let mut rem = Vec::new();
+                                let completed_lock = stage_completed.lock().unwrap();
+                                let node_finished: &Vec<usize> =
+                                    &completed_lock.stage_buffer(stage)[node_name];
+                                for i in 0..mult_factor {
+                                    if !node_finished.contains(&i)
+                                        && !scheduled_indices.contains(&i)
+                                    {
+                                        rem.push(i);
+                                    }
+                                }
+                                rem
                             };
 
-                            if remaining.is_empty() {
+                            if node_remaining.is_empty() {
                                 continue;
                             }
 
-                            let mut arg_vecs = Vec::new();
-                            for task_idx in remaining.iter() {
-                                let deps = {
-                                    let mut vec = Vec::new();
-                                    for i in dependents_index.iter() {
-                                        let req_idx = (*task_idx as isize) - (*i as isize);
-                                        vec.push(find_index(req_idx, mult_factor));
-                                    }
-                                    vec
-                                };
+                            // Access dependencies for the current node
+                            let dependencies: &HashMap<String, Vec<usize>> =
+                                &node_dependencies_vecmap[stage][node_name];
 
-                                // Check if all dependencies are present in completed_indices
-                                if deps.iter().all(|&dep| completed_indices.contains(&dep)) {
-                                    let mut arg_vect = Vec::new();
-                                    for dep in deps.iter() {
-                                        let arg = CmTypes::VecC32(
-                                            fft_buffers[*dep].lock().unwrap().get_buf(),
-                                        );
-                                        arg_vect.push(arg);
+                            let mut arg_vecs: Vec<(Vec<CmTypes>, usize)> = Vec::new();
+                            for task_idx in node_remaining.iter() {
+                                let deps: HashMap<String, Vec<usize>> = dependencies
+                                    .iter()
+                                    .map(|(dep_name, idxs)| {
+                                        // use find_index to correctly correspond the
+                                        // dependent indexes to the current task
+                                        let transformed = idxs
+                                            .iter()
+                                            .map(|&i| {
+                                                let req_idx = (*task_idx as isize) - (i as isize);
+                                                find_index(req_idx, mult_factor)
+                                            })
+                                            .collect::<Vec<_>>();
+                                        (dep_name.clone(), transformed)
+                                    })
+                                    .collect();
+
+                                // All indexes for each key in deps should also be present in
+                                // completed_indices
+                                let mut ready_to_schedule: bool = true;
+
+                                for (dep_node, dep_idx) in deps.iter() {
+                                    let complete_lock = stage_completed.lock().unwrap();
+                                    let completed_indices_opt: Option<Vec<usize>> =
+                                        complete_lock.search_node(dep_node);
+                                    drop(complete_lock);
+
+                                    if let Some(completed_indices) = completed_indices_opt {
+                                        // all dep_idxes should be present in completed_indices
+                                        for dep in dep_idx.iter() {
+                                            if !completed_indices.contains(dep) {
+                                                ready_to_schedule = false;
+                                                break;
+                                            }
+                                        }
+                                    } else {
+                                        // dep_node is not present in completed_indices
+                                        ready_to_schedule = false;
                                     }
-                                    arg_vecs.push((arg_vect, *task_idx));
+                                    if !ready_to_schedule {
+                                        break;
+                                    }
+                                }
+
+                                // Retrieve arguments from dependencies
+                                if ready_to_schedule {
+                                    let mut arg_vec: Vec<CmTypes> = Vec::new();
+                                    let mut ref_task_count = 0;
+
+                                    for arg in node_args.iter() {
+                                        match arg {
+                                            CmTypes::Ref(obj_name) => {
+                                                // Check for reference task
+                                                if let Some(ref_task_vec) = ref_task_opt {
+                                                    let task_key = &ref_task_vec[ref_task_count];
+                                                    ref_task_count += 1;
+
+                                                    let indices = &deps[&task_key.clone()];
+                                                    for dep in indices.iter() {
+                                                        let init_objects =
+                                                            init_objects_opt.as_ref().unwrap();
+                                                        let obj =
+                                                            &init_objects[&obj_name.clone()][*dep];
+                                                        arg_vec.push(obj.clone());
+                                                    }
+                                                } else {
+                                                    let init_objects =
+                                                        init_objects_opt.as_ref().unwrap();
+                                                    let obj = &init_objects[obj_name][*task_idx];
+                                                    arg_vec.push(obj.clone());
+                                                }
+                                            }
+                                            CmTypes::Res(res_node) => {
+                                                let indices = &deps[res_node];
+                                                for dep in indices.iter() {
+                                                    // for each task index, retrieve the
+                                                    // corresponding results
+                                                    // (must exist since they are completed)
+                                                    let res_lock =
+                                                        self.stage_results.lock().unwrap();
+
+                                                    let result = res_lock
+                                                        .search_node_idx(&res_node, *dep)
+                                                        .unwrap();
+                                                    drop(res_lock);
+                                                    arg_vec.push(result);
+                                                }
+                                            }
+                                            _ => {
+                                                arg_vec.push(arg.clone());
+                                            }
+                                        }
+                                    }
+                                    arg_vecs.push((arg_vec, *task_idx));
                                 }
                             }
 
-                            let func = func_opt.unwrap();
+                            // Schedule all remaining tasks
                             for (arg_vec, index) in arg_vecs {
-                                let arc_timebuf = arc_timebuf.clone();
-                                let stage_results = stage_results.clone();
-                                let stage_completed = stage_completed.clone();
-                                stage_scheduled.lock().unwrap()[stage].push(index);
-                    
-                                let task = {
-                                    move || {
-                                    let worker_index = rayon::current_thread_index().unwrap_or(0);
-                                    let t1_comp = Instant::now();
-                                    let res = func(arg_vec);
-                                    let t2_comp = Instant::now();
-                    
-                                    let mut tb = arc_timebuf.lock().unwrap();
-                                    tb.add_time("VecMat-Comp", run_idx, worker_index, t2_comp - t1_comp);
-                                    drop(tb);
-                    
-                                    stage_completed.lock().unwrap()[stage].push(index);
-                                    stage_results.lock().unwrap()[stage][index] = res;
-                                }};
-                    
-                                task_counter.fetch_add(1, Ordering::SeqCst);
-                                self.spawn_task(task, task_counter.clone());
-                            }
-                        } else if node_args[0].arg_name() == "$res" {
-                            let dependencies: HashMap<String, Vec<usize>> = {
-                                let mut map = HashMap::new();
-                                let dependents = node.dependents();
-                                for dependent in dependents {
-                                    let dep_node = graph.stage(dependent.1).node(&dependent.0);
-                                    let successors_index =
-                                        dep_node.successors_index()[&node_name.clone()].clone();
-                                    map.insert(dep_node.name().clone(), successors_index);
-                                }
-                                map
-                            };
+                                stage_scheduled.add_elem(stage, node_name.clone(), index);
 
-                            let dependents_index: Vec<usize> = dependencies["Vec2Mat"].clone();
-                            let completed_indices: Vec<usize> =
-                                stage_completed.lock().unwrap()[stage - 1].clone();
-                            let scheduled_indices = stage_scheduled.lock().unwrap()[stage].clone();
-
-                            let remaining = {
-                                let stage_finished = &stage_completed.lock().unwrap()[stage];
-                                let mut vec = Vec::new();
-                                for i in 0..mult_factor {
-                                    if !stage_finished.contains(&i)
-                                        && !scheduled_indices.contains(&i)
-                                    {
-                                        vec.push(i);
-                                    }
-                                }
-                                vec
-                            };
-
-                            if remaining.is_empty() {
-                                continue;
-                            }
-
-                            let mut arg_vecs = Vec::new();
-
-                            for task_idx in remaining.iter() {
-                                let deps = {
-                                    let mut vec = Vec::new();
-                                    for i in dependents_index.iter() {
-                                        let req_idx = (*task_idx as isize) - (*i as isize);
-                                        vec.push(find_index(req_idx, mult_factor));
-                                    }
-                                    vec
-                                };
-
-                                let mut count = 0;
-                                let t1_clone = Instant::now();
-                                if deps.iter().all(|&dep| completed_indices.contains(&dep)) {
-                                    let mut arg_vect = Vec::new();
-                                    for dep in deps.iter() {
-                                        let prev_stage_res = stage_results.lock().unwrap()[stage - 1]
-                                            [*dep]
-                                            .clone();
-                                        arg_vect.push(prev_stage_res);
-                                    }
-                                    count += 1;
-                                    arg_vecs.push((arg_vect, *task_idx));
-                                }
-                                let t2_clone = Instant::now();
-                                if count > 0 {
-                                    let mut tb = arc_timebuf.lock().unwrap();
-                                    tb.add_time("Stage2-Clone", run_idx, 0, t2_clone - t1_clone);
-                                    drop(tb);
-                                }
-                            }
-
-                            let func = func_opt.unwrap();
-                            for (arg_vec, index) in arg_vecs {
-                                let arc_timebuf = arc_timebuf.clone();
-                                let stage_results = stage_results.clone();
-                                let stage_completed = stage_completed.clone();
-                                stage_scheduled.lock().unwrap()[stage].push(index);
-                    
-                                let task = {
-                                    move || {
-                                    let worker_index = rayon::current_thread_index().unwrap_or(0);
-                                    let t1_comp = Instant::now();
-                                    let res = func(arg_vec);
-                                    let t2_comp = Instant::now();
-                    
-                                    let mut tb = arc_timebuf.lock().unwrap();
-                                    tb.add_time("CGEMM-Comp", run_idx, worker_index, t2_comp - t1_comp);
-                                    drop(tb);
-                    
-                                    stage_completed.lock().unwrap()[stage].push(index);
-                                    stage_results.lock().unwrap()[stage][index] = res;
-                                }};
-                    
-                                task_counter.fetch_add(1, Ordering::SeqCst);
-                                self.spawn_task(task, task_counter.clone());
+                                self.enqueue_task(
+                                    stage,
+                                    node_name.clone(),
+                                    index,
+                                    arg_vec,
+                                    func,
+                                    time_key.clone(),
+                                    run_idx,
+                                    arc_timebuf.clone(),
+                                    stage_completed.clone(),
+                                    self.stage_results.clone(),
+                                    task_counter.clone(),
+                                );
                             }
                         }
                     }
@@ -316,33 +433,58 @@ impl Executor {
         }
         // Wait for all tasks to complete
         while task_counter.load(Ordering::SeqCst) > 0 {
-            std::thread::sleep(Duration::from_micros(1));
+            spin_loop();
         }
-
-        // Collect results from last stage
-        let t1 = Instant::now();
-        let last_stage_results = &stage_results.lock().unwrap()[num_stages - 1];
-        for i in 0..mult_factor {
-            // pushing Arc references
-            let res = last_stage_results[i].clone();
-            results.push(res);
-        }
-        let t2 = Instant::now();
-        let mut tb = arc_timebuf.lock().unwrap();
-        tb.add_time("CmRetrieve", run_idx, 0, t2 - t1);
-        drop(tb);
         let end_time = Instant::now();
+        let total_done = stage_completed.lock().unwrap().stage_total(num_stages - 1);
+        assert_eq!(total_done, last_stage_nodes);
         end_time - start_time
     }
 
-    fn spawn_task<F>(&self, task_clos: F, task_counter: Arc<AtomicUsize>)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        // Spawn Rayon tasks to process the given closure
-        self.threadpool.spawn(move || {
-            task_clos();
-            task_counter.fetch_sub(1, Ordering::SeqCst);
-        });
+    fn enqueue_task(
+        &self,
+        stage: usize,
+        node_name: String,
+        index: usize,
+        arg_vec: Vec<CmTypes>,
+        func: fn(Vec<CmTypes>) -> CmTypes,
+        time_key: String,
+        run_idx: usize,
+        arc_timebuf: Arc<Mutex<TimeBuffer>>,
+        stage_completed: Arc<Mutex<StageBuffer<usize>>>,
+        stage_results: Arc<Mutex<StageBuffer<CmTypes>>>,
+        task_counter: Arc<AtomicUsize>,
+    ) {
+        let task = move || {
+            let worker = get_thread_idx();
+            let t1 = Instant::now();
+            let res = func(arg_vec);
+            let t2 = Instant::now();
+
+            // Time function
+            {
+                let mut tb = arc_timebuf.lock().unwrap();
+                tb.add_time(&time_key, run_idx, worker, t2 - t1);
+            }
+            // store result
+            {
+                let mut res_lock = stage_results.lock().unwrap();
+                let slot = res_lock
+                    .stage_buffer_mut(stage)
+                    .get_mut(&node_name)
+                    .unwrap();
+                slot[index] = res;
+                drop(res_lock);
+            }
+            // mark completed
+            {
+                let mut comp_lock = stage_completed.lock().unwrap();
+                comp_lock.add_elem(stage, node_name.clone(), index);
+                drop(comp_lock);
+            }
+        };
+
+        task_counter.fetch_add(1, Ordering::SeqCst);
+        spawn_task(&self.threadpool, task, task_counter.clone());
     }
 }

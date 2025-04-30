@@ -42,7 +42,7 @@ pub fn init_objects(graph_json: &str) -> Result<HashMap<String, Vec<CmTypes>>, s
 
             let mut value_vec: Vec<CmTypes> = Vec::new();
             for _ in 0..mult_factor {
-                let arg: CmTypes = string_to_primitive(type_str.clone(), arg_str.clone()).unwrap();
+                let arg: CmTypes = string_to_cmtype(type_str.clone(), arg_str.clone()).unwrap();
                 value_vec.push(arg);
             }
             init_objects.insert(name, value_vec);
@@ -63,7 +63,7 @@ pub fn init_objects(graph_json: &str) -> Result<HashMap<String, Vec<CmTypes>>, s
                         continue;
                     }
 
-                    args.push(string_to_primitive(type_str.clone(), arg_str.clone()).unwrap());
+                    args.push(string_to_cmtype(type_str.clone(), arg_str.clone()).unwrap());
                 }
                 args
             };

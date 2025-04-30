@@ -1,9 +1,9 @@
+use crate::init_funcs;
+use nalgebra::*;
+use num_complex::Complex32;
 use serde::Deserialize;
 use std::fmt;
 use std::sync::{Arc, Mutex};
-use nalgebra::*;
-use num_complex::Complex32;
-use crate::init_funcs;
 
 #[derive(Deserialize, Clone)]
 pub enum CmTypes {
@@ -34,7 +34,7 @@ pub enum CmTypes {
     None(),
     // Space for Custom structs/types
     #[serde[skip]]
-    Fft(Arc<Mutex<init_funcs::Fft>>)
+    Fft(Arc<Mutex<init_funcs::Fft>>),
 }
 
 mod dvector_arc_serde {
@@ -174,7 +174,7 @@ impl std::error::Error for CustomError {
     }
 }
 
-pub fn string_to_primitive(tp: String, arg: String) -> Result<CmTypes, CustomError> {
+pub fn string_to_cmtype(tp: String, arg: String) -> Result<CmTypes, CustomError> {
     let tp = tp.as_str();
     match tp {
         "bool" => arg

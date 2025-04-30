@@ -1,4 +1,28 @@
 {
+    "initializations": [
+        {
+            "name": "fft_size",
+            "mult_factor": 1,
+            "func": "",
+            "arg_types": [
+                "usize"
+            ],
+            "args": [
+                "10000"
+            ]
+        },
+        {
+            "name": "fft_buffers",
+            "mult_factor": 100,
+            "func": "Fft::new",
+            "args": [
+                "fft_size"
+            ],
+            "arg_types": [
+                "usize"
+            ]
+        }
+    ],
     "graph": {
         "stages": [
             {
@@ -13,7 +37,33 @@
                             "args": [
                                 "fft_buffers"
                             ],
-                            "function_name": "vec_to_mat"
+                            "function_name": "Fft::computefft"
+                        },
+                        "successors": [
+                            {
+                                "task": "FFT_GET",
+                                "indexes": "0"
+                            }
+                        ]
+                    }
+                ]
+            },
+            {
+                "nodes": [
+                    {
+                        "name": "FFT_GET",
+                        "mult_factor": 100,
+                        "task": {
+                            "arg_types": [
+                                "$ref"
+                            ],
+                            "args": [
+                                "fft_buffers"
+                            ],
+                            "ref_tasks": [
+                                "FFT"
+                            ],
+                            "function_name": "Fft::get_buf"
                         },
                         "successors": [
                             {
@@ -31,10 +81,10 @@
                         "mult_factor": 100,
                         "task": {
                             "arg_types": [
-                                "$ref"
+                                "$res"
                             ],
                             "args": [
-                                "fft_buffers"
+                                "FFT_GET"
                             ],
                             "function_name": "vec_to_mat"
                         },
