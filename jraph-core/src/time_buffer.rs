@@ -1,3 +1,4 @@
+use itertools::Itertools;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
@@ -70,7 +71,8 @@ impl TimeBuffer {
 
         output_buffer.push_str(&format!("{}\n{}", filler, total_stat));
 
-        for (task, run_buffer) in self.time_buffers.iter() {
+        for task in self.time_buffers.keys().sorted() {
+            let run_buffer = self.time_buffers.get(task).unwrap();
             // Count total tasks and tasks executed by each worker
             // for the last run
             let mut worker_tasks = vec![0; self.workers];
@@ -118,11 +120,7 @@ impl TimeBuffer {
         let mut output_buffer: String = format!("Time Statistics for {}\n", bench_name);
 
         for (task, run_buffers) in &self.time_buffers {
-
-            output_buffer.push_str(&format!(
-                "{}\nTask: {}\n",
-                filler, task
-            ));
+            output_buffer.push_str(&format!("{}\nTask: {}\n", filler, task));
 
             for (run_idx, run_buf) in run_buffers.iter().enumerate() {
                 output_buffer.push_str(&format!("{}\nRun: {}\n", filler, run_idx));
@@ -137,7 +135,7 @@ impl TimeBuffer {
                     let tasks = wk_buf.len();
                     let max_time = wk_buf.iter().max().unwrap();
                     let min_time = wk_buf.iter().min().unwrap();
-                    let avg_time = total_time /tasks as u32;
+                    let avg_time = total_time / tasks as u32;
 
                     output_buffer.push_str(&format!(
                         "Tasks: {:?}, Total: {:.4?}, Max: {:.4?}, Min: {:.4?}, Avg: {:.4?}\n",
@@ -157,11 +155,7 @@ impl TimeBuffer {
         let mut output_buffer: String = format!("Time Statistics for {}\n", bench_name);
 
         for (task, run_buffers) in &self.time_buffers {
-
-            output_buffer.push_str(&format!(
-                "{}\nTask: {}\n",
-                filler, task
-            ));
+            output_buffer.push_str(&format!("{}\nTask: {}\n", filler, task));
 
             for (run_idx, run_buf) in run_buffers.iter().enumerate() {
                 output_buffer.push_str(&format!("{}\nRun: {}\n", filler, run_idx));
@@ -176,8 +170,7 @@ impl TimeBuffer {
                         let val = {
                             if idx == wk_buf.len() - 1 {
                                 format!("{:.4?}", time)
-                            }
-                            else {
+                            } else {
                                 format!("{:.4?}, ", time)
                             }
                         };
