@@ -3,6 +3,7 @@
 use crate::cmtypes::*;
 use std::collections::HashMap;
 
+#[derive(Clone)]
 pub struct Task {
     args: Vec<CmTypes>,
     ref_tasks: Option<Vec<String>>,
@@ -42,6 +43,7 @@ impl Task {
     }
 }
 
+#[derive(Clone)]
 pub struct Node {
     name: String,
     task: Task,
@@ -113,6 +115,7 @@ impl Node {
     }
 }
 
+#[derive(Clone)]
 pub struct Stage {
     nodes: HashMap<String, Node>,
 }
@@ -204,6 +207,36 @@ impl Graph {
             }
         }
         dependencies_vecmap
+    }
+
+    pub fn merge(&mut self, other: &Graph) {
+        // 1) Merge init_objects
+        if let (Some(self_inits), Some(other_inits)) =
+            (self.init_objects.as_mut(), other.init_objects.as_ref())
+        {
+            for (key, vec) in other_inits {
+                self_inits.entry(key.clone()).or_insert_with(|| vec.clone());
+            }
+        }
+
+        let my_len = self.stages.len();
+        let oth_len = other.stages.len();
+        if oth_len > my_len {
+            // clone in the extra whole stages
+            for stage in other.stages.iter().skip(my_len) {
+                self.stages.push(stage.clone());
+            }
+        }
+
+        // 3) For each stage that `other` has, merge its nodes
+        for stage_i in 0..oth_len {
+            let target = &mut self.stages[stage_i];
+            let src = &other.stages[stage_i];
+            for node_name in src.node_names() {
+                let node = src.node(&node_name).clone();
+                target.add_node(node);
+            }
+        }
     }
 }
 
