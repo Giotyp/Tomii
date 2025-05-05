@@ -1,11 +1,10 @@
-pub mod scheduler;
+pub mod cmtypes;
 pub mod graph_gen;
-pub mod obj_gen;
 pub mod graph_struct;
-pub mod temp_funcs;
+pub mod obj_gen;
+pub mod scheduler;
 pub mod time_buffer;
 pub mod utils_rdtsc;
-pub mod cmtypes;
 
 pub mod funcs {
     include!(concat!(env!("OUT_DIR"), "/funcs.rs"));
