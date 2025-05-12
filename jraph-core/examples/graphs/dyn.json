@@ -1,0 +1,93 @@
+{
+    "initializations": [
+        {
+            "name": "buf_size",
+            "mult_factor": 1,
+            "args": [
+                {
+                    "type": "usize",
+                    "value": "5"
+                }
+            ]
+        }
+    ],
+    "nodes": [
+        {
+            "name": "buffer_gen",
+            "mult_factor": 1,
+            "function_name": "buf_gen",
+            "args": [
+                {
+                    "type": "$ref",
+                    "value": "buf_size"
+                }
+            ]
+        },
+        {
+            "name": "conditional",
+            "mult_factor": 1,
+            "function_name": "check_condition",
+            "args": [
+                {
+                    "type": "$res",
+                    "predecessor": {
+                        "name": "buffer_gen",
+                        "indexes": "0"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "buf_mult",
+            "mult_factor": 1,
+            "function_name": "multiply_elems",
+            "args": [
+                {
+                    "type": "$res",
+                    "predecessor": {
+                        "name": "buffer_gen",
+                        "indexes": "0"
+                    }
+                },
+                {
+                    "type": "$res",
+                    "condition": {
+                        "operation": "Eq",
+                        "value": "true",
+                        "value_type": "bool"
+                    },
+                    "predecessor": {
+                        "name": "conditional",
+                        "indexes": "0"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "buf_add",
+            "mult_factor": 1,
+            "function_name": "add_elems",
+            "args": [
+                {
+                    "type": "$res",
+                    "predecessor": {
+                        "name": "buffer_gen",
+                        "indexes": "0"
+                    }
+                },
+                {
+                    "type": "$res",
+                    "condition": {
+                        "operation": "Eq",
+                        "value": "false",
+                        "value_type": "bool"
+                    },
+                    "predecessor": {
+                        "name": "conditional",
+                        "indexes": "0"
+                    }
+                }
+            ]
+        }
+    ]
+}

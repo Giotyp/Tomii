@@ -3,134 +3,92 @@
 use crate::cmtypes::*;
 use std::collections::HashMap;
 
-#[derive(Clone)]
-pub struct Task {
-    args: Vec<CmTypes>,
-    ref_tasks: Option<Vec<String>>,
-    function_name: String,
-    func_ptr: Option<CmPtr>,
+/// Comparison operators
+#[derive(Clone, Debug)]
+pub enum CondOp {
+    Eq,
+    Neq,
+    Gt,
+    Lt,
 }
 
-impl Task {
-    pub fn new(
-        args: Vec<CmTypes>,
-        ref_tasks: Option<Vec<String>>,
-        function_name: String,
-        func_ptr: Option<CmPtr>,
-    ) -> Task {
-        Task {
-            args,
-            ref_tasks,
-            function_name,
-            func_ptr,
+impl CondOp {
+    pub fn from_str(op: &str) -> Option<CondOp> {
+        match op {
+            "Eq" => Some(CondOp::Eq),
+            "Neq" => Some(CondOp::Neq),
+            "Gt" => Some(CondOp::Gt),
+            "Lt" => Some(CondOp::Lt),
+            _ => None,
         }
     }
+}
 
-    pub fn args(&self) -> &Vec<CmTypes> {
-        &self.args
-    }
+/// Node Initialization  (Optional) Condition
+#[derive(Clone, Debug)]
+pub struct InitCondition {
+    pub operation: CondOp,
+    pub eval_value: CmTypes,
+}
 
-    pub fn ref_tasks(&self) -> Option<&Vec<String>> {
-        self.ref_tasks.as_ref()
-    }
+impl InitCondition {
+    pub fn evaluate(&self, arg_value: CmTypes) -> bool {
+        // Evaluate against arg_value that is decided during runtime
 
-    pub fn function_name(&self) -> &String {
-        &self.function_name
+        match self.operation {
+            CondOp::Eq => {
+                // if at least one evaluation fails, return false
+                if arg_value != self.eval_value {
+                    return false;
+                }
+            }
+            CondOp::Neq => {
+                if arg_value == self.eval_value {
+                    return false;
+                }
+            }
+            _ => {
+                // Handle other operations (Gt, Lt) as needed
+                // Currently returns false
+                return false;
+            }
+        }
+        // If all evaluations pass, return true
+        true
     }
+}
 
-    pub fn func_ptr(&self) -> Option<CmPtr> {
-        self.func_ptr
-    }
+struct Predecessor {
+    pub name: String,
+    pub indexes: usize,
+}
+
+#[derive(Clone)]
+pub struct Arg {
+    pub value: Option<String>,
+    pub type_: CmTypes,
+    // Optional condition for initialization
+    pub init_condition: Option<InitCondition>,
+    pub predecessor: Option<Predecessor>,
 }
 
 #[derive(Clone)]
 pub struct Node {
-    name: String,
-    task: Task,
-    mult_factor: usize,
-    successors_index: HashMap<String, Vec<usize>>,
-    successors: Vec<(String, usize)>,
-    dependents: Vec<(String, usize)>,
+    pub name: String,
+    pub args: Vec<Arg>,
+    // Variable that defines the number of times
+    // the node is initiated
+    pub mult_factor: usize,
+    pub func_ptr: Option<CmPtr>,
 }
 
-impl Node {
-    pub fn new(name: String, task: Task, mult_factor: usize) -> Node {
-        Node {
-            name,
-            task,
-            mult_factor,
-            successors_index: HashMap::new(),
-            successors: Vec::new(),
-            dependents: Vec::new(),
-        }
-    }
-
-    pub fn name(&self) -> &String {
-        &self.name
-    }
-
-    pub fn task(&self) -> &Task {
-        &self.task
-    }
-
-    pub fn mult_factor(&self) -> usize {
-        self.mult_factor
-    }
-
-    pub fn successors(&self) -> &Vec<(String, usize)> {
-        &self.successors
-    }
-
-    pub fn successors_index(&self) -> &HashMap<String, Vec<usize>> {
-        &self.successors_index
-    }
-
-    pub fn dependents(&self) -> &Vec<(String, usize)> {
-        &self.dependents
-    }
-
-    pub fn add_successor(&mut self, successor: String, stage_no: usize) {
-        self.successors.push((successor, stage_no));
-    }
-
-    pub fn add_successor_index(&mut self, successor_name: String, successor_index: usize) {
-        self.successors_index
-            .entry(successor_name)
-            .or_insert(Vec::new())
-            .push(successor_index);
-    }
-
-    pub fn add_dependent(&mut self, dependent: String, stage_no: usize) {
-        self.dependents.push((dependent, stage_no));
-    }
-
-    pub fn dependencies_map(&self, graph: &Graph) -> HashMap<String, Vec<usize>> {
-        let mut dependencies_map = HashMap::new();
-        for (dependent_name, stage_no) in &self.dependents {
-            let dep_node = graph.stages[*stage_no].node(dependent_name);
-            let successors_index = dep_node.successors_index[self.name()].clone();
-            dependencies_map.insert(dependent_name.clone(), successors_index);
-        }
-        dependencies_map
-    }
-}
-
-#[derive(Clone)]
-pub struct Stage {
+pub struct Graph {
     nodes: HashMap<String, Node>,
+    init_objects: Option<HashMap<String, Vec<CmTypes>>>,
 }
 
-impl Stage {
-    pub fn new() -> Stage {
-        Stage {
-            nodes: HashMap::new(),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.nodes.len()
-    }
-
+/// Node functions
+impl Graph {
     pub fn node_names(&self) -> Vec<String> {
         self.nodes.keys().cloned().collect()
     }
@@ -152,39 +110,22 @@ impl Stage {
         self.nodes.insert(node_name.clone(), node);
     }
 
-    // Utility functions
     pub fn total_nodes(&self) -> usize {
         self.nodes.values().map(|node| node.mult_factor()).sum()
     }
 }
 
-pub struct Graph {
-    stages: Vec<Stage>,
-    init_objects: Option<HashMap<String, Vec<CmTypes>>>,
-}
-
+/// Utility functions
 impl Graph {
     pub fn new() -> Graph {
         Graph {
-            stages: Vec::new(),
+            nodes: HashMap::new(),
             init_objects: None,
         }
     }
 
     pub fn len(&self) -> usize {
-        self.stages.len()
-    }
-
-    pub fn stage(&self, stage_no: usize) -> &Stage {
-        &self.stages[stage_no]
-    }
-
-    pub fn stage_mut(&mut self, stage_no: usize) -> &mut Stage {
-        &mut self.stages[stage_no]
-    }
-
-    pub fn add_stage(&mut self, stage: Stage) {
-        self.stages.push(stage);
+        self.nodes.len()
     }
 
     pub fn init_objects(&self) -> Option<&HashMap<String, Vec<CmTypes>>> {
@@ -194,92 +135,50 @@ impl Graph {
     pub fn set_init_objects(&mut self, init_objects: HashMap<String, Vec<CmTypes>>) {
         self.init_objects = Some(init_objects);
     }
-
-    pub fn node_dependencies_vecmap(&self) -> Vec<HashMap<String, HashMap<String, Vec<usize>>>> {
-        let mut dependencies_vecmap = vec![HashMap::new(); self.stages.len()];
-        for (stage_no, stage) in self.stages.iter().enumerate() {
-            if stage_no == 0 {
-                continue; // Skip the first stage
-            }
-            for node in stage.nodes.values() {
-                let dependencies_map = node.dependencies_map(self);
-                dependencies_vecmap[stage_no].insert(node.name.clone(), dependencies_map);
-            }
-        }
-        dependencies_vecmap
-    }
-
-    pub fn merge(&mut self, other: &Graph) {
-        // 1) Merge init_objects
-        if let (Some(self_inits), Some(other_inits)) =
-            (self.init_objects.as_mut(), other.init_objects.as_ref())
-        {
-            for (key, vec) in other_inits {
-                self_inits.entry(key.clone()).or_insert_with(|| vec.clone());
-            }
-        }
-
-        let my_len = self.stages.len();
-        let oth_len = other.stages.len();
-        if oth_len > my_len {
-            // clone in the extra whole stages
-            for stage in other.stages.iter().skip(my_len) {
-                self.stages.push(stage.clone());
-            }
-        }
-
-        // 3) For each stage that `other` has, merge its nodes
-        for stage_i in 0..oth_len {
-            let target = &mut self.stages[stage_i];
-            let src = &other.stages[stage_i];
-            for node_name in src.node_names() {
-                let node = src.node(&node_name).clone();
-                target.add_node(node);
-            }
-        }
-    }
 }
 
 // Display functions
 impl Graph {
+    /// Generates a tree-style DOT where each edge is predecessor -> node
+    /// and every node is declared by its name.
     pub fn generate_dot(&self) -> String {
-        let mut dot = String::from("digraph {\n");
-
-        for (stage_idx, stage) in self.stages.iter().enumerate() {
-            for (node_name, node) in &stage.nodes {
-                for (successor_name, _) in &node.successors {
-                    dot.push_str(&format!(
-                        "    \"Stage{}::{}\" -> \"Stage{}::{}\";\n",
-                        stage_idx,
-                        node_name,
-                        stage_idx + 1,
-                        successor_name
-                    ));
-                }
+        let mut dot = String::from("digraph Tree {\n");
+        dot.push_str("    node [shape=ellipse];\n\n");
+        // declare all nodes, so even isolated ones appear
+        for node_name in self.node_names() {
+            dot.push_str(&format!("    \"{}\";\n", node_name));
+        }
+        dot.push('\n');
+        // emit edges from each predecessor to this node
+        for (node_name, node) in &self.nodes {
+            let node_names = node.predecessors.keys().cloned().collect::<Vec<_>>();
+            for pred in node_names {
+                dot.push_str(&format!("    \"{}\" -> \"{}\";\n", pred, node_name));
             }
         }
-
         dot.push_str("}\n");
         dot
     }
 
+    /// Pretty-print every node’s fields in a flat list.
     pub fn print_graph(&self) {
         println!("Graph:");
-        for (stage_no, stage) in self.stages.iter().enumerate() {
-            println!("  Stage {}: ", stage_no);
-            for node_name in stage.node_names() {
-                let node = &stage.nodes[&node_name];
-                println!("      Node: {}", node.name);
-                println!("          Mult-Factor: {}", node.mult_factor);
-                println!("          Task: {}", node.task.function_name);
-                println!("              Args: {:?}", node.task.args);
-                if let Some(ref_tasks) = &node.task.ref_tasks {
-                    println!("              Ref Tasks: {:?}", ref_tasks);
-                }
-                println!("          Successors: {:?}", node.successors);
-                println!("          Successors Index: {:?}", node.successors_index);
-                println!("          Dependents: {:?}", node.dependents);
+        for node_name in self.node_names() {
+            let node = &self.nodes[&node_name];
+            println!("  Node: {}", node.name());
+            println!("    Mult-Factor: {}", node.mult_factor());
+            if let Some(init_cond) = node.init_condition() {
+                println!("    Init Condition: ");
+                println!("      Args: {:?}", init_cond.args());
+                println!("      Operations: {:?}", init_cond.operations());
+                println!("      Values: {:?}", init_cond.values());
             }
+            println!("    Task: {}", node.task().function_name());
+            println!("      Args: {:?}", node.task().args());
+            if let Some(ref_tasks) = node.task().ref_tasks() {
+                println!("      Ref Tasks: {:?}", ref_tasks);
+            }
+            println!("    Pred Indexes: {:?}\n", node.predecessors);
         }
     }
 

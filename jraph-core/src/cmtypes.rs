@@ -1,11 +1,10 @@
-use crate::init_funcs;
 use nalgebra::*;
 use num_complex::Complex32;
 use serde::Deserialize;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, PartialEq)]
 pub enum CmTypes {
     Bool(bool),
     I8(i8),
@@ -22,7 +21,7 @@ pub enum CmTypes {
     F64(f64),
     Char(char),
     Usize(usize),
-    VecUsize(Vec<usize>),
+    VecCmt(Vec<CmTypes>),
     String(String),
     VecC32(Vec<Complex32>),
     #[serde(with = "dvector_arc_serde")]
@@ -33,8 +32,8 @@ pub enum CmTypes {
     Res(String),
     None(),
     // Space for Custom structs/types
-    #[serde[skip]]
-    Fft(Arc<Mutex<init_funcs::Fft>>),
+    // #[serde[skip]]
+    // Fft(Arc<Mutex<init_funcs::Fft>>),
 }
 
 mod dvector_arc_serde {
@@ -106,7 +105,8 @@ impl std::fmt::Debug for CmTypes {
             CmTypes::F64(val) => write!(f, "F64({:?})", val),
             CmTypes::Char(val) => write!(f, "Char({:?})", val),
             CmTypes::Usize(val) => write!(f, "Usize({:?})", val),
-            CmTypes::VecUsize(val) => write!(f, "VecUsize({:?})", val),
+            CmTypes::VecCmt(val) => write!(f, "VecCmt({:?})", val),
+            // CmTypes::VecUsize(val) => write!(f, "VecUsize({:?})", val),
             CmTypes::String(val) => write!(f, "String({:?})", val),
             CmTypes::VecC32(val) => write!(f, "VecC32({:?})", val),
             CmTypes::DVectorC32(val) => write!(f, "DVectorC32({:?})", val),
@@ -114,7 +114,7 @@ impl std::fmt::Debug for CmTypes {
             CmTypes::Ref(val) => write!(f, "Ref({:?})", val),
             CmTypes::Res(val) => write!(f, "Res({:?})", val),
             CmTypes::None() => write!(f, "None"),
-            CmTypes::Fft(_) => write!(f, "Fft(<excluded>)"), // Custom debug output or omit entirely
+            // CmTypes::Fft(_) => write!(f, "Fft(<excluded>)"), // Custom debug output or omit entirely
         }
     }
 }
