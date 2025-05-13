@@ -1,7 +1,7 @@
 pub fn buf_gen(size: usize) -> Vec<usize> {
     let mut vec = Vec::new();
     for i in 0..size {
-        vec.push(i);
+        vec.push(i + 1);
     }
     vec
 }

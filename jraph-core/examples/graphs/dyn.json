@@ -6,7 +6,7 @@
             "args": [
                 {
                     "type": "usize",
-                    "value": "5"
+                    "value": "8"
                 }
             ]
         }
@@ -53,7 +53,7 @@
                     "type": "$res",
                     "condition": {
                         "operation": "Eq",
-                        "value": "true",
+                        "value": "false",
                         "value_type": "bool"
                     },
                     "predecessor": {
@@ -79,7 +79,7 @@
                     "type": "$res",
                     "condition": {
                         "operation": "Eq",
-                        "value": "false",
+                        "value": "true",
                         "value_type": "bool"
                     },
                     "predecessor": {

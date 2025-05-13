@@ -2,7 +2,7 @@ use nalgebra::*;
 use num_complex::Complex32;
 use serde::Deserialize;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[derive(Deserialize, Clone, PartialEq)]
 pub enum CmTypes {
@@ -31,9 +31,6 @@ pub enum CmTypes {
     Ref(String),
     Res(String),
     None(),
-    // Space for Custom structs/types
-    // #[serde[skip]]
-    // Fft(Arc<Mutex<init_funcs::Fft>>),
 }
 
 mod dvector_arc_serde {

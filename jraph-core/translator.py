@@ -35,11 +35,22 @@ def map_cmtype_entry(arg):
     elif arg == "String":
         return "String", False
     elif arg == "Vec<usize>":
-        return "VecUsize", False
+        return "VecCmt", False
     elif arg == "()":
         return "None", False
     else:
         return arg.capitalize(), True
+
+
+def get_arg_type(arg):
+    """
+    Extract the argument type from a vector definition.
+    E.g. "Vec<usize>" -> "usize"
+    """
+    start_pos = arg.find("<")
+    end_pos = arg.rfind(">")
+    if start_pos != -1 and end_pos != -1:
+        return arg[start_pos + 1 : end_pos]
 
 
 def retrieve_type(arg, arg_name):
@@ -92,11 +103,20 @@ def create_arg_retrieve(index, arg_name, arg_type):
     # clean_type = arg_type.replace("&", "").replace("mut", "")
 
     # match on enum variant
-    arg_proc, is_prim = map_cmtype_entry(arg_type)
+
+    #  strip arg_type of &mut and store them if exist in stem_var
+
+    arg_strip = arg_type.replace("&", "").replace("mut", "").strip()
+
+    arg_proc, is_prim = map_cmtype_entry(arg_strip)
 
     # bind the inner value (e.g. as_ref(), clone(), etc.)
     retr_type = retrieve_type(arg_proc, arg_name)
     ref = "&" if not is_prim else ""
+
+    ref_arg = "&" if "&" in arg_type else ""
+    mut = "mut" if "mut" in arg_type else ""
+    ref_mut = f"{ref_arg}{mut} "
 
     obj_ref = ""
     if "Arc" in retr_type:
@@ -105,11 +125,21 @@ def create_arg_retrieve(index, arg_name, arg_type):
 
     # For `Vec<...>` arguments, build up a mutable Vec by iterating all args.
     if arg_type[0:3] == "Vec":
+        arg_raw_type = get_arg_type(arg_type)
+        raw_arg, raw_prim = map_cmtype_entry(arg_raw_type)
+        ref = "&" if not raw_prim else ""
+        # For now assume primitive types
         arg_ret = (
             f"\tlet mut {arg_name}: {arg_type} = Vec::new();\n"
-            f"\tfor i in 0..args.len() {{\n"
-            f"\t\t let x = match {ref}args[i] {{\n"
-            f"\t\t\tCmTypes::{arg_proc}(x) => x,\n"
+            # Take VecCmt buffer
+            f"\tlet raw_arg_buffer = match &{ref}args[0] {{\n"
+            f"\t\tCmTypes::{arg_proc}({obj_ref}{arg_name}) => {retr_type},\n"
+            f'\t\t_ => panic!("Invalid argument type"),\n'
+            f"\t}};\n"
+            # Collect arguments
+            f"\tfor i in 0..raw_arg_buffer.len() {{\n"
+            f"\t\t let x = match {ref}raw_arg_buffer[i] {{\n"
+            f"\t\t\tCmTypes::{raw_arg}(x) => x,\n"
             f'\t\t\t_ => panic!("Invalid argument type"),\n'
             f"\t\t }};\n"
             f"\t\t {arg_name}.push(x);\n"
@@ -119,7 +149,7 @@ def create_arg_retrieve(index, arg_name, arg_type):
         # Single-value case: pick the slot `index` and match against the enum.
         arg_ret = (
             f"\tlet {arg_name}: {arg_type} = match {ref}args[{index}] {{\n"
-            f"\t\tCmTypes::{arg_proc}({obj_ref}{arg_name}) => {retr_type},\n"
+            f"\t\tCmTypes::{arg_proc}({obj_ref}{arg_name}) => {ref_mut}{retr_type},\n"
             f'\t\t_ => panic!("Invalid argument type"),\n'
             f"\t}};"
         )
@@ -149,13 +179,13 @@ def create_arg_return(
         - Wraps the result in a `CmTypes` enum variant.
         - Returns the wrapped result.
     """
-    return_type, _ = map_cmtype_entry(return_type)
+    retcm_type, _ = map_cmtype_entry(return_type)
 
     # Check for struct function that needs to be called with . operator
     if struct_func:
         struct_name = fn_name.split("::")[0]
         func = fn_name.split("::")[1]
-        if struct_name == return_type:
+        if struct_name == retcm_type:
             # new() function that returns the struct
             # no need to lock object
             pass
@@ -168,13 +198,13 @@ def create_arg_return(
                 ins_mut = " "
 
             lock_obj = f'\tlet{ins_mut}lock_obj = struct_obj.lock().expect("Failed to lock object");\n'
-            if return_type == "None":
+            if retcm_type == "None":
                 func_call = f"\tlock_obj.{func}({arg_names});\n"
                 ret_none = f"\tCmTypes::None()\n}}\n"
                 return lock_obj + func_call + ret_none
             else:
                 func_call = (
-                    f"\tCmTypes::{return_type}(lock_obj.{func}({arg_names}))\n}}\n"
+                    f"\tCmTypes::{retcm_type}(lock_obj.{func}({arg_names}))\n}}\n"
                 )
                 return lock_obj + func_call
 
@@ -182,12 +212,31 @@ def create_arg_return(
     arc_mutex_ret = f"Arc::new(Mutex::new({fn_name}({arg_names})))"
     norm_ret = f"{fn_name}({arg_names})"
 
-    if "C32" in return_type:
-        func_call = f"\tCmTypes::{return_type}({arc_ret})\n}}\n"
+    if "C32" in retcm_type:
+        func_call = f"\tCmTypes::{retcm_type}({arc_ret})\n}}\n"
     elif struct_func:
-        func_call = f"\tCmTypes::{return_type}({arc_mutex_ret})\n}}\n"
+        func_call = f"\tCmTypes::{retcm_type}({arc_mutex_ret})\n}}\n"
     else:
-        func_call = f"\tCmTypes::{return_type}({norm_ret})\n}}\n"
+        if retcm_type == "VecCmt":
+            arg_raw_type = get_arg_type(return_type)
+            raw_arg, raw_prim = map_cmtype_entry(arg_raw_type)
+            # create a new vector to gather the results
+            func_call = (
+                f"\tlet res = {norm_ret};\n"
+                f"\tlet mut ret = Vec::new();\n"
+                f"\tfor i in 0..res.len() {{\n"
+                f"\t\tlet x = res[i];\n"
+                f"\t\tret.push(CmTypes::{raw_arg}(x));\n"
+                f"\t}};\n"
+                f"\tCmTypes::{retcm_type}(ret)\n}}\n"
+            )
+
+        else:
+            if retcm_type == "None":
+                # first call function and then return None
+                func_call = f"\t{norm_ret};\n" f"\tCmTypes::None()\n}}\n"
+            else:
+                func_call = f"\tCmTypes::{retcm_type}({norm_ret})\n}}\n"
 
     return func_call
 
@@ -423,8 +472,6 @@ def handle_rust(content, input_stem, output_file, init_content=None, init_stem=N
 
     with output_file.open("w") as f:
         # insert warning attributes
-        f.write("#[allow(unused)]\n")
-        f.write("#[allow(unused_mut)]\n")
         # include the original function file
         f.write(f"use crate::{input_stem}::*;\n")
         # include the optional init function file
@@ -485,7 +532,9 @@ def create_func_registry(wrapper_file, registry_file):
             f.write(f"\t\t\tSome({fn_wrap})\n")
             f.write("\t\t},\n")
         # write last arm
-        f.write('\t\t_ => panic!("Function not found"),\n')
+        f.write(
+            '\t\t_ => {\n\t\t\tprintln!("Function {} not found", func_name);\n\t\t\tpanic!("Panicking...");\n\t\t}\n'
+        )
         f.write("\t}\n")
         f.write("}\n")
 
@@ -501,9 +550,9 @@ def create_emtpy_registry(registry_file):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 6:
+    if len(sys.argv) > 6 or len(sys.argv) < 5:
         print(
-            "Usage: translator.py <function_file> <wrapper_file> <registry_file> <python>"
+            "Usage: translator.py <function_file> <wrapper_file> <registry_file> <python> (<init_file>)"
         )
         exit(1)
 
@@ -518,7 +567,11 @@ if __name__ == "__main__":
         exit(0)
 
     # Check for optional arguments about init_file and init_out_file
-    init_file = Path(sys.argv[5])
+    try:
+        init_file = Path(sys.argv[5])
+    except IndexError:
+        init_file = None
+
     init_stem = init_file.stem if init_file else None
 
     with input_file.open("r") as f:

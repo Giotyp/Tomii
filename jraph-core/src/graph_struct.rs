@@ -37,14 +37,13 @@ impl InitCondition {
 
         match self.operation {
             CondOp::Eq => {
-                // if at least one evaluation fails, return false
-                if arg_value != self.eval_value {
-                    return false;
+                if arg_value == self.eval_value {
+                    return true;
                 }
             }
             CondOp::Neq => {
-                if arg_value == self.eval_value {
-                    return false;
+                if arg_value != self.eval_value {
+                    return true;
                 }
             }
             _ => {
@@ -53,8 +52,7 @@ impl InitCondition {
                 return false;
             }
         }
-        // If all evaluations pass, return true
-        true
+        false
     }
 }
 
@@ -101,6 +99,7 @@ impl Node {
     }
 }
 
+#[derive(Clone)]
 pub struct Graph {
     nodes: HashMap<String, Node>,
     init_objects: Option<HashMap<String, Vec<CmTypes>>>,
@@ -153,6 +152,10 @@ impl Graph {
 
     pub fn set_init_objects(&mut self, init_objects: HashMap<String, Vec<CmTypes>>) {
         self.init_objects = Some(init_objects);
+    }
+
+    pub fn set_nodes(&mut self, nodes: HashMap<String, Node>) {
+        self.nodes = nodes;
     }
 }
 

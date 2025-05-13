@@ -6,29 +6,101 @@ use crate::cmtypes::*;
 use crate::graph_struct::*;
 use crate::scheduler::Scheduler;
 
+#[derive(Clone)]
 pub struct Clerk {
-    scheduler: Scheduler,
-    // Keep a nodes map under Mutex lock in case
+    // Keep a graph copy under Mutex lock in case
     // adding nodes is needed
-    nodes_map: Arc<Mutex<HashMap<String, Node>>>,
+    graph: Arc<Mutex<Graph>>,
     pending_nodes: Arc<Mutex<Vec<(String, usize)>>>,
     completed_nodes: Arc<Mutex<Vec<(String, usize)>>>,
     node_results: Arc<Mutex<Buffer<CmTypes>>>,
 }
 
 impl Clerk {
-    pub fn new(scheduler: Scheduler) -> Clerk {
+    pub fn new() -> Clerk {
         // node_result will be initialized with mult_factor entries
         // when crawling begins
-        let node_results = Arc::new(Mutex::new(Buffer::new_empty()));
+        let node_results = Arc::new(Mutex::new(Buffer::new()));
 
         Clerk {
-            scheduler,
-            nodes_map: Arc::new(Mutex::new(HashMap::new())),
+            graph: Arc::new(Mutex::new(Graph::new())),
             pending_nodes: Arc::new(Mutex::new(Vec::new())),
             completed_nodes: Arc::new(Mutex::new(Vec::new())),
             node_results,
         }
+    }
+
+    pub fn get_results(&self) -> HashMap<String, Vec<CmTypes>> {
+        let node_results_lock = self.node_results.lock().unwrap();
+        node_results_lock.get_buffer().clone()
+    }
+
+    pub fn run(&mut self, graph: &Graph, scheduler: Scheduler, max_runtime: Option<u64>) {
+        let nodes = graph.nodes_map();
+        let init_objects_opt = graph.init_objects();
+
+        // Set the fields of the struct's graph copy
+        let mut graph_lock = self.graph.lock().unwrap();
+        graph_lock.set_nodes(nodes.clone());
+
+        if let Some(init_objects) = init_objects_opt {
+            // Clone the init_objects to avoid borrowing issues
+            let init_objects = init_objects.clone();
+            graph_lock.set_init_objects(init_objects);
+        }
+        drop(graph_lock);
+
+        // create ready channel
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<(String, usize)>();
+
+        // Add pending nodes to the list
+        let mut pending_lock = self.pending_nodes.lock().unwrap();
+        for (node_name, node) in nodes.iter() {
+            let mult_factor = node.mult_factor;
+            for i in 0..mult_factor {
+                pending_lock.push((node_name.clone(), i));
+            }
+        }
+        drop(pending_lock);
+
+        // Initialize node_results with mult_factor entries
+        let mut node_results_lock = self.node_results.lock().unwrap();
+        node_results_lock.init_buffer(graph, CmTypes::None());
+        drop(node_results_lock);
+
+        // clone a pair of clerks, one for each thread
+        let mut clerk_for_ready = self.clone();
+        let mut clerk_for_schedule = self.clone();
+
+        // Spawn thread to handle set_ready_nodes
+        let ready_handle = std::thread::spawn(move || {
+            clerk_for_ready.set_ready_nodes(&ready_tx);
+        });
+
+        // Spawn thread to handle schedule_nodes
+        let schedule_handle = std::thread::spawn(move || {
+            clerk_for_schedule.schedule_nodes(scheduler, &ready_rx);
+        });
+
+        let start_time = std::time::Instant::now();
+        // Check for max_runtime
+        if let Some(max_runtime) = max_runtime {
+            loop {
+                if start_time.elapsed().as_secs() > max_runtime {
+                    // set exit signal
+                    println!("Max runtime reached, exiting...");
+                    pending_lock = self.pending_nodes.lock().unwrap();
+                    pending_lock.push(("exit".to_string(), 0));
+                    drop(pending_lock);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+
+        // wait for both to finish
+        ready_handle.join().unwrap();
+        schedule_handle.join().unwrap();
     }
 
     fn check_ready_node(
@@ -75,6 +147,7 @@ impl Clerk {
                     if !eval {
                         return false;
                     }
+                    drop(res_lock);
                 }
                 _ => {}
             }
@@ -82,58 +155,74 @@ impl Clerk {
         return true;
     }
 
-    fn set_ready_nodes(
-        &mut self,
-        init_objects: Option<&HashMap<String, Vec<CmTypes>>>,
-        ready_channel: &Sender<(String, usize)>,
-        pending_channel: &Receiver<(String, usize)>,
-    ) {
+    fn set_ready_nodes(&mut self, ready_tx: &Sender<(String, usize)>) {
         // Checks if the node is ready to be scheduled and
         // adds it to the ready_nodes list
-        for (node_name, index) in pending_channel.iter() {
-            let nodes_lock = self.nodes_map.lock().unwrap();
-            let node = nodes_lock.get(&node_name).unwrap();
-            if self.check_ready_node(node, index, init_objects) {
-                ready_channel.send((node_name.clone(), index)).unwrap();
+        loop {
+            let mut pending_lock = self.pending_nodes.lock().unwrap();
+            let mut ready_nodes_idx = Vec::new();
+            for (i, (node_name, index)) in pending_lock.iter().enumerate() {
+                // Check for exit condition
+                if node_name == "exit" {
+                    return;
+                }
+
+                let graph_lock = self.graph.lock().unwrap();
+                let nodes_map = graph_lock.nodes_map();
+                let node = nodes_map.get(node_name).unwrap();
+
+                let init_objects = graph_lock.init_objects();
+                if self.check_ready_node(node, *index, init_objects) {
+                    ready_tx.send((node_name.clone(), *index)).unwrap();
+                    // mark for removal from pending
+                    ready_nodes_idx.push(i);
+                }
+                drop(graph_lock);
             }
-            drop(nodes_lock);
+            // Remove ready nodes from pending
+            for i in ready_nodes_idx.iter() {
+                pending_lock.remove(*i);
+            }
+            drop(pending_lock);
+            // Sleep for a while to avoid busy waiting
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 
-    fn schedule_nodes(
-        &mut self,
-        ready_channel: &Receiver<(String, usize)>,
-        init_objects_opt: Option<&HashMap<String, Vec<CmTypes>>>,
-    ) {
+    fn schedule_nodes(&mut self, scheduler: Scheduler, ready_rx: &Receiver<(String, usize)>) {
         // Get node and node_index from the channel
-        let (node_name, node_index) = ready_channel.recv().unwrap();
-        let nodes_lock = self.nodes_map.lock().unwrap();
-        let node = nodes_lock.get(&node_name.clone()).unwrap();
+        for (node_name, node_index) in ready_rx.iter() {
+            let graph_lock = self.graph.lock().unwrap();
 
-        let arg_vec = self.create_node_args(node, node_index, init_objects_opt);
-        let func = node.func_ptr.unwrap();
-        drop(nodes_lock);
+            let nodes_map = graph_lock.nodes_map();
+            let node = nodes_map.get(&node_name.clone()).unwrap();
+            let init_objects = graph_lock.init_objects();
 
-        // Copy required Arc pointers
-        let completed_nodes = self.completed_nodes.clone();
-        let node_results = self.node_results.clone();
+            let arg_vec = self.create_node_args(node, node_index, init_objects);
+            let func = node.func_ptr.unwrap();
+            drop(graph_lock);
 
-        let task = move || {
-            let result = func(arg_vec);
-            // store result
-            {
-                let mut res_lock = node_results.lock().unwrap();
-                res_lock.add_element_index(&node_name, node_index, result);
-                drop(res_lock);
-            }
-            // mark completed
-            {
-                let mut comp_lock = completed_nodes.lock().unwrap();
-                comp_lock.push((node_name.clone(), node_index));
-                drop(comp_lock);
-            }
-        };
-        self.scheduler.spawn_task(task);
+            // Copy required Arc pointers
+            let completed_nodes = self.completed_nodes.clone();
+            let node_results = self.node_results.clone();
+
+            let task = move || {
+                let result = func(arg_vec);
+                // store result
+                {
+                    let mut res_lock = node_results.lock().unwrap();
+                    res_lock.add_element_index(&node_name, node_index, result);
+                    drop(res_lock);
+                }
+                // mark completed
+                {
+                    let mut comp_lock = completed_nodes.lock().unwrap();
+                    comp_lock.push((node_name.clone(), node_index));
+                    drop(comp_lock);
+                }
+            };
+            scheduler.spawn_task(task);
+        }
     }
 
     fn create_node_args(
@@ -206,22 +295,30 @@ struct Buffer<T> {
 }
 
 impl<T> Buffer<T> {
-    fn new(graph: &Graph) -> Buffer<T> {
-        let buffer = graph
-            .nodes_map()
-            .keys()
-            .map(|name| (name.clone(), Vec::new()))
-            .collect();
-        Buffer { buffer }
-    }
-
-    fn new_empty() -> Buffer<T> {
+    fn new() -> Buffer<T> {
         Buffer {
             buffer: HashMap::new(),
         }
     }
 
-    fn search_node(&self, node_name: &str) -> Option<&Vec<T>> {
+    fn init_buffer(&mut self, graph: &Graph, init_val: T)
+    where
+        T: Clone,
+    {
+        let nodes_map = graph.nodes_map();
+        // iterate over the nodes map to create a vector for each node
+        for (node_name, node) in nodes_map {
+            let mult_factor = node.mult_factor;
+            let new_vec = vec![init_val.clone(); mult_factor];
+            self.buffer.insert(node_name.clone(), new_vec);
+        }
+    }
+
+    fn get_buffer(&self) -> &HashMap<String, Vec<T>> {
+        &self.buffer
+    }
+
+    fn _search_node(&self, node_name: &str) -> Option<&Vec<T>> {
         self.buffer.get(node_name)
     }
 
@@ -240,7 +337,7 @@ impl<T> Buffer<T> {
         }
     }
 
-    fn add_element(&mut self, node_name: &str, element: T) {
+    fn _add_element(&mut self, node_name: &str, element: T) {
         if let Some(vec) = self.buffer.get_mut(node_name) {
             vec.push(element);
         } else {
