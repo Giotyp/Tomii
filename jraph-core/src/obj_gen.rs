@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 
+#[derive(Debug, Deserialize)]
 struct ArgInit {
     #[serde(rename = "type")]
     type_: String,
@@ -39,7 +40,7 @@ pub fn init_objects(graph_json: &str) -> Result<HashMap<String, Vec<CmTypes>>, s
     for init in root.initializations.iter() {
         let name = init.name.clone();
         let mult_factor = init.mult_factor;
-        let args_json: Vec<ArgInit> = init.args.clone();
+        let args_json: &Vec<ArgInit> = &init.args;
 
         if init.func.is_none() {
             // direct variable initialization
@@ -57,7 +58,7 @@ pub fn init_objects(graph_json: &str) -> Result<HashMap<String, Vec<CmTypes>>, s
             let func_name = init.func.as_ref().unwrap().clone();
             let func_ptr = get_func(&func_name).unwrap();
 
-            let args: Vec<CmTypes> = Vec::new();
+            let mut args: Vec<CmTypes> = Vec::new();
             for arg_json in args_json.iter() {
                 let type_str = arg_json.type_.clone();
                 let value_str = arg_json.value.clone();

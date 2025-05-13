@@ -58,9 +58,10 @@ impl InitCondition {
     }
 }
 
-struct Predecessor {
+#[derive(Clone)]
+pub struct Predecessor {
     pub name: String,
-    pub indexes: usize,
+    pub indexes: Vec<usize>,
 }
 
 #[derive(Clone)]
@@ -72,6 +73,12 @@ pub struct Arg {
     pub predecessor: Option<Predecessor>,
 }
 
+impl Arg {
+    pub fn is_condition(&self) -> bool {
+        self.init_condition.is_some()
+    }
+}
+
 #[derive(Clone)]
 pub struct Node {
     pub name: String,
@@ -80,6 +87,18 @@ pub struct Node {
     // the node is initiated
     pub mult_factor: usize,
     pub func_ptr: Option<CmPtr>,
+}
+
+impl Node {
+    pub fn condition_args(&self) -> Vec<&Arg> {
+        let mut cond_args: Vec<&Arg> = Vec::new();
+        for arg in &self.args {
+            if arg.is_condition() {
+                cond_args.push(arg);
+            }
+        }
+        cond_args
+    }
 }
 
 pub struct Graph {
@@ -111,7 +130,7 @@ impl Graph {
     }
 
     pub fn total_nodes(&self) -> usize {
-        self.nodes.values().map(|node| node.mult_factor()).sum()
+        self.nodes.values().map(|node| node.mult_factor).sum()
     }
 }
 
@@ -139,46 +158,28 @@ impl Graph {
 
 // Display functions
 impl Graph {
-    /// Generates a tree-style DOT where each edge is predecessor -> node
-    /// and every node is declared by its name.
-    pub fn generate_dot(&self) -> String {
-        let mut dot = String::from("digraph Tree {\n");
-        dot.push_str("    node [shape=ellipse];\n\n");
-        // declare all nodes, so even isolated ones appear
-        for node_name in self.node_names() {
-            dot.push_str(&format!("    \"{}\";\n", node_name));
-        }
-        dot.push('\n');
-        // emit edges from each predecessor to this node
-        for (node_name, node) in &self.nodes {
-            let node_names = node.predecessors.keys().cloned().collect::<Vec<_>>();
-            for pred in node_names {
-                dot.push_str(&format!("    \"{}\" -> \"{}\";\n", pred, node_name));
-            }
-        }
-        dot.push_str("}\n");
-        dot
-    }
-
     /// Pretty-print every node’s fields in a flat list.
     pub fn print_graph(&self) {
         println!("Graph:");
         for node_name in self.node_names() {
             let node = &self.nodes[&node_name];
-            println!("  Node: {}", node.name());
-            println!("    Mult-Factor: {}", node.mult_factor());
-            if let Some(init_cond) = node.init_condition() {
-                println!("    Init Condition: ");
-                println!("      Args: {:?}", init_cond.args());
-                println!("      Operations: {:?}", init_cond.operations());
-                println!("      Values: {:?}", init_cond.values());
+            println!("  Node: {}", node.name);
+            println!("    Mult-Factor: {}", node.mult_factor);
+            println!("    Args: ");
+            for arg in &node.args {
+                println!("     Value: {:?}", arg.value);
+                println!("     Type: {:?}", arg.type_);
+                if let Some(init_cond) = &arg.init_condition {
+                    println!("     Init Condition: {:?}", init_cond);
+                    println!("      Operation: {:?}", init_cond.operation);
+                    println!("      Eval Value: {:?}", init_cond.eval_value);
+                }
+                if let Some(pred) = &arg.predecessor {
+                    println!("     Predecessor: {:?}", pred.name);
+                    println!("      Name: {:?}", pred.name);
+                    println!("      Indexes: {:?}", pred.indexes);
+                }
             }
-            println!("    Task: {}", node.task().function_name());
-            println!("      Args: {:?}", node.task().args());
-            if let Some(ref_tasks) = node.task().ref_tasks() {
-                println!("      Ref Tasks: {:?}", ref_tasks);
-            }
-            println!("    Pred Indexes: {:?}\n", node.predecessors);
         }
     }
 

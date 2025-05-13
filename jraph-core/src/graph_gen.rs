@@ -5,7 +5,6 @@ use crate::cmtypes::*;
 use crate::func_reg::*;
 use crate::graph_struct::*;
 use crate::obj_gen::init_objects;
-use rayon::string;
 use serde::Deserialize;
 use serde_json;
 
@@ -124,7 +123,7 @@ fn parse_predecessor(pred_json: &PredJson) -> Predecessor {
 fn parse_condition(condition_json: &ConditionJson) -> InitCondition {
     let operation = {
         let op = CondOp::from_str(&condition_json.operation);
-        if op.is_ok() {
+        if op.is_some() {
             op.unwrap()
         } else {
             panic!("Invalid operation: {}", condition_json.operation);
@@ -155,16 +154,15 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
     let mut graph = Graph::new();
 
     for node_json in &graph_parsed.nodes {
-        let args = Vec::new();
+        let mut args = Vec::new();
 
         for arg_json in &node_json.args {
-            let arg = parse_arg(arg_json);
-            args.push(arg);
+            args.push(parse_arg(arg_json));
         }
 
-        let func_ptr = get_func(&arg_json.function_name);
+        let func_ptr = get_func(&node_json.function_name);
 
-        let mut node = Node {
+        let node = Node {
             name: node_json.name.clone(),
             args,
             mult_factor: node_json.mult_factor,
