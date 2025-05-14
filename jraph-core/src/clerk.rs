@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -36,12 +37,15 @@ impl Clerk {
     }
 
     pub fn run(&mut self, graph: &Graph, scheduler: Scheduler, max_runtime: Option<u64>) {
-        let nodes = graph.nodes_map();
+        let nodes_map = graph.nodes_map();
         let init_objects_opt = graph.init_objects();
+        let connect_list = graph.connect_list();
 
         // Set the fields of the struct's graph copy
         let mut graph_lock = self.graph.lock().unwrap();
-        graph_lock.set_nodes(nodes.clone());
+        graph_lock.set_nodes(nodes_map.clone());
+
+        graph_lock.set_connect_list(connect_list.clone());
 
         if let Some(init_objects) = init_objects_opt {
             // Clone the init_objects to avoid borrowing issues
@@ -53,20 +57,10 @@ impl Clerk {
         // create ready channel
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<(String, usize)>();
 
-        // Add pending nodes to the list
-        let mut pending_lock = self.pending_nodes.lock().unwrap();
-        for (node_name, node) in nodes.iter() {
-            let mult_factor = node.mult_factor;
-            for i in 0..mult_factor {
-                pending_lock.push((node_name.clone(), i));
-            }
+        // Add graph nodes to pending_nodes
+        for connect_nodes in connect_list.iter() {
+            self.add_nodes(nodes_map, connect_nodes);
         }
-        drop(pending_lock);
-
-        // Initialize node_results with mult_factor entries
-        let mut node_results_lock = self.node_results.lock().unwrap();
-        node_results_lock.init_buffer(graph, CmTypes::None());
-        drop(node_results_lock);
 
         // clone a pair of clerks, one for each thread
         let mut clerk_for_ready = self.clone();
@@ -89,7 +83,7 @@ impl Clerk {
                 if start_time.elapsed().as_secs() > max_runtime {
                     // set exit signal
                     println!("Max runtime reached, exiting...");
-                    pending_lock = self.pending_nodes.lock().unwrap();
+                    let mut pending_lock = self.pending_nodes.lock().unwrap();
                     pending_lock.push(("exit".to_string(), 0));
                     drop(pending_lock);
                     break;
@@ -98,9 +92,27 @@ impl Clerk {
             }
         }
 
-        // wait for both to finish
+        // Wait for threads to finish
         ready_handle.join().unwrap();
         schedule_handle.join().unwrap();
+    }
+
+    fn add_nodes(&mut self, nodes_map: &HashMap<String, Node>, nodes: &Vec<String>) {
+        let mut pending_lock = self.pending_nodes.lock().unwrap();
+        for node_name in nodes.iter() {
+            let node = nodes_map.get(node_name).unwrap();
+            let mult_factor = node.mult_factor;
+            for i in 0..mult_factor {
+                pending_lock.push((node_name.clone(), i));
+            }
+        }
+        drop(pending_lock);
+
+        // Initialize node_results with mult_factor entries
+        let mut node_results_lock = self.node_results.lock().unwrap();
+        node_results_lock.clear_buffer();
+        node_results_lock.init_buffer(nodes_map, CmTypes::None());
+        drop(node_results_lock);
     }
 
     fn check_ready_node(
@@ -108,18 +120,32 @@ impl Clerk {
         node: &Node,
         index: usize,
         init_objects: Option<&HashMap<String, Vec<CmTypes>>>,
-    ) -> bool {
-        // Check if the node is ready to be executed
+    ) -> (bool, bool, bool) {
+        // Check if the node is ready to be executed return (bool, bool)
+        // where the first bool indicates if the node is ready, the second
+        // bool indicates if the node has conditions and the third bool
+        // indicates if all of them are met
+
+        let mut has_conditions = false;
+        let mut conditions_met = true;
+        let mut preds_ready = true;
 
         for node in node.args.iter() {
             // Check Predecessor node
             if let Some(predecessor) = node.predecessor.as_ref() {
                 let compl_lock = self.completed_nodes.lock().unwrap();
+                let mut not_ready = false;
                 for index in predecessor.indexes.iter() {
                     if !compl_lock.contains(&(predecessor.name.clone(), *index)) {
                         // predecessor not completed
-                        return false;
+                        preds_ready = false;
+                        not_ready = true;
+                        break;
                     }
+                }
+                if not_ready {
+                    drop(compl_lock);
+                    break;
                 }
                 drop(compl_lock);
             }
@@ -130,6 +156,7 @@ impl Clerk {
                 continue;
             }
             let init_condition: &InitCondition = init_condition.unwrap();
+            has_conditions = true;
             // Check if init_condition is met
             match &node.type_ {
                 CmTypes::Ref(obj_name) => {
@@ -137,7 +164,8 @@ impl Clerk {
                     let obj = objects[obj_name][index].clone();
                     let eval = init_condition.evaluate(obj);
                     if !eval {
-                        return false;
+                        conditions_met = false;
+                        break;
                     }
                 }
                 CmTypes::Res(node_name) => {
@@ -145,14 +173,15 @@ impl Clerk {
                     let result = res_lock.search_node_idx(&node_name, index).unwrap();
                     let eval = init_condition.evaluate(result);
                     if !eval {
-                        return false;
+                        conditions_met = false;
+                        break;
                     }
                     drop(res_lock);
                 }
                 _ => {}
             }
         }
-        return true;
+        return (preds_ready, has_conditions, conditions_met);
     }
 
     fn set_ready_nodes(&mut self, ready_tx: &Sender<(String, usize)>) {
@@ -160,7 +189,7 @@ impl Clerk {
         // adds it to the ready_nodes list
         loop {
             let mut pending_lock = self.pending_nodes.lock().unwrap();
-            let mut ready_nodes_idx = Vec::new();
+            let mut remove_nodes_idx = Vec::new();
             for (i, (node_name, index)) in pending_lock.iter().enumerate() {
                 // Check for exit condition
                 if node_name == "exit" {
@@ -172,16 +201,31 @@ impl Clerk {
                 let node = nodes_map.get(node_name).unwrap();
 
                 let init_objects = graph_lock.init_objects();
-                if self.check_ready_node(node, *index, init_objects) {
-                    ready_tx.send((node_name.clone(), *index)).unwrap();
-                    // mark for removal from pending
-                    ready_nodes_idx.push(i);
+
+                let (preds_ready, has_conditions, conditions_met) =
+                    self.check_ready_node(node, *index, init_objects);
+
+                if preds_ready {
+                    // Predecessors are ready
+                    if !has_conditions || (has_conditions && conditions_met) {
+                        // Node is ready to be scheduled
+                        ready_tx.send((node_name.clone(), *index)).unwrap();
+                        // mark for removal from pending
+                        remove_nodes_idx.push(i);
+                    } else if has_conditions && !conditions_met {
+                        // mark for removal from pending since conditions
+                        // evaluated to false
+                        remove_nodes_idx.push(i);
+                    }
                 }
+
                 drop(graph_lock);
             }
             // Remove ready nodes from pending
-            for i in ready_nodes_idx.iter() {
-                pending_lock.remove(*i);
+            let mut removed = 0;
+            for i in remove_nodes_idx.iter() {
+                pending_lock.remove(*i - removed);
+                removed += 1;
             }
             drop(pending_lock);
             // Sleep for a while to avoid busy waiting
@@ -301,17 +345,20 @@ impl<T> Buffer<T> {
         }
     }
 
-    fn init_buffer(&mut self, graph: &Graph, init_val: T)
+    fn init_buffer(&mut self, nodes: &HashMap<String, Node>, init_val: T)
     where
         T: Clone,
     {
-        let nodes_map = graph.nodes_map();
         // iterate over the nodes map to create a vector for each node
-        for (node_name, node) in nodes_map {
+        for (node_name, node) in nodes.iter() {
             let mult_factor = node.mult_factor;
             let new_vec = vec![init_val.clone(); mult_factor];
             self.buffer.insert(node_name.clone(), new_vec);
         }
+    }
+
+    fn clear_buffer(&mut self) {
+        self.buffer.clear();
     }
 
     fn get_buffer(&self) -> &HashMap<String, Vec<T>> {

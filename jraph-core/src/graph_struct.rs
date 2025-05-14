@@ -97,11 +97,26 @@ impl Node {
         }
         cond_args
     }
+
+    pub fn predecessor_names(&self) -> Vec<String> {
+        let mut pred_names: Vec<String> = Vec::new();
+        for arg in &self.args {
+            if let Some(pred) = &arg.predecessor {
+                pred_names.push(pred.name.clone());
+            }
+        }
+        pred_names
+    }
 }
 
 #[derive(Clone)]
 pub struct Graph {
     nodes: HashMap<String, Node>,
+    // keep a list of nodes that are connected
+    connect_list: Vec<Vec<String>>,
+    // buffer list that need to be registere in connect_list
+    // in case the json description is not in order
+    buffer_list: Vec<(String, Vec<String>)>,
     init_objects: Option<HashMap<String, Vec<CmTypes>>>,
 }
 
@@ -125,11 +140,50 @@ impl Graph {
 
     pub fn add_node(&mut self, node: Node) {
         let node_name = node.name.clone();
+        let predecessors = node.predecessor_names();
         self.nodes.insert(node_name.clone(), node);
+        // update connections
+        self.update_connections(&node_name, predecessors);
     }
 
     pub fn total_nodes(&self) -> usize {
         self.nodes.values().map(|node| node.mult_factor).sum()
+    }
+
+    pub fn connect_list(&self) -> &Vec<Vec<String>> {
+        &self.connect_list
+    }
+
+    fn update_connections(&mut self, node_name: &str, predecessors: Vec<String>) {
+        if self.connect_list.is_empty() || predecessors.is_empty() {
+            self.connect_list.push(vec![node_name.to_string()]);
+        } else {
+            // check buffer list first
+            let buffed_length = self.buffer_list.len();
+            for _ in 0..buffed_length {
+                let (name, preds) = self.buffer_list.pop().unwrap();
+                self.add_connect_list(&name, preds);
+            }
+            // check for given node
+            self.add_connect_list(node_name, predecessors);
+        }
+    }
+
+    fn add_connect_list(&mut self, node_name: &str, predecessors: Vec<String>) {
+        for connected_nodes in &mut self.connect_list {
+            for pred in &predecessors {
+                if connected_nodes.contains(pred) {
+                    connected_nodes.push(node_name.to_string());
+                    return;
+                }
+            }
+        }
+        // predecessor not yet inserted
+        // add to the buffer list
+        let buf_node = (node_name.to_string(), predecessors);
+        if !self.buffer_list.contains(&buf_node) {
+            self.buffer_list.push(buf_node);
+        }
     }
 }
 
@@ -138,6 +192,8 @@ impl Graph {
     pub fn new() -> Graph {
         Graph {
             nodes: HashMap::new(),
+            connect_list: Vec::new(),
+            buffer_list: Vec::new(),
             init_objects: None,
         }
     }
@@ -156,6 +212,10 @@ impl Graph {
 
     pub fn set_nodes(&mut self, nodes: HashMap<String, Node>) {
         self.nodes = nodes;
+    }
+
+    pub fn set_connect_list(&mut self, connect_list: Vec<Vec<String>>) {
+        self.connect_list = connect_list;
     }
 }
 
