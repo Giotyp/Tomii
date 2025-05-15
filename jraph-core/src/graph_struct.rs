@@ -81,10 +81,13 @@ impl Arg {
 pub struct Node {
     pub name: String,
     pub args: Vec<Arg>,
+    pub loop_args: Option<Vec<Arg>>,
     // Variable that defines the number of times
     // the node is initiated
     pub mult_factor: usize,
     pub func_ptr: Option<CmPtr>,
+    // Optional node to loop after execution
+    pub loop_: Option<String>,
 }
 
 impl Node {
@@ -152,6 +155,16 @@ impl Graph {
 
     pub fn connect_list(&self) -> &Vec<Vec<String>> {
         &self.connect_list
+    }
+
+    pub fn node_connections(&self, node_name: &str) -> Option<Vec<String>> {
+        for (i, connected_nodes) in self.connect_list.iter().enumerate() {
+            if connected_nodes.contains(&node_name.to_string()) {
+                // Get vector beggining from offset i
+                return Some(connected_nodes[i..].to_vec());
+            }
+        }
+        None
     }
 
     fn update_connections(&mut self, node_name: &str, predecessors: Vec<String>) {

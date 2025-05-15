@@ -33,8 +33,11 @@ struct ArgJson {
 #[derive(Debug, Deserialize)]
 struct NodeJson {
     name: String,
-    mult_factor: usize,
+    mult_factor: Option<usize>,
     function_name: String,
+    #[serde(rename = "loop")]
+    loop_: Option<String>,
+    loop_args: Option<Vec<ArgJson>>,
     args: Vec<ArgJson>,
 }
 
@@ -155,18 +158,40 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
 
     for node_json in &graph_parsed.nodes {
         let mut args = Vec::new();
+        let mut loop_args_vec = Vec::new();
 
         for arg_json in &node_json.args {
             args.push(parse_arg(arg_json));
         }
 
+        if let Some(loop_args_json) = &node_json.loop_args {
+            for arg_json in loop_args_json {
+                loop_args_vec.push(parse_arg(arg_json));
+            }
+        }
+
+        let loop_args = {
+            if loop_args_vec.is_empty() {
+                None
+            } else {
+                Some(loop_args_vec)
+            }
+        };
+
         let func_ptr = get_func(&node_json.function_name);
+
+        let mult_factor = match node_json.mult_factor {
+            Some(mult_factor) => mult_factor,
+            None => 1,
+        };
 
         let node = Node {
             name: node_json.name.clone(),
             args,
-            mult_factor: node_json.mult_factor,
+            loop_args,
+            mult_factor: mult_factor,
             func_ptr,
+            loop_: node_json.loop_.clone(),
         };
 
         graph.add_node(node);

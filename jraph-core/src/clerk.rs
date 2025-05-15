@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -14,6 +13,7 @@ pub struct Clerk {
     graph: Arc<Mutex<Graph>>,
     pending_nodes: Arc<Mutex<Vec<(String, usize)>>>,
     completed_nodes: Arc<Mutex<Vec<(String, usize)>>>,
+    loop_nodes: Arc<Mutex<Vec<(String, usize)>>>,
     node_results: Arc<Mutex<Buffer<CmTypes>>>,
 }
 
@@ -27,6 +27,7 @@ impl Clerk {
             graph: Arc::new(Mutex::new(Graph::new())),
             pending_nodes: Arc::new(Mutex::new(Vec::new())),
             completed_nodes: Arc::new(Mutex::new(Vec::new())),
+            loop_nodes: Arc::new(Mutex::new(Vec::new())),
             node_results,
         }
     }
@@ -59,12 +60,20 @@ impl Clerk {
 
         // Add graph nodes to pending_nodes
         for connect_nodes in connect_list.iter() {
-            self.add_nodes(nodes_map, connect_nodes);
+            self.add_nodes(connect_nodes, None);
         }
+        // Initialize node_results
+        self.init_results();
 
         // clone a pair of clerks, one for each thread
         let mut clerk_for_ready = self.clone();
+        let mut clerk_for_completed = self.clone();
         let mut clerk_for_schedule = self.clone();
+
+        // Create a process_completed buffer
+        let completed_queue = Arc::new(Mutex::new(Vec::new()));
+        let queue_process = completed_queue.clone();
+        let queue_schedule = completed_queue.clone();
 
         // Spawn thread to handle set_ready_nodes
         let ready_handle = std::thread::spawn(move || {
@@ -73,8 +82,12 @@ impl Clerk {
 
         // Spawn thread to handle schedule_nodes
         let schedule_handle = std::thread::spawn(move || {
-            clerk_for_schedule.schedule_nodes(scheduler, &ready_rx);
+            clerk_for_schedule.schedule_nodes(scheduler, queue_schedule, &ready_rx);
         });
+
+        // Spawn a thread to handle completed nodes
+        let complete_handle =
+            std::thread::spawn(move || clerk_for_completed.process_completed(queue_process));
 
         let start_time = std::time::Instant::now();
         // Check for max_runtime
@@ -86,6 +99,8 @@ impl Clerk {
                     let mut pending_lock = self.pending_nodes.lock().unwrap();
                     pending_lock.push(("exit".to_string(), 0));
                     drop(pending_lock);
+                    let mut completed_lock = completed_queue.lock().unwrap();
+                    completed_lock.push(("exit".to_string(), 0));
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -95,24 +110,77 @@ impl Clerk {
         // Wait for threads to finish
         ready_handle.join().unwrap();
         schedule_handle.join().unwrap();
+        complete_handle.join().unwrap();
     }
 
-    fn add_nodes(&mut self, nodes_map: &HashMap<String, Node>, nodes: &Vec<String>) {
+    fn add_nodes(&mut self, nodes: &Vec<String>, index: Option<usize>) {
+        let graph_lock = self.graph.lock().unwrap();
+        let nodes_map = graph_lock.nodes_map();
         let mut pending_lock = self.pending_nodes.lock().unwrap();
         for node_name in nodes.iter() {
             let node = nodes_map.get(node_name).unwrap();
             let mult_factor = node.mult_factor;
-            for i in 0..mult_factor {
-                pending_lock.push((node_name.clone(), i));
+
+            if index.is_none() {
+                for i in 0..mult_factor {
+                    pending_lock.push((node_name.clone(), i));
+                }
+            } else {
+                let i = index.unwrap();
+                if i < mult_factor {
+                    pending_lock.push((node_name.clone(), i));
+                } else {
+                    panic!("Index {} out of bounds for node {}", i, node_name);
+                }
             }
         }
         drop(pending_lock);
+    }
 
+    fn init_results(&mut self) {
         // Initialize node_results with mult_factor entries
+        let graph_lock = self.graph.lock().unwrap();
+        let nodes_map = graph_lock.nodes_map();
         let mut node_results_lock = self.node_results.lock().unwrap();
         node_results_lock.clear_buffer();
         node_results_lock.init_buffer(nodes_map, CmTypes::None());
         drop(node_results_lock);
+        drop(graph_lock);
+    }
+
+    fn process_loop(&mut self, node_name: String, node_index: usize) {
+        let graph_lock = self.graph.lock().unwrap();
+        let connections_opt = graph_lock.node_connections(&node_name);
+        drop(graph_lock);
+
+        if let Some(connections) = connections_opt {
+            self.add_nodes(&connections, Some(node_index));
+
+            // Add connections to loop_nodes
+            let mut loop_lock = self.loop_nodes.lock().unwrap();
+            for node_name in connections.iter() {
+                loop_lock.push((node_name.clone(), node_index));
+            }
+            drop(loop_lock);
+
+            // Remove added nodes from completed
+            let mut completed_lock = self.completed_nodes.lock().unwrap();
+            let mut remove_nodes_idx = Vec::new();
+            for (i, (node_name, index)) in completed_lock.iter().enumerate() {
+                if connections.contains(node_name) && *index == node_index {
+                    remove_nodes_idx.push(i);
+                }
+            }
+            // Remove nodes from completed
+            let mut removed = 0;
+            for i in remove_nodes_idx.iter() {
+                completed_lock.remove(*i - removed);
+                removed += 1;
+            }
+            drop(completed_lock);
+        } else {
+            panic!("Node {} not found in graph", node_name);
+        }
     }
 
     fn check_ready_node(
@@ -205,6 +273,7 @@ impl Clerk {
                 let (preds_ready, has_conditions, conditions_met) =
                     self.check_ready_node(node, *index, init_objects);
 
+                drop(graph_lock);
                 if preds_ready {
                     // Predecessors are ready
                     if !has_conditions || (has_conditions && conditions_met) {
@@ -218,8 +287,6 @@ impl Clerk {
                         remove_nodes_idx.push(i);
                     }
                 }
-
-                drop(graph_lock);
             }
             // Remove ready nodes from pending
             let mut removed = 0;
@@ -233,9 +300,51 @@ impl Clerk {
         }
     }
 
-    fn schedule_nodes(&mut self, scheduler: Scheduler, ready_rx: &Receiver<(String, usize)>) {
+    fn process_completed(&mut self, completed_queue: Arc<Mutex<Vec<(String, usize)>>>) {
+        // Process completed nodes
+        loop {
+            let mut queue_lock = completed_queue.lock().unwrap();
+            if queue_lock.is_empty() {
+                drop(queue_lock);
+                // Sleep for a while to avoid busy waiting
+                std::thread::sleep(std::time::Duration::from_millis(15));
+                continue;
+            }
+            let (node_name, node_index) = queue_lock.pop().unwrap();
+            drop(queue_lock);
+
+            // Check for exit condition
+            if node_name == "exit" {
+                return;
+            }
+
+            // Add node to completed
+            let mut completed_lock = self.completed_nodes.lock().unwrap();
+            completed_lock.push((node_name.clone(), node_index));
+            drop(completed_lock);
+
+            // check for loop in the node
+            let graph_lock = self.graph.lock().unwrap();
+            let node = graph_lock.node(&node_name);
+            let loop_opt = node.loop_.clone();
+            drop(graph_lock);
+            if let Some(loop_name) = loop_opt {
+                // add loop to pending
+                self.process_loop(loop_name.clone(), node_index);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+    }
+
+    fn schedule_nodes(
+        &mut self,
+        scheduler: Scheduler,
+        completed_queue: Arc<Mutex<Vec<(String, usize)>>>,
+        ready_rx: &Receiver<(String, usize)>,
+    ) {
         // Get node and node_index from the channel
         for (node_name, node_index) in ready_rx.iter() {
+            println!("Scheduling node {}:{}", node_name.clone(), node_index);
             let graph_lock = self.graph.lock().unwrap();
 
             let nodes_map = graph_lock.nodes_map();
@@ -247,21 +356,22 @@ impl Clerk {
             drop(graph_lock);
 
             // Copy required Arc pointers
-            let completed_nodes = self.completed_nodes.clone();
             let node_results = self.node_results.clone();
+            let completed_queue = completed_queue.clone();
+            let name = node_name.clone();
 
             let task = move || {
                 let result = func(arg_vec);
                 // store result
                 {
                     let mut res_lock = node_results.lock().unwrap();
-                    res_lock.add_element_index(&node_name, node_index, result);
+                    res_lock.add_element_index(&name, node_index, result);
                     drop(res_lock);
                 }
-                // mark completed
+                // add to completed queue
                 {
-                    let mut comp_lock = completed_nodes.lock().unwrap();
-                    comp_lock.push((node_name.clone(), node_index));
+                    let mut comp_lock = completed_queue.lock().unwrap();
+                    comp_lock.push((name, node_index));
                     drop(comp_lock);
                 }
             };
@@ -279,7 +389,26 @@ impl Clerk {
         let mut arg_vec: Vec<CmTypes> = Vec::new();
         let mult_factor = node.mult_factor;
 
-        for arg in node.args.iter() {
+        let args = {
+            // check if node is in loop_nodes
+            let loop_lock = self.loop_nodes.lock().unwrap();
+            let mut looping = false;
+            if loop_lock.contains(&(node.name.clone(), node_index)) {
+                // node is in loop_nodes
+                looping = true;
+            }
+            drop(loop_lock);
+
+            let loop_opt = node.loop_args.as_ref();
+
+            if looping && loop_opt.is_some() {
+                loop_opt.unwrap()
+            } else {
+                &node.args
+            }
+        };
+
+        for arg in args.iter() {
             // continue if arg is a condition
             if arg.is_condition() {
                 continue;

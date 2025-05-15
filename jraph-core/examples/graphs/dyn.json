@@ -2,11 +2,19 @@
     "initializations": [
         {
             "name": "buf_size",
-            "mult_factor": 1,
             "args": [
                 {
                     "type": "usize",
                     "value": "8"
+                }
+            ]
+        },
+        {
+            "name": "factor",
+            "args": [
+                {
+                    "type": "usize",
+                    "value": "2"
                 }
             ]
         }
@@ -14,18 +22,25 @@
     "nodes": [
         {
             "name": "buffer_gen",
-            "mult_factor": 1,
             "function_name": "buf_gen",
             "args": [
                 {
                     "type": "$ref",
                     "value": "buf_size"
                 }
+            ],
+            "loop_args": [
+                {
+                    "type": "$res",
+                    "predecessor": {
+                        "name": "increase_size",
+                        "indexes": "0"
+                    }
+                }
             ]
         },
         {
             "name": "conditional",
-            "mult_factor": 1,
             "function_name": "check_condition",
             "args": [
                 {
@@ -38,9 +53,9 @@
             ]
         },
         {
-            "name": "buf_mult",
-            "mult_factor": 1,
-            "function_name": "multiply_elems",
+            "name": "increase_size",
+            "function_name": "increase_buf_size",
+            "loop": "buffer_gen",
             "args": [
                 {
                     "type": "$res",
@@ -48,6 +63,10 @@
                         "name": "buffer_gen",
                         "indexes": "0"
                     }
+                },
+                {
+                    "type": "$ref",
+                    "value": "factor"
                 },
                 {
                     "type": "$res",
@@ -65,7 +84,6 @@
         },
         {
             "name": "buf_add",
-            "mult_factor": 1,
             "function_name": "add_elems",
             "args": [
                 {

@@ -23,10 +23,7 @@ pub fn add_elems(buffer: Vec<usize>) -> usize {
     sum
 }
 
-pub fn multiply_elems(buffer: Vec<usize>) -> usize {
-    let mut product = 1;
-    for i in buffer {
-        product *= i;
-    }
-    product
+pub fn increase_buf_size(buffer: Vec<usize>, factor: usize) -> usize {
+    let length = buffer.len();
+    return length + factor;
 }

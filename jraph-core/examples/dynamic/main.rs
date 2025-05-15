@@ -16,7 +16,8 @@ fn main() {
 
     // Get results
     let results = clerk.get_results();
+    println!("\nResults: ");
     for (node_name, result) in results {
-        println!("Node: {}, Result: {:?}", node_name, result);
+        println!("Node: {}\n    -> {:?}", node_name, result);
     }
 }

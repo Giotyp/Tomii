@@ -16,7 +16,7 @@ struct ArgInit {
 #[derive(Debug, Deserialize)]
 struct InitJson {
     name: String,
-    mult_factor: usize,
+    mult_factor: Option<usize>,
     args: Vec<ArgInit>,
     func: Option<String>,
 }
@@ -39,7 +39,10 @@ pub fn init_objects(graph_json: &str) -> Result<HashMap<String, Vec<CmTypes>>, s
 
     for init in root.initializations.iter() {
         let name = init.name.clone();
-        let mult_factor = init.mult_factor;
+        let mult_factor = match init.mult_factor {
+            Some(mult_factor) => mult_factor,
+            None => 1,
+        };
         let args_json: &Vec<ArgInit> = &init.args;
 
         if init.func.is_none() {
