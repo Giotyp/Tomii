@@ -454,7 +454,7 @@ impl Clerk {
 
     fn find_index(node_idx: usize, dep_idx: usize, mult_factor: usize) -> usize {
         // Find the index of the node in the results
-        let req_idx: isize = (node_idx as isize) - (dep_idx as isize);
+        let req_idx: isize = (node_idx as isize) + (dep_idx as isize);
         if req_idx >= 0 {
             req_idx as usize
         } else {
