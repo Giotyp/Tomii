@@ -19,7 +19,7 @@ pub struct Clerk {
 
 impl Clerk {
     pub fn new() -> Clerk {
-        // node_result will be initialized with mult_factor entries
+        // node_result will be initialized with factor entries
         // when crawling begins
         let node_results = Arc::new(Mutex::new(Buffer::new()));
 
@@ -119,15 +119,15 @@ impl Clerk {
         let mut pending_lock = self.pending_nodes.lock().unwrap();
         for node_name in nodes.iter() {
             let node = nodes_map.get(node_name).unwrap();
-            let mult_factor = node.mult_factor;
+            let factor = node.factor;
 
             if index.is_none() {
-                for i in 0..mult_factor {
+                for i in 0..factor {
                     pending_lock.push((node_name.clone(), i));
                 }
             } else {
                 let i = index.unwrap();
-                if i < mult_factor {
+                if i < factor {
                     pending_lock.push((node_name.clone(), i));
                 } else {
                     panic!("Index {} out of bounds for node {}", i, node_name);
@@ -138,7 +138,7 @@ impl Clerk {
     }
 
     fn init_results(&mut self) {
-        // Initialize node_results with mult_factor entries
+        // Initialize node_results with factor entries
         let graph_lock = self.graph.lock().unwrap();
         let nodes_map = graph_lock.nodes_map();
         let mut node_results_lock = self.node_results.lock().unwrap();
@@ -387,7 +387,7 @@ impl Clerk {
     ) -> Vec<CmTypes> {
         // Create the arguments vector for given node
         let mut arg_vec: Vec<CmTypes> = Vec::new();
-        let mult_factor = node.mult_factor;
+        let factor = node.factor;
 
         let args = {
             // check if node is in loop_nodes
@@ -429,7 +429,7 @@ impl Clerk {
                         .iter()
                         .map(|&x| {
                             // Find the index of the node in the results
-                            Self::find_index(node_index, x, mult_factor)
+                            Self::find_index(node_index, x, factor)
                         })
                         .collect::<Vec<usize>>();
 
@@ -452,13 +452,13 @@ impl Clerk {
         arg_vec
     }
 
-    fn find_index(node_idx: usize, dep_idx: usize, mult_factor: usize) -> usize {
+    fn find_index(node_idx: usize, dep_idx: usize, factor: usize) -> usize {
         // Find the index of the node in the results
         let req_idx: isize = (node_idx as isize) + (dep_idx as isize);
         if req_idx >= 0 {
             req_idx as usize
         } else {
-            mult_factor - req_idx.abs() as usize
+            factor - req_idx.abs() as usize
         }
     }
 }
@@ -480,8 +480,8 @@ impl<T> Buffer<T> {
     {
         // iterate over the nodes map to create a vector for each node
         for (node_name, node) in nodes.iter() {
-            let mult_factor = node.mult_factor;
-            let new_vec = vec![init_val.clone(); mult_factor];
+            let factor = node.factor;
+            let new_vec = vec![init_val.clone(); factor];
             self.buffer.insert(node_name.clone(), new_vec);
         }
     }

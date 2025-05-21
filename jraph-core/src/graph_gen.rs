@@ -33,7 +33,7 @@ struct ArgJson {
 #[derive(Debug, Deserialize)]
 struct NodeJson {
     name: String,
-    mult_factor: Option<usize>,
+    factor: Option<usize>,
     function_name: String,
     #[serde(rename = "loop")]
     loop_: Option<String>,
@@ -180,8 +180,8 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
 
         let func_ptr = get_func(&node_json.function_name);
 
-        let mult_factor = match node_json.mult_factor {
-            Some(mult_factor) => mult_factor,
+        let factor = match node_json.factor {
+            Some(factor) => factor,
             None => 1,
         };
 
@@ -189,7 +189,7 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
             name: node_json.name.clone(),
             args,
             loop_args,
-            mult_factor: mult_factor,
+            factor: factor,
             func_ptr,
             loop_: node_json.loop_.clone(),
         };

@@ -84,7 +84,7 @@ pub struct Node {
     pub loop_args: Option<Vec<Arg>>,
     // Variable that defines the number of times
     // the node is initiated
-    pub mult_factor: usize,
+    pub factor: usize,
     pub func_ptr: Option<CmPtr>,
     // Optional node to loop after execution
     pub loop_: Option<String>,
@@ -150,7 +150,7 @@ impl Graph {
     }
 
     pub fn total_nodes(&self) -> usize {
-        self.nodes.values().map(|node| node.mult_factor).sum()
+        self.nodes.values().map(|node| node.factor).sum()
     }
 
     pub fn connect_list(&self) -> &Vec<Vec<String>> {
@@ -240,7 +240,7 @@ impl Graph {
         for node_name in self.node_names() {
             let node = &self.nodes[&node_name];
             println!("  Node: {}", node.name);
-            println!("    Mult-Factor: {}", node.mult_factor);
+            println!("    Mult-Factor: {}", node.factor);
             println!("    Args: ");
             for arg in &node.args {
                 println!("     Value: {:?}", arg.value);
