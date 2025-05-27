@@ -34,7 +34,7 @@ def map_cmtype_entry(arg):
         return "DMatrixC32", False
     elif arg == "String":
         return "String", False
-    elif arg == "Vec<usize>":
+    elif arg == "Vec<usize>" or arg == "Vec<u8>":
         return "VecCmt", False
     elif arg == "()":
         return "None", False

@@ -70,29 +70,66 @@ fn main() {
     };
 
     // Initialization file
-    let init_file = env::var("INIT_PATH").expect("INIT_PATH environment variable is not set");
+    let init_file = match env::var("INIT_PATH") {
+        Ok(path) => path,
+        Err(_) => {
+            info!("INIT_PATH environment variable is not set. Skipping initialization.");
+            "".to_string()
+        }
+    };
     println!("cargo:rerun-if-changed={}", init_file);
+
     let init_funcs = "init_funcs.rs";
     let copied_init = out_dir.join(init_funcs);
 
-    info!("Generating init functions for {}", init_file);
-    fs::copy(&init_file, &copied_init)
-            .unwrap_or_else(|err| panic!("Failed to copy init_func.rs to OUT_DIR: {}", err));
+    let output = {
+        if !init_file.is_empty() {
+            info!("Generating init functions for {}", init_file);
+            fs::copy(&init_file, &copied_init)
+                .unwrap_or_else(|err| panic!("Failed to copy init_func.rs to OUT_DIR: {}", err));
 
-    // Call the translator script to generate the wrappers
-    let output = Command::new("python3")
-        .arg("translator.py")
-        .arg(input_path)
-        .arg(wrapper_file.to_str().unwrap())
-        .arg(registry_file.to_str().unwrap())
-        .arg("False")
-        .arg(copied_init)
-        .output()
-        .expect("Failed to execute Python script");
+            // Call the translator script to generate the wrappers
+            Command::new("python3")
+                .arg("translator.py")
+                .arg(input_path)
+                .arg(wrapper_file.to_str().unwrap())
+                .arg(registry_file.to_str().unwrap())
+                .arg("False")
+                .arg(copied_init)
+                .output()
+                .expect("Failed to execute Python script")
+        } else {
+            // write empty module
+            let empty_module = r#"
+                pub mod init_funcs {
+                    // Placeholder for .h files
+                }
+                "#;
+
+            fs::write(&copied_init, empty_module)
+                .unwrap_or_else(|err| panic!("Failed to write empty module to OUT_DIR: {}", err));
+
+            // Call translator without init file
+            Command::new("python3")
+                .arg("translator.py")
+                .arg(input_path)
+                .arg(wrapper_file.to_str().unwrap())
+                .arg(registry_file.to_str().unwrap())
+                .arg("False")
+                .output()
+                .expect("Failed to execute Python script")
+        }
+    };
 
     if !output.status.success() {
-        let error_output = std::str::from_utf8(&output.stderr).unwrap();
-        panic!("Python script failed: {}", error_output);
+        let out = String::from_utf8_lossy(&output.stdout);
+        let err = String::from_utf8_lossy(&output.stderr);
+        panic!(
+            "Python script failed (exit {:?})\n--- STDOUT ---\n{}\n--- STDERR ---\n{}",
+            output.status.code(),
+            out,
+            err
+        );
     }
 
     // If given function file is a .h header

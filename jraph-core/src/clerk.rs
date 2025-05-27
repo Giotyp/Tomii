@@ -186,7 +186,7 @@ impl Clerk {
     fn check_ready_node(
         &self,
         node: &Node,
-        index: usize,
+        node_idx: usize,
         init_objects: Option<&HashMap<String, Vec<CmTypes>>>,
     ) -> (bool, bool, bool) {
         // Check if the node is ready to be executed return (bool, bool)
@@ -198,13 +198,14 @@ impl Clerk {
         let mut conditions_met = true;
         let mut preds_ready = true;
 
-        for node in node.args.iter() {
+        for arg in node.args.iter() {
             // Check Predecessor node
-            if let Some(predecessor) = node.predecessor.as_ref() {
+            if let Some(predecessor) = arg.predecessor.as_ref() {
                 let compl_lock = self.completed_nodes.lock().unwrap();
                 let mut not_ready = false;
                 for index in predecessor.indexes.iter() {
-                    if !compl_lock.contains(&(predecessor.name.clone(), *index)) {
+                    let adjusted_index = Self::find_index(node_idx, *index, node.factor);
+                    if !compl_lock.contains(&(predecessor.name.clone(), adjusted_index)) {
                         // predecessor not completed
                         preds_ready = false;
                         not_ready = true;
@@ -219,17 +220,17 @@ impl Clerk {
             }
 
             // Check if node has a condition
-            let init_condition: Option<&InitCondition> = node.init_condition.as_ref();
+            let init_condition: Option<&InitCondition> = arg.init_condition.as_ref();
             if init_condition.is_none() {
                 continue;
             }
             let init_condition: &InitCondition = init_condition.unwrap();
             has_conditions = true;
             // Check if init_condition is met
-            match &node.type_ {
+            match &arg.type_ {
                 CmTypes::Ref(obj_name) => {
                     let objects: &HashMap<String, Vec<CmTypes>> = init_objects.as_ref().unwrap();
-                    let obj = objects[obj_name][index].clone();
+                    let obj = objects[obj_name][node_idx].clone();
                     let eval = init_condition.evaluate(obj);
                     if !eval {
                         conditions_met = false;
@@ -238,7 +239,7 @@ impl Clerk {
                 }
                 CmTypes::Res(node_name) => {
                     let res_lock = self.node_results.lock().unwrap();
-                    let result = res_lock.search_node_idx(&node_name, index).unwrap();
+                    let result = res_lock.search_node_idx(&node_name, node_idx).unwrap();
                     let eval = init_condition.evaluate(result);
                     if !eval {
                         conditions_met = false;
@@ -344,7 +345,6 @@ impl Clerk {
     ) {
         // Get node and node_index from the channel
         for (node_name, node_index) in ready_rx.iter() {
-            println!("Scheduling node {}:{}", node_name.clone(), node_index);
             let graph_lock = self.graph.lock().unwrap();
 
             let nodes_map = graph_lock.nodes_map();
@@ -417,8 +417,20 @@ impl Clerk {
             match &arg.type_ {
                 CmTypes::Ref(obj_name) => {
                     let init_objects = init_objects_opt.as_ref().unwrap();
-                    let obj = &init_objects[obj_name][node_index];
-                    arg_vec.push(obj.clone());
+
+                    // object may be either buffer indexed by node_index
+                    // or just variable indexed by 0
+                    let obj_vec = init_objects.get(obj_name).unwrap();
+                    let obj = {
+                        if obj_vec.len() > 1 {
+                            // If the object is a buffer, get the object at node_index
+                            obj_vec[node_index].clone()
+                        } else {
+                            // If the object is a variable, get the first element
+                            obj_vec[0].clone()
+                        }
+                    };
+                    arg_vec.push(obj);
                 }
                 CmTypes::Res(res_node) => {
                     let indices = arg
