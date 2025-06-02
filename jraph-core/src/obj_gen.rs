@@ -18,7 +18,7 @@ struct InitJson {
     name: String,
     mult_factor: Option<usize>,
     args: Vec<ArgInit>,
-    func: Option<String>,
+    function_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,7 +45,7 @@ pub fn init_objects(graph_json: &str) -> Result<HashMap<String, Vec<CmTypes>>, s
         };
         let args_json: &Vec<ArgInit> = &init.args;
 
-        if init.func.is_none() {
+        if init.function_name.is_none() {
             // direct variable initialization
             let type_str = args_json[0].type_.clone();
             let value_str = args_json[0].value.clone();
@@ -58,7 +58,7 @@ pub fn init_objects(graph_json: &str) -> Result<HashMap<String, Vec<CmTypes>>, s
             init_objects.insert(name, value_vec);
         } else {
             // function call needed
-            let func_name = init.func.as_ref().unwrap().clone();
+            let func_name = init.function_name.as_ref().unwrap().clone();
             let func_ptr = get_func(&func_name).unwrap();
 
             let mut args: Vec<CmTypes> = Vec::new();

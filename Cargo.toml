@@ -1,8 +1,7 @@
 [workspace]
-members = [
-    "cst_macros", 
-    "shared", 
+members = [ 
     "jraph-core", 
-    "jraph-py"
+    "jraph-py", 
+    "rust-translator"
 ]
-resolver = "2"
+resolver = "3"

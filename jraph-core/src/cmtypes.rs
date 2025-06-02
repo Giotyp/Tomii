@@ -2,9 +2,10 @@ use nalgebra::*;
 use num_complex::Complex32;
 use serde::Deserialize;
 use std::fmt;
+use std::net::UdpSocket;
 use std::sync::Arc;
 
-#[derive(Deserialize, Clone, PartialEq)]
+#[derive(Deserialize, Clone)]
 pub enum CmTypes {
     Bool(bool),
     I8(i8),
@@ -21,6 +22,8 @@ pub enum CmTypes {
     F64(f64),
     Char(char),
     Usize(usize),
+    #[serde(skip)]
+    Udpsocket(Arc<UdpSocket>),
     VecCmt(Vec<CmTypes>),
     String(String),
     VecC32(Vec<Complex32>),
@@ -31,6 +34,36 @@ pub enum CmTypes {
     Ref(String),
     Res(String),
     None(),
+}
+
+impl PartialEq for CmTypes {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (CmTypes::Bool(a), CmTypes::Bool(b)) => a == b,
+            (CmTypes::I8(a), CmTypes::I8(b)) => a == b,
+            (CmTypes::I16(a), CmTypes::I16(b)) => a == b,
+            (CmTypes::I32(a), CmTypes::I32(b)) => a == b,
+            (CmTypes::I64(a), CmTypes::I64(b)) => a == b,
+            (CmTypes::I128(a), CmTypes::I128(b)) => a == b,
+            (CmTypes::U8(a), CmTypes::U8(b)) => a == b,
+            (CmTypes::U16(a), CmTypes::U16(b)) => a == b,
+            (CmTypes::U32(a), CmTypes::U32(b)) => a == b,
+            (CmTypes::U64(a), CmTypes::U64(b)) => a == b,
+            (CmTypes::U128(a), CmTypes::U128(b)) => a == b,
+            (CmTypes::F32(a), CmTypes::F32(b)) => a == b,
+            (CmTypes::F64(a), CmTypes::F64(b)) => a == b,
+            (CmTypes::Char(a), CmTypes::Char(b)) => a == b,
+            (CmTypes::Usize(a), CmTypes::Usize(b)) => a == b,
+            (CmTypes::String(a), CmTypes::String(b)) => a == b,
+            (CmTypes::VecCmt(a), CmTypes::VecCmt(b)) => a == b,
+            (CmTypes::VecC32(a), CmTypes::VecC32(b)) => a == b,
+            (CmTypes::DVectorC32(a), CmTypes::DVectorC32(b)) => a == b,
+            (CmTypes::DMatrixC32(a), CmTypes::DMatrixC32(b)) => a == b,
+            (CmTypes::Ref(a), CmTypes::Ref(b)) => a == b,
+            (CmTypes::Res(a), CmTypes::Res(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 mod dvector_arc_serde {
@@ -102,6 +135,7 @@ impl std::fmt::Debug for CmTypes {
             CmTypes::F64(val) => write!(f, "F64({:?})", val),
             CmTypes::Char(val) => write!(f, "Char({:?})", val),
             CmTypes::Usize(val) => write!(f, "Usize({:?})", val),
+            CmTypes::Udpsocket(val) => write!(f, "UdpSocket({:?})", val),
             CmTypes::VecCmt(val) => write!(f, "VecCmt({:?})", val),
             // CmTypes::VecUsize(val) => write!(f, "VecUsize({:?})", val),
             CmTypes::String(val) => write!(f, "String({:?})", val),
