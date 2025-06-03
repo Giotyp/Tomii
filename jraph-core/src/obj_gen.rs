@@ -11,6 +11,7 @@ struct ArgInit {
     #[serde(rename = "type")]
     type_: String,
     value: String,
+    mutable: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,7 +50,16 @@ pub fn init_objects(graph_json: &str) -> Result<HashMap<String, Vec<CmTypes>>, s
             // direct variable initialization
             let type_str = args_json[0].type_.clone();
             let value_str = args_json[0].value.clone();
-            let value_cmt = string_to_cmtype(type_str.clone(), value_str.clone()).unwrap();
+
+            // Check if type_str is in PARSERS
+            let value_cmt = {
+                if defined_type(&type_str) {
+                    string_to_cmtype(type_str.clone(), value_str.clone(), None).unwrap()
+                } else {
+                    let is_mut_opt = args_json[0].mutable;
+                    string_to_cmtype("Custom".to_string(), value_str.clone(), is_mut_opt).unwrap()
+                }
+            };
 
             let mut value_vec: Vec<CmTypes> = Vec::new();
             for _ in 0..mult_factor {
@@ -72,7 +82,16 @@ pub fn init_objects(graph_json: &str) -> Result<HashMap<String, Vec<CmTypes>>, s
                     continue;
                 }
 
-                let arg_cmt = string_to_cmtype(type_str.clone(), value_str.clone()).unwrap();
+                let type_val = {
+                    if defined_type(&type_str) {
+                        type_str.clone()
+                    } else {
+                        "Custom".to_string()
+                    }
+                };
+                let is_mut_opt = arg_json.mutable;
+
+                let arg_cmt = string_to_cmtype(type_val, value_str.clone(), is_mut_opt).unwrap();
                 args.push(arg_cmt);
             }
 

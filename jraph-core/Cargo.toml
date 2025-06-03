@@ -22,6 +22,7 @@ intel-mkl-src = { version = "0.8.1", features = ["mkl-dynamic-lp64-seq"]}
 crossbeam = "0.8.4"
 crossbeam-channel = "0.5"
 itertools = "0.14.0"
+lazy_static = "1.5.0"
 
 [build-dependencies]
 build-print = "0.1.1"

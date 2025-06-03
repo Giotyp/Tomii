@@ -26,6 +26,7 @@ struct ArgJson {
     #[serde(rename = "type")]
     type_: String,
     value: Option<String>,
+    mutable: Option<bool>,
     condition: Option<ConditionJson>,
     predecessor: Option<PredJson>,
 }
@@ -69,12 +70,18 @@ fn parse_arg(arg_json: &ArgJson) -> Arg {
 
     let arg_cmtype = {
         let type_json = arg_json.type_.clone();
+        let mutable_opt = arg_json.mutable;
         if predecessor.is_some() {
             let name = predecessor.as_ref().unwrap().name.clone();
-            string_to_cmtype(type_json.clone(), name).unwrap()
+            string_to_cmtype(type_json.clone(), name, mutable_opt).unwrap()
         } else {
             if arg_value_opt.is_some() {
-                string_to_cmtype(type_json.clone(), arg_value_opt.clone().unwrap()).unwrap()
+                string_to_cmtype(
+                    type_json.clone(),
+                    arg_value_opt.clone().unwrap(),
+                    mutable_opt,
+                )
+                .unwrap()
             } else {
                 // This should not happen
                 CmTypes::None()
@@ -136,6 +143,7 @@ fn parse_condition(condition_json: &ConditionJson) -> InitCondition {
     let eval_value = string_to_cmtype(
         condition_json.value_type.clone(),
         condition_json.value.clone(),
+        None,
     )
     .unwrap();
 
