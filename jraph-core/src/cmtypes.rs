@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 #[derive(Deserialize, Clone)]
 pub enum CmTypes {
@@ -23,6 +23,7 @@ pub enum CmTypes {
     F64(f64),
     Char(char),
     Usize(usize),
+    Isize(isize),
     String(String),
     C32(Complex32),
     Ref(String),
@@ -65,34 +66,26 @@ impl PartialEq for CmTypes {
 }
 
 impl CmTypes {
-    // wrap any `T: Any + Send + Sync`
     pub fn from_any_mut<T: Any + Send + Sync>(value: T) -> CmTypes {
         CmTypes::AnyMut(Arc::new(Mutex::new(Box::new(value))))
     }
 
-    // downcast and consume the catch-all, panic if wrong type or shared
-    pub fn into_any_mut<T: Any + Send + Sync>(self) -> T {
+    pub fn with_any_mut<T: Any + Send + Sync, F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut T) -> R,
+    {
         match self {
             CmTypes::AnyMut(arc_mutex) => {
-                let boxed = Arc::try_unwrap(arc_mutex)
-                    .expect("Multiple Arc refs on Any")
-                    .into_inner()
-                    .expect("Mutex poisoned");
-                *boxed.downcast::<T>().unwrap_or_else(|_| {
-                    panic!(
-                        "Type mismatch in into_any_mut<{}>",
-                        std::any::type_name::<T>()
-                    )
-                })
-            }
-            _ => panic!("into_any_mut() called on non-AnyMut variant"),
-        }
-    }
+                let mut guard = arc_mutex.lock().expect("Mutex poisoned");
+                let boxed = &mut *guard;
 
-    pub fn as_any_mut(&self) -> MutexGuard<'_, Box<dyn Any + Send + Sync>> {
-        match self {
-            CmTypes::AnyMut(arc_mutex) => arc_mutex.lock().expect("Mutex poisoned in as_any_mut()"),
-            other => panic!("as_any_mut() called on non-AnyMut variant: {:?}", other),
+                if let Some(value) = boxed.downcast_mut::<T>() {
+                    Some(f(value))
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
@@ -100,25 +93,13 @@ impl CmTypes {
         CmTypes::Any(Arc::new(Box::new(value)))
     }
 
-    pub fn as_any(&self) -> &Box<dyn Any + Send + Sync> {
-        match self {
-            CmTypes::Any(arc_box) => arc_box.as_ref(),
-            other => panic!("as_any_shared() called on non-Any variant: {:?}", other),
-        }
-    }
-
-    pub fn into_any<T: Any + Send + Sync>(self) -> T {
+    pub fn downcast_any<T: Any + Send + Sync>(&self) -> Option<&T> {
         match self {
             CmTypes::Any(arc_box) => {
-                let boxed_any = Arc::try_unwrap(arc_box)
-                    .expect("Multiple Arc references exist for AnyShared")
-                    .downcast::<T>()
-                    .unwrap_or_else(|_| {
-                        panic!("Type mismatch in into_any<{}>", std::any::type_name::<T>())
-                    });
-                *boxed_any
+                // Get a reference to the boxed value and try to downcast it
+                arc_box.as_ref().downcast_ref::<T>()
             }
-            _ => panic!("into_any() called on non-Any variant"),
+            _ => None,
         }
     }
 }
@@ -142,6 +123,7 @@ impl std::fmt::Debug for CmTypes {
             CmTypes::F64(val) => write!(f, "F64({:?})", val),
             CmTypes::Char(val) => write!(f, "Char({:?})", val),
             CmTypes::Usize(val) => write!(f, "Usize({:?})", val),
+            CmTypes::Isize(val) => write!(f, "Isize({:?})", val),
             CmTypes::VecCmt(val) => write!(f, "VecCmt({:?})", val),
             CmTypes::String(val) => write!(f, "String({:?})", val),
             CmTypes::Ref(val) => write!(f, "Ref({:?})", val),
@@ -172,6 +154,7 @@ impl fmt::Display for CmTypes {
             CmTypes::F64(x) => write!(f, "{}", x),
             CmTypes::Char(x) => write!(f, "{}", x),
             CmTypes::Usize(x) => write!(f, "{}", x),
+            CmTypes::Isize(x) => write!(f, "{}", x),
             CmTypes::String(x) => write!(f, "{}", x),
             CmTypes::Ref(x) => write!(f, "{}", x),
             CmTypes::Res(x) => write!(f, "{}", x),
@@ -244,6 +227,7 @@ lazy_static! {
         add!("f64",     |s| s.parse::<f64>().map(CmTypes::F64 ).map_err(|_| CustomError::new("invalid f64")));
         add!("char",    |s| s.chars().next().map(CmTypes::Char).ok_or_else(|| CustomError::new("invalid char")));
         add!("usize",   |s| s.parse::<usize>().map(CmTypes::Usize).map_err(|_| CustomError::new("invalid usize")));
+        add!("isize",   |s| s.parse::<isize>().map(CmTypes::Isize).map_err(|_| CustomError::new("invalid isize")));
         add!("String",  |s| Ok(CmTypes::String(s.to_string())));
         add!("$ref",    |s| Ok(CmTypes::Ref(s.to_string())));
         add!("$res",    |s| Ok(CmTypes::Res(s.to_string())));
@@ -255,37 +239,33 @@ pub fn defined_type(tp: &str) -> bool {
     PARSERS.contains_key(tp)
 }
 
-/// Converts a type‐name & argument‐string into a CmTypes, with:
-///  - explicit parsers for known primitives/strings
-///  - JSON→Vec<CmTypes> for `VecCmt`
-///  - generic `from_any` fallback for everything else
-pub fn string_to_cmtype(
-    tp: String,
-    arg: String,
-    mutable: Option<bool>,
-) -> Result<CmTypes, CustomError> {
+pub fn string_to_cmtype(tp: String, arg: String) -> Result<CmTypes, CustomError> {
     // 1) explicit table
     if let Some(parser) = PARSERS.get(tp.as_str()) {
         return parser(&arg);
     }
 
-    if tp == "Custom" {
-        // Handle "Custom" type, which is a special case
-        if let Some(is_mut) = mutable {
-            if !is_mut {
-                return Ok(CmTypes::from_any(arg.to_string()));
+    if tp.starts_with("Vec") {
+        // get type inside <> markers
+        let tp = tp
+            .strip_prefix("Vec<")
+            .and_then(|s| s.strip_suffix(">"))
+            .ok_or_else(|| CustomError::new(&format!("Invalid Vec format: {}", tp)))?;
+
+        let mut v: Vec<CmTypes> = Vec::new();
+        // arg contains tp values separated by commas
+        let values: Vec<&str> = arg.split(',').collect();
+        for value in values {
+            if let Some(parser) = PARSERS.get(tp) {
+                v.push(parser(value.trim())?);
             } else {
-                return Ok(CmTypes::from_any_mut(arg.to_string()));
+                return Err(CustomError::new(&format!("Unable to parse type '{}'", tp)));
             }
-        } else {
-            // by default, return immutable
-            return Ok(CmTypes::from_any(arg.to_string()));
         }
+        // Return the vector of CmTypes
+        return Ok(CmTypes::VecCmt(v));
     } else {
         // Return error
-        return Err(CustomError::new(&format!(
-            "No parser for type '{}', use 'Custom' or 'VecCmt'",
-            tp
-        )));
+        return Err(CustomError::new(&format!("Unable to parse type '{}'", tp)));
     }
 }

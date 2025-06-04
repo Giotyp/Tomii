@@ -5,6 +5,27 @@ from pathlib import Path
 
 func_reg = []
 
+defined_types = [
+    "bool",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "i128",
+    "isize",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "u128",
+    "usize",
+    "f32",
+    "f64",
+    "String",
+    "C32",
+    "Vec<CmTypes>",
+]
+
 
 def map_arg(arg):
     if "*" not in arg:
@@ -26,20 +47,12 @@ def map_cmtype_entry(arg):
         indicating if the type is a primitive type.
     """
     # second return for is_primitive
-    if "Vec<Complex32>" in arg:
-        return "VecC32", False
-    elif "DVector<Complex32>" in arg:
-        return "DVectorC32", False
-    elif "DMatrix<Complex32>" in arg:
-        return "DMatrixC32", False
-    elif arg == "String":
-        return "String", False
-    elif arg == "Vec<usize>" or arg == "Vec<u8>":
-        return "VecCmt", False
-    elif arg == "()":
+    if arg == "()":
         return "None", False
-    else:
+    elif arg in defined_types:
         return arg.capitalize(), True
+    else:
+        return "from_any", False
 
 
 def get_arg_type(arg):
@@ -129,30 +142,47 @@ def create_arg_retrieve(index, arg_name, arg_type):
         raw_arg, raw_prim = map_cmtype_entry(arg_raw_type)
         ref = "&" if not raw_prim else ""
         # For now assume primitive types
-        arg_ret = (
-            f"\tlet mut {arg_name}: {arg_type} = Vec::new();\n"
-            # Take VecCmt buffer
-            f"\tlet raw_arg_buffer = match &{ref}args[0] {{\n"
-            f"\t\tCmTypes::{arg_proc}({obj_ref}{arg_name}) => {retr_type},\n"
-            f'\t\t_ => panic!("Invalid argument type"),\n'
-            f"\t}};\n"
-            # Collect arguments
-            f"\tfor i in 0..raw_arg_buffer.len() {{\n"
-            f"\t\t let x = match {ref}raw_arg_buffer[i] {{\n"
-            f"\t\t\tCmTypes::{raw_arg}(x) => x,\n"
-            f'\t\t\t_ => panic!("Invalid argument type"),\n'
-            f"\t\t }};\n"
-            f"\t\t {arg_name}.push(x);\n"
-            f"\t}};\n"
-        )
+
+        if arg_type in defined_types:
+            arg_ret = (
+                f"\tlet mut {arg_name}: {arg_type} = Vec::new();\n"
+                # Take VecCmt buffer
+                f"\tlet raw_arg_buffer = match &{ref}args[0] {{\n"
+                f"\t\tCmTypes::{arg_proc}({obj_ref}{arg_name}) => {retr_type},\n"
+                f'\t\t_ => panic!("Invalid argument type"),\n'
+                f"\t}};\n"
+                # Collect arguments
+                f"\tfor i in 0..raw_arg_buffer.len() {{\n"
+                f"\t\t let x = match {ref}raw_arg_buffer[i] {{\n"
+                f"\t\t\tCmTypes::{raw_arg}(x) => x,\n"
+                f'\t\t\t_ => panic!("Invalid argument type"),\n'
+                f"\t\t }};\n"
+                f"\t\t {arg_name}.push(x);\n"
+                f"\t}};\n"
+            )
+        else:
+            arg_ret = (
+                f"\tlet {arg_name} = match args[{index}].downcast_any() {{\n"
+                f"\t\tSome(extracted) => extracted,\n"
+                f'\t\tNone => panic!("Failed to downcast CmTypes::Any"),\n'
+                f"\t}};\n"
+            )
     else:
-        # Single-value case: pick the slot `index` and match against the enum.
-        arg_ret = (
-            f"\tlet {arg_name}: {arg_type} = match {ref}args[{index}] {{\n"
-            f"\t\tCmTypes::{arg_proc}({obj_ref}{arg_name}) => {ref_mut}{retr_type},\n"
-            f'\t\t_ => panic!("Invalid argument type"),\n'
-            f"\t}};"
-        )
+        if arg_type in defined_types:
+            # Single-value case: pick the slot `index` and match against the enum.
+            arg_ret = (
+                f"\tlet {arg_name}: {arg_type} = match {ref}args[{index}] {{\n"
+                f"\t\tCmTypes::{arg_proc}({obj_ref}{arg_name}) => {ref_mut}{retr_type},\n"
+                f'\t\t_ => panic!("Invalid argument type"),\n'
+                f"\t}};"
+            )
+        else:
+            arg_ret = (
+                f"\tlet {arg_name} = match args[{index}].downcast_any() {{\n"
+                f"\t\tSome(extracted) => extracted,\n"
+                f'\t\tNone => panic!("Failed to downcast CmTypes::Any"),\n'
+                f"\t}};\n"
+            )
     return arg_ret
 
 
@@ -414,7 +444,22 @@ def generate_wrapper(fn_name, args_signature, return_type, mode="rust"):
     # remove struct_obj from arg_names
     if "struct_obj" in arg_names:
         arg_names.remove("struct_obj")
-    arg_names_str = ", ".join(arg_names)
+
+    arg_names_str = ""
+    downcast = False
+    for arg in arguments:
+        if "downcast_any" in arg:
+            downcast = True
+            break
+    for arg_name in arg_names:
+        if downcast:
+            # append args with a *
+            arg_names_str += f"*{arg_name}, "
+        else:
+            arg_names_str += f"{arg_name}, "
+
+    # trim from the end
+    arg_names_str = arg_names_str.rstrip(", ")
     match_arms_str = "\n\n".join(arguments)
 
     if mode == "cpp":
@@ -470,6 +515,10 @@ def handle_rust(content, input_stem, output_file, init_content=None, init_stem=N
     )
     wrapper_code, _ = generate_wrappers(function_signatures, struct_impls, mode)
 
+    # get any use modules from the content to reuse in the wrapper code
+    use_modules = re.findall(r"use\s+([a-zA-Z0-9_]+::[a-zA-Z0-9_]+);", content)
+    init_modules = re.findall(r"use\s+([a-zA-Z0-9_]+::[a-zA-Z0-9_]+);", init_content)
+
     with output_file.open("w") as f:
         # insert warning attributes
         # include the original function file
@@ -477,14 +526,14 @@ def handle_rust(content, input_stem, output_file, init_content=None, init_stem=N
         # include the optional init function file
         if init_content:
             f.write(f"use crate::{init_stem}::*;\n\n")
+            for module in init_modules:
+                if module not in use_modules:
+                    f.write(f"use {module};\n")
         # include shared::CmTypes
-        f.write("use crate::cmtypes::CmTypes;\n")
-        # include Complex32
-        f.write("use num_complex::Complex32;\n")
-        # include Arc, Mutex
-        f.write("use std::sync::{Arc, Mutex};\n\n")
-        # include nalgebra
-        f.write("use nalgebra::*;\n\n")
+        # include same modules
+        for module in use_modules:
+            f.write(f"use {module};\n")
+        f.write("use jraph_core::cmtypes::CmTypes;\n")
         f.write(wrapper_code)
 
 
@@ -520,7 +569,7 @@ def create_func_registry(wrapper_file, registry_file):
         # include generated wrappers
         f.write(f"use crate::{wrapper_file.stem}::*;\n")
         # include shared::CmTypes
-        f.write("use crate::cmtypes::*;\n\n")
+        f.write("use jraph_core::cmtypes::*;\n\n")
 
         # registry to retrieve function pointers
         # function signature

@@ -1,5 +1,5 @@
 use crate::cmtypes::*;
-use crate::func_reg::get_func;
+use crate::registry::get_func;
 use serde::Deserialize;
 use serde_json;
 use std::collections::HashMap;
@@ -11,7 +11,6 @@ struct ArgInit {
     #[serde(rename = "type")]
     type_: String,
     value: String,
-    mutable: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,12 +51,12 @@ pub fn init_objects(graph_json: &str) -> Result<HashMap<String, Vec<CmTypes>>, s
             let value_str = args_json[0].value.clone();
 
             // Check if type_str is in PARSERS
-            let value_cmt = {
-                if defined_type(&type_str) {
-                    string_to_cmtype(type_str.clone(), value_str.clone(), None).unwrap()
-                } else {
-                    let is_mut_opt = args_json[0].mutable;
-                    string_to_cmtype("Custom".to_string(), value_str.clone(), is_mut_opt).unwrap()
+            let value_cmt_res = string_to_cmtype(type_str.clone(), value_str.clone());
+            let value_cmt = match value_cmt_res {
+                Ok(cmt) => cmt,
+                Err(e) => {
+                    eprintln!("Error parsing type '{}': {}", type_str, e);
+                    panic!("Create an init function to handle this type.");
                 }
             };
 
@@ -82,16 +81,14 @@ pub fn init_objects(graph_json: &str) -> Result<HashMap<String, Vec<CmTypes>>, s
                     continue;
                 }
 
-                let type_val = {
-                    if defined_type(&type_str) {
-                        type_str.clone()
-                    } else {
-                        "Custom".to_string()
+                let arg_cmt_res = string_to_cmtype(type_str.clone(), value_str.clone());
+                let arg_cmt = match arg_cmt_res {
+                    Ok(cmt) => cmt,
+                    Err(e) => {
+                        eprintln!("Error parsing type '{}': {}", type_str, e);
+                        panic!("Create an init function to handle this type.");
                     }
                 };
-                let is_mut_opt = arg_json.mutable;
-
-                let arg_cmt = string_to_cmtype(type_val, value_str.clone(), is_mut_opt).unwrap();
                 args.push(arg_cmt);
             }
 

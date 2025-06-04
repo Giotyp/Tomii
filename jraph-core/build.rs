@@ -80,22 +80,22 @@ fn main() {
     println!("cargo:rerun-if-changed={}", init_file);
 
     let init_funcs = "init_funcs.rs";
-    let copied_init = out_dir.join(init_funcs);
+    let init_path = out_dir.join(init_funcs);
 
     let output = {
         if !init_file.is_empty() {
             info!("Generating init functions for {}", init_file);
-            fs::copy(&init_file, &copied_init)
+            fs::copy(&init_file, &init_path)
                 .unwrap_or_else(|err| panic!("Failed to copy init_func.rs to OUT_DIR: {}", err));
 
             // Call the translator script to generate the wrappers
             Command::new("python3")
                 .arg("translator.py")
-                .arg(input_path)
+                .arg(input_path.clone())
                 .arg(wrapper_file.to_str().unwrap())
                 .arg(registry_file.to_str().unwrap())
                 .arg("False")
-                .arg(copied_init)
+                .arg(init_path.clone())
                 .output()
                 .expect("Failed to execute Python script")
         } else {
@@ -106,13 +106,13 @@ fn main() {
                 }
                 "#;
 
-            fs::write(&copied_init, empty_module)
+            fs::write(&init_path, empty_module)
                 .unwrap_or_else(|err| panic!("Failed to write empty module to OUT_DIR: {}", err));
 
             // Call translator without init file
             Command::new("python3")
                 .arg("translator.py")
-                .arg(input_path)
+                .arg(input_path.clone())
                 .arg(wrapper_file.to_str().unwrap())
                 .arg(registry_file.to_str().unwrap())
                 .arg("False")
@@ -144,16 +144,37 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", func_path);
     }
 
-    // link with libraries meant to be done by project
-    // Link against the MKL library
-    println!("cargo:rerun-if-env-changed=MKLROOT");
-    println!("cargo:rustc-link-search=native=/opt/intel/oneapi/mkl/2024.0/lib/");
-    println!("cargo:rustc-link-lib=static=mkl_intel_lp64");
-    println!("cargo:rustc-link-lib=dylib=mkl_core");
-    println!("cargo:rustc-link-lib=dylib=mkl_sequential");
-    println!("cargo:rustc-link-search=native=/lib/x86_64-linux-gnu/");
-    println!("cargo:rustc-link-lib=dylib=pthread");
-    println!("cargo:rustc-link-lib=dylib=m");
-    println!("cargo:rustc-link-lib=dylib=dl");
-    println!("cargo:rustc-link-lib=dylib=stdc++");
+    let project_src = env::var("SRC_PATH").expect("SRC_PATH environment variable is not set");
+    println!("cargo:rerun-if-changed={}", project_src);
+
+    let user_include = PathBuf::from(project_src).join("generated_jraph.rs");
+    info!("Writing generated_jraph.rs to {}", user_include.display());
+
+    let content = format!(
+        r#"
+pub mod funcs {{
+    include!("{}");
+}}
+pub mod init_funcs {{
+    include!("{}");
+}}
+pub mod wrappers {{
+    include!("{}");
+}}
+pub mod func_reg {{
+    include!("{}");
+}}
+"#,
+        input_path.display(),
+        init_path.display(),
+        wrapper_file.display(),
+        registry_file.display()
+    );
+
+    fs::write(&user_include, content).expect("Failed to write generated_jraph.rs");
+
+    println!(
+        "cargo:warning=Generated include file at {:?}",
+        user_include.display()
+    );
 }
