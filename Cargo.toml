@@ -1,7 +1,3 @@
 [workspace]
-members = [ 
-    "jraph-core", 
-    "jraph-py", 
-    "rust-translator"
-]
+members = ["synstream-core", "synstream-macro", "synstream-types"]
 resolver = "3"
