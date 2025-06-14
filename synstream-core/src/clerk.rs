@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -38,25 +37,12 @@ impl Clerk {
         node_results_lock.get_buffer().clone()
     }
 
-    pub fn print_all_results(&self, output: String) {
+    pub fn print_all_results(&self) {
         let results = self.get_results();
-        // if output is "stdout", print to stdout
-        if output == "stdout" {
-            for (node_name, result_vec) in results.iter() {
-                println!("Node: {}", node_name);
-                for (i, result) in result_vec.iter().enumerate() {
-                    println!("    Index {}: {:?}", i, result);
-                }
-            }
-        } else {
-            // write to file
-            let mut file = std::fs::File::create(output).expect("Failed to create output file");
-            for (node_name, result_vec) in results.iter() {
-                writeln!(file, "Node: {}", node_name).expect("Failed to write to output file");
-                for (i, result) in result_vec.iter().enumerate() {
-                    writeln!(file, "    Index {}: {:?}", i, result)
-                        .expect("Failed to write to output file");
-                }
+        for (node_name, result_vec) in results.iter() {
+            println!("Node: {}", node_name);
+            for (i, result) in result_vec.iter().enumerate() {
+                println!("    Index {}: {:?}", i, result);
             }
         }
     }
@@ -448,7 +434,8 @@ impl Clerk {
 
                     // object may be either buffer indexed by node_index
                     // or just variable indexed by 0
-                    let obj_vec = init_objects.get(obj_name).unwrap();
+                    let msg = format!("Object {} not found in init_objects", obj_name);
+                    let obj_vec = init_objects.get(obj_name).expect(msg.as_str());
                     let obj = {
                         if obj_vec.len() > 1 {
                             // If the object is a buffer, get the object at node_index

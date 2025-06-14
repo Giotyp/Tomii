@@ -554,7 +554,7 @@ def create_func_registry(wrapper_file, registry_file):
         # include generated wrappers
         f.write(f"use crate::{wrapper_file.stem}::*;\n")
         # include shared::CmTypes
-        f.write("use crate::cmtypes::*;\n\n")
+        f.write("use synstream_types::*;\n\n")
 
         # registry to retrieve function pointers
         # function signature
@@ -576,7 +576,7 @@ def create_func_registry(wrapper_file, registry_file):
 def create_emtpy_registry(registry_file):
     with registry_file.open("w") as f:
         # include shared::CmTypes
-        f.write("use crate::cmtypes::*;\n\n")
+        f.write("use synstream_types::*;\n\n")
         # function signature
         f.write("pub fn get_func(_func_name: &str) -> Option<CmPtr> {\n")
         f.write("\tNone\n")

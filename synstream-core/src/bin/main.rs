@@ -1,6 +1,8 @@
 use clap::Parser;
+use std::fs::OpenOptions;
 use synstream_core::clerk::Clerk;
 use synstream_core::graph_gen::from_json;
+use synstream_core::graph_struct::Graph;
 use synstream_core::scheduler::Scheduler;
 
 #[derive(Parser)]
@@ -28,6 +30,8 @@ struct Args {
     max_runtime: u64,
     #[clap(long, value_name = "FILE", required = false, default_value = "stdout")]
     output: String,
+    #[clap(long, help = "Print Initializations to stdout")]
+    inits: bool,
 }
 
 fn main() {
@@ -44,23 +48,43 @@ fn main() {
         _ => Some(args.max_runtime),
     };
 
-    let clerk = run_graph(&args.json, args.workers, args.core_offset, runtime);
+    let _stdout_guard = if args.output != "stdout" {
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&args.output)
+            .expect("Failed to create output file");
+
+        // Redirect stdout to file
+        Some(gag::Redirect::stdout(file).expect("Failed to redirect stdout"))
+    } else {
+        None
+    };
+
+    let graph = from_json(&args.json).expect("Failed to parse graph from JSON file");
+    // check if inits flag is set
+    if args.inits {
+        println!();
+        graph.print_init_objects();
+        println!();
+    }
+
+    let clerk = run_graph(&graph, args.workers, args.core_offset, runtime);
 
     // print results
-    clerk.print_all_results(args.output);
+    clerk.print_all_results();
 }
 
 pub fn run_graph(
-    json_file: &str,
+    graph: &Graph,
     workers: usize,
     core_offset: usize,
     max_runtime: Option<u64>,
 ) -> Clerk {
-    let graph = from_json(json_file).expect("Failed to parse graph from JSON file");
-
     let mut clerk = Clerk::new();
     let scheduler = Scheduler::new(core_offset, workers);
 
-    clerk.run(&graph, scheduler, max_runtime);
+    clerk.run(graph, scheduler, max_runtime);
     clerk
 }
