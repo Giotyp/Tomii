@@ -227,6 +227,7 @@ lazy_static! {
         add!("String",  |s| Ok(CmTypes::String(s.to_string())));
         add!("$ref",    |s| Ok(CmTypes::Ref(s.to_string())));
         add!("$res",    |s| Ok(CmTypes::Res(s.to_string())));
+        add!("None",    |_| Ok(CmTypes::None()));
         entry_map
     };
 }

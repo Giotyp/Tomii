@@ -32,6 +32,8 @@ struct Args {
     output: String,
     #[clap(long, help = "Print Initializations to stdout")]
     inits: bool,
+    #[clap(long, help = "Enable Debug Printing")]
+    debug: bool,
 }
 
 fn main() {
@@ -70,10 +72,9 @@ fn main() {
         println!();
     }
 
-    let clerk = run_graph(&graph, args.workers, args.core_offset, runtime);
+    let debug = if args.debug { true } else { false };
 
-    // print results
-    clerk.print_all_results();
+    let _clerk = run_graph(&graph, args.workers, args.core_offset, runtime, debug);
 }
 
 pub fn run_graph(
@@ -81,8 +82,9 @@ pub fn run_graph(
     workers: usize,
     core_offset: usize,
     max_runtime: Option<u64>,
+    debug: bool,
 ) -> Clerk {
-    let mut clerk = Clerk::new();
+    let mut clerk = Clerk::new(debug);
     let scheduler = Scheduler::new(core_offset, workers);
 
     clerk.run(graph, scheduler, max_runtime);
