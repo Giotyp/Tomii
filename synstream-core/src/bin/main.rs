@@ -3,7 +3,7 @@ use std::fs::OpenOptions;
 use synstream_core::clerk::Clerk;
 use synstream_core::graph_gen::from_json;
 use synstream_core::graph_struct::Graph;
-use synstream_core::scheduler::Scheduler;
+use synstream_core::scheduler::{create_scheduler, SchedulerType};
 
 #[derive(Parser)]
 #[clap(author = "George Typaldos", version, about)]
@@ -30,6 +30,8 @@ struct Args {
     max_runtime: u64,
     #[clap(long, value_name = "FILE", required = false, default_value = "stdout")]
     output: String,
+    #[clap(long, help = "Enable fifo scheduler")]
+    fifo: bool,
     #[clap(long, help = "Print Initializations to stdout")]
     inits: bool,
     #[clap(long, help = "Enable Debug Printing")]
@@ -64,6 +66,12 @@ fn main() {
         None
     };
 
+    let scheduler_type = if args.fifo {
+        SchedulerType::Fifo
+    } else {
+        SchedulerType::WorkStealing
+    };
+
     let graph = from_json(&args.json).expect("Failed to parse graph from JSON file");
     // check if inits flag is set
     if args.inits {
@@ -74,18 +82,26 @@ fn main() {
 
     let debug = if args.debug { true } else { false };
 
-    let _clerk = run_graph(&graph, args.workers, args.core_offset, runtime, debug);
+    let _clerk = run_graph(
+        &graph,
+        scheduler_type,
+        args.workers,
+        args.core_offset,
+        runtime,
+        debug,
+    );
 }
 
 pub fn run_graph(
     graph: &Graph,
+    scheduler_type: SchedulerType,
     workers: usize,
     core_offset: usize,
     max_runtime: Option<u64>,
     debug: bool,
 ) -> Clerk {
     let mut clerk = Clerk::new(debug);
-    let scheduler = Scheduler::new(core_offset, workers);
+    let scheduler = create_scheduler(scheduler_type, core_offset, workers);
 
     clerk.run(graph, scheduler, max_runtime);
     clerk

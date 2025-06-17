@@ -3,7 +3,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, RwLock};
 
 use crate::graph_struct::*;
-use crate::scheduler::Scheduler;
+use crate::scheduler::{Scheduler, SchedulerImpl};
 use synstream_types::*;
 
 #[derive(Clone)]
@@ -49,7 +49,7 @@ impl Clerk {
         }
     }
 
-    pub fn run(&mut self, graph: &Graph, scheduler: Scheduler, max_runtime: Option<u64>) {
+    pub fn run(&mut self, graph: &Graph, scheduler: SchedulerImpl, max_runtime: Option<u64>) {
         let nodes_map = graph.nodes_map();
         let init_objects_opt = graph.init_objects();
         let connect_list = graph.connect_list();
@@ -360,7 +360,7 @@ impl Clerk {
 
     fn schedule_nodes(
         &mut self,
-        scheduler: Scheduler,
+        scheduler: SchedulerImpl,
         completed_queue: Arc<RwLock<Vec<(String, usize)>>>,
         ready_rx: &Receiver<(String, usize)>,
     ) {
