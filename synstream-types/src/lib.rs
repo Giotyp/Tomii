@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 #[derive(Deserialize, Clone)]
 pub enum CmTypes {
@@ -28,12 +28,8 @@ pub enum CmTypes {
     Res(String),
     VecCmt(Vec<CmTypes>),
     None(),
-    // "Mutable Any"
     #[serde(skip)]
-    AnyMut(Arc<Mutex<Box<dyn Any + Send + Sync>>>),
-    // "Immutable Any"
-    #[serde(skip)]
-    Any(Arc<Box<dyn Any + Send + Sync>>),
+    Any(Arc<RwLock<Box<dyn Any + Send + Sync>>>),
 }
 
 impl PartialEq for CmTypes {
@@ -64,40 +60,33 @@ impl PartialEq for CmTypes {
 }
 
 impl CmTypes {
-    pub fn from_any_mut<T: Any + Send + Sync>(value: T) -> CmTypes {
-        CmTypes::AnyMut(Arc::new(Mutex::new(Box::new(value))))
+    pub fn from_any<T: Any + Send + Sync>(value: T) -> CmTypes {
+        CmTypes::Any(Arc::new(RwLock::new(Box::new(value))))
     }
 
+    /// Read-only borrow
+    pub fn with_any<T: Any + Send + Sync, F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&T) -> R,
+    {
+        if let CmTypes::Any(lock) = self {
+            let guard = lock.read().unwrap();
+            guard.downcast_ref::<T>().map(f)
+        } else {
+            None
+        }
+    }
+
+    /// Mutable borrow
     pub fn with_any_mut<T: Any + Send + Sync, F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&mut T) -> R,
     {
-        match self {
-            CmTypes::AnyMut(arc_mutex) => {
-                let mut guard = arc_mutex.lock().expect("Mutex poisoned");
-                let boxed = &mut *guard;
-
-                if let Some(value) = boxed.downcast_mut::<T>() {
-                    Some(f(value))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    pub fn from_any<T: Any + Send + Sync>(value: T) -> CmTypes {
-        CmTypes::Any(Arc::new(Box::new(value)))
-    }
-
-    pub fn downcast_any<T: Any + Send + Sync>(&self) -> Option<&T> {
-        match self {
-            CmTypes::Any(arc_box) => {
-                // Get a reference to the boxed value and try to downcast it
-                arc_box.as_ref().downcast_ref::<T>()
-            }
-            _ => None,
+        if let CmTypes::Any(lock) = self {
+            let mut guard = lock.write().unwrap();
+            guard.downcast_mut::<T>().map(f)
+        } else {
+            None
         }
     }
 }
@@ -126,8 +115,7 @@ impl std::fmt::Debug for CmTypes {
             CmTypes::Ref(val) => write!(f, "Ref({:?})", val),
             CmTypes::Res(val) => write!(f, "Res({:?})", val),
             CmTypes::None() => write!(f, "None"),
-            CmTypes::AnyMut(_) => write!(f, "CustomTypeMut"),
-            CmTypes::Any(_) => write!(f, "CustomTypeShared"),
+            CmTypes::Any(_) => write!(f, "CustomType"),
         }
     }
 }
@@ -166,8 +154,7 @@ impl fmt::Display for CmTypes {
                 }
                 write!(f, "]")
             }
-            CmTypes::AnyMut(_) => write!(f, "CustomTypeMut"),
-            CmTypes::Any(_) => write!(f, "{}", "CustomTypeMut"),
+            CmTypes::Any(_) => write!(f, "{}", "CustomType"),
         }
     }
 }
@@ -264,5 +251,51 @@ pub fn string_to_cmtype(tp: String, arg: String) -> Result<CmTypes, CustomError>
     } else {
         // Return error
         return Err(CustomError::new(&format!("Unable to parse type '{}'", tp)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_cmtypes_from_any() {
+        let value = 42;
+        let cm_type = CmTypes::from_any(value);
+        cm_type.with_any_mut(|v: &mut i32| {
+            assert_eq!(*v, 42);
+            *v += 1;
+        });
+        cm_type.with_any(|v: &i32| {
+            println!("Value: {}", v);
+            assert_eq!(*v, 43);
+        });
+    }
+
+    #[test]
+    fn test_boxed_type() {
+        let value: Box<dyn Any + Send + Sync> = Box::new(42);
+        let cm_type = CmTypes::from_any(value);
+        cm_type.with_any(|v: &i32| {
+            assert_eq!(*v, 42);
+        });
+    }
+
+    #[test]
+    fn test_boxed_fn() {
+        let fun: Box<dyn Fn(usize) + Send + Sync> = Box::new(|value| println!("Value: {}", value));
+        let cm_type = CmTypes::from_any(fun);
+        cm_type.with_any(|fun: &Box<dyn Fn(usize) + Send + Sync>| {
+            fun(10);
+        });
+    }
+
+    #[test]
+    fn test_boxed_fnmut() {
+        let fun: Box<dyn FnMut(usize) + Send + Sync> =
+            Box::new(|value| println!("Value: {}", value));
+        let cm_type = CmTypes::from_any(fun);
+        cm_type.with_any_mut(|fun: &mut Box<dyn FnMut(usize) + Send + Sync>| {
+            fun(20);
+        });
     }
 }
