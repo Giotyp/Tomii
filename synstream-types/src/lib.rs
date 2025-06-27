@@ -89,6 +89,23 @@ impl CmTypes {
             None
         }
     }
+
+    pub fn valid_number_to_usize(&self) -> Option<usize> {
+        match self {
+            CmTypes::Usize(x) => Some(*x),
+            CmTypes::U8(x) => Some(*x as usize),
+            CmTypes::U16(x) => Some(*x as usize),
+            CmTypes::U32(x) => Some(*x as usize),
+            CmTypes::U64(x) => Some(*x as usize),
+            CmTypes::U128(x) => Some(*x as usize),
+            CmTypes::I8(x) if *x >= 0 => Some(*x as usize),
+            CmTypes::I16(x) if *x >= 0 => Some(*x as usize),
+            CmTypes::I32(x) if *x >= 0 => Some(*x as usize),
+            CmTypes::I64(x) if *x >= 0 => Some(*x as usize),
+            CmTypes::I128(x) if *x >= 0 => Some(*x as usize),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Debug for CmTypes {

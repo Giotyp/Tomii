@@ -1,12 +1,48 @@
+use core::panic;
 use std::fs::File;
 use std::io::Read;
 
-use synstream_types::*;
 use crate::func_reg::*;
 use crate::graph_struct::*;
 use crate::obj_gen::init_objects;
 use serde::Deserialize;
 use serde_json;
+use std::collections::HashMap;
+use synstream_types::*;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum Factor {
+    Number(usize),
+    Ref(String),
+}
+
+impl Factor {
+    pub fn resolve(&self, init_objects: &Option<HashMap<String, Vec<CmTypes>>>) -> usize {
+        match self {
+            Factor::Number(num) => *num,
+            Factor::Ref(ref_name) => {
+                if let Some(table) = init_objects {
+                    if let Some(ref_val) = table.get(ref_name) {
+                        let usize_res = ref_val[0].valid_number_to_usize();
+                        if let Some(usize_val) = usize_res {
+                            return usize_val;
+                        } else {
+                            panic!(
+                                "Variable '{}' found but does not contain a valid number",
+                                ref_name
+                            );
+                        }
+                    }
+                }
+                panic!(
+                    "Variable '{}' not found or does not contain a number",
+                    ref_name
+                );
+            }
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct ConditionJson {
@@ -33,7 +69,7 @@ struct ArgJson {
 #[derive(Debug, Deserialize)]
 struct NodeJson {
     name: String,
-    factor: Option<usize>,
+    factor: Option<Factor>,
     function_name: String,
     #[serde(rename = "loop")]
     loop_: Option<String>,
@@ -153,6 +189,15 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
     // Parse JSON file with defined structure
     let graph_parsed: GraphFile = serde_json::from_str(&contents)?;
 
+    // Check for initializations in the graph
+    let init_objects = match init_objects(graph_json) {
+        Ok(init_objects) => Some(init_objects),
+        Err(e) => {
+            eprintln!("Error parsing initial objects: {}", e);
+            None
+        }
+    };
+
     // Create a new Graph
     let mut graph = Graph::new();
 
@@ -180,8 +225,8 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
 
         let func_ptr = get_func(&node_json.function_name);
 
-        let factor = match node_json.factor {
-            Some(factor) => factor,
+        let factor = match &node_json.factor {
+            Some(factor) => factor.resolve(&init_objects),
             None => 1,
         };
 
@@ -197,14 +242,6 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
         graph.add_node(node.clone());
     }
 
-    // Check for initializations in the graph
-    let init_objects = match init_objects(graph_json) {
-        Ok(init_objects) => Some(init_objects),
-        Err(e) => {
-            eprintln!("Error parsing initial objects: {}", e);
-            None
-        }
-    };
     // Set the initialized objects in the graph
     if let Some(init_objects) = init_objects {
         graph.set_init_objects(init_objects);

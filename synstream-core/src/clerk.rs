@@ -442,6 +442,7 @@ impl Clerk {
 
             match &arg.type_ {
                 CmTypes::Ref(obj_name) => {
+                    self.print_debug(&format!("Passing arg reference to object: {}", obj_name));
                     let init_objects = init_objects_opt.as_ref().unwrap();
 
                     // object may be either buffer indexed by node_index
@@ -460,6 +461,7 @@ impl Clerk {
                     arg_vec.push(obj);
                 }
                 CmTypes::Res(res_node) => {
+                    self.print_debug(&format!("Passing arg result of node: {}", res_node));
                     let indices = arg
                         .predecessor
                         .as_ref()
