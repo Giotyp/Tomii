@@ -445,6 +445,17 @@ impl Clerk {
                     self.print_debug(&format!("Passing arg reference to object: {}", obj_name));
                     let init_objects = init_objects_opt.as_ref().unwrap();
 
+                    // Argument may be node index
+                    if obj_name == "$index" {
+                        // If the object is a variable, get the node index
+                        self.print_debug(&format!(
+                            "Passing node index: {} for object: {}",
+                            node_index, obj_name
+                        ));
+                        arg_vec.push(CmTypes::Usize(node_index));
+                        continue;
+                    }
+
                     // object may be either buffer indexed by node_index
                     // or just variable indexed by 0
                     let msg = format!("Object {} not found in init_objects", obj_name);
