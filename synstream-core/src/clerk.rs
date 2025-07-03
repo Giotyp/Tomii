@@ -16,6 +16,7 @@ pub struct Clerk {
     loop_nodes: Arc<RwLock<Vec<(String, usize)>>>,
     node_results: Arc<RwLock<Buffer<CmTypes>>>,
     debug: bool,
+    workers: usize,
 }
 
 impl Clerk {
@@ -31,6 +32,7 @@ impl Clerk {
             loop_nodes: Arc::new(RwLock::new(Vec::new())),
             node_results,
             debug,
+            workers: 1, // Default to 1 worker
         }
     }
 
@@ -50,6 +52,9 @@ impl Clerk {
     }
 
     pub fn run(&mut self, graph: &Graph, scheduler: SchedulerImpl, max_runtime: Option<u64>) {
+        // Overwrite workers
+        self.workers = scheduler.workers();
+
         let nodes_map = graph.nodes_map();
         let init_objects_opt = graph.init_objects();
         let connect_list = graph.connect_list();
@@ -447,12 +452,18 @@ impl Clerk {
 
                     // Argument may be node index
                     if obj_name == "$index" {
-                        // If the object is a variable, get the node index
                         self.print_debug(&format!(
                             "Passing node index: {} for object: {}",
                             node_index, obj_name
                         ));
                         arg_vec.push(CmTypes::Usize(node_index));
+                        continue;
+                    }
+
+                    // Argument may be worker num
+                    if obj_name == "$workers" {
+                        self.print_debug(&format!("Passing worker num for object: {}", obj_name));
+                        arg_vec.push(CmTypes::Usize(self.workers));
                         continue;
                     }
 

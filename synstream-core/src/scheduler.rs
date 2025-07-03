@@ -9,6 +9,11 @@ pub trait Scheduler {
     fn spawn_task<F>(&self, task: F)
     where
         F: FnOnce() + Send + 'static;
+
+    fn workers(&self) -> usize {
+        // Default implementation returns 1 worker
+        1
+    }
 }
 
 pub struct FifoScheduler {
@@ -46,6 +51,10 @@ impl Scheduler for FifoScheduler {
             task();
         });
     }
+
+    fn workers(&self) -> usize {
+        self.threadpool.current_num_threads()
+    }
 }
 
 pub struct WorkStealScheduler {
@@ -82,6 +91,10 @@ impl Scheduler for WorkStealScheduler {
         self.threadpool.spawn(move || {
             task_clos();
         });
+    }
+
+    fn workers(&self) -> usize {
+        self.threadpool.current_num_threads()
     }
 }
 
