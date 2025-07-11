@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-use synstream_types::*;
 use std::collections::HashMap;
+use synstream_types::*;
 
 /// Comparison operators
 #[derive(Clone, Debug)]
@@ -229,6 +229,14 @@ impl Graph {
 
     pub fn set_connect_list(&mut self, connect_list: Vec<Vec<String>>) {
         self.connect_list = connect_list;
+    }
+
+    pub fn change_node_factor(&mut self, node_name: &str, factor: usize) {
+        if let Some(node) = self.nodes.get_mut(node_name) {
+            node.factor = factor;
+        } else {
+            panic!("Node {} not found in the graph", node_name);
+        }
     }
 }
 

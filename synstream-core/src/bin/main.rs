@@ -72,7 +72,7 @@ fn main() {
         SchedulerType::WorkStealing
     };
 
-    let graph = from_json(&args.json).expect("Failed to parse graph from JSON file");
+    let graph = from_json(&args.json, args.workers).expect("Failed to parse graph from JSON file");
     // check if inits flag is set
     if args.inits {
         println!();

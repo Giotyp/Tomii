@@ -1,4 +1,5 @@
 use crate::func_reg::get_func;
+use crate::graph_gen::Factor;
 use serde::Deserialize;
 use serde_json;
 use std::collections::HashMap;
@@ -16,7 +17,7 @@ struct ArgInit {
 #[derive(Debug, Deserialize)]
 struct InitJson {
     name: String,
-    mult_factor: Option<usize>,
+    factor: Option<Factor>,
     args: Vec<ArgInit>,
     function_name: Option<String>,
 }
@@ -26,7 +27,10 @@ struct RootJson {
     initializations: Vec<InitJson>,
 }
 
-pub fn init_objects(graph_json: &str) -> Result<HashMap<String, Vec<CmTypes>>, serde_json::Error> {
+pub fn init_objects(
+    graph_json: &str,
+    workers: usize,
+) -> Result<HashMap<String, Vec<CmTypes>>, serde_json::Error> {
     let mut file = File::open(graph_json).unwrap();
     let mut contents = String::new();
     file.read_to_string(&mut contents).unwrap();
@@ -39,8 +43,8 @@ pub fn init_objects(graph_json: &str) -> Result<HashMap<String, Vec<CmTypes>>, s
 
     for init in root.initializations.iter() {
         let name = init.name.clone();
-        let mult_factor = match init.mult_factor {
-            Some(mult_factor) => mult_factor,
+        let factor = match &init.factor {
+            Some(factor) => factor.search(&init_objects, workers),
             None => 1,
         };
         let args_json: &Vec<ArgInit> = &init.args;
@@ -61,7 +65,7 @@ pub fn init_objects(graph_json: &str) -> Result<HashMap<String, Vec<CmTypes>>, s
             };
 
             let mut value_vec: Vec<CmTypes> = Vec::new();
-            for _ in 0..mult_factor {
+            for _ in 0..factor {
                 value_vec.push(value_cmt.clone());
             }
             init_objects.insert(name, value_vec);
@@ -70,32 +74,43 @@ pub fn init_objects(graph_json: &str) -> Result<HashMap<String, Vec<CmTypes>>, s
             let func_name = init.function_name.as_ref().unwrap().clone();
             let func_ptr = get_func(&func_name).unwrap();
 
-            let mut args: Vec<CmTypes> = Vec::new();
-            for arg_json in args_json.iter() {
-                let type_str = arg_json.type_.clone();
-                let value_str = arg_json.value.clone();
+            let mut value_vec: Vec<CmTypes> = Vec::new();
+            for i in 0..factor {
+                let mut args: Vec<CmTypes> = Vec::new();
+                for arg_json in args_json.iter() {
+                    let type_str = arg_json.type_.clone();
+                    let value_str = arg_json.value.clone();
 
-                // check if value_str is in init_objects
-                if let Some(init_arg) = init_objects.get(&value_str) {
-                    args.push(init_arg[0].clone());
-                    continue;
+                    if value_str == "$workers" {
+                        // special case for workers
+                        args.push(CmTypes::Usize(workers));
+                        continue;
+                    }
+
+                    if value_str == "$index" {
+                        // special case for index
+                        args.push(CmTypes::Usize(i));
+                        continue;
+                    }
+
+                    // check if value_str is in init_objects
+                    if let Some(init_arg) = init_objects.get(&value_str) {
+                        args.push(init_arg[0].clone());
+                        continue;
+                    }
+
+                    let arg_cmt_res = string_to_cmtype(type_str.clone(), value_str.clone());
+                    let arg_cmt = match arg_cmt_res {
+                        Ok(cmt) => cmt,
+                        Err(e) => {
+                            eprintln!("Error parsing type '{}': {}", type_str, e);
+                            panic!("Create an init function to handle this type.");
+                        }
+                    };
+                    args.push(arg_cmt);
                 }
 
-                let arg_cmt_res = string_to_cmtype(type_str.clone(), value_str.clone());
-                let arg_cmt = match arg_cmt_res {
-                    Ok(cmt) => cmt,
-                    Err(e) => {
-                        eprintln!("Error parsing type '{}': {}", type_str, e);
-                        panic!("Create an init function to handle this type.");
-                    }
-                };
-                args.push(arg_cmt);
-            }
-
-            let value_cmt = func_ptr(args.clone());
-
-            let mut value_vec: Vec<CmTypes> = Vec::new();
-            for _ in 0..mult_factor {
+                let value_cmt = func_ptr(args.clone());
                 value_vec.push(value_cmt.clone());
             }
             init_objects.insert(name, value_vec);

@@ -12,6 +12,7 @@ pub struct Clerk {
     // adding nodes is needed
     graph: Arc<RwLock<Graph>>,
     pending_nodes: Arc<RwLock<Vec<(String, usize)>>>,
+    removed_cond_nodes: Arc<RwLock<HashMap<String, Vec<usize>>>>,
     completed_nodes: Arc<RwLock<Vec<(String, usize)>>>,
     loop_nodes: Arc<RwLock<Vec<(String, usize)>>>,
     node_results: Arc<RwLock<Buffer<CmTypes>>>,
@@ -28,6 +29,7 @@ impl Clerk {
         Clerk {
             graph: Arc::new(RwLock::new(Graph::new())),
             pending_nodes: Arc::new(RwLock::new(Vec::new())),
+            removed_cond_nodes: Arc::new(RwLock::new(HashMap::new())),
             completed_nodes: Arc::new(RwLock::new(Vec::new())),
             loop_nodes: Arc::new(RwLock::new(Vec::new())),
             node_results,
@@ -141,6 +143,7 @@ impl Clerk {
                 for i in 0..factor {
                     pending_lock.push((node_name.clone(), i));
                 }
+                self.print_debug(&format!("Added {} nodes for {}", factor, node_name));
             } else {
                 let i = index.unwrap();
                 if i < factor {
@@ -303,6 +306,13 @@ impl Clerk {
                         // mark for removal from pending since conditions
                         // evaluated to false
                         remove_nodes_idx.push(i);
+                        // increase removed conditional count hashmap for node
+                        let mut removed_cond_lock = self.removed_cond_nodes.write().unwrap();
+                        removed_cond_lock
+                            .entry(node_name.clone())
+                            .and_modify(|v| v.push(*index))
+                            .or_insert(vec![*index]);
+                        drop(removed_cond_lock);
                     }
                 }
             }
@@ -313,9 +323,39 @@ impl Clerk {
                 removed += 1;
             }
             drop(pending_lock);
+
             // Sleep for a while to avoid busy waiting
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    fn shift_indexes(&mut self, node_name: String, node_idxs: &Vec<usize>) {
+        let count = node_idxs.len();
+
+        let mut completed_lock = self.completed_nodes.write().unwrap();
+        for (name, index) in completed_lock.iter_mut() {
+            if name != &node_name {
+                continue;
+            }
+            let mut new_index = std::cmp::max(*index - count, 0);
+
+            while !node_idxs.contains(&new_index) && new_index != *index {
+                new_index += 1;
+            }
+            self.print_debug(&format!(
+                "Node {} with index {} changed to index {}",
+                name, index, new_index
+            ));
+            *index = new_index;
+        }
+
+        // change node's factor
+        let mut graph_write = self.graph.write().unwrap();
+        let nodes_map = graph_write.nodes_map();
+        let old_factor = nodes_map.get(&node_name).unwrap().factor;
+        let factor = old_factor - count;
+        graph_write.change_node_factor(&node_name, factor);
+        drop(graph_write);
     }
 
     fn process_completed(&mut self, completed_queue: Arc<RwLock<Vec<(String, usize)>>>) {
@@ -349,6 +389,40 @@ impl Clerk {
                 "Completed node: {} with index {}",
                 node_name, node_index
             ));
+
+            // check possible shift indexes
+            let nodes_to_shift: Vec<(String, Vec<usize>)> = {
+                let rem_nodes_map = self.removed_cond_nodes.read().unwrap();
+                rem_nodes_map
+                    .iter()
+                    .filter_map(|(name, indexes)| {
+                        // check if pending
+                        let pending = self.pending_nodes.read().unwrap();
+                        let is_pending =
+                            pending.iter().any(|(pending_name, _)| pending_name == name);
+                        drop(pending);
+
+                        if !is_pending {
+                            Some((name.clone(), indexes.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+
+            let mut remove_nodes = Vec::new();
+            for (name, indexes) in nodes_to_shift {
+                self.print_debug(&format!("Node {} is not pending, shifting indexes", name));
+                self.shift_indexes(name.clone(), &indexes);
+                remove_nodes.push(name.clone());
+            }
+            // Remove processed nodes from removed_cond_nodes
+            let mut removed_cond_lock = self.removed_cond_nodes.write().unwrap();
+            for name in remove_nodes.iter() {
+                removed_cond_lock.remove(name);
+            }
+            drop(removed_cond_lock);
 
             // check for loop in the node
             let graph_read = self.graph.read().unwrap();
@@ -447,22 +521,16 @@ impl Clerk {
 
             match &arg.type_ {
                 CmTypes::Ref(obj_name) => {
-                    self.print_debug(&format!("Passing arg reference to object: {}", obj_name));
                     let init_objects = init_objects_opt.as_ref().unwrap();
 
                     // Argument may be node index
                     if obj_name == "$index" {
-                        self.print_debug(&format!(
-                            "Passing node index: {} for object: {}",
-                            node_index, obj_name
-                        ));
                         arg_vec.push(CmTypes::Usize(node_index));
                         continue;
                     }
 
                     // Argument may be worker num
                     if obj_name == "$workers" {
-                        self.print_debug(&format!("Passing worker num for object: {}", obj_name));
                         arg_vec.push(CmTypes::Usize(self.workers));
                         continue;
                     }
@@ -473,8 +541,9 @@ impl Clerk {
                     let obj_vec = init_objects.get(obj_name).expect(msg.as_str());
                     let obj = {
                         if obj_vec.len() > 1 {
-                            // If the object is a buffer, get the object at node_index
-                            obj_vec[node_index].clone()
+                            // If the object is a buffer, get the object according to node_index
+                            let index = node_index % obj_vec.len();
+                            obj_vec[index].clone()
                         } else {
                             // If the object is a variable, get the first element
                             obj_vec[0].clone()
@@ -483,7 +552,10 @@ impl Clerk {
                     arg_vec.push(obj);
                 }
                 CmTypes::Res(res_node) => {
-                    self.print_debug(&format!("Passing arg result of node: {}", res_node));
+                    self.print_debug(&format!(
+                        "Adding result for node {} with index {}",
+                        res_node, node_index
+                    ));
                     let indices = arg
                         .predecessor
                         .as_ref()
@@ -530,7 +602,7 @@ impl Clerk {
 
     fn print_debug(&self, msg: &str) {
         if self.debug {
-            println!("{}", msg);
+            println!("DB: {}", msg);
         }
     }
 }

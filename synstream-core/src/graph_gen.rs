@@ -12,13 +12,17 @@ use synstream_types::*;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
-enum Factor {
+pub enum Factor {
     Number(usize),
     Ref(String),
 }
 
 impl Factor {
-    pub fn resolve(&self, init_objects: &Option<HashMap<String, Vec<CmTypes>>>) -> usize {
+    pub fn resolve(
+        &self,
+        init_objects: &Option<HashMap<String, Vec<CmTypes>>>,
+        workers: usize,
+    ) -> usize {
         match self {
             Factor::Number(num) => *num,
             Factor::Ref(ref_name) => {
@@ -34,6 +38,37 @@ impl Factor {
                             );
                         }
                     }
+                }
+                // Check if ref_name is $workers
+                if ref_name == "$workers" {
+                    return workers;
+                }
+                panic!(
+                    "Variable '{}' not found or does not contain a number",
+                    ref_name
+                );
+            }
+        }
+    }
+
+    pub fn search(&self, init_objects: &HashMap<String, Vec<CmTypes>>, workers: usize) -> usize {
+        match self {
+            Factor::Number(num) => *num,
+            Factor::Ref(ref_name) => {
+                if let Some(ref_val) = init_objects.get(ref_name) {
+                    let usize_res = ref_val[0].valid_number_to_usize();
+                    if let Some(usize_val) = usize_res {
+                        return usize_val;
+                    } else {
+                        panic!(
+                            "Variable '{}' found but does not contain a valid number",
+                            ref_name
+                        );
+                    }
+                }
+                // Check if ref_name is $workers
+                if ref_name == "$workers" {
+                    return workers;
                 }
                 panic!(
                     "Variable '{}' not found or does not contain a number",
@@ -82,7 +117,7 @@ struct GraphFile {
     nodes: Vec<NodeJson>,
 }
 
-fn parse_arg(arg_json: &ArgJson) -> Arg {
+fn parse_arg(arg_json: &ArgJson, init_objects: Option<&HashMap<String, Vec<CmTypes>>>) -> Arg {
     let arg_value_opt = arg_json.value.clone();
 
     // Check if the argument has a condition
@@ -97,7 +132,7 @@ fn parse_arg(arg_json: &ArgJson) -> Arg {
     let predecessor: Option<Predecessor> = {
         // Check if the argument has a predecessor
         if let Some(pred_json) = &arg_json.predecessor {
-            Some(parse_predecessor(pred_json))
+            Some(parse_predecessor(pred_json, init_objects))
         } else {
             None
         }
@@ -127,7 +162,10 @@ fn parse_arg(arg_json: &ArgJson) -> Arg {
     arg
 }
 
-fn parse_predecessor(pred_json: &PredJson) -> Predecessor {
+fn parse_predecessor(
+    pred_json: &PredJson,
+    init_objects: Option<&HashMap<String, Vec<CmTypes>>>,
+) -> Predecessor {
     let pred_name = pred_json.name.clone();
     let mut index_vec = Vec::new();
     let indexes = pred_json.indexes.clone();
@@ -144,7 +182,23 @@ fn parse_predecessor(pred_json: &PredJson) -> Predecessor {
     else if indexes.contains('-') {
         let range: Vec<&str> = indexes.split("-").collect();
         let start = range[0].parse::<usize>().unwrap();
-        let end = range[1].parse::<usize>().unwrap();
+        let end = {
+            match range[1].parse::<usize>() {
+                Ok(end) => end,
+                Err(_) => {
+                    // If the second part of the range is not a number, it might be a reference
+                    if let Some(init_objects) = init_objects {
+                        if let Some(ref_val) = init_objects.get(range[1]) {
+                            ref_val[0].valid_number_to_usize().unwrap()
+                        } else {
+                            panic!("Invalid range in predecessor: {}", indexes);
+                        }
+                    } else {
+                        panic!("Invalid range in predecessor: {}", indexes);
+                    }
+                }
+            }
+        };
         for i in start..end + 1 {
             index_vec.push(i);
         }
@@ -181,7 +235,7 @@ fn parse_condition(condition_json: &ConditionJson) -> InitCondition {
     }
 }
 
-pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
+pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::Error> {
     let mut file = File::open(graph_json).unwrap();
     let mut contents = String::new();
     file.read_to_string(&mut contents).unwrap();
@@ -190,7 +244,7 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
     let graph_parsed: GraphFile = serde_json::from_str(&contents)?;
 
     // Check for initializations in the graph
-    let init_objects = match init_objects(graph_json) {
+    let init_objects = match init_objects(graph_json, workers) {
         Ok(init_objects) => Some(init_objects),
         Err(e) => {
             eprintln!("Error parsing initial objects: {}", e);
@@ -206,12 +260,12 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
         let mut loop_args_vec = Vec::new();
 
         for arg_json in &node_json.args {
-            args.push(parse_arg(arg_json));
+            args.push(parse_arg(arg_json, init_objects.as_ref()));
         }
 
         if let Some(loop_args_json) = &node_json.loop_args {
             for arg_json in loop_args_json {
-                loop_args_vec.push(parse_arg(arg_json));
+                loop_args_vec.push(parse_arg(arg_json, init_objects.as_ref()));
             }
         }
 
@@ -226,7 +280,7 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
         let func_ptr = get_func(&node_json.function_name);
 
         let factor = match &node_json.factor {
-            Some(factor) => factor.resolve(&init_objects),
+            Some(factor) => factor.resolve(&init_objects, workers),
             None => 1,
         };
 
@@ -250,9 +304,9 @@ pub fn from_json(graph_json: &str) -> Result<Graph, serde_json::Error> {
     Ok(graph)
 }
 
-pub fn re_init_objects(graph: &mut Graph, graph_json: &str) {
+pub fn re_init_objects(graph: &mut Graph, graph_json: &str, workers: usize) {
     // Check for initializations in the graph
-    let init_objects = match init_objects(graph_json) {
+    let init_objects = match init_objects(graph_json, workers) {
         Ok(init_objects) => Some(init_objects),
         Err(_) => None,
     };
