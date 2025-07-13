@@ -1,3 +1,4 @@
+use crate::debug::print_debug;
 use crate::func_reg::get_func;
 use crate::graph_gen::Factor;
 use serde::Deserialize;
@@ -43,6 +44,7 @@ pub fn init_objects(
 
     for init in root.initializations.iter() {
         let name = init.name.clone();
+        print_debug(&format!("Initializing object: {}", name));
         let factor = match &init.factor {
             Some(factor) => factor.search(&init_objects, workers),
             None => 1,
@@ -68,7 +70,7 @@ pub fn init_objects(
             for _ in 0..factor {
                 value_vec.push(value_cmt.clone());
             }
-            init_objects.insert(name, value_vec);
+            init_objects.insert(name.clone(), value_vec);
         } else {
             // function call needed
             let func_name = init.function_name.as_ref().unwrap().clone();
@@ -113,7 +115,7 @@ pub fn init_objects(
                 let value_cmt = func_ptr(args.clone());
                 value_vec.push(value_cmt.clone());
             }
-            init_objects.insert(name, value_vec);
+            init_objects.insert(name.clone(), value_vec);
         }
     }
     Ok(init_objects)

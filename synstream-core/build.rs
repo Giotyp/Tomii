@@ -5,7 +5,7 @@ use std::{env, fs};
 
 fn main() {
     let func_file = env::var("FUNC_PATH").expect("FUNC_PATH environment variable is not set");
-    println!("cargo:rerun-if-changed={}", func_file);
+    // println!("cargo:rerun-if-changed={}", func_file);
     let path = PathBuf::from(func_file.clone());
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());

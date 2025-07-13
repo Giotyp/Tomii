@@ -1,4 +1,5 @@
 pub mod clerk;
+pub mod debug;
 pub mod graph_gen;
 pub mod graph_struct;
 pub mod obj_gen;

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, RwLock};
 
+use crate::debug::print_debug;
 use crate::graph_struct::*;
 use crate::scheduler::{Scheduler, SchedulerImpl};
 use synstream_types::*;
@@ -16,12 +17,11 @@ pub struct Clerk {
     completed_nodes: Arc<RwLock<Vec<(String, usize)>>>,
     loop_nodes: Arc<RwLock<Vec<(String, usize)>>>,
     node_results: Arc<RwLock<Buffer<CmTypes>>>,
-    debug: bool,
     workers: usize,
 }
 
 impl Clerk {
-    pub fn new(debug: bool) -> Clerk {
+    pub fn new() -> Clerk {
         // node_result will be initialized with factor entries
         // when crawling begins
         let node_results = Arc::new(RwLock::new(Buffer::new()));
@@ -33,7 +33,6 @@ impl Clerk {
             completed_nodes: Arc::new(RwLock::new(Vec::new())),
             loop_nodes: Arc::new(RwLock::new(Vec::new())),
             node_results,
-            debug,
             workers: 1, // Default to 1 worker
         }
     }
@@ -114,11 +113,11 @@ impl Clerk {
                     let mut pending_lock = self.pending_nodes.write().unwrap();
                     pending_lock.push(("exit".to_string(), 0));
                     drop(pending_lock);
-                    self.print_debug("pending_lock dropped");
+                    print_debug("pending_lock dropped");
                     let mut completed_lock = completed_queue.write().unwrap();
                     completed_lock.push(("exit".to_string(), 0));
                     drop(completed_lock);
-                    self.print_debug("completed_lock dropped");
+                    print_debug("completed_lock dropped");
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -143,7 +142,7 @@ impl Clerk {
                 for i in 0..factor {
                     pending_lock.push((node_name.clone(), i));
                 }
-                self.print_debug(&format!("Added {} nodes for {}", factor, node_name));
+                print_debug(&format!("Added {} nodes for {}", factor, node_name));
             } else {
                 let i = index.unwrap();
                 if i < factor {
@@ -264,6 +263,15 @@ impl Clerk {
                         break;
                     }
                 }
+                CmTypes::Barrier(node_name) => {
+                    let res_read = self.node_results.read().unwrap();
+                    let result = res_read.search_node_idx(&node_name, node_idx).unwrap();
+                    let eval = init_condition.evaluate(result);
+                    if !eval {
+                        conditions_met = false;
+                        break;
+                    }
+                }
                 _ => {}
             }
         }
@@ -295,7 +303,7 @@ impl Clerk {
                     // Predecessors are ready
                     if !has_conditions || (has_conditions && conditions_met) {
                         // Node is ready to be scheduled
-                        self.print_debug(&format!(
+                        print_debug(&format!(
                             "Node {} with index {} is ready to be scheduled",
                             node_name, index
                         ));
@@ -342,10 +350,15 @@ impl Clerk {
             while !node_idxs.contains(&new_index) && new_index != *index {
                 new_index += 1;
             }
-            self.print_debug(&format!(
+            print_debug(&format!(
                 "Node {} with index {} changed to index {}",
                 name, index, new_index
             ));
+            // change result index
+            let mut node_results_lock = self.node_results.write().unwrap();
+            node_results_lock.change_node_idx(&node_name, *index, new_index);
+            drop(node_results_lock);
+            // update index
             *index = new_index;
         }
 
@@ -370,7 +383,7 @@ impl Clerk {
             }
             let (node_name, node_index) = queue_lock.pop().unwrap();
             drop(queue_lock);
-            self.print_debug(&format!(
+            print_debug(&format!(
                 "Processing completed node: {} with index {}",
                 node_name, node_index
             ));
@@ -385,7 +398,7 @@ impl Clerk {
             completed_lock.push((node_name.clone(), node_index));
             drop(completed_lock);
 
-            self.print_debug(&format!(
+            print_debug(&format!(
                 "Completed node: {} with index {}",
                 node_name, node_index
             ));
@@ -413,7 +426,7 @@ impl Clerk {
 
             let mut remove_nodes = Vec::new();
             for (name, indexes) in nodes_to_shift {
-                self.print_debug(&format!("Node {} is not pending, shifting indexes", name));
+                print_debug(&format!("Node {} is not pending, shifting indexes", name));
                 self.shift_indexes(name.clone(), &indexes);
                 remove_nodes.push(name.clone());
             }
@@ -478,7 +491,7 @@ impl Clerk {
                     drop(comp_lock);
                 }
             };
-            self.print_debug(&format!(
+            print_debug(&format!(
                 "Scheduling node {} with index {}",
                 node_name, node_index
             ));
@@ -494,6 +507,10 @@ impl Clerk {
     ) -> Vec<CmTypes> {
         // Create the arguments vector for given node
         let mut arg_vec: Vec<CmTypes> = Vec::new();
+        print_debug(&format!(
+            "Creating args for node {} with index {}",
+            node.name, node_index
+        ));
 
         let args = {
             // check if node is in loop_nodes
@@ -521,6 +538,7 @@ impl Clerk {
 
             match &arg.type_ {
                 CmTypes::Ref(obj_name) => {
+                    print_debug(&format!("Adding ref object {}", obj_name));
                     let init_objects = init_objects_opt.as_ref().unwrap();
 
                     // Argument may be node index
@@ -552,10 +570,6 @@ impl Clerk {
                     arg_vec.push(obj);
                 }
                 CmTypes::Res(res_node) => {
-                    self.print_debug(&format!(
-                        "Adding result for node {} with index {}",
-                        res_node, node_index
-                    ));
                     let indices = arg
                         .predecessor
                         .as_ref()
@@ -572,7 +586,12 @@ impl Clerk {
                             let pred_factor = pred_node.factor;
 
                             // Find the index of the node in the results
-                            Self::find_index(node_index, x, pred_factor)
+                            let new_index = Self::find_index(node_index, x, pred_factor);
+                            print_debug(&format!(
+                                "Adding result from node {} with index {}",
+                                res_node, new_index
+                            ));
+                            new_index
                         })
                         .collect::<Vec<usize>>();
 
@@ -585,6 +604,9 @@ impl Clerk {
                         let result = res_read.search_node_idx(&res_node, *dep_idx).unwrap();
                         arg_vec.push(result);
                     }
+                }
+                CmTypes::Barrier(_) => {
+                    // Barrier does not require any arguments
                 }
                 _ => {
                     arg_vec.push(arg.type_.clone());
@@ -599,19 +621,13 @@ impl Clerk {
         let req_idx = node_idx + dep_idx;
         req_idx % pred_factor
     }
-
-    fn print_debug(&self, msg: &str) {
-        if self.debug {
-            println!("DB: {}", msg);
-        }
-    }
 }
 
 struct Buffer<T> {
     buffer: HashMap<String, Vec<T>>,
 }
 
-impl<T> Buffer<T> {
+impl<T: Clone> Buffer<T> {
     fn new() -> Buffer<T> {
         Buffer {
             buffer: HashMap::new(),
@@ -671,6 +687,19 @@ impl<T> Buffer<T> {
                 vec[index] = element;
             } else {
                 panic!("Index {} out of bounds for node {}", index, node_name);
+            }
+        } else {
+            panic!("Node {} not found in buffer", node_name);
+        }
+    }
+
+    fn change_node_idx(&mut self, node_name: &str, old_index: usize, new_index: usize) {
+        // copy data from old index to new index
+        if let Some(vec) = self.buffer.get_mut(node_name) {
+            if old_index < vec.len() && new_index < vec.len() {
+                vec[new_index] = vec[old_index].clone();
+            } else {
+                panic!("Index out of bounds for node {}", node_name);
             }
         } else {
             panic!("Node {} not found in buffer", node_name);

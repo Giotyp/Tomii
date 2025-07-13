@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::debug::print_debug;
 use std::collections::HashMap;
 use synstream_types::*;
 
@@ -233,6 +234,10 @@ impl Graph {
 
     pub fn change_node_factor(&mut self, node_name: &str, factor: usize) {
         if let Some(node) = self.nodes.get_mut(node_name) {
+            print_debug(&format!(
+                "Changing factor of node {} from {} to {}",
+                node_name, node.factor, factor
+            ));
             node.factor = factor;
         } else {
             panic!("Node {} not found in the graph", node_name);

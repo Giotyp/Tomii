@@ -26,6 +26,7 @@ pub enum CmTypes {
     String(String),
     Ref(String),
     Res(String),
+    Barrier(String),
     VecCmt(Vec<CmTypes>),
     None(),
     #[serde(skip)]
@@ -54,6 +55,7 @@ impl PartialEq for CmTypes {
             (CmTypes::VecCmt(a), CmTypes::VecCmt(b)) => a == b,
             (CmTypes::Ref(a), CmTypes::Ref(b)) => a == b,
             (CmTypes::Res(a), CmTypes::Res(b)) => a == b,
+            (CmTypes::Barrier(a), CmTypes::Barrier(b)) => a == b,
             _ => false,
         }
     }
@@ -131,6 +133,7 @@ impl std::fmt::Debug for CmTypes {
             CmTypes::String(val) => write!(f, "String({:?})", val),
             CmTypes::Ref(val) => write!(f, "Ref({:?})", val),
             CmTypes::Res(val) => write!(f, "Res({:?})", val),
+            CmTypes::Barrier(val) => write!(f, "Barrier({:?})", val),
             CmTypes::None() => write!(f, "None"),
             CmTypes::Any(_) => write!(f, "CustomType"),
         }
@@ -160,6 +163,7 @@ impl fmt::Display for CmTypes {
             CmTypes::String(x) => write!(f, "{}", x),
             CmTypes::Ref(x) => write!(f, "{}", x),
             CmTypes::Res(x) => write!(f, "{}", x),
+            CmTypes::Barrier(x) => write!(f, "{}", x),
             CmTypes::None() => write!(f, "None"),
             CmTypes::VecCmt(x) => {
                 write!(f, "[")?;
@@ -231,6 +235,7 @@ lazy_static! {
         add!("String",  |s| Ok(CmTypes::String(s.to_string())));
         add!("$ref",    |s| Ok(CmTypes::Ref(s.to_string())));
         add!("$res",    |s| Ok(CmTypes::Res(s.to_string())));
+        add!("$barrier", |s| Ok(CmTypes::Barrier(s.to_string())));
         add!("None",    |_| Ok(CmTypes::None()));
         entry_map
     };
