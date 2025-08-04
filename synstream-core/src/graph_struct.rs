@@ -79,6 +79,12 @@ impl Arg {
 }
 
 #[derive(Clone)]
+pub struct Loop {
+    pub name: String,
+    pub factor: usize,
+}
+
+#[derive(Clone)]
 pub struct Node {
     pub name: String,
     pub args: Vec<Arg>,
@@ -88,7 +94,7 @@ pub struct Node {
     pub factor: usize,
     pub func_ptr: Option<CmPtr>,
     // Optional node to loop after execution
-    pub loop_: Option<String>,
+    pub loop_: Option<Loop>,
 }
 
 impl Node {
@@ -116,6 +122,7 @@ impl Node {
 #[derive(Clone)]
 pub struct Graph {
     nodes: HashMap<String, Node>,
+    post_nodes: Option<HashMap<String, Node>>,
     // keep a list of nodes that are connected
     connect_list: Vec<Vec<String>>,
     // buffer list that need to be registere in connect_list
@@ -138,6 +145,10 @@ impl Graph {
         &self.nodes
     }
 
+    pub fn post_nodes_map(&self) -> Option<&HashMap<String, Node>> {
+        self.post_nodes.as_ref()
+    }
+
     pub fn node_mut(&mut self, node_name: &str) -> &mut Node {
         self.nodes.get_mut(node_name).unwrap()
     }
@@ -148,6 +159,16 @@ impl Graph {
         self.nodes.insert(node_name.clone(), node);
         // update connections
         self.update_connections(&node_name, predecessors);
+    }
+
+    pub fn add_post_node(&mut self, node: Node) {
+        if let Some(post_nodes) = &mut self.post_nodes {
+            post_nodes.insert(node.name.clone(), node);
+        } else {
+            let mut post_nodes = HashMap::new();
+            post_nodes.insert(node.name.clone(), node);
+            self.post_nodes = Some(post_nodes);
+        }
     }
 
     pub fn total_nodes(&self) -> usize {
@@ -206,6 +227,7 @@ impl Graph {
     pub fn new() -> Graph {
         Graph {
             nodes: HashMap::new(),
+            post_nodes: None,
             connect_list: Vec::new(),
             buffer_list: Vec::new(),
             init_objects: None,
@@ -226,6 +248,10 @@ impl Graph {
 
     pub fn set_nodes(&mut self, nodes: HashMap<String, Node>) {
         self.nodes = nodes;
+    }
+
+    pub fn set_post_nodes(&mut self, post_nodes: Option<HashMap<String, Node>>) {
+        self.post_nodes = post_nodes;
     }
 
     pub fn set_connect_list(&mut self, connect_list: Vec<Vec<String>>) {

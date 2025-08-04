@@ -102,12 +102,18 @@ struct ArgJson {
 }
 
 #[derive(Debug, Deserialize)]
+struct LoopJson {
+    name: String,
+    factor: Option<Factor>,
+}
+
+#[derive(Debug, Deserialize)]
 struct NodeJson {
     name: String,
     factor: Option<Factor>,
     function_name: String,
     #[serde(rename = "loop")]
-    loop_: Option<String>,
+    loop_: Option<LoopJson>,
     loop_args: Option<Vec<ArgJson>>,
     args: Vec<ArgJson>,
 }
@@ -115,6 +121,7 @@ struct NodeJson {
 #[derive(Debug, Deserialize)]
 struct GraphFile {
     nodes: Vec<NodeJson>,
+    post_nodes: Option<Vec<NodeJson>>,
 }
 
 fn parse_arg(arg_json: &ArgJson, init_objects: Option<&HashMap<String, Vec<CmTypes>>>) -> Arg {
@@ -284,16 +291,57 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             None => 1,
         };
 
+        let loop_ = {
+            if let Some(loop_json) = &node_json.loop_ {
+                Some(Loop {
+                    name: loop_json.name.clone(),
+                    factor: loop_json
+                        .factor
+                        .as_ref()
+                        .map_or(1, |f| f.resolve(&init_objects, workers)),
+                })
+            } else {
+                None
+            }
+        };
+
         let node = Node {
             name: node_json.name.clone(),
             args,
             loop_args,
             factor: factor,
             func_ptr,
-            loop_: node_json.loop_.clone(),
+            loop_,
         };
 
         graph.add_node(node.clone());
+    }
+
+    for post_node_json in graph_parsed.post_nodes.unwrap_or_default() {
+        let mut args = Vec::new();
+        for arg_json in &post_node_json.args {
+            args.push(parse_arg(arg_json, init_objects.as_ref()));
+        }
+
+        let func_ptr = get_func(&post_node_json.function_name);
+
+        let factor = match &post_node_json.factor {
+            Some(factor) => factor.resolve(&init_objects, workers),
+            None => 1,
+        };
+
+        println!("Adding post-node: {}", post_node_json.name);
+
+        let node = Node {
+            name: post_node_json.name.clone(),
+            args,
+            loop_args: None,
+            factor,
+            func_ptr,
+            loop_: None,
+        };
+
+        graph.add_post_node(node);
     }
 
     // Set the initialized objects in the graph

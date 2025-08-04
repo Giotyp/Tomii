@@ -1,6 +1,9 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, RwLock};
+use std::thread::{sleep, spawn};
+use std::time::{Duration, Instant};
 
 use crate::debug::print_debug;
 use crate::graph_struct::*;
@@ -15,7 +18,8 @@ pub struct Clerk {
     pending_nodes: Arc<RwLock<Vec<(String, usize)>>>,
     removed_cond_nodes: Arc<RwLock<HashMap<String, Vec<usize>>>>,
     completed_nodes: Arc<RwLock<Vec<(String, usize)>>>,
-    loop_nodes: Arc<RwLock<Vec<(String, usize)>>>,
+    loop_nodes: Arc<RwLock<Vec<String>>>,
+    // Atomic variable used to count loop iterations
     node_results: Arc<RwLock<Buffer<CmTypes>>>,
     workers: usize,
 }
@@ -57,6 +61,7 @@ impl Clerk {
         self.workers = scheduler.workers();
 
         let nodes_map = graph.nodes_map();
+        let post_nodes_map = graph.post_nodes_map();
         let init_objects_opt = graph.init_objects();
         let connect_list = graph.connect_list();
 
@@ -67,14 +72,16 @@ impl Clerk {
         if let Some(inits) = init_objects_opt {
             graph.set_init_objects(inits.clone());
         }
+        graph.set_post_nodes(post_nodes_map.cloned());
         drop(graph);
 
         // create ready channel
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<(String, usize)>();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<(String, usize, bool)>();
+        let ready_tx_clone = ready_tx.clone();
 
         // Add graph nodes to pending_nodes
         for connect_nodes in connect_list.iter() {
-            self.add_nodes(connect_nodes, None);
+            self.add_nodes(connect_nodes);
         }
         // Initialize node_results
         self.init_results();
@@ -90,37 +97,41 @@ impl Clerk {
         let queue_schedule = completed_queue.clone();
 
         // Spawn thread to handle set_ready_nodes
-        let ready_handle = std::thread::spawn(move || {
-            clerk_for_ready.set_ready_nodes(&ready_tx);
+        let ready_handle = spawn(move || {
+            clerk_for_ready.set_ready_nodes(&ready_tx_clone);
         });
 
         // Spawn thread to handle schedule_nodes
-        let schedule_handle = std::thread::spawn(move || {
+        let schedule_handle = spawn(move || {
             clerk_for_schedule.schedule_nodes(scheduler, queue_schedule, &ready_rx);
         });
 
         // Spawn a thread to handle completed nodes
-        let complete_handle =
-            std::thread::spawn(move || clerk_for_completed.process_completed(queue_process));
+        let complete_handle = spawn(move || clerk_for_completed.process_completed(queue_process));
 
-        let start_time = std::time::Instant::now();
+        let start_time = Instant::now();
         // Check for max_runtime
         if let Some(max_runtime) = max_runtime {
             loop {
                 if start_time.elapsed().as_secs() > max_runtime {
                     // set exit signal
                     println!("Max runtime reached, exiting...");
+                    // Process post-nodes if any
+                    println!("Processing possible post-nodes...");
+                    // blocking
+                    self.schedule_post_nodes(&ready_tx);
+                    // Close ready channel
+                    ready_tx.send(("exit".to_string(), 0, false)).unwrap();
+                    // Add exit signal to pending nodes
                     let mut pending_lock = self.pending_nodes.write().unwrap();
                     pending_lock.push(("exit".to_string(), 0));
                     drop(pending_lock);
-                    print_debug("pending_lock dropped");
                     let mut completed_lock = completed_queue.write().unwrap();
-                    completed_lock.push(("exit".to_string(), 0));
+                    completed_lock.push(("exit".to_string(), 0, false));
                     drop(completed_lock);
-                    print_debug("completed_lock dropped");
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                sleep(Duration::from_millis(20));
             }
         }
 
@@ -130,7 +141,7 @@ impl Clerk {
         complete_handle.join().unwrap();
     }
 
-    fn add_nodes(&mut self, nodes: &Vec<String>, index: Option<usize>) {
+    fn add_nodes(&mut self, nodes: &Vec<String>) {
         let graph_read = self.graph.read().unwrap();
         let nodes_map = graph_read.nodes_map();
         let mut pending_lock = self.pending_nodes.write().unwrap();
@@ -138,17 +149,37 @@ impl Clerk {
             let node = nodes_map.get(node_name).unwrap();
             let factor = node.factor;
 
-            if index.is_none() {
-                for i in 0..factor {
-                    pending_lock.push((node_name.clone(), i));
+            for i in 0..factor {
+                pending_lock.push((node_name.clone(), i));
+            }
+            print_debug(&format!("Added {} nodes for {}", factor, node_name));
+        }
+    }
+
+    fn schedule_post_nodes(&mut self, ready_tx: &Sender<(String, usize, bool)>) {
+        let graph_read = self.graph.read().unwrap();
+        let nodes_map = graph_read.post_nodes_map();
+        if let Some(post_nodes) = nodes_map {
+            for node in post_nodes.values() {
+                for i in 0..node.factor {
+                    ready_tx.send((node.name.clone(), i, true)).unwrap();
                 }
-                print_debug(&format!("Added {} nodes for {}", factor, node_name));
-            } else {
-                let i = index.unwrap();
-                if i < factor {
-                    pending_lock.push((node_name.clone(), i));
-                } else {
-                    panic!("Index {} out of bounds for node {}", i, node_name);
+                print_debug(&format!("Added post node: {}", node.name));
+                // Wait until all are completed
+                let completed_read = self.completed_nodes.read().unwrap();
+                let mut completed_count = completed_read
+                    .iter()
+                    .filter(|(name, _)| name == &node.name)
+                    .count();
+                drop(completed_read);
+                while completed_count < node.factor {
+                    sleep(Duration::from_millis(10));
+                    let completed_read = self.completed_nodes.read().unwrap();
+                    completed_count = completed_read
+                        .iter()
+                        .filter(|(name, _)| name == &node.name)
+                        .count();
+                    drop(completed_read);
                 }
             }
         }
@@ -161,28 +192,34 @@ impl Clerk {
         let mut node_results_lock = self.node_results.write().unwrap();
         node_results_lock.clear_buffer();
         node_results_lock.init_buffer(nodes_map, CmTypes::None());
+
+        // Initialize post_nodes if any
+        let post_nodes_opt = graph_read.post_nodes_map();
+        if let Some(post_nodes) = post_nodes_opt {
+            node_results_lock.init_buffer(post_nodes, CmTypes::None());
+        }
     }
 
-    fn process_loop(&mut self, node_name: String, node_index: usize) {
+    fn process_loop(&mut self, node_name: String) {
         let graph_read = self.graph.read().unwrap();
         let connections_opt = graph_read.node_connections(&node_name);
         drop(graph_read);
 
         if let Some(connections) = connections_opt {
-            self.add_nodes(&connections, Some(node_index));
+            self.add_nodes(&connections);
 
             // Add connections to loop_nodes
             let mut loop_lock = self.loop_nodes.write().unwrap();
             for node_name in connections.iter() {
-                loop_lock.push((node_name.clone(), node_index));
+                loop_lock.push(node_name.clone());
             }
             drop(loop_lock);
 
             // Remove added nodes from completed
             let mut completed_lock = self.completed_nodes.write().unwrap();
             let mut remove_nodes_idx = Vec::new();
-            for (i, (node_name, index)) in completed_lock.iter().enumerate() {
-                if connections.contains(node_name) && *index == node_index {
+            for (i, (node_name, _index)) in completed_lock.iter().enumerate() {
+                if connections.contains(node_name) {
                     remove_nodes_idx.push(i);
                 }
             }
@@ -278,7 +315,7 @@ impl Clerk {
         return (preds_ready, has_conditions, conditions_met);
     }
 
-    fn set_ready_nodes(&mut self, ready_tx: &Sender<(String, usize)>) {
+    fn set_ready_nodes(&mut self, ready_tx: &Sender<(String, usize, bool)>) {
         // Checks if the node is ready to be scheduled and
         // adds it to the ready_nodes list
         loop {
@@ -287,6 +324,7 @@ impl Clerk {
             for (i, (node_name, index)) in pending_lock.iter().enumerate() {
                 // Check for exit condition
                 if node_name == "exit" {
+                    println!("Exit signal received, stopping set_ready_nodes thread.");
                     return;
                 }
 
@@ -307,7 +345,7 @@ impl Clerk {
                             "Node {} with index {} is ready to be scheduled",
                             node_name, index
                         ));
-                        ready_tx.send((node_name.clone(), *index)).unwrap();
+                        ready_tx.send((node_name.clone(), *index, false)).unwrap();
                         // mark for removal from pending
                         remove_nodes_idx.push(i);
                     } else if has_conditions && !conditions_met {
@@ -333,34 +371,42 @@ impl Clerk {
             drop(pending_lock);
 
             // Sleep for a while to avoid busy waiting
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            sleep(Duration::from_millis(10));
         }
     }
 
-    fn shift_indexes(&mut self, node_name: String, node_idxs: &Vec<usize>) {
-        let count = node_idxs.len();
+    fn shift_indexes(&mut self, node_name: String, count: usize) {
+        print_debug(&format!(
+            "Shifting indexes for node {} by {}",
+            node_name, count
+        ));
 
         let mut completed_lock = self.completed_nodes.write().unwrap();
         for (name, index) in completed_lock.iter_mut() {
             if name != &node_name {
                 continue;
             }
-            let mut new_index = std::cmp::max(*index - count, 0);
-
-            while !node_idxs.contains(&new_index) && new_index != *index {
-                new_index += 1;
-            }
             print_debug(&format!(
-                "Node {} with index {} changed to index {}",
-                name, index, new_index
+                "Node {} with index {} found in completed_nodes",
+                name, index
             ));
-            // change result index
-            let mut node_results_lock = self.node_results.write().unwrap();
-            node_results_lock.change_node_idx(&node_name, *index, new_index);
-            drop(node_results_lock);
-            // update index
-            *index = new_index;
+
+            if count <= *index {
+                let new_index = *index - count;
+
+                print_debug(&format!(
+                    "Node {} with index {} changed to index {}",
+                    name, index, new_index
+                ));
+                // change result index
+                let mut node_results_lock = self.node_results.write().unwrap();
+                node_results_lock.change_node_idx(&node_name, *index, new_index);
+                drop(node_results_lock);
+                // update index
+                *index = new_index;
+            }
         }
+        drop(completed_lock);
 
         // change node's factor
         let mut graph_write = self.graph.write().unwrap();
@@ -371,17 +417,18 @@ impl Clerk {
         drop(graph_write);
     }
 
-    fn process_completed(&mut self, completed_queue: Arc<RwLock<Vec<(String, usize)>>>) {
+    fn process_completed(&mut self, completed_queue: Arc<RwLock<Vec<(String, usize, bool)>>>) {
+        let loop_counter = AtomicUsize::new(0);
         // Process completed nodes
         loop {
             let mut queue_lock = completed_queue.write().unwrap();
             if queue_lock.is_empty() {
                 drop(queue_lock);
                 // Sleep for a while to avoid busy waiting
-                std::thread::sleep(std::time::Duration::from_millis(15));
+                sleep(Duration::from_millis(15));
                 continue;
             }
-            let (node_name, node_index) = queue_lock.pop().unwrap();
+            let (node_name, node_index, post_node) = queue_lock.pop().unwrap();
             drop(queue_lock);
             print_debug(&format!(
                 "Processing completed node: {} with index {}",
@@ -390,6 +437,7 @@ impl Clerk {
 
             // Check for exit condition
             if node_name == "exit" {
+                println!("Exit signal received, stopping process_completed thread.");
                 return;
             }
 
@@ -403,8 +451,13 @@ impl Clerk {
                 node_name, node_index
             ));
 
+            if post_node {
+                sleep(Duration::from_millis(15));
+                continue;
+            }
+
             // check possible shift indexes
-            let nodes_to_shift: Vec<(String, Vec<usize>)> = {
+            let nodes_to_shift: Vec<(String, usize)> = {
                 let rem_nodes_map = self.removed_cond_nodes.read().unwrap();
                 rem_nodes_map
                     .iter()
@@ -416,7 +469,7 @@ impl Clerk {
                         drop(pending);
 
                         if !is_pending {
-                            Some((name.clone(), indexes.clone()))
+                            Some((name.clone(), indexes.len()))
                         } else {
                             None
                         }
@@ -425,9 +478,9 @@ impl Clerk {
             };
 
             let mut remove_nodes = Vec::new();
-            for (name, indexes) in nodes_to_shift {
+            for (name, count) in nodes_to_shift {
                 print_debug(&format!("Node {} is not pending, shifting indexes", name));
-                self.shift_indexes(name.clone(), &indexes);
+                self.shift_indexes(name.clone(), count);
                 remove_nodes.push(name.clone());
             }
             // Remove processed nodes from removed_cond_nodes
@@ -442,25 +495,63 @@ impl Clerk {
             let node = graph_read.node(&node_name);
             let loop_opt = node.loop_.clone();
             drop(graph_read);
-            if let Some(loop_name) = loop_opt {
+            if let Some(loop_) = loop_opt {
+                let loop_name = loop_.name.clone();
+                let loop_factor = loop_.factor;
+                // check if any current nodes are pending
+                let pending = self.pending_nodes.read().unwrap();
+                let is_pending = pending
+                    .iter()
+                    .any(|(pending_name, _)| *pending_name == node_name);
+                drop(pending);
+
+                let schedule_loop = {
+                    let loop_counter = loop_counter.fetch_add(1, Ordering::Relaxed);
+                    if loop_counter <= loop_factor {
+                        true
+                    } else {
+                        false
+                    }
+                };
+
                 // add loop to pending
-                self.process_loop(loop_name.clone(), node_index);
+                if !is_pending && schedule_loop {
+                    print_debug(&format!(
+                        "Initiating loop from node {} to node {}",
+                        node_name, loop_name
+                    ));
+                    self.process_loop(loop_name.clone());
+                    // increment loop count
+                }
             }
-            std::thread::sleep(std::time::Duration::from_millis(15));
+            sleep(Duration::from_millis(15));
         }
     }
 
     fn schedule_nodes(
         &mut self,
         scheduler: SchedulerImpl,
-        completed_queue: Arc<RwLock<Vec<(String, usize)>>>,
-        ready_rx: &Receiver<(String, usize)>,
+        completed_queue: Arc<RwLock<Vec<(String, usize, bool)>>>,
+        ready_rx: &Receiver<(String, usize, bool)>,
     ) {
         // Get node and node_index from the channel
-        for (node_name, node_index) in ready_rx.iter() {
+        for (node_name, node_index, post_node) in ready_rx.iter() {
+            // Check for exit condition
+            if node_name == "exit" {
+                println!("Exit signal received, stopping schedule_nodes thread.");
+                return;
+            }
+
             let graph_read = self.graph.read().unwrap();
 
-            let nodes_map = graph_read.nodes_map();
+            let nodes_map = {
+                if post_node {
+                    graph_read.post_nodes_map().unwrap()
+                } else {
+                    graph_read.nodes_map()
+                }
+            };
+
             let node = nodes_map.get(&node_name.clone()).unwrap();
             let init_objects = graph_read.init_objects();
 
@@ -487,7 +578,7 @@ impl Clerk {
                 // add to completed queue
                 {
                     let mut comp_lock = completed_queue.write().unwrap();
-                    comp_lock.push((name.clone(), node_index));
+                    comp_lock.push((name.clone(), node_index, post_node));
                     drop(comp_lock);
                 }
             };
@@ -507,16 +598,12 @@ impl Clerk {
     ) -> Vec<CmTypes> {
         // Create the arguments vector for given node
         let mut arg_vec: Vec<CmTypes> = Vec::new();
-        print_debug(&format!(
-            "Creating args for node {} with index {}",
-            node.name, node_index
-        ));
 
         let args = {
             // check if node is in loop_nodes
             let loop_read = self.loop_nodes.read().unwrap();
             let mut looping = false;
-            if loop_read.contains(&(node.name.clone(), node_index)) {
+            if loop_read.contains(&node.name.clone()) {
                 // node is in loop_nodes
                 looping = true;
             }
@@ -538,7 +625,6 @@ impl Clerk {
 
             match &arg.type_ {
                 CmTypes::Ref(obj_name) => {
-                    print_debug(&format!("Adding ref object {}", obj_name));
                     let init_objects = init_objects_opt.as_ref().unwrap();
 
                     // Argument may be node index
@@ -587,10 +673,6 @@ impl Clerk {
 
                             // Find the index of the node in the results
                             let new_index = Self::find_index(node_index, x, pred_factor);
-                            print_debug(&format!(
-                                "Adding result from node {} with index {}",
-                                res_node, new_index
-                            ));
                             new_index
                         })
                         .collect::<Vec<usize>>();
