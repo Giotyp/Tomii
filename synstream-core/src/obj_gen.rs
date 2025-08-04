@@ -1,48 +1,18 @@
 use crate::debug::print_debug;
 use crate::func_reg::get_func;
-use crate::graph_gen::Factor;
-use serde::Deserialize;
+use crate::json_structs::*;
 use serde_json;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Read;
 use synstream_types::*;
 
-#[derive(Debug, Deserialize)]
-struct ArgInit {
-    #[serde(rename = "type")]
-    type_: String,
-    value: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct InitJson {
-    name: String,
-    factor: Option<Factor>,
-    args: Vec<ArgInit>,
-    function_name: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RootJson {
-    initializations: Vec<InitJson>,
-}
-
 pub fn init_objects(
-    graph_json: &str,
+    initializations_json: &Vec<InitJson>,
     workers: usize,
 ) -> Result<HashMap<String, Vec<CmTypes>>, serde_json::Error> {
-    let mut file = File::open(graph_json).unwrap();
-    let mut contents = String::new();
-    file.read_to_string(&mut contents).unwrap();
-
-    // Parse JSON file to look for initializations
-    let root: RootJson = serde_json::from_str(&contents)?;
-
     // Create a new HashMap to store the initialized objects
     let mut init_objects: HashMap<String, Vec<CmTypes>> = HashMap::new();
 
-    for init in root.initializations.iter() {
+    for init in initializations_json.iter() {
         let name = init.name.clone();
         print_debug(&format!("Initializing object: {}", name));
         let factor = match &init.factor {

@@ -4,125 +4,11 @@ use std::io::Read;
 
 use crate::func_reg::*;
 use crate::graph_struct::*;
+use crate::json_structs::*;
 use crate::obj_gen::init_objects;
-use serde::Deserialize;
 use serde_json;
 use std::collections::HashMap;
 use synstream_types::*;
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-pub enum Factor {
-    Number(usize),
-    Ref(String),
-}
-
-impl Factor {
-    pub fn resolve(
-        &self,
-        init_objects: &Option<HashMap<String, Vec<CmTypes>>>,
-        workers: usize,
-    ) -> usize {
-        match self {
-            Factor::Number(num) => *num,
-            Factor::Ref(ref_name) => {
-                if let Some(table) = init_objects {
-                    if let Some(ref_val) = table.get(ref_name) {
-                        let usize_res = ref_val[0].valid_number_to_usize();
-                        if let Some(usize_val) = usize_res {
-                            return usize_val;
-                        } else {
-                            panic!(
-                                "Variable '{}' found but does not contain a valid number",
-                                ref_name
-                            );
-                        }
-                    }
-                }
-                // Check if ref_name is $workers
-                if ref_name == "$workers" {
-                    return workers;
-                }
-                panic!(
-                    "Variable '{}' not found or does not contain a number",
-                    ref_name
-                );
-            }
-        }
-    }
-
-    pub fn search(&self, init_objects: &HashMap<String, Vec<CmTypes>>, workers: usize) -> usize {
-        match self {
-            Factor::Number(num) => *num,
-            Factor::Ref(ref_name) => {
-                if let Some(ref_val) = init_objects.get(ref_name) {
-                    let usize_res = ref_val[0].valid_number_to_usize();
-                    if let Some(usize_val) = usize_res {
-                        return usize_val;
-                    } else {
-                        panic!(
-                            "Variable '{}' found but does not contain a valid number",
-                            ref_name
-                        );
-                    }
-                }
-                // Check if ref_name is $workers
-                if ref_name == "$workers" {
-                    return workers;
-                }
-                panic!(
-                    "Variable '{}' not found or does not contain a number",
-                    ref_name
-                );
-            }
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct ConditionJson {
-    operation: String,
-    value: String,
-    value_type: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PredJson {
-    name: String,
-    indexes: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ArgJson {
-    #[serde(rename = "type")]
-    type_: String,
-    value: Option<String>,
-    condition: Option<ConditionJson>,
-    predecessor: Option<PredJson>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LoopJson {
-    name: String,
-    factor: Option<Factor>,
-}
-
-#[derive(Debug, Deserialize)]
-struct NodeJson {
-    name: String,
-    factor: Option<Factor>,
-    function_name: String,
-    #[serde(rename = "loop")]
-    loop_: Option<LoopJson>,
-    loop_args: Option<Vec<ArgJson>>,
-    args: Vec<ArgJson>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphFile {
-    nodes: Vec<NodeJson>,
-    post_nodes: Option<Vec<NodeJson>>,
-}
 
 fn parse_arg(arg_json: &ArgJson, init_objects: Option<&HashMap<String, Vec<CmTypes>>>) -> Arg {
     let arg_value_opt = arg_json.value.clone();
@@ -251,7 +137,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
     let graph_parsed: GraphFile = serde_json::from_str(&contents)?;
 
     // Check for initializations in the graph
-    let init_objects = match init_objects(graph_json, workers) {
+    let init_objects = match init_objects(&graph_parsed.initializations, workers) {
         Ok(init_objects) => Some(init_objects),
         Err(e) => {
             eprintln!("Error parsing initial objects: {}", e);
@@ -353,8 +239,14 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
 }
 
 pub fn re_init_objects(graph: &mut Graph, graph_json: &str, workers: usize) {
+    let mut file = File::open(graph_json).unwrap();
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).unwrap();
+
+    // Parse JSON file with defined structure
+    let graph_parsed: GraphFile = serde_json::from_str(&contents).unwrap();
     // Check for initializations in the graph
-    let init_objects = match init_objects(graph_json, workers) {
+    let init_objects = match init_objects(&graph_parsed.initializations, workers) {
         Ok(init_objects) => Some(init_objects),
         Err(_) => None,
     };

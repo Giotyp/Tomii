@@ -2,6 +2,7 @@ pub mod clerk;
 pub mod debug;
 pub mod graph_gen;
 pub mod graph_struct;
+pub mod json_structs;
 pub mod obj_gen;
 pub mod scheduler;
 pub mod time_buffer;
