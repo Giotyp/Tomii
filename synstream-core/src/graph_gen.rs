@@ -230,9 +230,29 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
         graph.add_post_node(node);
     }
 
+    // Parse ID function if present
+    if let Some(id_function_json) = &graph_parsed.id_function {
+        let func_ptr = get_func(&id_function_json.function_name);
+
+        let predecessor = &id_function_json.predecessor;
+
+        let mut args = Vec::new();
+        for arg_json in &id_function_json.args {
+            args.push(parse_arg(arg_json, init_objects.as_ref()));
+        }
+
+        let id_function = IdFunction {
+            func_ptr,
+            predecessor: predecessor.clone(),
+            args,
+        };
+
+        graph.set_id_function(&id_function);
+    }
+
     // Set the initialized objects in the graph
     if let Some(init_objects) = init_objects {
-        graph.set_init_objects(init_objects);
+        graph.set_init_objects(&init_objects);
     }
 
     Ok(graph)
@@ -252,6 +272,6 @@ pub fn re_init_objects(graph: &mut Graph, graph_json: &str, workers: usize) {
     };
     // Set the initialized objects in the graph
     if let Some(init_objects) = init_objects {
-        graph.set_init_objects(init_objects);
+        graph.set_init_objects(&init_objects);
     }
 }

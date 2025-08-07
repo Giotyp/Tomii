@@ -7,6 +7,7 @@ pub struct GraphFile {
     pub initializations: Vec<InitJson>,
     pub nodes: Vec<NodeJson>,
     pub post_nodes: Option<Vec<NodeJson>>,
+    pub id_function: Option<IdFunctionJson>,
 }
 
 // Node structures
@@ -63,6 +64,14 @@ pub struct InitJson {
     pub factor: Option<Factor>,
     pub args: Vec<ArgInit>,
     pub function_name: Option<String>,
+}
+
+// ID Function for streaming support
+#[derive(Debug, Deserialize)]
+pub struct IdFunctionJson {
+    pub function_name: String,
+    pub predecessor: String,
+    pub args: Vec<ArgJson>,
 }
 
 // Factor struct

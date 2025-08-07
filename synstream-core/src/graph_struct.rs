@@ -120,8 +120,16 @@ impl Node {
 }
 
 #[derive(Clone)]
+pub struct IdFunction {
+    pub func_ptr: Option<CmPtr>,
+    pub predecessor: String,
+    pub args: Vec<Arg>,
+}
+
+#[derive(Clone)]
 pub struct Graph {
     nodes: HashMap<String, Node>,
+    id_function: Option<IdFunction>,
     post_nodes: Option<HashMap<String, Node>>,
     // keep a list of nodes that are connected
     connect_list: Vec<Vec<String>>,
@@ -173,6 +181,106 @@ impl Graph {
 
     pub fn total_nodes(&self) -> usize {
         self.nodes.values().map(|node| node.factor).sum()
+    }
+
+    pub fn total_nodes_with_conditions(&self) -> usize {
+        let mut total = 0;
+        let mut condition_predecessors: HashMap<String, usize> = HashMap::new();
+        let mut nodes_with_same_condition: HashMap<String, Vec<String>> = HashMap::new();
+
+        // First pass: identify all nodes with conditions and group them by predecessor
+        for (node_name, node) in &self.nodes {
+            let mut has_condition = false;
+
+            for arg in &node.args {
+                if let Some(_) = &arg.init_condition {
+                    has_condition = true;
+
+                    // Check what type of condition this is
+                    match &arg.type_ {
+                        CmTypes::Ref(obj_name) => {
+                            // For Ref conditions, use the object name as the key
+                            nodes_with_same_condition
+                                .entry(format!("ref:{}", obj_name))
+                                .or_insert_with(Vec::new)
+                                .push(node_name.clone());
+                        }
+                        CmTypes::Res(pred_name) => {
+                            // For Res conditions, use the predecessor name
+                            if let Some(pred_node) = self.nodes.get(pred_name) {
+                                let key = format!("pred:{}", pred_name);
+                                nodes_with_same_condition
+                                    .entry(key.clone())
+                                    .or_insert_with(Vec::new)
+                                    .push(node_name.clone());
+
+                                // Store the predecessor's factor
+                                condition_predecessors.insert(key, pred_node.factor);
+                            }
+                        }
+                        _ => {}
+                    }
+                    break;
+                }
+            }
+
+            if !has_condition {
+                total += node.factor;
+            }
+        }
+
+        // Second pass: for each group of nodes with the same condition,
+        // add the factor only once (use the predecessor's factor)
+        for (condition_key, node_names) in &nodes_with_same_condition {
+            if condition_key.starts_with("pred:") {
+                // Use predecessor's factor
+                if let Some(&pred_factor) = condition_predecessors.get(condition_key) {
+                    total += pred_factor;
+                }
+            } else if condition_key.starts_with("ref:") {
+                // For reference conditions, use the factor of the first node in the group
+                if let Some(first_node_name) = node_names.first() {
+                    if let Some(first_node) = self.nodes.get(first_node_name) {
+                        total += first_node.factor;
+                    }
+                }
+            }
+        }
+        total
+    }
+
+    pub fn analyze_conditional_nodes(&self) -> (Vec<String>, HashMap<String, Vec<String>>) {
+        let mut unconditional_nodes = Vec::new();
+        let mut conditional_groups: HashMap<String, Vec<String>> = HashMap::new();
+
+        for (node_name, node) in &self.nodes {
+            let mut has_condition = false;
+
+            for arg in &node.args {
+                if let Some(_) = &arg.init_condition {
+                    has_condition = true;
+
+                    let group_key = match &arg.type_ {
+                        CmTypes::Ref(obj_name) => format!("ref:{}", obj_name),
+                        CmTypes::Res(pred_name) => format!("pred:{}", pred_name),
+                        CmTypes::Barrier(pred_name) => format!("barrier:{}", pred_name),
+                        _ => "unknown".to_string(),
+                    };
+
+                    conditional_groups
+                        .entry(group_key)
+                        .or_insert_with(Vec::new)
+                        .push(node_name.clone());
+                    break; // Only consider first condition
+                }
+            }
+
+            if !has_condition {
+                unconditional_nodes.push(node_name.clone());
+            }
+        }
+
+        (unconditional_nodes, conditional_groups)
     }
 
     pub fn connect_list(&self) -> &Vec<Vec<String>> {
@@ -227,6 +335,7 @@ impl Graph {
     pub fn new() -> Graph {
         Graph {
             nodes: HashMap::new(),
+            id_function: None,
             post_nodes: None,
             connect_list: Vec::new(),
             buffer_list: Vec::new(),
@@ -242,12 +351,20 @@ impl Graph {
         self.init_objects.as_ref()
     }
 
-    pub fn set_init_objects(&mut self, init_objects: HashMap<String, Vec<CmTypes>>) {
-        self.init_objects = Some(init_objects);
+    pub fn id_function(&self) -> Option<&IdFunction> {
+        self.id_function.as_ref()
+    }
+
+    pub fn set_init_objects(&mut self, init_objects: &HashMap<String, Vec<CmTypes>>) {
+        self.init_objects = Some(init_objects.clone());
     }
 
     pub fn set_nodes(&mut self, nodes: HashMap<String, Node>) {
         self.nodes = nodes;
+    }
+
+    pub fn set_id_function(&mut self, id_function: &IdFunction) {
+        self.id_function = Some(id_function.clone());
     }
 
     pub fn set_post_nodes(&mut self, post_nodes: Option<HashMap<String, Node>>) {
@@ -307,5 +424,33 @@ impl Graph {
         } else {
             println!("No initialized objects.");
         }
+    }
+
+    pub fn print_conditional_analysis(&self) {
+        let (unconditional_nodes, conditional_groups) = self.analyze_conditional_nodes();
+
+        println!("Node Analysis:");
+        println!("  Unconditional nodes: {:?}", unconditional_nodes);
+        println!("  Conditional groups:");
+
+        for (group_key, node_names) in &conditional_groups {
+            if group_key.starts_with("pred:") {
+                let pred_name = &group_key[5..]; // Remove "pred:" prefix
+                if let Some(pred_node) = self.nodes.get(pred_name) {
+                    println!(
+                        "    {}: {:?} (predecessor factor: {})",
+                        group_key, node_names, pred_node.factor
+                    );
+                }
+            } else {
+                println!("    {}: {:?}", group_key, node_names);
+            }
+        }
+
+        println!("  Total nodes (simple): {}", self.total_nodes());
+        println!(
+            "  Total nodes (with conditions): {}",
+            self.total_nodes_with_conditions()
+        );
     }
 }
