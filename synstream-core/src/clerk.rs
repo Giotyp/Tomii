@@ -127,9 +127,10 @@ impl Clerk {
         drop(streams_mapping);
 
         // Set the fields of the struct's graphs copy - one for each stream
+        // Create an additional graph as a static copy
         let mut graphs = self.graphs.write().unwrap();
         graphs.clear();
-        for _ in 0..streams {
+        for _ in 0..streams + 1 {
             let mut graph = Graph::new();
             graph.set_nodes(nodes_map.clone());
             graph.set_connect_list(connect_list.clone());
@@ -150,7 +151,10 @@ impl Clerk {
 
         // Add graph nodes to pending_nodes
         for connect_nodes in connect_list.iter() {
-            self.add_nodes(connect_nodes);
+            let stream_count = std::cmp::min(streams, max_streams);
+            for stream in 0..stream_count {
+                self.add_nodes_for_stream(connect_nodes, stream);
+            }
         }
         // Initialize node_results
         self.init_results(streams);
@@ -214,9 +218,9 @@ impl Clerk {
 
     fn add_nodes(&mut self, nodes: &Vec<String>) {
         let graphs_read = self.graphs.read().unwrap();
-        // Use the first graph to get nodes_map since
-        let nodes_map = graphs_read[0].nodes_map();
-        let stream_count = std::min(self.streams, self.max_streams);
+        // Use the static graph to get nodes_map
+        let nodes_map = graphs_read[self.streams].nodes_map();
+        let stream_count = std::cmp::min(self.streams, self.max_streams);
         let mut pending_lock = self.pending_nodes.write().unwrap();
 
         for node_name in nodes.iter() {
@@ -239,10 +243,32 @@ impl Clerk {
         }
     }
 
+    fn add_nodes_for_stream(&mut self, nodes: &Vec<String>, stream: usize) {
+        let graphs_read = self.graphs.read().unwrap();
+        // Use the static graph to get nodes_map
+        let nodes_map = graphs_read[self.streams].nodes_map();
+        let mut pending_lock = self.pending_nodes.write().unwrap();
+
+        for node_name in nodes.iter() {
+            let node = nodes_map.get(node_name).unwrap();
+            let factor = node.factor;
+
+            for i in 0..factor {
+                let node_id = NodeID::new(node_name.clone(), stream, i);
+                pending_lock.push(node_id);
+            }
+
+            print_debug(&format!(
+                "Added {} nodes for {} at stream: {}",
+                factor, node_name, stream
+            ));
+        }
+    }
+
     fn schedule_post_nodes(&mut self, ready_tx: &Sender<NodeID>) {
         let graphs_read = self.graphs.read().unwrap();
-        // Use the first graph to get post_nodes_map since
-        let nodes_map = graphs_read[0].post_nodes_map();
+        // Use the static graph to get post_nodes_map
+        let nodes_map = graphs_read[self.streams].post_nodes_map();
         if let Some(post_nodes) = nodes_map {
             let stream_use = self.streams; // initialized +1 in init_results
             for node in post_nodes.values() {
@@ -275,14 +301,14 @@ impl Clerk {
     fn init_results(&mut self, streams: usize) {
         // Initialize node_results with factor entries
         let graphs_read = self.graphs.read().unwrap();
-        // Use the first graph to get nodes_map since
-        let nodes_map = graphs_read[0].nodes_map();
+        // Use the static graph to get nodes_map
+        let nodes_map = graphs_read[self.streams].nodes_map();
         let mut node_results_lock = self.node_results.write().unwrap();
         node_results_lock.clear_buffer();
         node_results_lock.init_buffer(nodes_map, CmTypes::None(), streams);
 
         // Initialize post_nodes if any
-        let post_nodes_opt = graphs_read[0].post_nodes_map();
+        let post_nodes_opt = graphs_read[self.streams].post_nodes_map();
         if let Some(post_nodes) = post_nodes_opt {
             node_results_lock.add_buffer(post_nodes, CmTypes::None());
         }
@@ -342,20 +368,8 @@ impl Clerk {
                 stream, current_count
             ));
 
-            // Find which stream corresponds to this stream and release the slot
-            let streams_mapping = self.stream_to_slot_mapping.read().unwrap();
-            let mut streams_to_release = None;
-            for (&stream, &slot_id) in streams_mapping.iter() {
-                if slot_id == stream {
-                    streams_to_release = Some(stream);
-                    break;
-                }
-            }
-            drop(streams_mapping);
-
-            if let Some(stream) = streams_to_release {
-                self.release_stream_slot(stream);
-            }
+            // Release the slot
+            self.release_stream_slot(stream);
 
             // Increment global completion counter
             let new_counter =
@@ -377,8 +391,8 @@ impl Clerk {
 
                 // Re-add nodes for new iteration using the completed stream slot
                 let graphs_read = self.graphs.read().unwrap();
-                // Use the first graph to get connect_list since
-                let connect_list = graphs_read[0].connect_list().clone();
+                // Use the static graph to get connect_list
+                let connect_list = graphs_read[self.streams].connect_list().clone();
                 drop(graphs_read);
 
                 for connect_nodes in connect_list.iter() {
@@ -391,32 +405,14 @@ impl Clerk {
         false
     }
 
-    fn add_nodes_for_stream(&mut self, nodes: &Vec<String>, stream: usize) {
-        let graphs_read = self.graphs.read().unwrap();
-        // Use the first graph to get nodes_map since
-        let nodes_map = graphs_read[0].nodes_map();
-        let mut pending_lock = self.pending_nodes.write().unwrap();
-
-        for node_name in nodes.iter() {
-            let node = nodes_map.get(node_name).unwrap();
-            let factor = node.factor;
-
-            for i in 0..factor {
-                let node_id = NodeID::new(node_name.clone(), stream, i);
-                pending_lock.push(node_id);
-            }
-        }
-        print_debug(&format!("Re-added nodes for stream {} iteration", stream));
-    }
-
     fn process_loop(&mut self, node_name: String) {
         let graphs_read = self.graphs.read().unwrap();
-        // Use the first graph to get connections since
-        let connections_opt = graphs_read[0].node_connections(&node_name);
+        // Use the static graph to get connections
+        let connections_opt = graphs_read[self.streams].node_connections(&node_name);
         drop(graphs_read);
 
         if let Some(connections) = connections_opt {
-            self.add_nodes(&connections);
+            self.add_nodes(&connections); // TODO: fix for streams
 
             // Add connections to loop_nodes
             let mut loop_lock = self.loop_nodes.write().unwrap();
@@ -836,8 +832,8 @@ impl Clerk {
 
             let nodes_map = {
                 if post_node {
-                    // Use the first graph for post nodes
-                    graphs_read[0].post_nodes_map().unwrap()
+                    // Use the static graph for post nodes
+                    graphs_read[self.streams].post_nodes_map().unwrap()
                 } else {
                     // Use the appropriate graph for this stream
                     graphs_read[stream].nodes_map()
@@ -846,7 +842,7 @@ impl Clerk {
 
             let node = nodes_map.get(&node_name.clone()).unwrap();
             let init_objects = if post_node {
-                graphs_read[0].init_objects()
+                graphs_read[self.streams].init_objects()
             } else {
                 graphs_read[stream].init_objects()
             };
