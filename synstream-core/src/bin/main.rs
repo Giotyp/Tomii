@@ -37,8 +37,8 @@ struct Args {
     inits: bool,
     #[clap(long, help = "Enable Debug Printing")]
     debug: bool,
-    #[clap(long, value_name = "STREAMS", required = false, default_value = "1")]
-    streams: usize,
+    #[clap(long, value_name = "SLOTS", required = false, default_value = "1")]
+    slots: usize,
     #[clap(
         long,
         value_name = "MAX_STREAMS",
@@ -104,7 +104,7 @@ fn main() {
         scheduler_type,
         args.workers,
         args.core_offset,
-        args.streams,
+        args.slots,
         args.max_streams,
         runtime,
     );
@@ -115,13 +115,13 @@ pub fn run_graph(
     scheduler_type: SchedulerType,
     workers: usize,
     core_offset: usize,
-    streams: usize,
+    slots: usize,
     max_streams: usize,
     max_runtime: Option<u64>,
 ) -> Clerk {
     let mut clerk = Clerk::new();
     let scheduler = create_scheduler(scheduler_type, core_offset, workers);
 
-    clerk.run(graph, scheduler, streams, max_streams, max_runtime);
+    clerk.run(graph, scheduler, slots, max_streams, max_runtime);
     clerk
 }

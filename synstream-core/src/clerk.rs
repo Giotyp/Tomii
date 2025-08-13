@@ -24,11 +24,13 @@ pub struct Clerk {
     // Persistent completion counters for each stream
     stream_completion_counts: Arc<RwLock<Vec<AtomicUsize>>>,
     // Track available stream slots (true = available, false = busy)
-    available_stream_slots: Arc<RwLock<Vec<bool>>>,
+    // (bool, usize) where usize indicates the real stream_id received
+    // from the ID function
+    available_stream_slots: Arc<RwLock<Vec<(bool, usize)>>>,
     // Map stream to actual stream slot
     stream_to_slot_mapping: Arc<RwLock<HashMap<usize, usize>>>,
     total_nodes_per_stream: usize,
-    streams: usize,
+    slots: usize,
     workers: usize,
     max_streams: usize,
 }
@@ -51,7 +53,7 @@ impl Clerk {
             available_stream_slots: Arc::new(RwLock::new(Vec::new())),
             stream_to_slot_mapping: Arc::new(RwLock::new(HashMap::new())),
             total_nodes_per_stream: 0,
-            streams: 1,     // Default to 1 stream
+            slots: 1,       // Default to 1 slot
             workers: 1,     // Default to 1 worker
             max_streams: 1, // Default to 1 max stream
         }
@@ -62,28 +64,16 @@ impl Clerk {
         node_results_lock.get_buffer(stream).clone()
     }
 
-    pub fn print_all_results(&self, streams: usize) {
-        for stream in 0..streams {
-            let results = self.get_results(stream);
-            for (node_name, result_vec) in results.iter() {
-                println!("Node: {}", node_name);
-                for (i, result) in result_vec.iter().enumerate() {
-                    println!("    Index {}: {:?}", i, result);
-                }
-            }
-        }
-    }
-
     pub fn run(
         &mut self,
         graph: &Graph,
         scheduler: SchedulerImpl,
-        streams: usize,
+        slots: usize,
         max_streams: usize,
         max_runtime: Option<u64>,
     ) {
         // Overwrite streams
-        self.streams = streams;
+        self.slots = slots;
         // Overwrite max_streams
         self.max_streams = max_streams;
 
@@ -105,7 +95,7 @@ impl Clerk {
         // Initialize stream completion counters
         let mut completion_counts = self.stream_completion_counts.write().unwrap();
         completion_counts.clear();
-        for _ in 0..streams {
+        for _ in 0..self.slots {
             completion_counts.push(AtomicUsize::new(0));
         }
         drop(completion_counts);
@@ -113,24 +103,16 @@ impl Clerk {
         // Initialize available stream slots (all initially busy with initial streams)
         let mut available_slots = self.available_stream_slots.write().unwrap();
         available_slots.clear();
-        for _ in 0..streams {
-            available_slots.push(false); // false = busy
+        for _ in 0..self.slots {
+            available_slots.push((true, std::usize::MAX)); // (available, real stream id)
         }
         drop(available_slots);
-
-        // Initialize streams to slot mapping for initial streams
-        let mut streams_mapping = self.stream_to_slot_mapping.write().unwrap();
-        streams_mapping.clear();
-        for i in 0..streams {
-            streams_mapping.insert(i, i); // stream 0->slot 0, stream 1->slot 1, etc.
-        }
-        drop(streams_mapping);
 
         // Set the fields of the struct's graphs copy - one for each stream
         // Create an additional graph as a static copy
         let mut graphs = self.graphs.write().unwrap();
         graphs.clear();
-        for _ in 0..streams + 1 {
+        for _ in 0..self.slots + 1 {
             let mut graph = Graph::new();
             graph.set_nodes(nodes_map.clone());
             graph.set_connect_list(connect_list.clone());
@@ -151,13 +133,13 @@ impl Clerk {
 
         // Add graph nodes to pending_nodes
         for connect_nodes in connect_list.iter() {
-            let stream_count = std::cmp::min(streams, max_streams);
-            for stream in 0..stream_count {
-                self.add_nodes_for_stream(connect_nodes, stream);
+            let slot_count = std::cmp::min(self.slots, max_streams);
+            for stream in 0..slot_count {
+                self.add_nodes_for_slot(connect_nodes, stream);
             }
         }
         // Initialize node_results
-        self.init_results(streams);
+        self.init_results(self.slots);
 
         // clone a pair of clerks, one for each thread
         let mut clerk_for_ready = self.clone();
@@ -219,8 +201,8 @@ impl Clerk {
     fn add_nodes(&mut self, nodes: &Vec<String>) {
         let graphs_read = self.graphs.read().unwrap();
         // Use the static graph to get nodes_map
-        let nodes_map = graphs_read[self.streams].nodes_map();
-        let stream_count = std::cmp::min(self.streams, self.max_streams);
+        let nodes_map = graphs_read[self.slots].nodes_map();
+        let stream_count = std::cmp::min(self.slots, self.max_streams);
         let mut pending_lock = self.pending_nodes.write().unwrap();
 
         for node_name in nodes.iter() {
@@ -235,7 +217,7 @@ impl Clerk {
                 }
             }
             print_debug(&format!(
-                "Added {} nodes for {} across {} streams",
+                "Added {} nodes for {} across {} slots",
                 factor * stream_count,
                 node_name,
                 stream_count
@@ -243,10 +225,10 @@ impl Clerk {
         }
     }
 
-    fn add_nodes_for_stream(&mut self, nodes: &Vec<String>, stream: usize) {
+    fn add_nodes_for_slot(&mut self, nodes: &Vec<String>, slot: usize) {
         let graphs_read = self.graphs.read().unwrap();
         // Use the static graph to get nodes_map
-        let nodes_map = graphs_read[self.streams].nodes_map();
+        let nodes_map = graphs_read[self.slots].nodes_map();
         let mut pending_lock = self.pending_nodes.write().unwrap();
 
         for node_name in nodes.iter() {
@@ -254,13 +236,13 @@ impl Clerk {
             let factor = node.factor;
 
             for i in 0..factor {
-                let node_id = NodeID::new(node_name.clone(), stream, i);
+                let node_id = NodeID::new(node_name.clone(), slot, i);
                 pending_lock.push(node_id);
             }
 
             print_debug(&format!(
-                "Added {} nodes for {} at stream: {}",
-                factor, node_name, stream
+                "Added {} nodes for {} at slot: {}",
+                factor, node_name, slot
             ));
         }
     }
@@ -268,9 +250,9 @@ impl Clerk {
     fn schedule_post_nodes(&mut self, ready_tx: &Sender<NodeID>) {
         let graphs_read = self.graphs.read().unwrap();
         // Use the static graph to get post_nodes_map
-        let nodes_map = graphs_read[self.streams].post_nodes_map();
+        let nodes_map = graphs_read[self.slots].post_nodes_map();
         if let Some(post_nodes) = nodes_map {
-            let stream_use = self.streams; // initialized +1 in init_results
+            let stream_use = self.slots; // initialized +1 in init_results
             for node in post_nodes.values() {
                 for i in 0..node.factor {
                     let mut node = NodeID::new(node.name.clone(), stream_use, i);
@@ -298,39 +280,43 @@ impl Clerk {
         }
     }
 
-    fn init_results(&mut self, streams: usize) {
+    fn init_results(&mut self, slots: usize) {
         // Initialize node_results with factor entries
         let graphs_read = self.graphs.read().unwrap();
         // Use the static graph to get nodes_map
-        let nodes_map = graphs_read[self.streams].nodes_map();
+        let nodes_map = graphs_read[self.slots].nodes_map();
         let mut node_results_lock = self.node_results.write().unwrap();
         node_results_lock.clear_buffer();
-        node_results_lock.init_buffer(nodes_map, CmTypes::None(), streams);
+        node_results_lock.init_buffer(nodes_map, CmTypes::None(), slots);
 
         // Initialize post_nodes if any
-        let post_nodes_opt = graphs_read[self.streams].post_nodes_map();
+        let post_nodes_opt = graphs_read[self.slots].post_nodes_map();
         if let Some(post_nodes) = post_nodes_opt {
             node_results_lock.add_buffer(post_nodes, CmTypes::None());
         }
     }
 
-    fn assign_streams_to_available_slot(&mut self, stream: usize) -> usize {
+    fn assign_stream_to_available_slot(&mut self, stream: usize) -> usize {
         let mut available_slots = self.available_stream_slots.write().unwrap();
         let mut streams_mapping = self.stream_to_slot_mapping.write().unwrap();
 
         // Check if this streams is already mapped to a slot
         if let Some(&slot) = streams_mapping.get(&stream) {
+            print_debug(&format!(
+                "Stream: {} is already assigned to slot {}",
+                stream, slot
+            ));
             return slot;
         }
 
         // Find first available slot
-        for (slot_id, &available) in available_slots.iter().enumerate() {
+        for (slot_id, &(available, _)) in available_slots.iter().enumerate() {
             if available {
-                // Assign this streams to the available slot
+                // Assign this stream to the available slot
                 streams_mapping.insert(stream, slot_id);
-                available_slots[slot_id] = false; // Mark as busy
+                available_slots[slot_id] = (false, stream); // Mark as busy
                 print_debug(&format!(
-                    "Assigned streams {} to available slot {}",
+                    "Assigned stream: {} to available slot {}",
                     stream, slot_id
                 ));
                 return slot_id;
@@ -338,42 +324,39 @@ impl Clerk {
         }
 
         // If no slots available, panic
-        panic!("No available stream slots for streams {}", stream);
+        panic!("No available stream slots for stream: {}", stream);
     }
 
-    fn release_stream_slot(&mut self, stream: usize) {
+    fn release_slot(&mut self, slot: usize) {
         let mut available_slots = self.available_stream_slots.write().unwrap();
-        let mut streams_mapping = self.stream_to_slot_mapping.write().unwrap();
 
-        if let Some(&slot_id) = streams_mapping.get(&stream) {
-            available_slots[slot_id] = true; // Mark as available
-            streams_mapping.remove(&stream);
-            print_debug(&format!(
-                "Released slot {} (was streams {})",
-                slot_id, stream
-            ));
-        }
+        let old_stream = available_slots[slot].1;
+        available_slots[slot] = (true, std::usize::MAX); // Mark as available
+        print_debug(&format!(
+            "Released slot {} (had stream: {})",
+            slot, old_stream
+        ));
     }
 
-    fn check_stream_completion(&mut self, stream: usize) -> bool {
-        // Increment the completion count for this stream
+    fn check_slot_completion(&mut self, slot: usize) -> bool {
+        // Increment the completion count for this slot
         let completion_counts = self.stream_completion_counts.read().unwrap();
-        let current_count = completion_counts[stream].fetch_add(1, Ordering::SeqCst) + 1;
+        let current_count = completion_counts[slot].fetch_add(1, Ordering::SeqCst) + 1;
         drop(completion_counts);
 
         // Check if this stream iteration is complete
         if current_count >= self.total_nodes_per_stream {
             print_debug(&format!(
-                "Stream {} iteration complete with {} nodes",
-                stream, current_count
+                "Completed iteration at slot {} with {} nodes",
+                slot, current_count
             ));
 
             // Release the slot
-            self.release_stream_slot(stream);
+            self.release_slot(slot);
 
             // Increment global completion counter
             let new_counter =
-                self.stream_complete_counter.fetch_add(1, Ordering::SeqCst) + self.streams;
+                self.stream_complete_counter.fetch_add(1, Ordering::SeqCst) + self.slots;
 
             // Check if we should start a new iteration
             if new_counter < self.max_streams {
@@ -381,23 +364,29 @@ impl Clerk {
 
                 // Reset the completion count for this stream
                 let completion_counts = self.stream_completion_counts.read().unwrap();
-                completion_counts[stream].store(0, Ordering::SeqCst);
+                completion_counts[slot].store(0, Ordering::SeqCst);
                 drop(completion_counts);
 
                 // Clear completed nodes for this stream to allow restart
                 let mut completed_lock = self.completed_nodes.write().unwrap();
-                completed_lock.retain(|node_id| node_id.stream != stream);
+                completed_lock.retain(|node_id| node_id.slot != slot);
                 drop(completed_lock);
 
-                // Re-add nodes for new iteration using the completed stream slot
+                // Re-add nodes for new iteration using the completed slot
                 let graphs_read = self.graphs.read().unwrap();
                 // Use the static graph to get connect_list
-                let connect_list = graphs_read[self.streams].connect_list().clone();
+                let connect_list = graphs_read[self.slots].connect_list().clone();
+                let nodes_map = graphs_read[self.slots].nodes_map().clone();
                 drop(graphs_read);
 
                 for connect_nodes in connect_list.iter() {
-                    self.add_nodes_for_stream(connect_nodes, stream);
+                    self.add_nodes_for_slot(connect_nodes, slot);
                 }
+
+                // Re-set nodes for slot graph
+                let mut graphs_write = self.graphs.write().unwrap();
+                graphs_write[slot].set_nodes(nodes_map);
+                drop(graphs_write);
 
                 return true;
             }
@@ -408,7 +397,7 @@ impl Clerk {
     fn process_loop(&mut self, node_name: String) {
         let graphs_read = self.graphs.read().unwrap();
         // Use the static graph to get connections
-        let connections_opt = graphs_read[self.streams].node_connections(&node_name);
+        let connections_opt = graphs_read[self.slots].node_connections(&node_name);
         drop(graphs_read);
 
         if let Some(connections) = connections_opt {
@@ -444,7 +433,7 @@ impl Clerk {
         &self,
         node: &Node,
         node_idx: usize,
-        stream: usize,
+        slot: usize,
         init_objects: Option<&HashMap<String, Vec<CmTypes>>>,
         nodes_map: &HashMap<String, Node>,
     ) -> (bool, bool, bool) {
@@ -468,7 +457,7 @@ impl Clerk {
                     let pred_factor = pred_node.factor;
 
                     let adjusted_index = Self::find_index(node_idx, *index, pred_factor);
-                    let check_id = NodeID::new(predecessor.name.clone(), stream, adjusted_index);
+                    let check_id = NodeID::new(predecessor.name.clone(), slot, adjusted_index);
                     if !compl_read.contains(&check_id) {
                         // predecessor not completed
                         preds_ready = false;
@@ -502,7 +491,7 @@ impl Clerk {
                 CmTypes::Res(node_name) => {
                     let res_read = self.node_results.read().unwrap();
                     let result = res_read
-                        .search_node_idx(&node_name, node_idx, stream)
+                        .search_node_idx(&node_name, node_idx, slot)
                         .unwrap();
                     let eval = init_condition.evaluate(result);
                     if !eval {
@@ -513,7 +502,7 @@ impl Clerk {
                 CmTypes::Barrier(node_name) => {
                     let res_read = self.node_results.read().unwrap();
                     let result = res_read
-                        .search_node_idx(&node_name, node_idx, stream)
+                        .search_node_idx(&node_name, node_idx, slot)
                         .unwrap();
                     let eval = init_condition.evaluate(result);
                     if !eval {
@@ -537,7 +526,7 @@ impl Clerk {
                 // Unwrap node_id
                 let node_name = node_id.name.clone();
                 let index = node_id.index;
-                let stream = node_id.stream;
+                let slot = node_id.slot;
 
                 // Check for exit condition
                 if node_name == "exit" {
@@ -546,19 +535,19 @@ impl Clerk {
                 }
 
                 let graphs_read = self.graphs.read().unwrap();
-                // Use the appropriate graph for this stream
-                let nodes_map = graphs_read[stream].nodes_map();
+                // Use the appropriate graph for this slot
+                let nodes_map = graphs_read[slot].nodes_map();
                 let node = nodes_map.get(&node_name).unwrap();
 
-                let init_objects = graphs_read[stream].init_objects();
+                let init_objects = graphs_read[slot].init_objects();
 
                 let (preds_ready, has_conditions, conditions_met) =
-                    self.check_ready_node(node, index, stream, init_objects, nodes_map);
+                    self.check_ready_node(node, index, slot, init_objects, nodes_map);
 
                 if preds_ready {
                     // Predecessors are ready
                     if !has_conditions || (has_conditions && conditions_met) {
-                        let node_id = NodeID::new(node_name.clone(), stream, index);
+                        let node_id = NodeID::new(node_name.clone(), slot, index);
                         // Node is ready to be scheduled
                         print_debug(&format!("{:?} is ready to be scheduled", node_id));
                         ready_tx.send(node_id).unwrap();
@@ -571,7 +560,7 @@ impl Clerk {
                         // increase removed conditional count hashmap for node
                         let mut removed_cond_lock = self.removed_cond_nodes.write().unwrap();
                         removed_cond_lock
-                            .entry((node_name.clone(), stream))
+                            .entry((node_name.clone(), slot))
                             .and_modify(|v| v.push(index))
                             .or_insert(vec![index]);
                         drop(removed_cond_lock);
@@ -591,17 +580,17 @@ impl Clerk {
         }
     }
 
-    fn shift_indexes(&mut self, node_name: String, count: usize, node_stream: usize) {
+    fn shift_indexes(&mut self, node_name: String, count: usize, node_slot: usize) {
         print_debug(&format!(
-            "Shifting indexes for node {} at stream {} by {}",
-            node_name, node_stream, count
+            "Shifting indexes for node {} at slot {} by {}",
+            node_name, node_slot, count
         ));
 
         let mut completed_lock = self.completed_nodes.write().unwrap();
         for node_id in completed_lock.iter_mut() {
             let name = &node_id.name;
-            let stream = node_id.stream;
-            if name != &node_name || stream != node_stream {
+            let slot = node_id.slot;
+            if name != &node_name || slot != node_slot {
                 continue;
             }
 
@@ -609,12 +598,12 @@ impl Clerk {
                 let new_index = node_id.index - count;
 
                 print_debug(&format!(
-                    "Node {} at stream {} with index {} changed to index {}",
-                    name, node_stream, node_id.index, new_index
+                    "Node {} at slot {} with index {} changed to index {}",
+                    name, node_slot, node_id.index, new_index
                 ));
                 // change result index
                 let mut node_results_lock = self.node_results.write().unwrap();
-                node_results_lock.change_node_idx(&node_name, node_id.index, new_index, stream);
+                node_results_lock.change_node_idx(&node_name, node_id.index, new_index, slot);
                 drop(node_results_lock);
                 // update index
                 node_id.index = new_index;
@@ -622,17 +611,18 @@ impl Clerk {
         }
         drop(completed_lock);
 
-        // change node's factor in the graph of the respective node_stream
+        // change node's factor in the graph of the respective node_slot
         let mut graphs_write = self.graphs.write().unwrap();
-        let nodes_map = graphs_write[node_stream].nodes_map();
+        let nodes_map = graphs_write[node_slot].nodes_map();
         let old_factor = nodes_map.get(&node_name).unwrap().factor;
         let factor = old_factor - count;
-        graphs_write[node_stream].change_node_factor(&node_name, factor);
+        graphs_write[node_slot].change_node_factor(&node_name, factor);
         drop(graphs_write);
     }
 
     fn process_completed(&mut self, completed_queue: Arc<RwLock<Vec<NodeID>>>) {
         let loop_counter = AtomicUsize::new(0);
+        let mut id_slot_counter = vec![0; self.slots];
         // Process completed nodes
         loop {
             let mut queue_lock = completed_queue.write().unwrap();
@@ -645,8 +635,8 @@ impl Clerk {
             let node_id = queue_lock.pop().unwrap();
             // Unwrap node_id
             let node_name = node_id.name.clone();
-            let node_index = node_id.index;
-            let mut stream = node_id.stream;
+            let mut node_index = node_id.index;
+            let mut slot = node_id.slot;
             let post_node = node_id.post_node;
 
             drop(queue_lock);
@@ -660,18 +650,18 @@ impl Clerk {
 
             if post_node {
                 let mut completed_lock = self.completed_nodes.write().unwrap();
-                completed_lock.push(NodeID::new(node_name.clone(), stream, node_index));
+                completed_lock.push(NodeID::new(node_name.clone(), slot, node_index));
                 drop(completed_lock);
                 sleep(Duration::from_millis(15));
                 continue;
             }
 
-            // Get Id function and validate stream
+            // Get Id function and validate slot
             let (id_function_opt, init_objects_opt) = {
                 let graphs_read = self.graphs.read().unwrap();
                 (
-                    graphs_read[stream].id_function().cloned(),
-                    graphs_read[stream].init_objects().cloned(),
+                    graphs_read[slot].id_function().cloned(),
+                    graphs_read[slot].init_objects().cloned(),
                 )
             };
 
@@ -686,7 +676,7 @@ impl Clerk {
                     let arg_vec = Self::parse_args(
                         &id_function.args,
                         node_index,
-                        stream,
+                        slot,
                         init_objects_opt.as_ref(),
                         &self.node_results,
                         &self.graphs,
@@ -701,20 +691,22 @@ impl Clerk {
                     if let Some(new_stream) = id_result.valid_number_to_usize() {
                         // Validate stream range
                         let current_counter = self.stream_complete_counter.load(Ordering::SeqCst);
-                        let max_allowed_stream = current_counter + self.streams;
+                        let max_allowed_stream = current_counter + self.slots;
 
                         if new_stream >= max_allowed_stream {
                             panic!(
-                                "ID function returned stream {} which exceeds maximum allowed {} (current_counter: {}, streams: {})",
-                                new_stream, max_allowed_stream, current_counter, self.streams
+                                "ID function returned stream {} which exceeds maximum allowed {} (current_counter: {}, slots: {})",
+                                new_stream, max_allowed_stream, current_counter, self.slots
                             );
                         }
 
                         // Assign streams to an available stream slot
-                        stream = self.assign_streams_to_available_slot(new_stream);
+                        slot = self.assign_stream_to_available_slot(new_stream);
+                        node_index = id_slot_counter[slot];
+                        id_slot_counter[slot] += 1;
                         print_debug(&format!(
-                            "ID function determined stream: {} assigned to slot: {}",
-                            new_stream, stream
+                            "ID function determined stream: {} assigned to slot: {} with index: {}",
+                            new_stream, slot, node_index
                         ));
                     } else {
                         panic!("ID function did not return a valid number for stream");
@@ -722,9 +714,9 @@ impl Clerk {
                 }
             }
 
-            // Add node to completed with correct stream
+            // Add node to completed with correct slot
             let mut completed_lock = self.completed_nodes.write().unwrap();
-            completed_lock.push(NodeID::new(node_name.clone(), stream, node_index));
+            completed_lock.push(NodeID::new(node_name.clone(), slot, node_index));
             drop(completed_lock);
 
             // check possible shift indexes
@@ -732,16 +724,16 @@ impl Clerk {
                 let rem_nodes_map = self.removed_cond_nodes.read().unwrap();
                 rem_nodes_map
                     .iter()
-                    .filter_map(|((name, node_stream), indexes)| {
-                        // check if pending for this specific stream
+                    .filter_map(|((name, node_slot), indexes)| {
+                        // check if pending for this specific slot
                         let pending = self.pending_nodes.read().unwrap();
                         let is_pending = pending
                             .iter()
-                            .any(|node_id| &node_id.name == name && node_id.stream == *node_stream);
+                            .any(|node_id| &node_id.name == name && node_id.slot == *node_slot);
                         drop(pending);
 
                         if !is_pending {
-                            Some((name.clone(), *node_stream, indexes.len()))
+                            Some((name.clone(), *node_slot, indexes.len()))
                         } else {
                             None
                         }
@@ -750,26 +742,26 @@ impl Clerk {
             };
 
             let mut remove_nodes = Vec::new();
-            for (name, node_stream, count) in nodes_to_shift {
+            for (name, node_slot, count) in nodes_to_shift {
                 print_debug(&format!(
-                    "Node {} at stream {} is not pending, shifting indexes",
-                    name, node_stream
+                    "Node {} at slot {} is not pending, shifting indexes",
+                    name, node_slot
                 ));
-                self.shift_indexes(name.clone(), count, node_stream);
-                remove_nodes.push((name.clone(), node_stream));
+                self.shift_indexes(name.clone(), count, node_slot);
+                remove_nodes.push((name.clone(), node_slot));
             }
             // Remove processed nodes from removed_cond_nodes
             let mut removed_cond_lock = self.removed_cond_nodes.write().unwrap();
-            for (name, node_stream) in remove_nodes.iter() {
-                removed_cond_lock.remove(&(name.clone(), *node_stream));
+            for (name, node_slot) in remove_nodes.iter() {
+                removed_cond_lock.remove(&(name.clone(), *node_slot));
             }
             drop(removed_cond_lock);
 
             // check for loop in the node
             let loop_opt = {
                 let graphs_read = self.graphs.read().unwrap();
-                // Use the appropriate graph for this stream
-                let node = graphs_read[stream].node(&node_name);
+                // Use the appropriate graph for this slot
+                let node = graphs_read[slot].node(&node_name);
                 node.loop_.clone()
             };
 
@@ -801,8 +793,11 @@ impl Clerk {
                 }
             }
 
-            // Check if stream iteration is complete and handle restart
-            self.check_stream_completion(stream);
+            // Check if slot iteration is complete and handle restart
+            let completed = self.check_slot_completion(slot);
+            if completed {
+                id_slot_counter[slot] = 0; // Reset index for this slot
+            }
 
             sleep(Duration::from_millis(15));
         }
@@ -819,7 +814,7 @@ impl Clerk {
             // Unwrap node_id
             let node_name = node_id.name.clone();
             let node_index = node_id.index;
-            let stream = node_id.stream;
+            let slot = node_id.slot;
             let post_node = node_id.post_node;
 
             // Check for exit condition
@@ -833,21 +828,21 @@ impl Clerk {
             let nodes_map = {
                 if post_node {
                     // Use the static graph for post nodes
-                    graphs_read[self.streams].post_nodes_map().unwrap()
+                    graphs_read[self.slots].post_nodes_map().unwrap()
                 } else {
-                    // Use the appropriate graph for this stream
-                    graphs_read[stream].nodes_map()
+                    // Use the appropriate graph for this slot
+                    graphs_read[slot].nodes_map()
                 }
             };
 
             let node = nodes_map.get(&node_name.clone()).unwrap();
             let init_objects = if post_node {
-                graphs_read[self.streams].init_objects()
+                graphs_read[self.slots].init_objects()
             } else {
-                graphs_read[stream].init_objects()
+                graphs_read[slot].init_objects()
             };
 
-            let arg_vec = self.create_node_args(node, node_index, stream, init_objects);
+            let arg_vec = self.create_node_args(node, node_index, slot, init_objects);
             let error = format!(
                 "Node {} with index {} has no function pointer",
                 node_name, node_index
@@ -864,13 +859,13 @@ impl Clerk {
                 // store result
                 {
                     let mut res_lock = node_results.write().unwrap();
-                    res_lock.add_element_index(&name, node_index, result, stream);
+                    res_lock.add_element_index(&name, node_index, result, slot);
                     drop(res_lock);
                 }
                 // add to completed queue
                 {
                     let mut comp_lock = completed_queue.write().unwrap();
-                    let mut node_id = NodeID::new(name.clone(), stream, node_index);
+                    let mut node_id = NodeID::new(name.clone(), slot, node_index);
                     node_id.set_post_node(post_node);
                     comp_lock.push(node_id);
                     drop(comp_lock);
@@ -885,7 +880,7 @@ impl Clerk {
         &self,
         node: &Node,
         node_index: usize,
-        stream: usize,
+        slot: usize,
         init_objects_opt: Option<&HashMap<String, Vec<CmTypes>>>,
     ) -> Vec<CmTypes> {
         let args = {
@@ -909,7 +904,7 @@ impl Clerk {
         let arg_vec = Self::parse_args(
             args,
             node_index,
-            stream,
+            slot,
             init_objects_opt,
             &self.node_results,
             &self.graphs,
@@ -931,7 +926,7 @@ impl Clerk {
     fn parse_args(
         args: &Vec<Arg>,
         node_index: usize,
-        stream: usize,
+        slot: usize,
         init_objects_opt: Option<&HashMap<String, Vec<CmTypes>>>,
         node_results: &Arc<RwLock<Buffer<CmTypes>>>,
         graphs: &Arc<RwLock<Vec<Graph>>>,
@@ -986,7 +981,7 @@ impl Clerk {
                         .map(|&x| {
                             // Get the predecessor node factor
                             let graphs_read = graphs.read().unwrap();
-                            let nodes_map = graphs_read[stream].nodes_map();
+                            let nodes_map = graphs_read[slot].nodes_map();
                             let pred_node: &Node = nodes_map
                                 .get(&arg.predecessor.as_ref().unwrap().name)
                                 .unwrap();
@@ -1004,9 +999,7 @@ impl Clerk {
                         // (must exist since they are completed)
                         let res_read = node_results.read().unwrap();
 
-                        let result = res_read
-                            .search_node_idx(&res_node, *dep_idx, stream)
-                            .unwrap();
+                        let result = res_read.search_node_idx(&res_node, *dep_idx, slot).unwrap();
                         arg_vec.push(result);
                     }
                 }
@@ -1025,16 +1018,16 @@ impl Clerk {
 #[derive(Clone, PartialEq)]
 struct NodeID {
     name: String,
-    stream: usize,
+    slot: usize,
     index: usize,
     post_node: bool,
 }
 
 impl NodeID {
-    fn new(name: String, stream: usize, index: usize) -> NodeID {
+    fn new(name: String, slot: usize, index: usize) -> NodeID {
         NodeID {
             name,
-            stream,
+            slot,
             index,
             post_node: false,
         }
@@ -1049,8 +1042,8 @@ impl std::fmt::Debug for NodeID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "NodeID {{ name: {}, index: {}, stream: {}, post_node: {} }}",
-            self.name, self.index, self.stream, self.post_node
+            "NodeID {{ name: {}, index: {}, slot: {}, post_node: {} }}",
+            self.name, self.index, self.slot, self.post_node
         )
     }
 }
@@ -1064,13 +1057,13 @@ impl<T: Clone> Buffer<T> {
         Buffer { buffer: Vec::new() }
     }
 
-    fn init_buffer(&mut self, nodes: &HashMap<String, Node>, init_val: T, streams: usize)
+    fn init_buffer(&mut self, nodes: &HashMap<String, Node>, init_val: T, slots: usize)
     where
         T: Clone,
     {
         if self.buffer.is_empty() {
             // Initialize buffer with empty HashMaps for each stream
-            for _ in 0..streams {
+            for _ in 0..slots {
                 self.buffer.push(HashMap::new());
             }
         }
@@ -1106,15 +1099,15 @@ impl<T: Clone> Buffer<T> {
         }
     }
 
-    fn get_buffer(&self, stream: usize) -> &HashMap<String, Vec<T>> {
-        &self.buffer[stream]
+    fn get_buffer(&self, slot: usize) -> &HashMap<String, Vec<T>> {
+        &self.buffer[slot]
     }
 
-    fn search_node_idx(&self, node_name: &str, index: usize, stream: usize) -> Option<T>
+    fn search_node_idx(&self, node_name: &str, index: usize, slot: usize) -> Option<T>
     where
         T: Clone,
     {
-        if let Some(vec) = self.buffer[stream].get(node_name) {
+        if let Some(vec) = self.buffer[slot].get(node_name) {
             if index < vec.len() {
                 Some(vec[index].clone())
             } else {
@@ -1125,8 +1118,8 @@ impl<T: Clone> Buffer<T> {
         }
     }
 
-    fn add_element_index(&mut self, node_name: &str, index: usize, element: T, stream: usize) {
-        if let Some(vec) = self.buffer[stream].get_mut(node_name) {
+    fn add_element_index(&mut self, node_name: &str, index: usize, element: T, slot: usize) {
+        if let Some(vec) = self.buffer[slot].get_mut(node_name) {
             if index < vec.len() {
                 vec[index] = element;
             } else {
@@ -1142,10 +1135,10 @@ impl<T: Clone> Buffer<T> {
         node_name: &str,
         old_index: usize,
         new_index: usize,
-        stream: usize,
+        slot: usize,
     ) {
         // copy data from old index to new index
-        if let Some(vec) = self.buffer[stream].get_mut(node_name) {
+        if let Some(vec) = self.buffer[slot].get_mut(node_name) {
             if old_index < vec.len() && new_index < vec.len() {
                 vec[new_index] = vec[old_index].clone();
             } else {
