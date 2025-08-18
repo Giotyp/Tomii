@@ -179,32 +179,52 @@ impl Graph {
         }
     }
 
-    pub fn total_nodes(&self) -> usize {
-        self.nodes.values().map(|node| node.factor).sum()
+    pub fn get_barrier_predecessors(&self) -> (HashMap<String, Vec<String>>, Vec<String>) {
+        let mut barrier_predecessors: HashMap<String, Vec<String>> = HashMap::new();
+        let mut barrier_nodes: Vec<String> = Vec::new();
+        for (node_name, node) in &self.nodes {
+            for arg in &node.args {
+                match &arg.type_ {
+                    CmTypes::Barrier(pred_name) => {
+                        // If the argument is a barrier, add the node to the predecessors
+                        barrier_predecessors
+                            .entry(pred_name.clone())
+                            .or_insert_with(Vec::new)
+                            .push(node_name.clone());
+                        barrier_nodes.push(pred_name.clone());
+                    }
+                    _ => {} // Ignore other types
+                }
+            }
+        }
+        (barrier_predecessors, barrier_nodes)
     }
 
-    pub fn total_nodes_with_conditions(&self) -> usize {
-        let mut total = 0;
+    pub fn get_successors_map(&self) -> HashMap<String, Vec<String>> {
+        let mut successors_map: HashMap<String, Vec<String>> = HashMap::new();
+        for (node_name, node) in &self.nodes {
+            for arg in &node.args {
+                if let Some(pred) = &arg.predecessor {
+                    successors_map
+                        .entry(pred.name.clone())
+                        .or_insert_with(Vec::new)
+                        .push(node_name.clone());
+                }
+            }
+        }
+        successors_map
+    }
+
+    pub fn get_condition_predecessors(
+        &self,
+    ) -> (HashMap<String, usize>, HashMap<String, Vec<String>>) {
         let mut condition_predecessors: HashMap<String, usize> = HashMap::new();
         let mut nodes_with_same_condition: HashMap<String, Vec<String>> = HashMap::new();
-
-        // First pass: identify all nodes with conditions and group them by predecessor
         for (node_name, node) in &self.nodes {
-            let mut has_condition = false;
-
             for arg in &node.args {
                 if let Some(_) = &arg.init_condition {
-                    has_condition = true;
-
                     // Check what type of condition this is
                     match &arg.type_ {
-                        CmTypes::Ref(obj_name) => {
-                            // For Ref conditions, use the object name as the key
-                            nodes_with_same_condition
-                                .entry(format!("ref:{}", obj_name))
-                                .or_insert_with(Vec::new)
-                                .push(node_name.clone());
-                        }
                         CmTypes::Res(pred_name) => {
                             // For Res conditions, use the predecessor name
                             if let Some(pred_node) = self.nodes.get(pred_name) {
@@ -223,7 +243,27 @@ impl Graph {
                     break;
                 }
             }
+        }
+        (condition_predecessors, nodes_with_same_condition)
+    }
 
+    pub fn total_nodes(&self) -> usize {
+        self.nodes.values().map(|node| node.factor).sum()
+    }
+
+    pub fn total_nodes_with_conditions(&self) -> usize {
+        let mut total = 0;
+        let (condition_predecessors, nodes_with_same_condition) = self.get_condition_predecessors();
+
+        // First pass: identify all nodes without conditions
+        for (_node_name, node) in &self.nodes {
+            let mut has_condition = false;
+            for arg in &node.args {
+                if let Some(_) = &arg.init_condition {
+                    has_condition = true;
+                    break;
+                }
+            }
             if !has_condition {
                 total += node.factor;
             }
@@ -231,18 +271,11 @@ impl Graph {
 
         // Second pass: for each group of nodes with the same condition,
         // add the factor only once (use the predecessor's factor)
-        for (condition_key, node_names) in &nodes_with_same_condition {
+        for (condition_key, _node_names) in &nodes_with_same_condition {
             if condition_key.starts_with("pred:") {
                 // Use predecessor's factor
                 if let Some(&pred_factor) = condition_predecessors.get(condition_key) {
                     total += pred_factor;
-                }
-            } else if condition_key.starts_with("ref:") {
-                // For reference conditions, use the factor of the first node in the group
-                if let Some(first_node_name) = node_names.first() {
-                    if let Some(first_node) = self.nodes.get(first_node_name) {
-                        total += first_node.factor;
-                    }
                 }
             }
         }

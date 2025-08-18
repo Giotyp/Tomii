@@ -33,86 +33,46 @@ pub struct Clerk {
     slots: usize,
     workers: usize,
     max_streams: usize,
+    max_runtime: Option<u64>,
 }
 
 impl Clerk {
-    pub fn new() -> Clerk {
-        // node_result will be initialized with factor entries
-        // when run begins
-        let node_results = Arc::new(RwLock::new(Buffer::new()));
-
-        Clerk {
-            graphs: Arc::new(RwLock::new(Vec::new())),
-            pending_nodes: Arc::new(RwLock::new(Vec::new())),
-            removed_cond_nodes: Arc::new(RwLock::new(HashMap::new())),
-            completed_nodes: Arc::new(RwLock::new(Vec::new())),
-            loop_nodes: Arc::new(RwLock::new(Vec::new())),
-            node_results,
-            stream_complete_counter: Arc::new(AtomicUsize::new(0)),
-            stream_completion_counts: Arc::new(RwLock::new(Vec::new())),
-            available_stream_slots: Arc::new(RwLock::new(Vec::new())),
-            stream_to_slot_mapping: Arc::new(RwLock::new(HashMap::new())),
-            total_nodes_per_stream: 0,
-            slots: 1,       // Default to 1 slot
-            workers: 1,     // Default to 1 worker
-            max_streams: 1, // Default to 1 max stream
-        }
-    }
-
-    pub fn get_results(&self, stream: usize) -> HashMap<String, Vec<CmTypes>> {
-        let node_results_lock = self.node_results.read().unwrap();
-        node_results_lock.get_buffer(stream).clone()
-    }
-
-    pub fn run(
-        &mut self,
-        graph: &Graph,
-        scheduler: SchedulerImpl,
-        slots: usize,
-        max_streams: usize,
-        max_runtime: Option<u64>,
-    ) {
-        // Overwrite streams
-        self.slots = slots;
-        // Overwrite max_streams
-        self.max_streams = max_streams;
-
-        // Overwrite workers
-        self.workers = scheduler.workers();
-
+    pub fn new(graph: &Graph, slots: usize, max_streams: usize, max_runtime: Option<u64>) -> Clerk {
         let nodes_map = graph.nodes_map();
         let post_nodes_map = graph.post_nodes_map();
         let init_objects_opt = graph.init_objects();
         let id_function_opt = graph.id_function();
         let connect_list = graph.connect_list();
 
-        self.total_nodes_per_stream = graph.total_nodes_with_conditions();
+        let total_nodes_per_stream = graph.total_nodes_with_conditions();
         print_debug(&format!(
             "Total nodes per stream: {} ",
-            self.total_nodes_per_stream,
+            total_nodes_per_stream,
         ));
 
         // Initialize stream completion counters
-        let mut completion_counts = self.stream_completion_counts.write().unwrap();
+        let stream_completion_counts = Arc::new(RwLock::new(Vec::new()));
+        let mut completion_counts = stream_completion_counts.write().unwrap();
         completion_counts.clear();
-        for _ in 0..self.slots {
+        for _ in 0..slots {
             completion_counts.push(AtomicUsize::new(0));
         }
         drop(completion_counts);
 
         // Initialize available stream slots (all initially busy with initial streams)
-        let mut available_slots = self.available_stream_slots.write().unwrap();
-        available_slots.clear();
-        for _ in 0..self.slots {
-            available_slots.push((true, std::usize::MAX)); // (available, real stream id)
+        let available_stream_slots = Arc::new(RwLock::new(Vec::new()));
+        let mut available_write = available_stream_slots.write().unwrap();
+        for _ in 0..slots {
+            available_write.push((true, std::usize::MAX)); // (available, real stream id)
         }
-        drop(available_slots);
+        drop(available_write);
 
         // Set the fields of the struct's graphs copy - one for each stream
         // Create an additional graph as a static copy
-        let mut graphs = self.graphs.write().unwrap();
-        graphs.clear();
-        for _ in 0..self.slots + 1 {
+        let graphs = Arc::new(RwLock::new(Vec::new()));
+        let mut graphs_write = graphs.write().unwrap();
+        graphs_write.clear();
+        for _ in 0..slots + 1 {
             let mut graph = Graph::new();
             graph.set_nodes(nodes_map.clone());
             graph.set_connect_list(connect_list.clone());
@@ -123,17 +83,49 @@ impl Clerk {
                 graph.set_id_function(id_function);
             }
             graph.set_post_nodes(post_nodes_map.cloned());
-            graphs.push(graph);
+            graphs_write.push(graph);
         }
-        drop(graphs);
+        drop(graphs_write);
+
+        Clerk {
+            graphs,
+            pending_nodes: Arc::new(RwLock::new(Vec::new())),
+            removed_cond_nodes: Arc::new(RwLock::new(HashMap::new())),
+            completed_nodes: Arc::new(RwLock::new(Vec::new())),
+            loop_nodes: Arc::new(RwLock::new(Vec::new())),
+            node_results: Arc::new(RwLock::new(Buffer::new())),
+            stream_complete_counter: Arc::new(AtomicUsize::new(0)),
+            stream_completion_counts,
+            available_stream_slots,
+            stream_to_slot_mapping: Arc::new(RwLock::new(HashMap::new())),
+            total_nodes_per_stream,
+            slots,
+            workers: 1, // Default to 1 worker -- Determined by scheduler
+            max_streams,
+            max_runtime,
+        }
+    }
+
+    pub fn get_results(&self, stream: usize) -> HashMap<String, Vec<CmTypes>> {
+        let node_results_lock = self.node_results.read().unwrap();
+        node_results_lock.get_buffer(stream).clone()
+    }
+
+    pub fn run(&mut self, scheduler: SchedulerImpl) {
+        // Overwrite workers
+        self.workers = scheduler.workers();
 
         // create ready channel
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<NodeID>();
         let ready_tx_clone = ready_tx.clone();
 
+        let graphs_read = self.graphs.read().unwrap();
+        let connect_list = graphs_read[self.slots].connect_list().clone();
+        drop(graphs_read);
+
         // Add graph nodes to pending_nodes
         for connect_nodes in connect_list.iter() {
-            let slot_count = std::cmp::min(self.slots, max_streams);
+            let slot_count = std::cmp::min(self.slots, self.max_streams);
             for stream in 0..slot_count {
                 self.add_nodes_for_slot(connect_nodes, stream);
             }
@@ -166,7 +158,7 @@ impl Clerk {
 
         let start_time = Instant::now();
         // Check for max_runtime
-        if let Some(max_runtime) = max_runtime {
+        if let Some(max_runtime) = self.max_runtime {
             loop {
                 if start_time.elapsed().as_secs() > max_runtime {
                     // set exit signal

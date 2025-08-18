@@ -119,9 +119,9 @@ pub fn run_graph(
     max_streams: usize,
     max_runtime: Option<u64>,
 ) -> Clerk {
-    let mut clerk = Clerk::new();
+    let mut clerk = Clerk::new(graph, slots, max_streams, max_runtime);
     let scheduler = create_scheduler(scheduler_type, core_offset, workers);
 
-    clerk.run(graph, scheduler, slots, max_streams, max_runtime);
+    clerk.run(scheduler);
     clerk
 }
