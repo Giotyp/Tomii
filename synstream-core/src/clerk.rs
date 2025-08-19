@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use crate::debug::print_debug;
 use crate::graph_struct::*;
 use crate::scheduler::{Scheduler, SchedulerImpl};
+use crate::time_buffer::TimeBuffer;
 use synstream_types::*;
 
 #[derive(Clone)]
@@ -34,10 +35,17 @@ pub struct Clerk {
     workers: usize,
     max_streams: usize,
     max_runtime: Option<u64>,
+    time_buffer: Arc<RwLock<TimeBuffer>>,
 }
 
 impl Clerk {
-    pub fn new(graph: &Graph, slots: usize, max_streams: usize, max_runtime: Option<u64>) -> Clerk {
+    pub fn new(
+        graph: &Graph,
+        slots: usize,
+        max_streams: usize,
+        max_runtime: Option<u64>,
+        use_rdtsc: bool,
+    ) -> Clerk {
         let nodes_map = graph.nodes_map();
         let post_nodes_map = graph.post_nodes_map();
         let init_objects_opt = graph.init_objects();
@@ -103,12 +111,18 @@ impl Clerk {
             workers: 1, // Default to 1 worker -- Determined by scheduler
             max_streams,
             max_runtime,
+            time_buffer: Arc::new(RwLock::new(TimeBuffer::new(slots, use_rdtsc))),
         }
     }
 
     pub fn get_results(&self, stream: usize) -> HashMap<String, Vec<CmTypes>> {
         let node_results_lock = self.node_results.read().unwrap();
         node_results_lock.get_buffer(stream).clone()
+    }
+
+    pub fn print_statistics(&self, bench_name: &str, out_file: Option<&str>) {
+        let time_read = self.time_buffer.read().unwrap();
+        time_read.print_stats(bench_name, out_file);
     }
 
     pub fn run(&mut self, scheduler: SchedulerImpl) {
@@ -154,6 +168,13 @@ impl Clerk {
         // Spawn a thread to handle completed nodes
         let complete_handle = spawn(move || clerk_for_completed.process_completed(completed_rx));
 
+        // Start slot processing
+        let mut time_write = self.time_buffer.write().unwrap();
+        for slot in 0..self.slots + 1 {
+            time_write.start_slot_processing(slot);
+        }
+        drop(time_write);
+
         let start_time = Instant::now();
         // Check for max_runtime
         if let Some(max_runtime) = self.max_runtime {
@@ -183,6 +204,10 @@ impl Clerk {
         ready_handle.join().unwrap();
         schedule_handle.join().unwrap();
         complete_handle.join().unwrap();
+
+        let mut time_write = self.time_buffer.write().unwrap();
+        time_write.finish_slot_processing(self.slots);
+        drop(time_write);
     }
 
     fn add_nodes(&mut self, nodes: &Vec<String>) {
@@ -341,6 +366,11 @@ impl Clerk {
             // Release the slot
             self.release_slot(slot);
 
+            // Complete timing
+            let mut time_write = self.time_buffer.write().unwrap();
+            time_write.finish_slot_processing(slot);
+            drop(time_write);
+
             // Increment global completion counter
             let new_counter =
                 self.stream_complete_counter.fetch_add(1, Ordering::SeqCst) + self.slots;
@@ -374,6 +404,11 @@ impl Clerk {
                 let mut graphs_write = self.graphs.write().unwrap();
                 graphs_write[slot].set_nodes(nodes_map);
                 drop(graphs_write);
+
+                // Restart slot processing
+                let mut time_write = self.time_buffer.write().unwrap();
+                time_write.start_slot_processing(slot);
+                drop(time_write);
 
                 return true;
             }
@@ -506,7 +541,12 @@ impl Clerk {
     fn set_ready_nodes(&mut self, ready_tx: &Sender<NodeID>) {
         // Checks if the node is ready to be scheduled and
         // adds it to the ready_nodes list
+
         loop {
+            let time_read = self.time_buffer.read().unwrap();
+            let start_time = time_read.measure_time();
+            drop(time_read);
+
             let mut pending_lock = self.pending_nodes.write().unwrap();
             let mut remove_nodes_idx = Vec::new();
             for (i, node_id) in pending_lock.iter().enumerate() {
@@ -562,6 +602,12 @@ impl Clerk {
             }
             drop(pending_lock);
 
+            let mut time_write = self.time_buffer.write().unwrap();
+            let end_time = time_write.measure_time();
+            let duration = time_write.measure_duration(start_time, end_time);
+            time_write.add_task_time(self.slots, "Ready-Check Thread", duration);
+            drop(time_write);
+
             // Sleep for a while to avoid busy waiting
             sleep(Duration::from_millis(10));
         }
@@ -601,6 +647,9 @@ impl Clerk {
 
         // Process completed nodes
         while let Ok((node_id, result)) = completed_rx.recv() {
+            let time_read = self.time_buffer.read().unwrap();
+            let start_time = time_read.measure_time();
+            drop(time_read);
             // Unwrap node_id
             let node_name = node_id.name.clone();
             let mut node_index = node_id.index;
@@ -777,7 +826,10 @@ impl Clerk {
                 id_slot_counter[slot] = 0; // Reset index for this slot
             }
 
-            sleep(Duration::from_millis(15));
+            let mut time_write = self.time_buffer.write().unwrap();
+            let end_time = time_write.measure_time();
+            let duration = time_write.measure_duration(start_time, end_time);
+            time_write.add_task_time(self.slots, "Completion Thread", duration);
         }
     }
 
@@ -789,6 +841,10 @@ impl Clerk {
     ) {
         // Get node and node_index from the channel
         for node_id in ready_rx.iter() {
+            let time_read = self.time_buffer.read().unwrap();
+            let start_time = time_read.measure_time();
+            drop(time_read);
+
             // Unwrap node_id
             let node_name = node_id.name.clone();
             let node_index = node_id.index;
@@ -831,14 +887,32 @@ impl Clerk {
             // Schedule Task
             let completed_tx_clone = completed_tx.clone();
             let node_id_clone = node_id.clone();
+            let time_buf = self.time_buffer.clone();
 
             let task = move || {
+                let time_read = time_buf.read().unwrap();
+                let start_time = time_read.measure_time();
+                drop(time_read);
+
                 let result = func(arg_vec);
+
+                if !node_id.post_node {
+                    let mut time_write = time_buf.write().unwrap();
+                    let end_time = time_write.measure_time();
+                    let duration = time_write.measure_duration(start_time, end_time);
+                    time_write.add_task_time(node_id_clone.slot, &node_id_clone.name, duration);
+                    drop(time_write);
+                }
                 // Send result through channel
                 completed_tx_clone.send((node_id_clone, result)).unwrap();
             };
             print_debug(&format!("Scheduling {:?}", node_id));
             scheduler.spawn_task(task);
+
+            let mut time_write = self.time_buffer.write().unwrap();
+            let end_time = time_write.measure_time();
+            let duration = time_write.measure_duration(start_time, end_time);
+            time_write.add_task_time(self.slots, "Scheduler Thread", duration);
         }
     }
 

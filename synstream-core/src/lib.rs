@@ -6,6 +6,7 @@ pub mod json_structs;
 pub mod obj_gen;
 pub mod scheduler;
 pub mod time_buffer;
+pub mod utils_rdtsc;
 
 pub mod wrappers {
     include!(concat!(env!("OUT_DIR"), "/wrappers.rs"));

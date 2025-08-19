@@ -46,6 +46,15 @@ struct Args {
         default_value = "1"
     )]
     max_streams: usize,
+    #[clap(long, help = "Enable timing", required = false, default_value = false)]
+    timing: bool,
+    #[clap(
+        long,
+        help = "Use rdtsc for timing",
+        required = false,
+        default_value = false
+    )]
+    use_rdtsc: bool,
 }
 
 fn main() {
@@ -99,7 +108,7 @@ fn main() {
     }
     print_debug("Objects Initialized");
 
-    let _clerk = run_graph(
+    let clerk = run_graph(
         &graph,
         scheduler_type,
         args.workers,
@@ -107,7 +116,12 @@ fn main() {
         args.slots,
         args.max_streams,
         runtime,
+        args.use_rdtsc,
     );
+
+    if args.timing {
+        clerk.print_statistics("MIMO- 1 frame", None);
+    }
 }
 
 pub fn run_graph(
@@ -118,8 +132,9 @@ pub fn run_graph(
     slots: usize,
     max_streams: usize,
     max_runtime: Option<u64>,
+    use_rdtsc: bool,
 ) -> Clerk {
-    let mut clerk = Clerk::new(graph, slots, max_streams, max_runtime);
+    let mut clerk = Clerk::new(graph, slots, max_streams, max_runtime, use_rdtsc);
     let scheduler = create_scheduler(scheduler_type, core_offset, workers);
 
     clerk.run(scheduler);
