@@ -119,6 +119,9 @@ impl Clerk {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<NodeID>();
         let ready_tx_clone = ready_tx.clone();
 
+        // create completed channel
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel::<(NodeID, CmTypes)>();
+
         let graphs_read = self.graphs.read().unwrap();
         let connect_list = graphs_read[self.slots].connect_list().clone();
         drop(graphs_read);
@@ -138,11 +141,6 @@ impl Clerk {
         let mut clerk_for_completed = self.clone();
         let mut clerk_for_schedule = self.clone();
 
-        // Create a process_completed buffer
-        let completed_queue = Arc::new(RwLock::new(Vec::new()));
-        let queue_process = completed_queue.clone();
-        let queue_schedule = completed_queue.clone();
-
         // Spawn thread to handle set_ready_nodes
         let ready_handle = spawn(move || {
             clerk_for_ready.set_ready_nodes(&ready_tx_clone);
@@ -150,11 +148,11 @@ impl Clerk {
 
         // Spawn thread to handle schedule_nodes
         let schedule_handle = spawn(move || {
-            clerk_for_schedule.schedule_nodes(scheduler, queue_schedule, &ready_rx);
+            clerk_for_schedule.schedule_nodes(scheduler, completed_tx, &ready_rx);
         });
 
         // Spawn a thread to handle completed nodes
-        let complete_handle = spawn(move || clerk_for_completed.process_completed(queue_process));
+        let complete_handle = spawn(move || clerk_for_completed.process_completed(completed_rx));
 
         let start_time = Instant::now();
         // Check for max_runtime
@@ -175,9 +173,6 @@ impl Clerk {
                     let mut pending_lock = self.pending_nodes.write().unwrap();
                     pending_lock.push(NodeID::new("exit".to_string(), 0, 0));
                     drop(pending_lock);
-                    let mut completed_lock = completed_queue.write().unwrap();
-                    completed_lock.push(NodeID::new("exit".to_string(), 0, 0));
-                    drop(completed_lock);
                     break;
                 }
                 sleep(Duration::from_millis(20));
@@ -572,36 +567,11 @@ impl Clerk {
         }
     }
 
-    fn shift_indexes(&mut self, node_name: String, count: usize, node_slot: usize) {
+    fn change_factor(&mut self, node_name: String, count: usize, node_slot: usize) {
         print_debug(&format!(
-            "Shifting indexes for node {} at slot {} by {}",
+            "Changing factor for node {} at slot {} by {}",
             node_name, node_slot, count
         ));
-
-        let mut completed_lock = self.completed_nodes.write().unwrap();
-        for node_id in completed_lock.iter_mut() {
-            let name = &node_id.name;
-            let slot = node_id.slot;
-            if name != &node_name || slot != node_slot {
-                continue;
-            }
-
-            if count <= node_id.index {
-                let new_index = node_id.index - count;
-
-                print_debug(&format!(
-                    "Node {} at slot {} with index {} changed to index {}",
-                    name, node_slot, node_id.index, new_index
-                ));
-                // change result index
-                let mut node_results_lock = self.node_results.write().unwrap();
-                node_results_lock.change_node_idx(&node_name, node_id.index, new_index, slot);
-                drop(node_results_lock);
-                // update index
-                node_id.index = new_index;
-            }
-        }
-        drop(completed_lock);
 
         // change node's factor in the graph of the respective node_slot
         let mut graphs_write = self.graphs.write().unwrap();
@@ -612,33 +582,32 @@ impl Clerk {
         drop(graphs_write);
     }
 
-    fn process_completed(&mut self, completed_queue: Arc<RwLock<Vec<NodeID>>>) {
+    fn process_completed(&mut self, completed_rx: Receiver<(NodeID, CmTypes)>) {
         let loop_counter = AtomicUsize::new(0);
         let mut id_slot_counter = vec![0; self.slots];
+
+        let nodes_names = {
+            let graphs_read = self.graphs.read().unwrap();
+            // Use the static graph to get nodes_map
+            let nodes_map = graphs_read[self.slots].nodes_map();
+            nodes_map.keys().cloned().collect::<Vec<String>>()
+        };
+
+        // Create a hasmap to store how many nodes of each type per slot are completed
+        let mut completed_count_map: HashMap<String, Vec<usize>> = HashMap::new();
+        for name in nodes_names {
+            completed_count_map.insert(name, vec![0; self.slots]);
+        }
+
         // Process completed nodes
-        loop {
-            let mut queue_lock = completed_queue.write().unwrap();
-            if queue_lock.is_empty() {
-                drop(queue_lock);
-                // Sleep for a while to avoid busy waiting
-                sleep(Duration::from_millis(15));
-                continue;
-            }
-            let node_id = queue_lock.pop().unwrap();
+        while let Ok((node_id, result)) = completed_rx.recv() {
             // Unwrap node_id
             let node_name = node_id.name.clone();
             let mut node_index = node_id.index;
             let mut slot = node_id.slot;
             let post_node = node_id.post_node;
 
-            drop(queue_lock);
             print_debug(&format!("Processing Completed {:?}", node_id));
-
-            // Check for exit condition
-            if node_name == "exit" {
-                println!("Exit signal received, stopping process_completed thread.");
-                return;
-            }
 
             if post_node {
                 let mut completed_lock = self.completed_nodes.write().unwrap();
@@ -673,6 +642,7 @@ impl Clerk {
                         &self.node_results,
                         &self.graphs,
                         self.workers,
+                        Some(result.clone()), // custom_res
                     );
 
                     // Call the id function
@@ -694,11 +664,9 @@ impl Clerk {
 
                         // Assign streams to an available stream slot
                         slot = self.assign_stream_to_available_slot(new_stream);
-                        node_index = id_slot_counter[slot];
-                        id_slot_counter[slot] += 1;
                         print_debug(&format!(
-                            "ID function determined stream: {} assigned to slot: {} with index: {}",
-                            new_stream, slot, node_index
+                            "ID function determined stream: {} assigned to slot: {}",
+                            new_stream, slot
                         ));
                     } else {
                         panic!("ID function did not return a valid number for stream");
@@ -706,10 +674,28 @@ impl Clerk {
                 }
             }
 
+            let current_completed = completed_count_map.get(&node_name).unwrap()[slot];
+            print_debug(&format!(
+                "Current completed count for node {} at slot {}: {}",
+                node_name, slot, current_completed
+            ));
+            node_index = current_completed;
+            completed_count_map.get_mut(&node_name).unwrap()[slot] += 1;
+
             // Add node to completed with correct slot
             let mut completed_lock = self.completed_nodes.write().unwrap();
             completed_lock.push(NodeID::new(node_name.clone(), slot, node_index));
             drop(completed_lock);
+
+            // store result
+            let mut res_lock = self.node_results.write().unwrap();
+            res_lock.add_element_index(&node_name, node_index, result, slot);
+            drop(res_lock);
+
+            print_debug(&format!(
+                "Completed Node {} with index: {} at slot {}",
+                node_id.name, node_index, slot
+            ));
 
             // check possible shift indexes
             let nodes_to_shift: Vec<(String, usize, usize)> = {
@@ -739,7 +725,7 @@ impl Clerk {
                     "Node {} at slot {} is not pending, shifting indexes",
                     name, node_slot
                 ));
-                self.shift_indexes(name.clone(), count, node_slot);
+                self.change_factor(name.clone(), count, node_slot);
                 remove_nodes.push((name.clone(), node_slot));
             }
             // Remove processed nodes from removed_cond_nodes
@@ -798,7 +784,7 @@ impl Clerk {
     fn schedule_nodes(
         &mut self,
         scheduler: SchedulerImpl,
-        completed_queue: Arc<RwLock<Vec<NodeID>>>,
+        completed_tx: Sender<(NodeID, CmTypes)>,
         ready_rx: &Receiver<NodeID>,
     ) {
         // Get node and node_index from the channel
@@ -812,6 +798,7 @@ impl Clerk {
             // Check for exit condition
             if node_name == "exit" {
                 println!("Exit signal received, stopping schedule_nodes thread.");
+                drop(completed_tx);
                 return;
             }
 
@@ -841,27 +828,14 @@ impl Clerk {
             );
             let func = node.func_ptr.expect(error.as_str());
 
-            // Copy required Arc pointers
-            let node_results = self.node_results.clone();
-            let completed_queue = completed_queue.clone();
-            let name = node_name.clone();
+            // Schedule Task
+            let completed_tx_clone = completed_tx.clone();
+            let node_id_clone = node_id.clone();
 
             let task = move || {
                 let result = func(arg_vec);
-                // store result
-                {
-                    let mut res_lock = node_results.write().unwrap();
-                    res_lock.add_element_index(&name, node_index, result, slot);
-                    drop(res_lock);
-                }
-                // add to completed queue
-                {
-                    let mut comp_lock = completed_queue.write().unwrap();
-                    let mut node_id = NodeID::new(name.clone(), slot, node_index);
-                    node_id.set_post_node(post_node);
-                    comp_lock.push(node_id);
-                    drop(comp_lock);
-                }
+                // Send result through channel
+                completed_tx_clone.send((node_id_clone, result)).unwrap();
             };
             print_debug(&format!("Scheduling {:?}", node_id));
             scheduler.spawn_task(task);
@@ -901,6 +875,7 @@ impl Clerk {
             &self.node_results,
             &self.graphs,
             self.workers,
+            None, // custom_res
         );
 
         arg_vec
@@ -923,6 +898,7 @@ impl Clerk {
         node_results: &Arc<RwLock<Buffer<CmTypes>>>,
         graphs: &Arc<RwLock<Vec<Graph>>>,
         workers: usize,
+        custom_res: Option<CmTypes>,
     ) -> Vec<CmTypes> {
         let mut arg_vec = Vec::new();
         for arg in args.iter() {
@@ -964,6 +940,10 @@ impl Clerk {
                     arg_vec.push(obj);
                 }
                 CmTypes::Res(res_node) => {
+                    if let Some(ref custom_res) = custom_res {
+                        arg_vec.push(custom_res.clone());
+                        continue;
+                    }
                     let indices = arg
                         .predecessor
                         .as_ref()
@@ -1116,25 +1096,6 @@ impl<T: Clone> Buffer<T> {
                 vec[index] = element;
             } else {
                 panic!("Index {} out of bounds for node {}", index, node_name);
-            }
-        } else {
-            panic!("Node {} not found in buffer", node_name);
-        }
-    }
-
-    fn change_node_idx(
-        &mut self,
-        node_name: &str,
-        old_index: usize,
-        new_index: usize,
-        slot: usize,
-    ) {
-        // copy data from old index to new index
-        if let Some(vec) = self.buffer[slot].get_mut(node_name) {
-            if old_index < vec.len() && new_index < vec.len() {
-                vec[new_index] = vec[old_index].clone();
-            } else {
-                panic!("Index out of bounds for node {}", node_name);
             }
         } else {
             panic!("Node {} not found in buffer", node_name);
