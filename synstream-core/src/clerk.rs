@@ -111,7 +111,7 @@ impl Clerk {
             workers: 1, // Default to 1 worker -- Determined by scheduler
             max_streams,
             max_runtime,
-            time_buffer: Arc::new(RwLock::new(TimeBuffer::new(slots, use_rdtsc))),
+            time_buffer: Arc::new(RwLock::new(TimeBuffer::new(slots + 1, use_rdtsc))),
         }
     }
 
@@ -168,11 +168,9 @@ impl Clerk {
         // Spawn a thread to handle completed nodes
         let complete_handle = spawn(move || clerk_for_completed.process_completed(completed_rx));
 
-        // Start slot processing
+        // Initiate clerk-thread timing
         let mut time_write = self.time_buffer.write().unwrap();
-        for slot in 0..self.slots + 1 {
-            time_write.start_slot_processing(slot);
-        }
+        time_write.start_slot_processing(self.slots);
         drop(time_write);
 
         let start_time = Instant::now();
@@ -331,6 +329,10 @@ impl Clerk {
                     "Assigned stream: {} to available slot {}",
                     stream, slot_id
                 ));
+                // Start slot timing
+                let mut time_write = self.time_buffer.write().unwrap();
+                time_write.start_slot_processing(slot_id);
+                drop(time_write);
                 return slot_id;
             }
         }
@@ -404,11 +406,6 @@ impl Clerk {
                 let mut graphs_write = self.graphs.write().unwrap();
                 graphs_write[slot].set_nodes(nodes_map);
                 drop(graphs_write);
-
-                // Restart slot processing
-                let mut time_write = self.time_buffer.write().unwrap();
-                time_write.start_slot_processing(slot);
-                drop(time_write);
 
                 return true;
             }
@@ -547,60 +544,84 @@ impl Clerk {
             let start_time = time_read.measure_time();
             drop(time_read);
 
-            let mut pending_lock = self.pending_nodes.write().unwrap();
-            let mut remove_nodes_idx = Vec::new();
-            for (i, node_id) in pending_lock.iter().enumerate() {
-                // Unwrap node_id
+            // Drain pending nodes to process outside the lock
+            let to_process = {
+                let mut pending_lock = self.pending_nodes.write().unwrap();
+                if pending_lock.is_empty() {
+                    // nothing to do right now
+                    Vec::new()
+                } else {
+                    std::mem::take(&mut *pending_lock)
+                }
+            };
+
+            // Nothing pending, sleep and continue
+            if to_process.is_empty() {
+                let mut time_write = self.time_buffer.write().unwrap();
+                let end_time = time_write.measure_time();
+                let duration = time_write.measure_duration(start_time, end_time);
+                time_write.add_task_time(self.slots, "Ready-Check Thread", duration);
+                drop(time_write);
+                sleep(Duration::from_millis(10));
+                continue;
+            }
+
+            // Process drained nodes without holding pending lock
+            let mut still_pending: Vec<NodeID> = Vec::new();
+            let mut removed_cond_updates: Vec<(String, usize, usize)> = Vec::new();
+            for node_id in to_process.into_iter() {
                 let node_name = node_id.name.clone();
                 let index = node_id.index;
                 let slot = node_id.slot;
 
-                // Check for exit condition
                 if node_name == "exit" {
                     println!("Exit signal received, stopping set_ready_nodes thread.");
                     return;
                 }
 
                 let graphs_read = self.graphs.read().unwrap();
-                // Use the appropriate graph for this slot
                 let nodes_map = graphs_read[slot].nodes_map();
                 let node = nodes_map.get(&node_name).unwrap();
-
                 let init_objects = graphs_read[slot].init_objects();
 
                 let (preds_ready, has_conditions, conditions_met) =
-                    self.check_ready_node(node, index, slot, init_objects, nodes_map);
+                    self.check_ready_node(node, index, slot, init_objects, &nodes_map);
+
+                drop(graphs_read);
 
                 if preds_ready {
-                    // Predecessors are ready
                     if !has_conditions || (has_conditions && conditions_met) {
                         let node_id = NodeID::new(node_name.clone(), slot, index);
-                        // Node is ready to be scheduled
                         print_debug(&format!("{:?} is ready to be scheduled", node_id));
                         ready_tx.send(node_id).unwrap();
-                        // mark for removal from pending
-                        remove_nodes_idx.push(i);
-                    } else if has_conditions && !conditions_met {
-                        // mark for removal from pending since conditions
-                        // evaluated to false
-                        remove_nodes_idx.push(i);
-                        // increase removed conditional count hashmap for node
-                        let mut removed_cond_lock = self.removed_cond_nodes.write().unwrap();
-                        removed_cond_lock
-                            .entry((node_name.clone(), slot))
-                            .and_modify(|v| v.push(index))
-                            .or_insert(vec![index]);
-                        drop(removed_cond_lock);
+                    } else {
+                        // conditions evaluated to false; track removal and index shift
+                        removed_cond_updates.push((node_name.clone(), slot, index));
                     }
+                } else {
+                    // Not ready yet, keep it pending
+                    still_pending.push(NodeID::new(node_name.clone(), slot, index));
                 }
             }
-            // Remove ready nodes from pending
-            let mut removed = 0;
-            for i in remove_nodes_idx.iter() {
-                pending_lock.remove(*i - removed);
-                removed += 1;
+
+            // Append still-pending back to the queue
+            if !still_pending.is_empty() {
+                let mut pending_lock = self.pending_nodes.write().unwrap();
+                pending_lock.extend(still_pending);
+                drop(pending_lock);
             }
-            drop(pending_lock);
+
+            // Apply buffered removed_cond updates
+            if !removed_cond_updates.is_empty() {
+                let mut removed_cond_lock = self.removed_cond_nodes.write().unwrap();
+                for (name, slot, idx) in removed_cond_updates {
+                    removed_cond_lock
+                        .entry((name, slot))
+                        .and_modify(|v| v.push(idx))
+                        .or_insert(vec![idx]);
+                }
+                drop(removed_cond_lock);
+            }
 
             let mut time_write = self.time_buffer.write().unwrap();
             let end_time = time_write.measure_time();
@@ -630,7 +651,6 @@ impl Clerk {
 
     fn process_completed(&mut self, completed_rx: Receiver<(NodeID, CmTypes)>) {
         let loop_counter = AtomicUsize::new(0);
-        let mut id_slot_counter = vec![0; self.slots];
 
         let nodes_names = {
             let graphs_read = self.graphs.read().unwrap();
@@ -640,9 +660,11 @@ impl Clerk {
         };
 
         // Create a hasmap to store how many nodes of each type per slot are completed
-        let mut completed_count_map: HashMap<String, Vec<usize>> = HashMap::new();
-        for name in nodes_names {
-            completed_count_map.insert(name, vec![0; self.slots]);
+        let mut completed_count_map: Vec<HashMap<String, usize>> = vec![HashMap::new(); self.slots];
+        for name in &nodes_names {
+            for slot in 0..self.slots {
+                completed_count_map[slot].insert(name.clone(), 0);
+            }
         }
 
         // Process completed nodes
@@ -723,13 +745,14 @@ impl Clerk {
                 }
             }
 
-            let current_completed = completed_count_map.get(&node_name).unwrap()[slot];
+            let current_completed = completed_count_map[slot].get(&node_name).unwrap();
             print_debug(&format!(
                 "Current completed count for node {} at slot {}: {}",
                 node_name, slot, current_completed
             ));
-            node_index = current_completed;
-            completed_count_map.get_mut(&node_name).unwrap()[slot] += 1;
+            node_index = *current_completed;
+            let completed_write = completed_count_map[slot].get_mut(&node_name).unwrap();
+            *completed_write += 1;
 
             // Add node to completed with correct slot
             let mut completed_lock = self.completed_nodes.write().unwrap();
@@ -823,7 +846,10 @@ impl Clerk {
             // Check if slot iteration is complete and handle restart
             let completed = self.check_slot_completion(slot);
             if completed {
-                id_slot_counter[slot] = 0; // Reset index for this slot
+                // Reset completed_count_map for this slot
+                for name in &nodes_names {
+                    completed_count_map[slot].insert(name.clone(), 0);
+                }
             }
 
             let mut time_write = self.time_buffer.write().unwrap();

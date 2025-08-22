@@ -68,7 +68,6 @@ impl TimeBuffer {
     /// Create a new TimeBuffer for the specified number of slots
     /// Use rdtsc_timing=true for high-precision timing, false for Instant-based timing
     pub fn new(slots: usize, use_rdtsc: bool) -> Self {
-        let slots = slots + 1;
         TimeBuffer {
             slots,
             slot_start_times: vec![None; slots],
@@ -292,15 +291,15 @@ impl TimeBuffer {
                 }
 
                 if !all_task_times.is_empty() {
-                    let avg_task_time =
-                        all_task_times.iter().sum::<Duration>() / all_task_times.len() as u32;
+                    let total_time = all_task_times.iter().sum::<Duration>();
+                    let total_executions = all_task_times.len();
+                    let avg_task_time = total_time / total_executions as u32;
                     let min_task_time = all_task_times.iter().min().unwrap();
                     let max_task_time = all_task_times.iter().max().unwrap();
-                    let total_executions = all_task_times.len();
 
                     output_buffer.push_str(&format!(
-                        "  Task '{}' - Executions: {}, Avg: {:.4?}, Min: {:.4?}, Max: {:.4?}\n",
-                        task_name, total_executions, avg_task_time, min_task_time, max_task_time
+                        "  Task '{}' - Executions: {}, Avg: {:.4?}, Min: {:.4?}, Max: {:.4?}, Total: {:.4?}\n",
+                        task_name, total_executions, avg_task_time, min_task_time, max_task_time, total_time
                     ));
                 }
             }

@@ -46,14 +46,9 @@ struct Args {
         default_value = "1"
     )]
     max_streams: usize,
-    #[clap(long, help = "Enable timing", required = false, default_value = false)]
-    timing: bool,
-    #[clap(
-        long,
-        help = "Use rdtsc for timing",
-        required = false,
-        default_value = false
-    )]
+    #[clap(long, value_name = "FILE", required = false, help = "Enable timing")]
+    timing: String,
+    #[clap(long, help = "Use rdtsc for timing")]
     use_rdtsc: bool,
 }
 
@@ -119,8 +114,10 @@ fn main() {
         args.use_rdtsc,
     );
 
-    if args.timing {
-        clerk.print_statistics("MIMO- 1 frame", None);
+    let time_file = args.timing;
+    if !time_file.is_empty() {
+        let bench_name = time_file.split('/').last().unwrap_or_default();
+        clerk.print_statistics(&bench_name, Some(&time_file));
     }
 }
 
