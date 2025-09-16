@@ -1,5 +1,7 @@
 pub mod clerk;
+pub mod clerk_structs;
 pub mod debug;
+pub mod graph;
 pub mod graph_gen;
 pub mod graph_struct;
 pub mod json_structs;

@@ -108,6 +108,18 @@ impl CmTypes {
             _ => None,
         }
     }
+
+    pub fn is_result(&self) -> bool {
+        matches!(self, CmTypes::Res(_))
+    }
+
+    pub fn is_reference(&self) -> bool {
+        matches!(self, CmTypes::Ref(_))
+    }
+
+    pub fn is_barrier(&self) -> bool {
+        matches!(self, CmTypes::Barrier(_))
+    }
 }
 
 impl std::fmt::Debug for CmTypes {

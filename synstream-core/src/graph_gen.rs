@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::Read;
 
 use crate::func_reg::*;
+use crate::graph::*;
 use crate::graph_struct::*;
 use crate::json_structs::*;
 use crate::obj_gen::init_objects;
@@ -68,21 +69,21 @@ fn parse_predecessor(
         for predecessor_index in indexes.split(",") {
             // strip to remove whitespace
             let predecessor_index = predecessor_index.trim();
-            index_vec.push(predecessor_index.parse::<usize>().unwrap());
+            index_vec.push(predecessor_index.parse::<isize>().unwrap());
         }
     }
     // 2nd case: range indexes '-' separated
     else if indexes.contains('-') {
         let range: Vec<&str> = indexes.split("-").collect();
-        let start = range[0].parse::<usize>().unwrap();
+        let start = range[0].parse::<isize>().unwrap();
         let end = {
-            match range[1].parse::<usize>() {
-                Ok(end) => end,
+            match range[1].parse::<isize>() {
+                Ok(end) => end + 1,
                 Err(_) => {
                     // If the second part of the range is not a number, it might be a reference
                     if let Some(init_objects) = init_objects {
                         if let Some(ref_val) = init_objects.get(range[1]) {
-                            ref_val[0].valid_number_to_usize().unwrap()
+                            ref_val[0].valid_number_to_usize().unwrap() as isize
                         } else {
                             panic!("Invalid range in predecessor: {}", indexes);
                         }
@@ -92,12 +93,12 @@ fn parse_predecessor(
                 }
             }
         };
-        for i in start..end + 1 {
+        for i in start..end {
             index_vec.push(i);
         }
     } else {
         // single predecessor
-        index_vec.push(indexes.parse::<usize>().unwrap());
+        index_vec.push(indexes.parse::<isize>().unwrap());
     }
 
     Predecessor {

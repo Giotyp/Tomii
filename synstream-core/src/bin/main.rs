@@ -2,8 +2,8 @@ use clap::Parser;
 use std::fs::OpenOptions;
 use synstream_core::clerk::Clerk;
 use synstream_core::debug::*;
+use synstream_core::graph::Graph;
 use synstream_core::graph_gen::from_json;
-use synstream_core::graph_struct::Graph;
 use synstream_core::scheduler::{create_scheduler, SchedulerType};
 
 #[derive(Parser)]
@@ -78,13 +78,10 @@ fn main() {
         synstream_core::wrappers::init_wrappers();
     }
 
-    print_debug("Args Parsed");
-
     let runtime = match args.max_runtime {
         0 => None,
         _ => Some(args.max_runtime),
     };
-    print_debug("Runtime");
 
     let scheduler_type = if args.fifo {
         SchedulerType::Fifo
@@ -97,6 +94,8 @@ fn main() {
     print_debug("Graph Initialized");
     // check if inits flag is set
     if args.inits {
+        println!();
+        graph.print_graph();
         println!();
         graph.print_init_objects();
         println!();
