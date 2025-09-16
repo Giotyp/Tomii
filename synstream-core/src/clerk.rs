@@ -282,53 +282,64 @@ impl Clerk {
             slot = self.process_id_function(&node_id, &result);
 
             let current_completed = completed_count_map[slot].get(&node_name).unwrap();
-            node_index = *current_completed;
-            let completed_write = completed_count_map[slot].get_mut(&node_name).unwrap();
-            *completed_write += 1;
 
-            // Add node to completed with correct slot
-            let mut completed_lock = self.completed_nodes.write().unwrap();
-            completed_lock.push(NodeID::new(node_name.clone(), slot, node_index));
-            drop(completed_lock);
-
-            // store result
-            let mut res_lock = self.node_results.write().unwrap();
-            res_lock.add_element_index(&node_name, node_index, result, slot);
-            drop(res_lock);
-
-            print_debug(&format!(
-                "Completed Node {} with index: {} at slot {}",
-                node_id.name, node_index, slot
-            ));
-
-            // Increment the completion count for this slot
-            let completion_counts = self.stream_completion_counts.read().unwrap();
-            let current_count = completion_counts[slot].fetch_add(1, Ordering::SeqCst) + 1;
-            drop(completion_counts);
-
-            // Check if this stream iteration is complete
-            if current_count >= self.total_nodes_per_stream {
-                print_debug(&format!(
-                    "Completed iteration at slot {} with {} nodes",
-                    slot, current_count
-                ));
-                self.process_slot_completion(slot);
-                // Reset completed_count_map for this slot
-                for name in &nodes_names {
-                    completed_count_map[slot].insert(name.clone(), 0);
-                }
-            } else {
-                // Add successors to pending
+            // Check if all required nodes of this type are already completed
+            let factor = {
                 let graphs_read = self.graphs.read().unwrap();
-                let successors: Vec<(String, Vec<usize>, bool)> =
-                    graphs_read[slot].find_successors(&node_name, node_index);
-                drop(graphs_read);
-                for (succ_name, idxs, has_barrier) in successors {
-                    // Check for barrier
-                    if (has_barrier && self.barrier_resolved(&succ_name, slot)) || !has_barrier {
-                        for idx in idxs {
-                            let succ_id = NodeID::new(succ_name.clone(), slot, idx);
-                            checker_tx.send(succ_id).unwrap();
+                let nodes_map = &graphs_read[self.slots].nodes;
+                let node = nodes_map.get(&node_name).unwrap();
+                node.factor
+            };
+            if *current_completed < factor {
+                node_index = *current_completed;
+                let completed_write = completed_count_map[slot].get_mut(&node_name).unwrap();
+                *completed_write += 1;
+
+                // Add node to completed with correct slot
+                let mut completed_lock = self.completed_nodes.write().unwrap();
+                completed_lock.push(NodeID::new(node_name.clone(), slot, node_index));
+                drop(completed_lock);
+
+                // store result
+                let mut res_lock = self.node_results.write().unwrap();
+                res_lock.add_element_index(&node_name, node_index, result, slot);
+                drop(res_lock);
+
+                print_debug(&format!(
+                    "Completed Node {} with index: {} at slot {}",
+                    node_id.name, node_index, slot
+                ));
+
+                // Increment the completion count for this slot
+                let completion_counts = self.stream_completion_counts.read().unwrap();
+                let current_count = completion_counts[slot].fetch_add(1, Ordering::SeqCst) + 1;
+                drop(completion_counts);
+
+                // Check if this stream iteration is complete
+                if current_count >= self.total_nodes_per_stream {
+                    print_debug(&format!(
+                        "Completed iteration at slot {} with {} nodes",
+                        slot, current_count
+                    ));
+                    self.process_slot_completion(slot);
+                    // Reset completed_count_map for this slot
+                    for name in &nodes_names {
+                        completed_count_map[slot].insert(name.clone(), 0);
+                    }
+                } else {
+                    // Add successors to pending
+                    let graphs_read = self.graphs.read().unwrap();
+                    let successors: Vec<(String, Vec<usize>, bool)> =
+                        graphs_read[slot].find_successors(&node_name, node_index);
+                    drop(graphs_read);
+                    for (succ_name, idxs, has_barrier) in successors {
+                        // Check for barrier
+                        if (has_barrier && self.barrier_resolved(&succ_name, slot)) || !has_barrier
+                        {
+                            for idx in idxs {
+                                let succ_id = NodeID::new(succ_name.clone(), slot, idx);
+                                checker_tx.send(succ_id).unwrap();
+                            }
                         }
                     }
                 }
