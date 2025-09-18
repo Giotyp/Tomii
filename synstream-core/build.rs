@@ -15,6 +15,53 @@ fn main() {
     let wrapper_file = out_dir.join("wrappers.rs");
     let registry_file = out_dir.join("func_reg.rs");
 
+    // Check if environment variables are set to bypass transformer
+    let wrap_env = env::var("WRAP_PATH").ok();
+    let reg_env = env::var("REG_PATH").ok();
+
+    let mut bypass_transformer = false;
+
+    if let Some(wrap_path) = wrap_env {
+        let wrap_path = PathBuf::from(wrap_path);
+        fs::copy(&wrap_path, &wrapper_file).unwrap_or_else(|err| {
+            panic!(
+                "Failed to copy wrapper file from {}: {}",
+                wrap_path.display(),
+                err
+            )
+        });
+        info!("Copied wrapper file from {}", wrap_path.display());
+
+        if let Some(reg_path) = reg_env {
+            let reg_path = PathBuf::from(reg_path);
+            fs::copy(&reg_path, &registry_file).unwrap_or_else(|err| {
+                panic!(
+                    "Failed to copy registry file from {}: {}",
+                    reg_path.display(),
+                    err
+                )
+            });
+            info!("Copied registry file from {}", reg_path.display());
+        } else {
+            // Create an empty registry file
+            fs::write(&registry_file, "// Empty registry file")
+                .unwrap_or_else(|err| panic!("Failed to write empty registry file: {}", err));
+            info!("Created empty registry file at {}", registry_file.display());
+        }
+
+        // Write empty funcs.rs to satisfy dependencies
+        fs::write(&copied_file, "// Empty funcs.rs file")
+            .unwrap_or_else(|err| panic!("Failed to write empty funcs.rs file: {}", err));
+        info!("Created empty funcs.rs file at {}", copied_file.display());
+
+        bypass_transformer = true;
+    }
+
+    if bypass_transformer {
+        info!("Bypassing transformer script as per environment variables.");
+        return;
+    }
+
     // Extract the path to function file
     let func_path = path.parent().unwrap().to_str().unwrap_or("");
     info!("Generating wrappers for functions in {}", func_path);
