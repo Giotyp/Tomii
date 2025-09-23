@@ -1,5 +1,7 @@
 use crate::graph_struct::Node;
-use std::collections::HashMap;
+use std::cmp::PartialEq;
+use std::fmt::Debug;
+use std::{collections::HashMap, vec};
 
 #[derive(Clone, PartialEq)]
 pub struct NodeID {
@@ -36,14 +38,18 @@ impl std::fmt::Debug for NodeID {
 
 pub struct Buffer<T> {
     buffer: Vec<HashMap<String, Vec<T>>>,
+    init_val: T,
 }
 
-impl<T: Clone> Buffer<T> {
-    pub fn new() -> Buffer<T> {
-        Buffer { buffer: Vec::new() }
+impl<T: Clone + PartialEq + Debug> Buffer<T> {
+    pub fn new(init_val: T) -> Buffer<T> {
+        Buffer {
+            buffer: Vec::new(),
+            init_val,
+        }
     }
 
-    pub fn init_buffer(&mut self, nodes: &HashMap<String, Node>, init_val: T, slots: usize)
+    pub fn init_buffer(&mut self, nodes: &HashMap<String, Node>, slots: usize)
     where
         T: Clone,
     {
@@ -57,7 +63,7 @@ impl<T: Clone> Buffer<T> {
         // iterate over the nodes map to create a vector for each node
         for (node_name, node) in nodes.iter() {
             let factor = node.factor;
-            let new_vec = vec![init_val.clone(); factor];
+            let new_vec = vec![self.init_val.clone(); factor];
             // Initialize HashMap for each stream
             for stream in 0..self.buffer.len() {
                 self.buffer[stream].insert(node_name.clone(), new_vec.clone());
@@ -65,7 +71,7 @@ impl<T: Clone> Buffer<T> {
         }
     }
 
-    pub fn add_buffer(&mut self, nodes: &HashMap<String, Node>, init_val: T)
+    pub fn add_buffer(&mut self, nodes: &HashMap<String, Node>)
     where
         T: Clone,
     {
@@ -73,7 +79,7 @@ impl<T: Clone> Buffer<T> {
         let mut new_buffer = HashMap::new();
         for (node_name, node) in nodes.iter() {
             let factor = node.factor;
-            let new_vec = vec![init_val.clone(); factor];
+            let new_vec = vec![self.init_val.clone(); factor];
             new_buffer.insert(node_name.clone(), new_vec);
         }
         self.buffer.push(new_buffer);
@@ -82,6 +88,21 @@ impl<T: Clone> Buffer<T> {
     pub fn clear_buffer(&mut self) {
         for buf in self.buffer.iter_mut() {
             buf.clear();
+        }
+    }
+
+    pub fn clear_slot(&mut self, slot: usize) {
+        if slot < self.buffer.len() {
+            let clean_buf = &mut self.buffer[slot];
+            for node_name in clean_buf.keys().cloned().collect::<Vec<String>>() {
+                if let Some(node_vec) = clean_buf.get_mut(&node_name) {
+                    for i in 0..node_vec.len() {
+                        node_vec[i] = self.init_val.clone();
+                    }
+                }
+            }
+        } else {
+            panic!("Slot {} out of bounds for buffer", slot);
         }
     }
 
@@ -108,6 +129,22 @@ impl<T: Clone> Buffer<T> {
         if let Some(vec) = self.buffer[slot].get_mut(node_name) {
             if index < vec.len() {
                 vec[index] = element;
+            } else {
+                panic!("Index {} out of bounds for node {}", index, node_name);
+            }
+        } else {
+            panic!("Node {} not found in buffer", node_name);
+        }
+    }
+
+    pub fn result_exists(&self, node_name: &str, index: usize, slot: usize) -> bool {
+        if let Some(vec) = self.buffer[slot].get(node_name) {
+            if index < vec.len() {
+                if &vec[index] == &self.init_val {
+                    false
+                } else {
+                    true
+                }
             } else {
                 panic!("Index {} out of bounds for node {}", index, node_name);
             }

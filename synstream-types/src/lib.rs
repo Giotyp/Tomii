@@ -56,6 +56,7 @@ impl PartialEq for CmTypes {
             (CmTypes::Ref(a), CmTypes::Ref(b)) => a == b,
             (CmTypes::Res(a), CmTypes::Res(b)) => a == b,
             (CmTypes::Barrier(a), CmTypes::Barrier(b)) => a == b,
+            (CmTypes::None(), CmTypes::None()) => true,
             _ => false,
         }
     }

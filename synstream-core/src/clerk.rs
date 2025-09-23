@@ -17,8 +17,6 @@ use synstream_types::*;
 pub struct Clerk {
     // Keep a vector of graph copies , one for each stream
     graphs: Arc<RwLock<Vec<Graph>>>,
-    completed_nodes: Arc<RwLock<Vec<NodeID>>>,
-    // Atomic variable used to count loop iterations
     node_results: Arc<RwLock<Buffer<CmTypes>>>,
     stream_complete_counter: Arc<AtomicUsize>,
     // Persistent completion counters for each stream
@@ -84,8 +82,7 @@ impl Clerk {
 
         Clerk {
             graphs,
-            completed_nodes: Arc::new(RwLock::new(Vec::new())),
-            node_results: Arc::new(RwLock::new(Buffer::new())),
+            node_results: Arc::new(RwLock::new(Buffer::new(CmTypes::None()))),
             stream_complete_counter: Arc::new(AtomicUsize::new(0)),
             stream_completion_counts,
             available_stream_slots,
@@ -173,7 +170,7 @@ impl Clerk {
                         .unwrap();
                     break;
                 }
-                sleep(Duration::from_millis(20));
+                sleep(Duration::from_secs(2));
             }
         }
 
@@ -260,8 +257,8 @@ impl Clerk {
             drop(time_read);
             // Unwrap node_id
             let node_name = node_id.name.clone();
-            let mut node_index = node_id.index;
-            let mut slot = node_id.slot;
+            let node_index;
+            let slot;
             let post_node = node_id.post_node;
 
             if node_name == "exit" {
@@ -272,9 +269,17 @@ impl Clerk {
             print_debug(&format!("Processing Completed {:?}", node_id));
 
             if post_node {
-                let mut completed_lock = self.completed_nodes.write().unwrap();
-                completed_lock.push(NodeID::new(node_name.clone(), slot, node_index));
-                drop(completed_lock);
+                // Store Result
+                let mut res_lock = self.node_results.write().unwrap();
+                // Add dummy result in case of None return
+                let res = {
+                    match result {
+                        CmTypes::None() => CmTypes::Bool(true),
+                        _ => result,
+                    }
+                };
+                res_lock.add_element_index(&node_name, node_id.index, res, self.slots);
+                drop(res_lock);
                 continue;
             }
 
@@ -294,11 +299,6 @@ impl Clerk {
                 node_index = *current_completed;
                 let completed_write = completed_count_map[slot].get_mut(&node_name).unwrap();
                 *completed_write += 1;
-
-                // Add node to completed with correct slot
-                let mut completed_lock = self.completed_nodes.write().unwrap();
-                completed_lock.push(NodeID::new(node_name.clone(), slot, node_index));
-                drop(completed_lock);
 
                 // store result
                 let mut res_lock = self.node_results.write().unwrap();
@@ -321,6 +321,7 @@ impl Clerk {
                         "Completed iteration at slot {} with {} nodes",
                         slot, current_count
                     ));
+
                     self.process_slot_completion(slot);
                     // Reset completed_count_map for this slot
                     for name in &nodes_names {
@@ -455,7 +456,7 @@ impl Clerk {
         for arg in node.args.iter() {
             // Check Predecessor node
             if let Some(predecessor) = arg.predecessor.as_ref() {
-                let compl_read = self.completed_nodes.read().unwrap();
+                let compl_read = self.node_results.read().unwrap();
                 let mut not_ready = false;
                 for pred_index in predecessor.indexes.iter() {
                     // get factor of predecessor node
@@ -463,8 +464,7 @@ impl Clerk {
                     let pred_factor = pred_node.factor;
 
                     let adjusted_index = find_pred_index(node_idx, *pred_index, pred_factor);
-                    let check_id = NodeID::new(predecessor.name.clone(), slot, adjusted_index);
-                    if !compl_read.contains(&check_id) {
+                    if !compl_read.result_exists(&predecessor.name, adjusted_index, slot) {
                         // predecessor not completed
                         preds_ready = false;
                         not_ready = true;
@@ -512,9 +512,6 @@ impl Clerk {
     }
 
     fn process_slot_completion(&mut self, slot: usize) {
-        // Release the slot
-        self.release_slot(slot);
-
         // Complete timing
         let mut time_write = self.time_buffer.write().unwrap();
         time_write.finish_slot_processing(slot);
@@ -527,24 +524,21 @@ impl Clerk {
         if new_counter < self.max_streams {
             print_debug(&format!("Starting new iteration {}", new_counter));
 
+            // Release the slot
+            self.release_slot(slot);
+
             // Reset the completion count for this stream
             let completion_counts = self.stream_completion_counts.read().unwrap();
             completion_counts[slot].store(0, Ordering::SeqCst);
             drop(completion_counts);
 
             // Clear completed nodes for this stream to allow restart
-            let mut completed_lock = self.completed_nodes.write().unwrap();
-            completed_lock.retain(|node_id| node_id.slot != slot);
-            drop(completed_lock);
+            let mut result_lock = self.node_results.write().unwrap();
+            result_lock.clear_slot(slot);
+            drop(result_lock);
 
             // Re-add nodes for new iteration using the completed slot
             self.add_init_nodes(vec![slot]);
-
-            // Re-set nodes for slot graph
-            let mut graphs_write = self.graphs.write().unwrap();
-            let nodes = graphs_write[self.slots].nodes.clone();
-            graphs_write[slot].set_nodes(nodes);
-            drop(graphs_write);
         }
     }
 
@@ -586,7 +580,7 @@ impl Clerk {
     fn release_slot(&mut self, slot: usize) {
         let mut available_slots = self.available_stream_slots.write().unwrap();
 
-        let old_stream = available_slots[slot].1;
+        let old_stream = available_slots[slot].1.clone();
         available_slots[slot] = (true, std::usize::MAX); // Mark as available
         print_debug(&format!(
             "Released slot {} (had stream: {})",
@@ -816,12 +810,11 @@ impl Clerk {
         let barrier_nodes = graphs_read[self.slots].get_barriers(node_name);
         drop(graphs_read);
         // Check if all barrier nodes are resolved
-        let completed_read = self.completed_nodes.read().unwrap();
+        let results_read = self.node_results.read().unwrap();
         barrier_nodes.iter().all(|(barrier_name, indices)| {
-            indices.iter().all(|index| {
-                let barrier_id = NodeID::new(barrier_name.clone(), slot, *index);
-                completed_read.contains(&barrier_id)
-            })
+            indices
+                .iter()
+                .all(|index| results_read.result_exists(barrier_name, *index, slot))
         })
     }
 
@@ -852,30 +845,28 @@ impl Clerk {
         let nodes = &graphs_read[self.slots].post_nodes;
         if let Some(post_nodes) = nodes {
             let stream_use = self.slots; // initialized +1 in init_results
-            for node in post_nodes.values() {
-                for i in 0..node.factor {
-                    let mut node = NodeID::new(node.name.clone(), stream_use, i);
-                    node.set_post_node(true);
-                    ready_tx.send(node).unwrap();
+            for post_node in post_nodes.values() {
+                for i in 0..post_node.factor {
+                    let mut node_id = NodeID::new(post_node.name.clone(), stream_use, i);
+                    node_id.set_post_node(true);
+                    ready_tx.send(node_id).unwrap();
                 }
-                print_debug(&format!("Added post node: {}", node.name));
-                // Wait until all are completed
-                let completed_read = self.completed_nodes.read().unwrap();
-                let mut completed_count = completed_read
-                    .iter()
-                    .filter(|node_id| node_id.name == node.name)
-                    .count();
-                drop(completed_read);
-                while completed_count < node.factor {
+                print_debug(&format!("Added post node: {}", post_node.name));
+                // Wait until all are completed by checking node_results
+                let mut completed_count = 0;
+                while completed_count < post_node.factor {
                     sleep(Duration::from_millis(10));
-                    let completed_read = self.completed_nodes.read().unwrap();
-                    completed_count = completed_read
-                        .iter()
-                        .filter(|node_id| node_id.name == node.name)
-                        .count();
-                    drop(completed_read);
+                    completed_count = 0;
+                    let results_read = self.node_results.read().unwrap();
+                    for i in 0..post_node.factor {
+                        if results_read.result_exists(&post_node.name, i, stream_use) {
+                            completed_count += 1;
+                        }
+                    }
+                    drop(results_read);
                 }
             }
+            print_debug("All post-nodes completed");
         }
     }
 
@@ -886,12 +877,12 @@ impl Clerk {
         let nodes = &graphs_read[self.slots].nodes;
         let mut node_results_lock = self.node_results.write().unwrap();
         node_results_lock.clear_buffer();
-        node_results_lock.init_buffer(&nodes, CmTypes::None(), slots);
+        node_results_lock.init_buffer(&nodes, slots);
 
         // Initialize post_nodes if any
         let post_nodes_opt = &graphs_read[self.slots].post_nodes;
         if let Some(post_nodes) = post_nodes_opt {
-            node_results_lock.add_buffer(&post_nodes, CmTypes::None());
+            node_results_lock.add_buffer(&post_nodes);
         }
     }
 
