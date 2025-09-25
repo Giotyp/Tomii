@@ -28,7 +28,7 @@ pub struct Clerk {
     // Map stream to actual stream slot
     stream_to_slot_mapping: Arc<RwLock<HashMap<usize, usize>>>,
     // Keep a channel sender to communicate with send_to_exec thread
-    exec_sender: Option<Arc<RwLock<Sender<NodeID>>>>,
+    exec_sender: Option<Arc<RwLock<Sender<(NodeID, Vec<CmTypes>)>>>>,
     total_nodes_per_stream: usize,
     slots: usize,
     workers: usize,
@@ -102,39 +102,40 @@ impl Clerk {
         self.workers = scheduler.workers();
 
         // create ready channel
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<NodeID>();
-        let ready_tx_clone = ready_tx.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<(NodeID, Vec<CmTypes>)>();
         let ready_tx_arc = Arc::new(RwLock::new(ready_tx.clone()));
         self.exec_sender = Some(ready_tx_arc);
 
         // create completed channel
         let (completed_tx, completed_rx) = std::sync::mpsc::channel::<(NodeID, CmTypes)>();
-        let completed_tx_clone = completed_tx.clone();
-
         // create checker channel
         let (checker_tx, checker_rx) = std::sync::mpsc::channel::<NodeID>();
+        // Share scheduler along threads
+        let scheduler_arc = Arc::new(scheduler);
 
         // Initialize node_results
         self.init_results(self.slots);
 
-        // clone a pair of clerks, one for each thread
-        let mut clerk_for_ready = self.clone();
-        let mut clerk_for_completed = self.clone();
-        let mut clerk_for_schedule = self.clone();
-
         // Spawn thread to handle set_ready_nodes
+        let mut clerk_for_ready = self.clone();
+        let completed_tx_ready = completed_tx.clone();
+        let scheduler_ready = scheduler_arc.clone();
         let ready_handle = spawn(move || {
-            clerk_for_ready.set_ready_nodes(checker_rx, ready_tx_clone);
+            clerk_for_ready.set_ready_nodes(checker_rx, completed_tx_ready, scheduler_ready);
         });
         print_debug("Ready thread spawned");
 
         // Spawn thread to handle send_to_exec_nodes
+        let mut clerk_for_schedule = self.clone();
+        let completed_tx_exec = completed_tx.clone();
+        let scheduler_exec = scheduler_arc.clone();
         let send_exec_handle = spawn(move || {
-            clerk_for_schedule.send_to_exec_nodes(scheduler, completed_tx_clone, ready_rx);
+            clerk_for_schedule.send_to_exec_nodes(scheduler_exec, completed_tx_exec, ready_rx);
         });
         print_debug("Scheduler thread spawned");
 
         // Spawn a thread to handle completed nodes
+        let mut clerk_for_completed = self.clone();
         let complete_handle =
             spawn(move || clerk_for_completed.process_completed(completed_rx, checker_tx));
         print_debug("Completion thread spawned");
@@ -162,7 +163,7 @@ impl Clerk {
                     self.schedule_post_nodes(&ready_tx);
                     // Close ready channel
                     ready_tx
-                        .send(NodeID::new("exit".to_string(), 0, 0))
+                        .send((NodeID::new("exit".to_string(), 0, 0), Vec::new()))
                         .unwrap();
                     // Close completed channel
                     completed_tx
@@ -187,7 +188,12 @@ impl Clerk {
 
 // Execution Threads
 impl Clerk {
-    fn set_ready_nodes(&mut self, checker_rx: Receiver<NodeID>, ready_tx: Sender<NodeID>) {
+    fn set_ready_nodes(
+        &mut self,
+        checker_rx: Receiver<NodeID>,
+        completed_tx: Sender<(NodeID, CmTypes)>,
+        scheduler: Arc<SchedulerImpl>,
+    ) {
         // Checks if the node is ready to be scheduled and
         // adds it to the ready_nodes list
 
@@ -197,7 +203,7 @@ impl Clerk {
             drop(time_read);
 
             let node_name = node_id.name.clone();
-            let index = node_id.index;
+            let node_index = node_id.index;
             let slot = node_id.slot;
 
             if node_name == "exit" {
@@ -208,19 +214,35 @@ impl Clerk {
             let graphs_read = self.graphs.read().unwrap();
             let nodes = &graphs_read[slot].nodes;
             let node = nodes.get(&node_name).unwrap();
+            let error = format!(
+                "Node {} with index {} has no function pointer",
+                node_name, node_index
+            );
+            let func: CmPtr = node.func_ptr.expect(error.as_str());
             let init_objects = &graphs_read[slot].init_objects;
 
-            let (preds_ready, has_conditions, conditions_met) =
-                self.check_ready_node(node, index, slot, init_objects, nodes);
+            let arg_vec = self.check_ready_node(node, node_index, slot, init_objects);
 
             drop(graphs_read);
 
-            if preds_ready {
-                if !has_conditions || (has_conditions && conditions_met) {
-                    let node_id = NodeID::new(node_name.clone(), slot, index);
-                    print_debug(&format!("{:?} is ready to be scheduled", node_id));
-                    ready_tx.send(node_id).unwrap();
-                }
+            if !arg_vec.is_empty() {
+                let node_id = NodeID::new(node_name.clone(), slot, node_index);
+                print_debug(&format!("{:?} is ready to be scheduled", node_id));
+
+                // Schedule Task
+                let completed_tx_clone = completed_tx.clone();
+                let node_id_clone = node_id.clone();
+                let time_buffer_clone = self.time_buffer.clone();
+
+                let task = Self::create_task(
+                    func,
+                    arg_vec,
+                    node_id_clone,
+                    completed_tx_clone,
+                    time_buffer_clone,
+                );
+                print_debug(&format!("Sending to Exec {:?}", node_id));
+                scheduler.spawn_task(task);
             }
 
             let mut time_write = self.time_buffer.write().unwrap();
@@ -355,19 +377,19 @@ impl Clerk {
 
     fn send_to_exec_nodes(
         &mut self,
-        scheduler: SchedulerImpl,
+        scheduler: Arc<SchedulerImpl>,
         completed_tx: Sender<(NodeID, CmTypes)>,
-        ready_rx: Receiver<NodeID>,
+        ready_rx: Receiver<(NodeID, Vec<CmTypes>)>,
     ) {
         // Get node and node_index from the channel
-        for node_id in ready_rx.iter() {
+        for (node_id, arg_vec) in ready_rx.iter() {
             let time_read = self.time_buffer.read().unwrap();
             let start_time = time_read.measure_time();
             drop(time_read);
 
             // Unwrap node_id
             let node_name = node_id.name.clone();
-            let mut node_index = node_id.index;
+            let node_index = node_id.index;
             let slot = node_id.slot;
             let post_node = node_id.post_node;
 
@@ -391,19 +413,6 @@ impl Clerk {
             };
 
             let node = nodes.get(&node_name.clone()).unwrap();
-            let init_objects = if post_node {
-                &graphs_read[self.slots].init_objects
-            } else {
-                &graphs_read[slot].init_objects
-            };
-
-            let arg_vec = self.create_node_args(node, node_index, slot, init_objects);
-
-            // Possibly adjust index
-            let node_factor = node.factor;
-            if node_index >= node_factor {
-                node_index = node_index % node_factor;
-            }
 
             let error = format!(
                 "Node {} with index {} has no function pointer",
@@ -439,76 +448,69 @@ impl Clerk {
     fn check_ready_node(
         &self,
         node: &Node,
-        node_idx: usize,
+        node_index: usize,
         slot: usize,
         init_objects: &Option<HashMap<String, Vec<CmTypes>>>,
-        nodes_map: &HashMap<String, Node>,
-    ) -> (bool, bool, bool) {
-        // Check if the node is ready to be executed return (bool, bool)
-        // where the first bool indicates if the node is ready, the second
-        // bool indicates if the node has conditions and the third bool
-        // indicates if all of them are met
+    ) -> Vec<CmTypes> {
+        let mut is_ready = true;
+        let arg_vec = self.create_node_args(node, node_index, slot, init_objects);
 
-        let mut has_conditions = false;
-        let mut conditions_met = true;
-        let mut preds_ready = true;
-
-        for arg in node.args.iter() {
-            // Check Predecessor node
-            if let Some(predecessor) = arg.predecessor.as_ref() {
-                let compl_read = self.node_results.read().unwrap();
-                let mut not_ready = false;
-                for pred_index in predecessor.indexes.iter() {
-                    // get factor of predecessor node
-                    let pred_node: &Node = nodes_map.get(&predecessor.name).unwrap();
-                    let pred_factor = pred_node.factor;
-
-                    let adjusted_index = find_pred_index(node_idx, *pred_index, pred_factor);
-                    if !compl_read.result_exists(&predecessor.name, adjusted_index, slot) {
-                        // predecessor not completed
-                        preds_ready = false;
-                        not_ready = true;
-                        break;
-                    }
-                }
-                if not_ready {
-                    break;
-                }
+        // Check for CmTypes::None() results
+        for arg in arg_vec.iter() {
+            if let CmTypes::None() = arg {
+                is_ready = false;
+                break;
             }
+        }
 
+        let mut arg_vec_index = 0;
+        for arg in node.args.iter() {
             // Check if node has a condition
             let init_condition: Option<&InitCondition> = arg.init_condition.as_ref();
             if init_condition.is_none() {
+                // Skip non-condition args and increment arg_vec_index if not a condition arg
+                if !arg.is_condition() {
+                    arg_vec_index += 1;
+                }
                 continue;
             }
             let init_condition: &InitCondition = init_condition.unwrap();
-            has_conditions = true;
-            // Check if init_condition is met
-            match &arg.type_ {
-                CmTypes::Ref(obj_name) => {
-                    let objects: &HashMap<String, Vec<CmTypes>> = init_objects.as_ref().unwrap();
-                    let obj = objects[obj_name][node_idx].clone();
-                    let eval = init_condition.evaluate(obj);
-                    if !eval {
-                        conditions_met = false;
+
+            // For condition args, we need to find the corresponding value
+            // Conditions can reference either Ref or Res types
+            let result = match &arg.type_ {
+                CmTypes::Ref(_) | CmTypes::Res(_) => {
+                    if arg_vec_index < arg_vec.len() {
+                        &arg_vec[arg_vec_index]
+                    } else {
+                        // This shouldn't happen if parse_args is working correctly
+                        is_ready = false;
                         break;
                     }
                 }
-                CmTypes::Res(node_name) => {
-                    let res_read = self.node_results.read().unwrap();
-                    let result = res_read
-                        .search_node_idx(&node_name, node_idx, slot)
-                        .unwrap();
-                    let eval = init_condition.evaluate(result);
-                    if !eval {
-                        conditions_met = false;
-                        break;
-                    }
+                _ => {
+                    // For other types, use the arg type directly
+                    &arg.type_
                 }
-                _ => {}
+            };
+
+            let eval = init_condition.evaluate(result.clone());
+            if !eval {
+                is_ready = false;
+                break;
+            }
+
+            // Increment arg_vec_index only if this wasn't a pure condition
+            if !arg.is_condition() {
+                arg_vec_index += 1;
             }
         }
-        return (preds_ready, has_conditions, conditions_met);
+
+        if is_ready {
+            arg_vec
+        } else {
+            vec![]
+        }
     }
 
     fn process_slot_completion(&mut self, slot: usize) {
@@ -822,34 +824,45 @@ impl Clerk {
         let graphs_read = self.graphs.read().unwrap();
         for slot in slots {
             let initial_nodes = graphs_read[slot].initial_nodes.clone();
+            let init_objects = &graphs_read[slot].init_objects;
             for node_name in initial_nodes {
-                let node_factor = graphs_read[slot].nodes.get(&node_name).unwrap().factor;
+                let node = graphs_read[slot]
+                    .nodes
+                    .get(&node_name)
+                    .expect("Initial node not found in graph");
+                let node_factor = node.factor;
                 let indexes: Vec<usize> = (0..node_factor).collect();
                 for index in indexes {
                     let node_id = NodeID::new(node_name.clone(), slot, index);
                     print_debug(&format!("Initial Node {:?} is ready", node_id));
+
+                    let arg_vec = self.create_node_args(node, index, slot, init_objects);
+
                     let exec_sender_option = self.exec_sender.as_ref();
                     if exec_sender_option.is_none() {
                         panic!("exec_sender is not initialized");
                     }
                     let exec_sender = exec_sender_option.unwrap().read().unwrap();
-                    exec_sender.send(node_id).unwrap();
+                    exec_sender.send((node_id, arg_vec)).unwrap();
                 }
             }
         }
     }
 
-    fn schedule_post_nodes(&mut self, ready_tx: &Sender<NodeID>) {
+    fn schedule_post_nodes(&mut self, ready_tx: &Sender<(NodeID, Vec<CmTypes>)>) {
         let graphs_read = self.graphs.read().unwrap();
         // Use the static graph to get post_nodes_map
         let nodes = &graphs_read[self.slots].post_nodes;
+        let init_objects = &graphs_read[self.slots].init_objects;
         if let Some(post_nodes) = nodes {
             let stream_use = self.slots; // initialized +1 in init_results
             for post_node in post_nodes.values() {
-                for i in 0..post_node.factor {
-                    let mut node_id = NodeID::new(post_node.name.clone(), stream_use, i);
+                for index in 0..post_node.factor {
+                    let mut node_id = NodeID::new(post_node.name.clone(), stream_use, index);
                     node_id.set_post_node(true);
-                    ready_tx.send(node_id).unwrap();
+
+                    let arg_vec = self.create_node_args(post_node, index, stream_use, init_objects);
+                    ready_tx.send((node_id, arg_vec)).unwrap();
                 }
                 print_debug(&format!("Added post node: {}", post_node.name));
                 // Wait until all are completed by checking node_results
