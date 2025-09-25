@@ -5,6 +5,73 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
+/// A wrapper that makes raw pointers `Send`/`Sync`.
+pub struct SendPtr<T>(pub *mut T);
+
+unsafe impl<T> Send for SendPtr<T> {}
+unsafe impl<T> Sync for SendPtr<T> {}
+
+/// A thread-safe slice wrapper for parallel access
+pub struct SendSlice<T> {
+    pub ptr: SendPtr<T>,
+    pub len: usize,
+    pub _owner: Arc<RwLock<Box<dyn Any + Send + Sync>>>,
+}
+
+unsafe impl<T> Send for SendSlice<T> {}
+unsafe impl<T> Sync for SendSlice<T> {}
+
+impl<T> SendSlice<T> {
+    /// Get a mutable slice from the SendSlice
+    pub unsafe fn as_mut_slice(&mut self) -> &mut [T] {
+        std::slice::from_raw_parts_mut(self.ptr.0, self.len)
+    }
+}
+
+/// Trait for types that can be sliced into multiple parts for parallel access
+pub trait Sliceable<T> {
+    /// Returns the base pointer to the data
+    fn as_ptr(&self) -> *const T;
+    /// Returns the mutable base pointer to the data
+    fn as_mut_ptr(&mut self) -> *mut T;
+    /// Returns the total number of elements
+    fn len(&self) -> usize;
+    /// Returns the size of each element in bytes
+    fn element_size(&self) -> usize;
+}
+
+/// A struct that keeps sliced data accessible by multiple threads
+pub struct Sliced<T: ?Sized> {
+    data: Box<T>,
+    slice_ptrs: Vec<SendPtr<u8>>,
+    slice_sizes: Vec<usize>,
+}
+
+impl<T: ?Sized> Sliced<T> {
+    /// Get a mutable pointer to a specific slice
+    pub unsafe fn get_slice_mut_ptr(&self, slice_index: usize) -> Option<SendPtr<u8>> {
+        if slice_index < self.slice_ptrs.len() {
+            Some(SendPtr(self.slice_ptrs[slice_index].0))
+        } else {
+            None
+        }
+    }
+
+    /// Get the size of a specific slice
+    pub fn get_slice_size(&self, slice_index: usize) -> Option<usize> {
+        if slice_index < self.slice_sizes.len() {
+            Some(self.slice_sizes[slice_index])
+        } else {
+            None
+        }
+    }
+
+    /// Get the number of slices
+    pub fn slice_count(&self) -> usize {
+        self.slice_ptrs.len()
+    }
+}
+
 #[derive(Deserialize, Clone)]
 pub enum CmTypes {
     Bool(bool),
@@ -31,6 +98,8 @@ pub enum CmTypes {
     None(),
     #[serde(skip)]
     Any(Arc<RwLock<Box<dyn Any + Send + Sync>>>),
+    #[serde(skip)]
+    AnySliced(Arc<Sliced<dyn Any + Send + Sync>>),
 }
 
 impl PartialEq for CmTypes {
@@ -93,6 +162,61 @@ impl CmTypes {
         }
     }
 
+    pub fn from_any_sliced<T: Any + Send + Sync + Sliceable<U>, U>(
+        value: T,
+        chunk_size: usize,
+    ) -> CmTypes
+    where
+        U: Clone,
+    {
+        let mut sliced_data = Sliced {
+            data: Box::new(value),
+            slice_ptrs: Vec::new(),
+            slice_sizes: Vec::new(),
+        };
+
+        // Calculate slices
+        let total_len = sliced_data.data.len();
+        let element_size = sliced_data.data.element_size();
+        let elements_per_chunk = chunk_size;
+
+        let mut current_offset = 0;
+        while current_offset < total_len {
+            let chunk_len = std::cmp::min(elements_per_chunk, total_len - current_offset);
+            let byte_offset = current_offset * element_size;
+
+            unsafe {
+                let base_ptr = sliced_data.data.as_mut_ptr() as *mut u8;
+                let slice_ptr = base_ptr.add(byte_offset);
+                sliced_data.slice_ptrs.push(SendPtr(slice_ptr));
+                sliced_data.slice_sizes.push(chunk_len);
+            }
+
+            current_offset += chunk_len;
+        }
+
+        // Type erase to dyn Any + Send + Sync
+        let erased_sliced: Sliced<dyn Any + Send + Sync> = Sliced {
+            data: sliced_data.data,
+            slice_ptrs: sliced_data.slice_ptrs,
+            slice_sizes: sliced_data.slice_sizes,
+        };
+
+        CmTypes::AnySliced(Arc::new(erased_sliced))
+    }
+
+    /// Returns a raw mutable pointer to the inner type `T` if it matches.
+    pub unsafe fn as_mut_ptr<T: Any + Send + Sync>(&self) -> Option<SendPtr<T>> {
+        if let CmTypes::Any(lock) = self {
+            let guard = lock.read().unwrap();
+            guard
+                .downcast_ref::<T>()
+                .map(|r| SendPtr(r as *const T as *mut T))
+        } else {
+            None
+        }
+    }
+
     pub fn valid_number_to_usize(&self) -> Option<usize> {
         match self {
             CmTypes::Usize(x) => Some(*x),
@@ -120,6 +244,42 @@ impl CmTypes {
 
     pub fn is_barrier(&self) -> bool {
         matches!(self, CmTypes::Barrier(_))
+    }
+
+    pub fn split_mut<T, E>(&self, n_chunks: usize) -> Option<Vec<SendSlice<E>>>
+    where
+        T: 'static + Send + Sync + Sliceable<E>,
+        E: 'static + Send + Sync,
+    {
+        if let CmTypes::Any(lock) = self {
+            let mut guard = lock.write().ok()?;
+            let t_ref: &mut T = guard.downcast_mut::<T>()?;
+            let base_ptr = t_ref.as_mut_ptr();
+
+            if n_chunks == 0 {
+                return None;
+            }
+
+            let total_len = t_ref.len();
+            let chunk_size = (total_len + n_chunks - 1) / n_chunks;
+            let mut offset = 0;
+            let mut out = Vec::new();
+
+            while offset < total_len {
+                let end = std::cmp::min(offset + chunk_size, total_len);
+                let ptr = unsafe { base_ptr.add(offset) };
+                out.push(SendSlice {
+                    ptr: SendPtr(ptr),
+                    len: end - offset,
+                    _owner: Arc::clone(&lock),
+                });
+                offset = end;
+            }
+
+            Some(out)
+        } else {
+            None
+        }
     }
 }
 
@@ -149,6 +309,7 @@ impl std::fmt::Debug for CmTypes {
             CmTypes::Barrier(val) => write!(f, "Barrier({:?})", val),
             CmTypes::None() => write!(f, "None"),
             CmTypes::Any(_) => write!(f, "CustomType"),
+            CmTypes::AnySliced(_) => write!(f, "SlicedType"),
         }
     }
 }
@@ -189,6 +350,7 @@ impl fmt::Display for CmTypes {
                 write!(f, "]")
             }
             CmTypes::Any(_) => write!(f, "{}", "CustomType"),
+            CmTypes::AnySliced(_) => write!(f, "{}", "CustomSlicedType"),
         }
     }
 }
@@ -292,6 +454,125 @@ pub fn string_to_cmtype(tp: String, arg: String) -> Result<CmTypes, CustomError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct CustomBuffer {
+        buffer: Vec<usize>,
+    }
+
+    unsafe impl Send for CustomBuffer {}
+    unsafe impl Sync for CustomBuffer {}
+
+    impl Sliceable<usize> for CustomBuffer {
+        fn as_ptr(&self) -> *const usize {
+            self.buffer.as_ptr()
+        }
+
+        fn as_mut_ptr(&mut self) -> *mut usize {
+            self.buffer.as_mut_ptr()
+        }
+
+        fn len(&self) -> usize {
+            self.buffer.len()
+        }
+
+        fn element_size(&self) -> usize {
+            std::mem::size_of::<usize>()
+        }
+    }
+
+    #[test]
+    fn test_unsafe_access() {
+        let custombuf = CmTypes::from_any(CustomBuffer {
+            buffer: vec![1; 10],
+        });
+        custombuf.with_any(|buf: &CustomBuffer| {
+            println!("Init Buffer: {:?}", buf.buffer);
+        });
+
+        let ptr = unsafe { custombuf.as_mut_ptr::<CustomBuffer>().unwrap().0 as usize };
+
+        std::thread::scope(|s| {
+            for thread_index in 0..2 {
+                s.spawn(move || unsafe {
+                    let ptr = ptr as *mut CustomBuffer;
+                    let buf = &mut *ptr;
+                    let start = thread_index * (buf.buffer.len() / 2);
+                    let end = start + (buf.buffer.len() / 2);
+                    let add_val = thread_index * 10;
+                    for i in start..end {
+                        buf.buffer[i] += add_val;
+                    }
+                });
+            }
+        });
+
+        custombuf.with_any(|buf: &CustomBuffer| {
+            println!("Buffer: {:?}", buf.buffer);
+        });
+    }
+
+    #[test]
+    fn test_sliced_multithreaded_access() {
+        // Create a CustomBuffer with initial values
+        let initial_data = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let custombuf = CustomBuffer {
+            buffer: initial_data.clone(),
+        };
+
+        // Create sliced CmTypes with chunk size of 3 elements per slice
+        let sliced = CmTypes::from_any_sliced(custombuf, 3);
+
+        println!("Initial buffer: {:?}", initial_data);
+
+        // Access the pre-calculated slices from AnySliced
+        if let CmTypes::AnySliced(arc_sliced) = &sliced {
+            let num_slices = arc_sliced.slice_count();
+            println!("Created {} slices", num_slices);
+
+            // Collect slice information as raw addresses (usize) before threads
+            let mut slice_info = Vec::new();
+            for i in 0..num_slices {
+                let ptr_addr = arc_sliced.slice_ptrs[i].0 as usize;
+                slice_info.push((ptr_addr, arc_sliced.slice_sizes[i]));
+            }
+
+            // Use scoped threads to safely access slices in parallel
+            std::thread::scope(|s| {
+                for (thread_index, (ptr_addr, slice_size)) in slice_info.into_iter().enumerate() {
+                    s.spawn(move || {
+                        let add_val = (thread_index + 1) * 10; // Each thread adds different value
+
+                        unsafe {
+                            println!(
+                                "Thread {} processing {} elements, adding {}",
+                                thread_index, slice_size, add_val
+                            );
+
+                            // Reconstruct pointer from address for usize elements
+                            let ptr = ptr_addr as *mut usize;
+
+                            // Modify each element in this slice
+                            for i in 0..slice_size {
+                                let elem_ptr = ptr.add(i);
+                                *elem_ptr += add_val;
+                            }
+                        }
+                    });
+                }
+            });
+
+            // Verify the results by accessing the original data through Any
+            if let CmTypes::AnySliced(arc_sliced) = &sliced {
+                if let Some(custom_buf) = arc_sliced.data.downcast_ref::<CustomBuffer>() {
+                    println!("Final buffer: {:?}", custom_buf.buffer);
+                }
+            }
+        } else {
+            panic!("Expected AnySliced variant");
+        }
+    }
+
     #[test]
     fn test_cmtypes_from_any() {
         let value = 42;
