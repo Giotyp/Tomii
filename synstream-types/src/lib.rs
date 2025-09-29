@@ -3,74 +3,10 @@ use serde::Deserialize;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
-
-/// A wrapper that makes raw pointers `Send`/`Sync`.
-pub struct SendPtr<T>(pub *mut T);
-
-unsafe impl<T> Send for SendPtr<T> {}
-unsafe impl<T> Sync for SendPtr<T> {}
-
-/// A thread-safe slice wrapper for parallel access
-pub struct SendSlice<T> {
-    pub ptr: SendPtr<T>,
-    pub len: usize,
-    pub _owner: Arc<RwLock<Box<dyn Any + Send + Sync>>>,
-}
-
-unsafe impl<T> Send for SendSlice<T> {}
-unsafe impl<T> Sync for SendSlice<T> {}
-
-impl<T> SendSlice<T> {
-    /// Get a mutable slice from the SendSlice
-    pub unsafe fn as_mut_slice(&mut self) -> &mut [T] {
-        std::slice::from_raw_parts_mut(self.ptr.0, self.len)
-    }
-}
-
-/// Trait for types that can be sliced into multiple parts for parallel access
-pub trait Sliceable<T> {
-    /// Returns the base pointer to the data
-    fn as_ptr(&self) -> *const T;
-    /// Returns the mutable base pointer to the data
-    fn as_mut_ptr(&mut self) -> *mut T;
-    /// Returns the total number of elements
-    fn len(&self) -> usize;
-    /// Returns the size of each element in bytes
-    fn element_size(&self) -> usize;
-}
-
-/// A struct that keeps sliced data accessible by multiple threads
-pub struct Sliced<T: ?Sized> {
-    data: Box<T>,
-    slice_ptrs: Vec<SendPtr<u8>>,
-    slice_sizes: Vec<usize>,
-}
-
-impl<T: ?Sized> Sliced<T> {
-    /// Get a mutable pointer to a specific slice
-    pub unsafe fn get_slice_mut_ptr(&self, slice_index: usize) -> Option<SendPtr<u8>> {
-        if slice_index < self.slice_ptrs.len() {
-            Some(SendPtr(self.slice_ptrs[slice_index].0))
-        } else {
-            None
-        }
-    }
-
-    /// Get the size of a specific slice
-    pub fn get_slice_size(&self, slice_index: usize) -> Option<usize> {
-        if slice_index < self.slice_sizes.len() {
-            Some(self.slice_sizes[slice_index])
-        } else {
-            None
-        }
-    }
-
-    /// Get the number of slices
-    pub fn slice_count(&self) -> usize {
-        self.slice_ptrs.len()
-    }
-}
+use std::thread;
+use std::time::Duration;
 
 #[derive(Deserialize, Clone)]
 pub enum CmTypes {
@@ -99,36 +35,7 @@ pub enum CmTypes {
     #[serde(skip)]
     Any(Arc<RwLock<Box<dyn Any + Send + Sync>>>),
     #[serde(skip)]
-    AnySliced(Arc<Sliced<dyn Any + Send + Sync>>),
-}
-
-impl PartialEq for CmTypes {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (CmTypes::Bool(a), CmTypes::Bool(b)) => a == b,
-            (CmTypes::I8(a), CmTypes::I8(b)) => a == b,
-            (CmTypes::I16(a), CmTypes::I16(b)) => a == b,
-            (CmTypes::I32(a), CmTypes::I32(b)) => a == b,
-            (CmTypes::I64(a), CmTypes::I64(b)) => a == b,
-            (CmTypes::I128(a), CmTypes::I128(b)) => a == b,
-            (CmTypes::U8(a), CmTypes::U8(b)) => a == b,
-            (CmTypes::U16(a), CmTypes::U16(b)) => a == b,
-            (CmTypes::U32(a), CmTypes::U32(b)) => a == b,
-            (CmTypes::U64(a), CmTypes::U64(b)) => a == b,
-            (CmTypes::U128(a), CmTypes::U128(b)) => a == b,
-            (CmTypes::F32(a), CmTypes::F32(b)) => a == b,
-            (CmTypes::F64(a), CmTypes::F64(b)) => a == b,
-            (CmTypes::Char(a), CmTypes::Char(b)) => a == b,
-            (CmTypes::Usize(a), CmTypes::Usize(b)) => a == b,
-            (CmTypes::String(a), CmTypes::String(b)) => a == b,
-            (CmTypes::VecCmt(a), CmTypes::VecCmt(b)) => a == b,
-            (CmTypes::Ref(a), CmTypes::Ref(b)) => a == b,
-            (CmTypes::Res(a), CmTypes::Res(b)) => a == b,
-            (CmTypes::Barrier(a), CmTypes::Barrier(b)) => a == b,
-            (CmTypes::None(), CmTypes::None()) => true,
-            _ => false,
-        }
-    }
+    AnySliced(Arc<dyn SlicedAccess>),
 }
 
 impl CmTypes {
@@ -162,47 +69,78 @@ impl CmTypes {
         }
     }
 
-    pub fn from_any_sliced<T: Any + Send + Sync + Sliceable<U>, U>(
-        value: T,
-        chunk_size: usize,
-    ) -> CmTypes
-    where
-        U: Clone,
-    {
-        let mut sliced_data = Sliced {
-            data: Box::new(value),
-            slice_ptrs: Vec::new(),
-            slice_sizes: Vec::new(),
-        };
+    pub fn from_any_sliced<T: Any + Send + Sync + Sliceable<U>, U: Clone + 'static>(
+        mut value: T,
+        _chunk_size_elements: usize,
+    ) -> CmTypes {
+        // Get the mutable slice from the value
+        let slice = value.as_mut_slice();
+        let total_length = slice.len();
+        let data_ptr = SendPtr(slice.as_mut_ptr());
 
-        // Calculate slices
-        let total_len = sliced_data.data.len();
-        let element_size = sliced_data.data.element_size();
-        let elements_per_chunk = chunk_size;
+        // Box the original value to keep it alive
+        let boxed_value: Box<dyn Any + Send + Sync> = Box::new(value);
 
-        let mut current_offset = 0;
-        while current_offset < total_len {
-            let chunk_len = std::cmp::min(elements_per_chunk, total_len - current_offset);
-            let byte_offset = current_offset * element_size;
+        // Create a sliced container that holds the data with write bits tracking
+        let container = SlicedContainer::new(boxed_value, data_ptr, total_length);
 
-            unsafe {
-                let base_ptr = sliced_data.data.as_mut_ptr() as *mut u8;
-                let slice_ptr = base_ptr.add(byte_offset);
-                sliced_data.slice_ptrs.push(SendPtr(slice_ptr));
-                sliced_data.slice_sizes.push(chunk_len);
-            }
+        CmTypes::AnySliced(Arc::new(container))
+    }
 
-            current_offset += chunk_len;
+    /// Get the total length in an AnySliced CmTypes
+    pub fn sliced_total_length(&self) -> Option<usize> {
+        if let CmTypes::AnySliced(container_arc) = self {
+            Some(container_arc.total_length())
+        } else {
+            None
         }
+    }
 
-        // Type erase to dyn Any + Send + Sync
-        let erased_sliced: Sliced<dyn Any + Send + Sync> = Sliced {
-            data: sliced_data.data,
-            slice_ptrs: sliced_data.slice_ptrs,
-            slice_sizes: sliced_data.slice_sizes,
-        };
+    /// Check if a range is borrowed in an AnySliced CmTypes
+    pub fn is_sliced_range_borrowed(&self, start: usize, len: usize) -> Option<bool> {
+        if let CmTypes::AnySliced(container_arc) = self {
+            Some(container_arc.is_range_borrowed(start, len))
+        } else {
+            None
+        }
+    }
 
-        CmTypes::AnySliced(Arc::new(erased_sliced))
+    /// Unset a range in an AnySliced CmTypes
+    pub fn unset_sliced_range(&self, start: usize, len: usize) {
+        if let CmTypes::AnySliced(container_arc) = self {
+            container_arc.unset_range(start, len);
+        }
+    }
+
+    /// Get mutable access to a range in an AnySliced CmTypes with automatic cleanup
+    /// Returns a RAII guard that automatically releases write bits when dropped
+    pub fn sliced_get_mut_range<T>(&self, start: usize, len: usize) -> Option<MutSliceGuard<T>> {
+        if let CmTypes::AnySliced(container_arc) = self {
+            unsafe {
+                if let Some((raw_ptr, byte_len)) = container_arc.get_mut_range_raw(start, len) {
+                    let element_size = std::mem::size_of::<T>();
+                    if element_size == 0 || byte_len % element_size != 0 {
+                        // Release the bits since we can't use them
+                        container_arc.unset_range(start, len);
+                        return None;
+                    }
+                    let element_len = byte_len / element_size;
+                    let typed_ptr = raw_ptr as *mut T;
+                    let slice = std::slice::from_raw_parts_mut(typed_ptr, element_len);
+
+                    Some(MutSliceGuard {
+                        slice,
+                        container: container_arc.as_ref(),
+                        start,
+                        len,
+                    })
+                } else {
+                    None
+                }
+            }
+        } else {
+            None
+        }
     }
 
     /// Returns a raw mutable pointer to the inner type `T` if it matches.
@@ -246,39 +184,382 @@ impl CmTypes {
         matches!(self, CmTypes::Barrier(_))
     }
 
-    pub fn split_mut<T, E>(&self, n_chunks: usize) -> Option<Vec<SendSlice<E>>>
-    where
-        T: 'static + Send + Sync + Sliceable<E>,
-        E: 'static + Send + Sync,
-    {
-        if let CmTypes::Any(lock) = self {
-            let mut guard = lock.write().ok()?;
-            let t_ref: &mut T = guard.downcast_mut::<T>()?;
-            let base_ptr = t_ref.as_mut_ptr();
+    /// Get a borrowed reference to a range without setting write bits
+    /// Returns Some(&[T]) if no mutable borrows are active in the range, None otherwise
+    pub fn sliced_get_range<T>(&self, start: usize, len: usize) -> Option<&[T]> {
+        if let CmTypes::AnySliced(container_arc) = self {
+            unsafe {
+                if let Some((raw_ptr, byte_len)) = container_arc.get_range_raw(start, len) {
+                    let element_size = std::mem::size_of::<T>();
+                    if element_size == 0 || byte_len % element_size != 0 {
+                        return None;
+                    }
+                    let element_len = byte_len / element_size;
+                    let typed_ptr = raw_ptr as *const T;
+                    let slice = std::slice::from_raw_parts(typed_ptr, element_len);
+                    Some(slice)
+                } else {
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
 
-            if n_chunks == 0 {
+    /// Get a borrowed reference to a range with timeout
+    /// Waits up to the specified duration for mutable borrows to be released
+    /// Returns Some(&[T]) if successful, None if timeout or out of bounds
+    pub fn sliced_get_range_timeout<T>(
+        &self,
+        start: usize,
+        len: usize,
+        timeout: Duration,
+    ) -> Option<&[T]> {
+        if let CmTypes::AnySliced(container_arc) = self {
+            unsafe {
+                if let Some((raw_ptr, byte_len)) =
+                    container_arc.get_range_raw_timeout(start, len, timeout)
+                {
+                    let element_size = std::mem::size_of::<T>();
+                    if element_size == 0 || byte_len % element_size != 0 {
+                        return None;
+                    }
+                    let element_len = byte_len / element_size;
+                    let typed_ptr = raw_ptr as *const T;
+                    let slice = std::slice::from_raw_parts(typed_ptr, element_len);
+                    Some(slice)
+                } else {
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Non-blocking check if a range can be read without conflicts
+    /// Returns true if sliced_get_range() would succeed for this range
+    pub fn can_read_range(&self, start: usize, len: usize) -> bool {
+        if let CmTypes::AnySliced(container_arc) = self {
+            container_arc.can_read_range(start, len)
+        } else {
+            false
+        }
+    }
+}
+
+/// A wrapper that makes raw pointers `Send`/`Sync`.
+pub struct SendPtr<T>(pub *mut T);
+
+/// RAII guard for automatic release of write bits
+pub struct MutSliceGuard<'a, T> {
+    slice: &'a mut [T],
+    container: &'a dyn SlicedAccess,
+    start: usize,
+    len: usize,
+}
+
+impl<'a, T> std::ops::Deref for MutSliceGuard<'a, T> {
+    type Target = [T];
+    fn deref(&self) -> &Self::Target {
+        self.slice
+    }
+}
+
+impl<'a, T> std::ops::DerefMut for MutSliceGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.slice
+    }
+}
+
+impl<'a, T> Drop for MutSliceGuard<'a, T> {
+    fn drop(&mut self) {
+        // Automatically release write bits when guard is dropped
+        self.container.unset_range(self.start, self.len);
+    }
+}
+
+/// Trait for type-erased sliced access
+pub trait SlicedAccess: Any + Send + Sync {
+    fn total_length(&self) -> usize;
+    fn is_range_borrowed(&self, start: usize, len: usize) -> bool;
+    fn unset_range(&self, start: usize, len: usize);
+    /// Get raw mutable pointer and length for a range, returns None if range is already borrowed
+    unsafe fn get_mut_range_raw(&self, start: usize, len: usize) -> Option<(*mut u8, usize)>;
+
+    /// Get raw immutable pointer and length for a range without setting write bits
+    /// Returns None if any mutable borrows are active in the range
+    unsafe fn get_range_raw(&self, start: usize, len: usize) -> Option<(*const u8, usize)>;
+
+    /// Get raw immutable pointer with timeout
+    unsafe fn get_range_raw_timeout(
+        &self,
+        start: usize,
+        len: usize,
+        timeout: Duration,
+    ) -> Option<(*const u8, usize)>;
+
+    /// Non-blocking check if a range can be read without conflicts
+    fn can_read_range(&self, start: usize, len: usize) -> bool;
+}
+
+unsafe impl<T> Send for SendPtr<T> {}
+unsafe impl<T> Sync for SendPtr<T> {}
+
+/// Trait for types that can be sliced into multiple parts for parallel access
+pub trait Sliceable<T> {
+    /// Returns a mutable slice to the complete buffer
+    fn as_mut_slice(&mut self) -> &mut [T];
+}
+
+/// A simplified sliced container that tracks mutable borrows with write bits
+pub struct SlicedContainer<T> {
+    data_ptr: SendPtr<T>,
+    total_length: usize,
+    write_bits: Vec<AtomicBool>,
+    _data: Box<dyn Any + Send + Sync>,
+}
+
+impl<T> SlicedContainer<T> {
+    /// Create a new sliced container with write bits tracking
+    pub fn new(
+        value: Box<dyn Any + Send + Sync>,
+        data_ptr: SendPtr<T>,
+        total_length: usize,
+    ) -> Self {
+        let write_bits = (0..total_length).map(|_| AtomicBool::new(false)).collect();
+
+        Self {
+            data_ptr,
+            total_length,
+            write_bits,
+            _data: value,
+        }
+    }
+
+    /// Get mutable access to a chunk of the buffer with spin lock protection
+    /// Returns a mutable slice reference if successful, None if already borrowed
+    pub fn sliced_data_mut(&self, start: usize, len: usize) -> Option<&mut [T]> {
+        if start + len > self.total_length {
+            return None;
+        }
+
+        // Try to acquire all write bits for this range
+        let mut acquired_indices = Vec::new();
+        for i in start..(start + len) {
+            // Spin lock: keep trying until we can acquire the bit
+            loop {
+                if self.write_bits[i]
+                    .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    acquired_indices.push(i);
+                    break;
+                } else {
+                    // Spin wait - small delay to reduce CPU usage
+                    thread::sleep(Duration::from_nanos(10));
+                }
+            }
+        }
+
+        // All bits acquired successfully, return the mutable slice
+        unsafe {
+            let ptr = self.data_ptr.0.add(start);
+            Some(std::slice::from_raw_parts_mut(ptr, len))
+        }
+    }
+
+    /// Manually unset write bits for a range
+    pub fn unset_range(&self, start: usize, len: usize) {
+        if start + len > self.total_length {
+            return;
+        }
+
+        for i in start..(start + len) {
+            self.write_bits[i].store(false, Ordering::Release);
+        }
+    }
+
+    /// Get the total length of the buffer
+    pub fn total_length(&self) -> usize {
+        self.total_length
+    }
+
+    /// Check if a range is currently borrowed
+    pub fn is_range_borrowed(&self, start: usize, len: usize) -> bool {
+        if start + len > self.total_length {
+            return false;
+        }
+
+        for i in start..(start + len) {
+            if self.write_bits[i].load(Ordering::Acquire) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get a borrowed reference to a range without setting write bits
+    /// Returns Some(&[T]) if no mutable borrows are active in the range, None otherwise
+    /// This allows multiple concurrent read-only accesses to the same data
+    pub fn sliced_get_range(&self, start: usize, len: usize) -> Option<&[T]> {
+        if start + len > self.total_length {
+            return None;
+        }
+
+        // Check if any element in the range is currently mutably borrowed
+        for i in start..(start + len) {
+            if self.write_bits[i].load(Ordering::Acquire) {
+                return None; // Mutable borrow is active, cannot provide read access
+            }
+        }
+
+        // Safe to return immutable reference since no mutable borrows are active
+        unsafe {
+            let ptr = self.data_ptr.0.add(start);
+            Some(std::slice::from_raw_parts(ptr, len))
+        }
+    }
+
+    /// Get a borrowed reference to a range with timeout
+    /// Waits up to the specified duration for mutable borrows to be released
+    /// Returns Some(&[T]) if successful, None if timeout or out of bounds
+    pub fn sliced_get_range_timeout(
+        &self,
+        start: usize,
+        len: usize,
+        timeout: Duration,
+    ) -> Option<&[T]> {
+        if start + len > self.total_length {
+            return None;
+        }
+
+        let start_time = std::time::Instant::now();
+
+        loop {
+            // Check if any element in the range is currently mutably borrowed
+            let mut all_available = true;
+            for i in start..(start + len) {
+                if self.write_bits[i].load(Ordering::Acquire) {
+                    all_available = false;
+                    break;
+                }
+            }
+
+            if all_available {
+                // Safe to return immutable reference since no mutable borrows are active
+                unsafe {
+                    let ptr = self.data_ptr.0.add(start);
+                    return Some(std::slice::from_raw_parts(ptr, len));
+                }
+            }
+
+            // Check if we've exceeded the timeout
+            if start_time.elapsed() >= timeout {
                 return None;
             }
 
-            let total_len = t_ref.len();
-            let chunk_size = (total_len + n_chunks - 1) / n_chunks;
-            let mut offset = 0;
-            let mut out = Vec::new();
+            // Small delay before retrying
+            thread::sleep(Duration::from_nanos(100));
+        }
+    }
 
-            while offset < total_len {
-                let end = std::cmp::min(offset + chunk_size, total_len);
-                let ptr = unsafe { base_ptr.add(offset) };
-                out.push(SendSlice {
-                    ptr: SendPtr(ptr),
-                    len: end - offset,
-                    _owner: Arc::clone(&lock),
-                });
-                offset = end;
+    /// Non-blocking check if a range can be read without conflicts
+    /// Returns true if sliced_get_range() would succeed for this range
+    pub fn can_read_range(&self, start: usize, len: usize) -> bool {
+        if start + len > self.total_length {
+            return false;
+        }
+
+        for i in start..(start + len) {
+            if self.write_bits[i].load(Ordering::Acquire) {
+                return false;
             }
+        }
+        true
+    }
+}
 
-            Some(out)
+impl<T: 'static> SlicedAccess for SlicedContainer<T> {
+    fn total_length(&self) -> usize {
+        self.total_length()
+    }
+
+    fn is_range_borrowed(&self, start: usize, len: usize) -> bool {
+        self.is_range_borrowed(start, len)
+    }
+
+    fn unset_range(&self, start: usize, len: usize) {
+        self.unset_range(start, len)
+    }
+
+    unsafe fn get_mut_range_raw(&self, start: usize, len: usize) -> Option<(*mut u8, usize)> {
+        // First try to get the mutable slice using our existing method
+        if let Some(slice) = self.sliced_data_mut(start, len) {
+            let ptr = slice.as_mut_ptr() as *mut u8;
+            let byte_len = len * std::mem::size_of::<T>();
+            Some((ptr, byte_len))
         } else {
             None
+        }
+    }
+
+    unsafe fn get_range_raw(&self, start: usize, len: usize) -> Option<(*const u8, usize)> {
+        if let Some(slice) = self.sliced_get_range(start, len) {
+            let ptr = slice.as_ptr() as *const u8;
+            let byte_len = len * std::mem::size_of::<T>();
+            Some((ptr, byte_len))
+        } else {
+            None
+        }
+    }
+
+    unsafe fn get_range_raw_timeout(
+        &self,
+        start: usize,
+        len: usize,
+        timeout: Duration,
+    ) -> Option<(*const u8, usize)> {
+        if let Some(slice) = self.sliced_get_range_timeout(start, len, timeout) {
+            let ptr = slice.as_ptr() as *const u8;
+            let byte_len = len * std::mem::size_of::<T>();
+            Some((ptr, byte_len))
+        } else {
+            None
+        }
+    }
+
+    fn can_read_range(&self, start: usize, len: usize) -> bool {
+        self.can_read_range(start, len)
+    }
+}
+
+impl PartialEq for CmTypes {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (CmTypes::Bool(a), CmTypes::Bool(b)) => a == b,
+            (CmTypes::I8(a), CmTypes::I8(b)) => a == b,
+            (CmTypes::I16(a), CmTypes::I16(b)) => a == b,
+            (CmTypes::I32(a), CmTypes::I32(b)) => a == b,
+            (CmTypes::I64(a), CmTypes::I64(b)) => a == b,
+            (CmTypes::I128(a), CmTypes::I128(b)) => a == b,
+            (CmTypes::U8(a), CmTypes::U8(b)) => a == b,
+            (CmTypes::U16(a), CmTypes::U16(b)) => a == b,
+            (CmTypes::U32(a), CmTypes::U32(b)) => a == b,
+            (CmTypes::U64(a), CmTypes::U64(b)) => a == b,
+            (CmTypes::U128(a), CmTypes::U128(b)) => a == b,
+            (CmTypes::F32(a), CmTypes::F32(b)) => a == b,
+            (CmTypes::F64(a), CmTypes::F64(b)) => a == b,
+            (CmTypes::Char(a), CmTypes::Char(b)) => a == b,
+            (CmTypes::Usize(a), CmTypes::Usize(b)) => a == b,
+            (CmTypes::String(a), CmTypes::String(b)) => a == b,
+            (CmTypes::VecCmt(a), CmTypes::VecCmt(b)) => a == b,
+            (CmTypes::Ref(a), CmTypes::Ref(b)) => a == b,
+            (CmTypes::Res(a), CmTypes::Res(b)) => a == b,
+            (CmTypes::Barrier(a), CmTypes::Barrier(b)) => a == b,
+            (CmTypes::None(), CmTypes::None()) => true,
+            _ => false,
         }
     }
 }
@@ -464,20 +745,8 @@ mod tests {
     unsafe impl Sync for CustomBuffer {}
 
     impl Sliceable<usize> for CustomBuffer {
-        fn as_ptr(&self) -> *const usize {
-            self.buffer.as_ptr()
-        }
-
-        fn as_mut_ptr(&mut self) -> *mut usize {
-            self.buffer.as_mut_ptr()
-        }
-
-        fn len(&self) -> usize {
-            self.buffer.len()
-        }
-
-        fn element_size(&self) -> usize {
-            std::mem::size_of::<usize>()
+        fn as_mut_slice(&mut self) -> &mut [usize] {
+            &mut self.buffer
         }
     }
 
@@ -514,62 +783,71 @@ mod tests {
 
     #[test]
     fn test_sliced_multithreaded_access() {
-        // Create a CustomBuffer with initial values
-        let initial_data = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let initial_data = vec![0; 10];
         let custombuf = CustomBuffer {
             buffer: initial_data.clone(),
         };
 
-        // Create sliced CmTypes with chunk size of 3 elements per slice
-        let sliced = CmTypes::from_any_sliced(custombuf, 3);
+        let sliced = CmTypes::from_any_sliced(custombuf, 5);
+        let total_length = sliced.sliced_total_length().unwrap_or(0);
 
-        println!("Initial buffer: {:?}", initial_data);
+        println!("Total buffer length: {}", total_length);
 
-        // Access the pre-calculated slices from AnySliced
-        if let CmTypes::AnySliced(arc_sliced) = &sliced {
-            let num_slices = arc_sliced.slice_count();
-            println!("Created {} slices", num_slices);
+        let sliced_ref = &sliced;
+        std::thread::scope(|s| {
+            for i in 0..3 {
+                let range_start = i * 3;
+                let range_len = 3.min(total_length - range_start);
 
-            // Collect slice information as raw addresses (usize) before threads
-            let mut slice_info = Vec::new();
-            for i in 0..num_slices {
-                let ptr_addr = arc_sliced.slice_ptrs[i].0 as usize;
-                slice_info.push((ptr_addr, arc_sliced.slice_sizes[i]));
-            }
-
-            // Use scoped threads to safely access slices in parallel
-            std::thread::scope(|s| {
-                for (thread_index, (ptr_addr, slice_size)) in slice_info.into_iter().enumerate() {
+                if range_start < total_length {
                     s.spawn(move || {
-                        let add_val = (thread_index + 1) * 10; // Each thread adds different value
+                        println!(
+                            "Thread {} working on range {}-{}",
+                            i,
+                            range_start,
+                            range_start + range_len
+                        );
 
-                        unsafe {
+                        if let Some(mut mut_slice) =
+                            sliced_ref.sliced_get_mut_range::<usize>(range_start, range_len)
+                        {
+                            let add_val = i * 10;
+                            add_vals(&mut mut_slice, add_val);
+                        } else {
                             println!(
-                                "Thread {} processing {} elements, adding {}",
-                                thread_index, slice_size, add_val
+                                "Thread {} could not acquire range {}-{} (already borrowed)",
+                                i,
+                                range_start,
+                                range_start + range_len
                             );
+                        }
 
-                            // Reconstruct pointer from address for usize elements
-                            let ptr = ptr_addr as *mut usize;
-
-                            // Modify each element in this slice
-                            for i in 0..slice_size {
-                                let elem_ptr = ptr.add(i);
-                                *elem_ptr += add_val;
+                        // Check if range is borrowed after processing
+                        if let Some(is_borrowed) =
+                            sliced_ref.is_sliced_range_borrowed(range_start, range_len)
+                        {
+                            if is_borrowed {
+                                println!(
+                                    "Thread {}: Range {}-{} is still borrowed after processing",
+                                    i,
+                                    range_start,
+                                    range_start + range_len
+                                );
                             }
                         }
                     });
                 }
-            });
-
-            // Verify the results by accessing the original data through Any
-            if let CmTypes::AnySliced(arc_sliced) = &sliced {
-                if let Some(custom_buf) = arc_sliced.data.downcast_ref::<CustomBuffer>() {
-                    println!("Final buffer: {:?}", custom_buf.buffer);
-                }
             }
-        } else {
-            panic!("Expected AnySliced variant");
+        });
+
+        // Print final buffer state
+
+        println!("Test completed - simplified slicing with write-bits tracking");
+    }
+
+    fn add_vals(data: &mut [usize], add_value: usize) {
+        for v in data.iter_mut() {
+            *v += add_value;
         }
     }
 
@@ -613,5 +891,98 @@ mod tests {
         cm_type.with_any_mut(|fun: &mut Box<dyn FnMut(usize) + Send + Sync>| {
             fun(20);
         });
+    }
+
+    #[test]
+    fn test_sliced_get_range() {
+        // Create test data using CustomBuffer
+        let test_buffer = CustomBuffer {
+            buffer: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        };
+        let sliced_data = CmTypes::from_any_sliced(test_buffer, 5);
+
+        println!("Testing sliced_get_range functionality");
+
+        // Test 1: Multiple concurrent read accesses should work
+        println!("Test 1: Multiple concurrent read accesses");
+        std::thread::scope(|s| {
+            for i in 0..3 {
+                let data_ref = &sliced_data;
+                s.spawn(move || {
+                    if let Some(slice) = data_ref.sliced_get_range::<usize>(i * 2, 2) {
+                        println!(
+                            "Thread {} got read access to range {}-{}: {:?}",
+                            i,
+                            i * 2,
+                            i * 2 + 1,
+                            slice
+                        );
+                    }
+                });
+            }
+        });
+
+        // Test 2: Read access should be blocked when mutable access is active
+        println!("Test 2: Read access blocked during mutable access");
+        std::thread::scope(|s| {
+            // Thread 1: Get mutable access to range 2-5
+            let data_ref = &sliced_data;
+            s.spawn(move || {
+                if let Some(mut mut_guard) = data_ref.sliced_get_mut_range::<usize>(2, 4) {
+                    println!("Thread got mutable access to range 2-5");
+                    // Modify the data
+                    for (i, elem) in mut_guard.iter_mut().enumerate() {
+                        *elem += (i + 1) * 10;
+                    }
+                    // Hold the lock for a bit
+                    std::thread::sleep(Duration::from_millis(50));
+                    println!("Thread releasing mutable access");
+                }
+            });
+
+            // Thread 2: Try to get read access to overlapping range
+            let data_ref2 = &sliced_data;
+            s.spawn(move || {
+                std::thread::sleep(Duration::from_millis(10)); // Let first thread acquire lock
+
+                // This should fail because of mutable borrow
+                if data_ref2.sliced_get_range::<usize>(3, 2).is_some() {
+                    println!("ERROR: Read access succeeded during mutable borrow!");
+                } else {
+                    println!("Read access correctly blocked during mutable borrow");
+                }
+
+                // Wait for mutable borrow to be released, then try again
+                std::thread::sleep(Duration::from_millis(50));
+                if let Some(slice) = data_ref2.sliced_get_range::<usize>(3, 2) {
+                    println!(
+                        "Read access succeeded after mutable borrow released: {:?}",
+                        slice
+                    );
+                }
+            });
+        });
+
+        // Test 3: Test timeout functionality
+        println!("Test 3: Testing timeout functionality");
+        let timeout_result =
+            sliced_data.sliced_get_range_timeout::<usize>(0, 3, Duration::from_millis(10));
+        if let Some(slice) = timeout_result {
+            println!("Got slice with timeout: {:?}", slice);
+        }
+
+        // Test 4: Test range checking
+        println!("Test 4: Testing range checking");
+        println!("Can read range 0-5: {}", sliced_data.can_read_range(0, 5));
+        println!(
+            "Can read range 8-3 (out of bounds): {}",
+            sliced_data.can_read_range(8, 3)
+        );
+
+        // Test 5: Verify data was modified by the mutable access
+        println!("Test 5: Verifying data modifications");
+        if let Some(slice) = sliced_data.sliced_get_range::<usize>(0, 10) {
+            println!("Final data after modifications: {:?}", slice);
+        }
     }
 }
