@@ -13,28 +13,32 @@ use crate::scheduler::{Scheduler, SchedulerImpl};
 use crate::time_buffer::TimeBuffer;
 use synstream_types::*;
 
-#[derive(Clone)]
-pub struct Clerk {
-    // Keep a copy of the graph
+/// Shared data across all Clerk threads - immutable or internally synchronized
+pub struct ClerkShared {
+    // Immutable data
     graph: Graph,
-    node_results: Arc<RwLock<Buffer<CmTypes>>>,
-    scheduler: Option<Arc<SchedulerImpl>>,
-    completed_tx: Option<Sender<(NodeID, CmTypes)>>,
-    stream_complete_counter: Arc<AtomicUsize>,
-    // Persistent completion counters for each stream
-    stream_completion_counts: Arc<RwLock<Vec<AtomicUsize>>>,
-    // Track available stream slots (true = available, false = busy)
-    // (bool, usize) where usize indicates the real stream_id received
-    // from the ID function
-    available_stream_slots: Arc<RwLock<Vec<(bool, usize)>>>,
-    // Map stream to actual stream slot
-    stream_to_slot_mapping: Arc<RwLock<HashMap<usize, usize>>>,
     total_nodes_per_stream: usize,
     slots: usize,
-    workers: usize,
     max_streams: usize,
     max_runtime: Option<u64>,
+
+    // Internally synchronized data
+    node_results: Arc<RwLock<Buffer<CmTypes>>>,
+    stream_complete_counter: Arc<AtomicUsize>,
+    stream_completion_counts: Arc<RwLock<Vec<AtomicUsize>>>,
+    available_stream_slots: Arc<RwLock<Vec<(bool, usize)>>>,
+    stream_to_slot_mapping: Arc<RwLock<HashMap<usize, usize>>>,
     time_buffer: Arc<RwLock<TimeBuffer>>,
+
+    // Shared between threads
+    scheduler: Arc<RwLock<Option<Arc<SchedulerImpl>>>>,
+    completed_tx: Arc<RwLock<Option<Sender<(NodeID, CmTypes)>>>>,
+    workers: Arc<AtomicUsize>,
+}
+
+/// Main Clerk struct with shared context
+pub struct Clerk {
+    shared: Arc<ClerkShared>,
 }
 
 impl Clerk {
@@ -72,65 +76,76 @@ impl Clerk {
         // Set the fields of the struct's graphs copy - one for each stream
         // Create an additional graph as a static copy
 
-        Clerk {
+        let shared = Arc::new(ClerkShared {
             graph: app_graph.clone(),
+            total_nodes_per_stream: total_nodes,
+            slots,
+            max_streams,
+            max_runtime,
             node_results: Arc::new(RwLock::new(Buffer::new(CmTypes::None()))),
-            scheduler: None,
-            completed_tx: None,
             stream_complete_counter: Arc::new(AtomicUsize::new(0)),
             stream_completion_counts,
             available_stream_slots,
             stream_to_slot_mapping: Arc::new(RwLock::new(HashMap::new())),
-            total_nodes_per_stream: total_nodes,
-            slots,
-            workers: 1, // Will be set in run()
-            max_streams,
-            max_runtime,
             time_buffer: Arc::new(RwLock::new(TimeBuffer::new(slots + 1, use_rdtsc))),
-        }
+            scheduler: Arc::new(RwLock::new(None)),
+            completed_tx: Arc::new(RwLock::new(None)),
+            workers: Arc::new(AtomicUsize::new(1)), // Will be set in run()
+        });
+
+        Clerk { shared }
     }
 
     pub fn run(&mut self, scheduler: SchedulerImpl) {
         // Overwrite workers
-        self.workers = scheduler.workers();
+        self.shared
+            .workers
+            .store(scheduler.workers(), Ordering::SeqCst);
 
         // create completed channel
         let (completed_tx, completed_rx) = std::sync::mpsc::channel::<(NodeID, CmTypes)>();
-        self.completed_tx = Some(completed_tx);
+        {
+            let mut tx_lock = self.shared.completed_tx.write().unwrap();
+            *tx_lock = Some(completed_tx);
+        }
         // create checker channel
         let (checker_tx, checker_rx) = std::sync::mpsc::channel::<NodeID>();
         // Store scheduler
-        self.scheduler = Some(Arc::new(scheduler));
+        {
+            let mut scheduler_lock = self.shared.scheduler.write().unwrap();
+            *scheduler_lock = Some(Arc::new(scheduler));
+        }
 
         // Initialize node_results
-        self.init_results(self.slots);
+        self.init_results(self.shared.slots);
 
         // Spawn thread to handle set_ready_nodes
-        let mut clerk_for_ready = self.clone();
+        let shared_for_ready = Arc::clone(&self.shared);
         let ready_handle = spawn(move || {
-            clerk_for_ready.set_ready_nodes(checker_rx);
+            Self::set_ready_nodes(shared_for_ready, checker_rx);
         });
         print_debug("Ready thread spawned");
 
         // Spawn a thread to handle completed nodes
-        let mut clerk_for_completed = self.clone();
-        let complete_handle =
-            spawn(move || clerk_for_completed.process_completed(completed_rx, checker_tx));
+        let shared_for_completed = Arc::clone(&self.shared);
+        let complete_handle = spawn(move || {
+            Self::process_completed(shared_for_completed, completed_rx, checker_tx);
+        });
         print_debug("Completion thread spawned");
 
         // Find and send initial nodes to ready channel
-        let slot_vec: Vec<usize> = (0..self.slots).collect();
-        self.add_init_nodes(slot_vec);
+        let slot_vec: Vec<usize> = (0..self.shared.slots).collect();
+        Self::add_init_nodes(&self.shared, slot_vec);
 
         // Initiate clerk-thread timing
-        let mut time_write = self.time_buffer.write().unwrap();
-        time_write.start_slot_processing(self.slots);
+        let mut time_write = self.shared.time_buffer.write().unwrap();
+        time_write.start_slot_processing(self.shared.slots);
         drop(time_write);
 
         let start_time = Instant::now();
         // Check for max_runtime
         print_debug("Max runtime check started");
-        if let Some(max_runtime) = self.max_runtime {
+        if let Some(max_runtime) = self.shared.max_runtime {
             loop {
                 if start_time.elapsed().as_secs() > max_runtime {
                     // set exit signal
@@ -139,12 +154,13 @@ impl Clerk {
                     println!("Processing possible post-nodes...");
                     self.schedule_post_nodes();
                     // Close completed channel
-                    self.completed_tx
-                        .as_ref()
-                        .unwrap()
-                        .clone()
-                        .send((NodeID::new("exit".to_string(), 0, 0), CmTypes::None()))
-                        .unwrap();
+                    {
+                        let tx_lock = self.shared.completed_tx.read().unwrap();
+                        if let Some(ref tx) = *tx_lock {
+                            tx.send((NodeID::new("exit".to_string(), 0, 0), CmTypes::None()))
+                                .unwrap();
+                        }
+                    }
                     break;
                 }
                 sleep(Duration::from_secs(2));
@@ -155,20 +171,20 @@ impl Clerk {
         ready_handle.join().unwrap();
         complete_handle.join().unwrap();
 
-        let mut time_write = self.time_buffer.write().unwrap();
-        time_write.finish_slot_processing(self.slots);
+        let mut time_write = self.shared.time_buffer.write().unwrap();
+        time_write.finish_slot_processing(self.shared.slots);
         drop(time_write);
     }
 }
 
 // Execution Threads
 impl Clerk {
-    fn set_ready_nodes(&mut self, checker_rx: Receiver<NodeID>) {
+    fn set_ready_nodes(shared: Arc<ClerkShared>, checker_rx: Receiver<NodeID>) {
         // Checks if the node is ready to be scheduled and
         // adds it to the ready_nodes list
 
         while let Ok(node_id) = checker_rx.recv() {
-            let time_read = self.time_buffer.read().unwrap();
+            let time_read = shared.time_buffer.read().unwrap();
             let start_time = time_read.measure_time();
             drop(time_read);
 
@@ -181,46 +197,47 @@ impl Clerk {
                 return;
             }
 
-            let nodes = &self.graph.nodes;
+            let nodes = &shared.graph.nodes;
             let node = nodes.get(&node_name).unwrap();
 
-            let arg_vec = self.check_ready_node(node, node_index, slot);
+            let arg_vec = Self::check_ready_node(&shared, node, node_index, slot);
 
             if !arg_vec.is_empty() {
                 let node_id = NodeID::new(node_name.clone(), slot, node_index);
                 print_debug(&format!("{:?} is ready to be scheduled", node_id));
                 // Schedule Task
-                self.send_to_scheduler(node_id, arg_vec);
+                Self::send_to_scheduler(&shared, node_id, arg_vec);
             }
 
-            let mut time_write = self.time_buffer.write().unwrap();
+            let mut time_write = shared.time_buffer.write().unwrap();
             let end_time = time_write.measure_time();
             let duration = time_write.measure_duration(start_time, end_time);
-            time_write.add_task_time(self.slots, "Ready-Check Thread", duration);
+            time_write.add_task_time(shared.slots, "Ready-Check Thread", duration);
             drop(time_write);
         }
     }
 
     fn process_completed(
-        &mut self,
+        shared: Arc<ClerkShared>,
         completed_rx: Receiver<(NodeID, CmTypes)>,
         checker_tx: Sender<NodeID>,
     ) {
         let nodes_names = {
-            let nodes_map = &self.graph.nodes;
+            let nodes_map = &shared.graph.nodes;
             nodes_map.keys().cloned().collect::<Vec<String>>()
         };
 
         // Create a hasmap to store how many nodes of each type per slot are completed
-        let mut completed_count_map: Vec<HashMap<String, usize>> = vec![HashMap::new(); self.slots];
+        let mut completed_count_map: Vec<HashMap<String, usize>> =
+            vec![HashMap::new(); shared.slots];
         for name in &nodes_names {
-            for slot in 0..self.slots {
+            for slot in 0..shared.slots {
                 completed_count_map[slot].insert(name.clone(), 0);
             }
         }
         // Process completed nodes
         while let Ok((node_id, result)) = completed_rx.recv() {
-            let time_read = self.time_buffer.read().unwrap();
+            let time_read = shared.time_buffer.read().unwrap();
             let start_time = time_read.measure_time();
             drop(time_read);
             // Unwrap node_id
@@ -238,7 +255,7 @@ impl Clerk {
 
             if post_node {
                 // Store Result
-                let mut res_lock = self.node_results.write().unwrap();
+                let mut res_lock = shared.node_results.write().unwrap();
                 // Add dummy result in case of None return
                 let res = {
                     match result {
@@ -246,19 +263,19 @@ impl Clerk {
                         _ => result,
                     }
                 };
-                res_lock.add_element_index(&node_name, node_id.index, res, self.slots);
+                res_lock.add_element_index(&node_name, node_id.index, res, shared.slots);
                 drop(res_lock);
                 continue;
             }
 
             // Get Id function and validate slot
-            slot = self.process_id_function(&node_id, &result);
+            slot = Self::process_id_function(&shared, &node_id, &result);
 
             let current_completed = completed_count_map[slot].get(&node_name).unwrap();
 
             // Check if all required nodes of this type are already completed
             let factor = {
-                let nodes_map = &self.graph.nodes;
+                let nodes_map = &shared.graph.nodes;
                 let node = nodes_map.get(&node_name).unwrap();
                 node.factor
             };
@@ -268,7 +285,7 @@ impl Clerk {
                 *completed_write += 1;
 
                 // store result
-                let mut res_lock = self.node_results.write().unwrap();
+                let mut res_lock = shared.node_results.write().unwrap();
                 res_lock.add_element_index(&node_name, node_index, result, slot);
                 drop(res_lock);
 
@@ -278,18 +295,18 @@ impl Clerk {
                 ));
 
                 // Increment the completion count for this slot
-                let completion_counts = self.stream_completion_counts.read().unwrap();
+                let completion_counts = shared.stream_completion_counts.read().unwrap();
                 let current_count = completion_counts[slot].fetch_add(1, Ordering::SeqCst) + 1;
                 drop(completion_counts);
 
                 // Check if this stream iteration is complete
-                if current_count >= self.total_nodes_per_stream {
+                if current_count >= shared.total_nodes_per_stream {
                     print_debug(&format!(
                         "Completed iteration at slot {} with {} nodes",
                         slot, current_count
                     ));
 
-                    self.process_slot_completion(slot);
+                    Self::process_slot_completion(&shared, slot);
                     // Reset completed_count_map for this slot
                     for name in &nodes_names {
                         completed_count_map[slot].insert(name.clone(), 0);
@@ -297,10 +314,11 @@ impl Clerk {
                 } else {
                     // Add successors to pending
                     let successors: Vec<(String, Vec<usize>, bool)> =
-                        self.graph.find_successors(&node_name, node_index);
+                        shared.graph.find_successors(&node_name, node_index);
                     for (succ_name, idxs, has_barrier) in successors {
                         // Check for barrier
-                        if (has_barrier && self.barrier_resolved(&succ_name, slot)) || !has_barrier
+                        if (has_barrier && Self::barrier_resolved(&shared, &succ_name, slot))
+                            || !has_barrier
                         {
                             for idx in idxs {
                                 let succ_id = NodeID::new(succ_name.clone(), slot, idx);
@@ -311,21 +329,17 @@ impl Clerk {
                 }
             }
 
-            let mut time_write = self.time_buffer.write().unwrap();
+            let mut time_write = shared.time_buffer.write().unwrap();
             let end_time = time_write.measure_time();
             let duration = time_write.measure_duration(start_time, end_time);
-            time_write.add_task_time(self.slots, "Completion Thread", duration);
+            time_write.add_task_time(shared.slots, "Completion Thread", duration);
         }
     }
 }
 
 // Helper Functions
 impl Clerk {
-    fn send_to_scheduler(&self, node_id: NodeID, arg_vec: Vec<CmTypes>) {
-        let time_read = self.time_buffer.read().unwrap();
-        let start_time = time_read.measure_time();
-        drop(time_read);
-
+    fn send_to_scheduler(shared: &Arc<ClerkShared>, node_id: NodeID, arg_vec: Vec<CmTypes>) {
         // Unwrap node_id
         let node_name = node_id.name.clone();
         let node_index = node_id.index;
@@ -340,10 +354,10 @@ impl Clerk {
         let nodes = {
             if post_node {
                 // Use the static graph for post nodes
-                &self.graph.post_nodes.as_ref().unwrap()
+                &shared.graph.post_nodes.as_ref().unwrap()
             } else {
                 // Use the appropriate graph for this slot
-                &self.graph.nodes
+                &shared.graph.nodes
             }
         };
 
@@ -356,9 +370,12 @@ impl Clerk {
         let func: CmPtr = node.func_ptr.expect(error.as_str());
 
         // Schedule Task
-        let completed_tx_clone = self.completed_tx.as_ref().unwrap().clone();
+        let completed_tx_clone = {
+            let tx_lock = shared.completed_tx.read().unwrap();
+            tx_lock.as_ref().unwrap().clone()
+        };
         let node_id_clone = node_id.clone();
-        let time_buffer_clone = self.time_buffer.clone();
+        let time_buffer_clone = shared.time_buffer.clone();
 
         let task = Self::create_task(
             func,
@@ -368,18 +385,21 @@ impl Clerk {
             time_buffer_clone,
         );
         print_debug(&format!("Sending to Exec {:?}", node_id));
-        let scheduler = self.scheduler.as_ref().unwrap().clone();
+        let scheduler = {
+            let scheduler_lock = shared.scheduler.read().unwrap();
+            scheduler_lock.as_ref().unwrap().clone()
+        };
         scheduler.spawn_task(task);
-
-        let mut time_write = self.time_buffer.write().unwrap();
-        let end_time = time_write.measure_time();
-        let duration = time_write.measure_duration(start_time, end_time);
-        time_write.add_task_time(self.slots, "Scheduler Thread", duration);
     }
 
-    fn check_ready_node(&self, node: &Node, node_index: usize, slot: usize) -> Vec<CmTypes> {
+    fn check_ready_node(
+        shared: &Arc<ClerkShared>,
+        node: &Node,
+        node_index: usize,
+        slot: usize,
+    ) -> Vec<CmTypes> {
         let mut is_ready = true;
-        let arg_vec = self.create_node_args(node, node_index, slot);
+        let arg_vec = Self::create_node_args(shared, node, node_index, slot);
 
         // Check for CmTypes::None() results
         for arg in arg_vec.iter() {
@@ -439,40 +459,43 @@ impl Clerk {
         }
     }
 
-    fn process_slot_completion(&mut self, slot: usize) {
+    fn process_slot_completion(shared: &Arc<ClerkShared>, slot: usize) {
         // Complete timing
-        let mut time_write = self.time_buffer.write().unwrap();
+        let mut time_write = shared.time_buffer.write().unwrap();
         time_write.finish_slot_processing(slot);
         drop(time_write);
 
         // Increment global completion counter
-        let new_counter = self.stream_complete_counter.fetch_add(1, Ordering::SeqCst) + self.slots;
+        let new_counter = shared
+            .stream_complete_counter
+            .fetch_add(1, Ordering::SeqCst)
+            + shared.slots;
 
         // Check if we should start a new iteration
-        if new_counter < self.max_streams {
+        if new_counter < shared.max_streams {
             print_debug(&format!("Starting new iteration {}", new_counter));
 
             // Release the slot
-            self.release_slot(slot);
+            Self::release_slot(shared, slot);
 
             // Reset the completion count for this stream
-            let completion_counts = self.stream_completion_counts.read().unwrap();
+            let completion_counts = shared.stream_completion_counts.read().unwrap();
             completion_counts[slot].store(0, Ordering::SeqCst);
             drop(completion_counts);
 
             // Clear completed nodes for this stream to allow restart
-            let mut result_lock = self.node_results.write().unwrap();
+            let mut result_lock = shared.node_results.write().unwrap();
             result_lock.clear_slot(slot);
             drop(result_lock);
 
             // Re-add nodes for new iteration using the completed slot
-            self.add_init_nodes(vec![slot]);
+            Self::add_init_nodes(shared, vec![slot]);
         }
     }
 
-    fn assign_stream_to_available_slot(&mut self, stream: usize) -> usize {
-        let mut available_slots = self.available_stream_slots.write().unwrap();
-        let mut streams_mapping = self.stream_to_slot_mapping.write().unwrap();
+    fn assign_stream_to_available_slot(shared: &Arc<ClerkShared>, stream: usize) -> usize {
+        let mut available_slots = shared.available_stream_slots.write().unwrap();
+        let mut streams_mapping = shared.stream_to_slot_mapping.write().unwrap();
 
         // Check if this streams is already mapped to a slot
         if let Some(&slot) = streams_mapping.get(&stream) {
@@ -494,7 +517,7 @@ impl Clerk {
                     stream, slot_id
                 ));
                 // Start slot timing
-                let mut time_write = self.time_buffer.write().unwrap();
+                let mut time_write = shared.time_buffer.write().unwrap();
                 time_write.start_slot_processing(slot_id);
                 drop(time_write);
                 return slot_id;
@@ -505,8 +528,8 @@ impl Clerk {
         panic!("No available stream slots for stream: {}", stream);
     }
 
-    fn release_slot(&mut self, slot: usize) {
-        let mut available_slots = self.available_stream_slots.write().unwrap();
+    fn release_slot(shared: &Arc<ClerkShared>, slot: usize) {
+        let mut available_slots = shared.available_stream_slots.write().unwrap();
 
         let old_stream = available_slots[slot].1.clone();
         available_slots[slot] = (true, std::usize::MAX); // Mark as available
@@ -516,10 +539,10 @@ impl Clerk {
         ));
     }
 
-    fn process_id_function(&mut self, node_id: &NodeID, result: &CmTypes) -> usize {
+    fn process_id_function(shared: &Arc<ClerkShared>, node_id: &NodeID, result: &CmTypes) -> usize {
         let mut slot = node_id.slot;
 
-        let id_function_opt = self.graph.id_function.clone();
+        let id_function_opt = shared.graph.id_function.clone();
 
         if let Some(id_function) = id_function_opt {
             let msg = "ID function is not set".to_string();
@@ -527,8 +550,13 @@ impl Clerk {
             let predecessor = &id_function.predecessor;
             // Check if completed node is the predecessor
             if predecessor == &node_id.name {
-                let arg_vec =
-                    self.parse_args(&id_function.args, node_id.index, slot, Some(result.clone()));
+                let arg_vec = Self::parse_args(
+                    shared,
+                    &id_function.args,
+                    node_id.index,
+                    slot,
+                    Some(result.clone()),
+                );
 
                 // Call the id function
                 print_debug(&format!("Calling ID function for {:?}", node_id));
@@ -537,18 +565,18 @@ impl Clerk {
                 // Extract stream from the result
                 if let Some(new_stream) = id_result.valid_number_to_usize() {
                     // Validate stream range
-                    let current_counter = self.stream_complete_counter.load(Ordering::SeqCst);
-                    let max_allowed_stream = current_counter + self.slots;
+                    let current_counter = shared.stream_complete_counter.load(Ordering::SeqCst);
+                    let max_allowed_stream = current_counter + shared.slots;
 
                     if new_stream >= max_allowed_stream {
                         panic!(
                                 "ID function returned stream {} which exceeds maximum allowed {} (current_counter: {}, slots: {})",
-                                new_stream, max_allowed_stream, current_counter, self.slots
+                                new_stream, max_allowed_stream, current_counter, shared.slots
                             );
                     }
 
                     // Assign streams to an available stream slot
-                    slot = self.assign_stream_to_available_slot(new_stream);
+                    slot = Self::assign_stream_to_available_slot(shared, new_stream);
                     print_debug(&format!(
                         "ID function determined stream: {} assigned to slot: {}",
                         new_stream, slot
@@ -588,7 +616,12 @@ impl Clerk {
         task
     }
 
-    fn create_node_args(&self, node: &Node, node_index: usize, slot: usize) -> Vec<CmTypes> {
+    fn create_node_args(
+        shared: &Arc<ClerkShared>,
+        node: &Node,
+        node_index: usize,
+        slot: usize,
+    ) -> Vec<CmTypes> {
         let args = {
             // check if node is in loop_nodes
             // let loop_read = self.loop_nodes.read().unwrap();
@@ -608,13 +641,13 @@ impl Clerk {
             &node.args
         };
 
-        let arg_vec = self.parse_args(args, node_index, slot, None);
+        let arg_vec = Self::parse_args(shared, args, node_index, slot, None);
 
         arg_vec
     }
 
     fn parse_args(
-        &self,
+        shared: &Arc<ClerkShared>,
         args: &Vec<Arg>,
         node_index: usize,
         slot: usize,
@@ -629,7 +662,7 @@ impl Clerk {
 
             match &arg.type_ {
                 CmTypes::Ref(obj_name) => {
-                    let init_objects = &self.graph.init_objects.as_ref().unwrap();
+                    let init_objects = &shared.graph.init_objects.as_ref().unwrap();
 
                     // Argument may be node index
                     if obj_name == "$index" {
@@ -639,7 +672,7 @@ impl Clerk {
 
                     // Argument may be worker num
                     if obj_name == "$workers" {
-                        arg_vec.push(CmTypes::Usize(self.workers));
+                        arg_vec.push(CmTypes::Usize(shared.workers.load(Ordering::SeqCst)));
                         continue;
                     }
 
@@ -672,7 +705,7 @@ impl Clerk {
                         .iter()
                         .map(|&x| {
                             // Get the predecessor node factor
-                            let nodes = &self.graph.nodes;
+                            let nodes = &shared.graph.nodes;
                             let pred_node: &Node =
                                 nodes.get(&arg.predecessor.as_ref().unwrap().name).unwrap();
                             let pred_factor = pred_node.factor;
@@ -687,7 +720,7 @@ impl Clerk {
                         // for each task index, retrieve the
                         // corresponding results
                         // (must exist since they are completed)
-                        let res_read = self.node_results.read().unwrap();
+                        let res_read = shared.node_results.read().unwrap();
 
                         let result = res_read.search_node_idx(&res_node, *dep_idx, slot).unwrap();
                         arg_vec.push(result);
@@ -704,10 +737,10 @@ impl Clerk {
         arg_vec
     }
 
-    fn barrier_resolved(&self, node_name: &str, slot: usize) -> bool {
-        let barrier_nodes = self.graph.get_barriers(node_name);
+    fn barrier_resolved(shared: &Arc<ClerkShared>, node_name: &str, slot: usize) -> bool {
+        let barrier_nodes = shared.graph.get_barriers(node_name);
         // Check if all barrier nodes are resolved
-        let results_read = self.node_results.read().unwrap();
+        let results_read = shared.node_results.read().unwrap();
         barrier_nodes.iter().all(|(barrier_name, indices)| {
             indices
                 .iter()
@@ -715,11 +748,11 @@ impl Clerk {
         })
     }
 
-    fn add_init_nodes(&self, slots: Vec<usize>) {
+    fn add_init_nodes(shared: &Arc<ClerkShared>, slots: Vec<usize>) {
         for slot in slots {
-            let initial_nodes = self.graph.initial_nodes.clone();
+            let initial_nodes = shared.graph.initial_nodes.clone();
             for node_name in initial_nodes {
-                let node = self
+                let node = shared
                     .graph
                     .nodes
                     .get(&node_name)
@@ -730,9 +763,9 @@ impl Clerk {
                     let node_id = NodeID::new(node_name.clone(), slot, index);
                     print_debug(&format!("Initial Node {:?} is ready", node_id));
 
-                    let arg_vec = self.create_node_args(node, index, slot);
+                    let arg_vec = Self::create_node_args(shared, node, index, slot);
 
-                    self.send_to_scheduler(node_id, arg_vec);
+                    Self::send_to_scheduler(shared, node_id, arg_vec);
                 }
             }
         }
@@ -740,16 +773,17 @@ impl Clerk {
 
     fn schedule_post_nodes(&mut self) {
         // Use the static graph to get post_nodes_map
-        let nodes = &self.graph.post_nodes;
+        let nodes = &self.shared.graph.post_nodes;
         if let Some(post_nodes) = nodes {
-            let stream_use = self.slots; // initialized +1 in init_results
+            let stream_use = self.shared.slots; // initialized +1 in init_results
             for post_node in post_nodes.values() {
                 for index in 0..post_node.factor {
                     let mut node_id = NodeID::new(post_node.name.clone(), stream_use, index);
                     node_id.set_post_node(true);
 
-                    let arg_vec = self.create_node_args(post_node, index, stream_use);
-                    self.send_to_scheduler(node_id, arg_vec);
+                    let arg_vec =
+                        Self::create_node_args(&self.shared, post_node, index, stream_use);
+                    Self::send_to_scheduler(&self.shared, node_id, arg_vec);
                 }
                 print_debug(&format!("Added post node: {}", post_node.name));
                 // Wait until all are completed by checking node_results
@@ -757,7 +791,7 @@ impl Clerk {
                 while completed_count < post_node.factor {
                     sleep(Duration::from_millis(10));
                     completed_count = 0;
-                    let results_read = self.node_results.read().unwrap();
+                    let results_read = self.shared.node_results.read().unwrap();
                     for i in 0..post_node.factor {
                         if results_read.result_exists(&post_node.name, i, stream_use) {
                             completed_count += 1;
@@ -772,20 +806,20 @@ impl Clerk {
 
     fn init_results(&mut self, slots: usize) {
         // Initialize node_results with factor entries
-        let nodes = &self.graph.nodes;
-        let mut node_results_lock = self.node_results.write().unwrap();
+        let nodes = &self.shared.graph.nodes;
+        let mut node_results_lock = self.shared.node_results.write().unwrap();
         node_results_lock.clear_buffer();
         node_results_lock.init_buffer(&nodes, slots);
 
         // Initialize post_nodes if any
-        let post_nodes_opt = &self.graph.post_nodes;
+        let post_nodes_opt = &self.shared.graph.post_nodes;
         if let Some(post_nodes) = post_nodes_opt {
             node_results_lock.add_buffer(&post_nodes);
         }
     }
 
     pub fn print_statistics(&self, bench_name: &str, out_file: Option<&str>) {
-        let time_read = self.time_buffer.read().unwrap();
+        let time_read = self.shared.time_buffer.read().unwrap();
         time_read.print_stats(bench_name, out_file);
     }
 }
