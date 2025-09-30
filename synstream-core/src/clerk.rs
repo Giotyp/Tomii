@@ -204,7 +204,6 @@ impl Clerk {
 
             if !arg_vec.is_empty() {
                 let node_id = NodeID::new(node_name.clone(), slot, node_index);
-                print_debug(&format!("{:?} is ready to be scheduled", node_id));
                 // Schedule Task
                 Self::send_to_scheduler(&shared, node_id, arg_vec);
             }
@@ -409,46 +408,20 @@ impl Clerk {
             }
         }
 
-        let mut arg_vec_index = 0;
         for arg in node.args.iter() {
             // Check if node has a condition
-            let init_condition: Option<&InitCondition> = arg.init_condition.as_ref();
-            if init_condition.is_none() {
-                // Skip non-condition args and increment arg_vec_index if not a condition arg
-                if !arg.is_condition() {
-                    arg_vec_index += 1;
-                }
-                continue;
-            }
-            let init_condition: &InitCondition = init_condition.unwrap();
+            if arg.is_condition() {
+                let init_condition: &InitCondition = &arg.init_condition.as_ref().unwrap();
+                // We assume condition has a single predecessor
+                let result = Self::collect_arg_result(arg, node_index, slot, None, shared).unwrap()
+                    [0]
+                .clone();
 
-            // For condition args, we need to find the corresponding value
-            // Conditions can reference either Ref or Res types
-            let result = match &arg.type_ {
-                CmTypes::Ref(_) | CmTypes::Res(_) => {
-                    if arg_vec_index < arg_vec.len() {
-                        &arg_vec[arg_vec_index]
-                    } else {
-                        // This shouldn't happen if parse_args is working correctly
-                        is_ready = false;
-                        break;
-                    }
+                let eval = init_condition.evaluate(result.clone());
+                if !eval {
+                    is_ready = false;
+                    break;
                 }
-                _ => {
-                    // For other types, use the arg type directly
-                    &arg.type_
-                }
-            };
-
-            let eval = init_condition.evaluate(result.clone());
-            if !eval {
-                is_ready = false;
-                break;
-            }
-
-            // Increment arg_vec_index only if this wasn't a pure condition
-            if !arg.is_condition() {
-                arg_vec_index += 1;
             }
         }
 
@@ -660,81 +633,91 @@ impl Clerk {
                 continue;
             }
 
-            match &arg.type_ {
-                CmTypes::Ref(obj_name) => {
-                    let init_objects = &shared.graph.init_objects.as_ref().unwrap();
-
-                    // Argument may be node index
-                    if obj_name == "$index" {
-                        arg_vec.push(CmTypes::Usize(node_index));
-                        continue;
-                    }
-
-                    // Argument may be worker num
-                    if obj_name == "$workers" {
-                        arg_vec.push(CmTypes::Usize(shared.workers.load(Ordering::SeqCst)));
-                        continue;
-                    }
-
-                    // object may be either buffer indexed by node_index
-                    // or just variable indexed by 0
-                    let msg = format!("Object {} not found in init_objects", obj_name);
-                    let obj_vec = init_objects.get(obj_name).expect(msg.as_str());
-                    let obj = {
-                        if obj_vec.len() > 1 {
-                            // If the object is a buffer, get the object according to node_index
-                            let index = node_index % obj_vec.len();
-                            obj_vec[index].clone()
-                        } else {
-                            // If the object is a variable, get the first element
-                            obj_vec[0].clone()
-                        }
-                    };
-                    arg_vec.push(obj);
-                }
-                CmTypes::Res(res_node) => {
-                    if let Some(ref custom_res) = custom_res {
-                        arg_vec.push(custom_res.clone());
-                        continue;
-                    }
-                    let indices = arg
-                        .predecessor
-                        .as_ref()
-                        .unwrap()
-                        .indexes
-                        .iter()
-                        .map(|&x| {
-                            // Get the predecessor node factor
-                            let nodes = &shared.graph.nodes;
-                            let pred_node: &Node =
-                                nodes.get(&arg.predecessor.as_ref().unwrap().name).unwrap();
-                            let pred_factor = pred_node.factor;
-
-                            // Find the index of the node in the results
-                            let new_index = find_pred_index(node_index, x, pred_factor);
-                            new_index
-                        })
-                        .collect::<Vec<usize>>();
-
-                    for dep_idx in indices.iter() {
-                        // for each task index, retrieve the
-                        // corresponding results
-                        // (must exist since they are completed)
-                        let res_read = shared.node_results.read().unwrap();
-
-                        let result = res_read.search_node_idx(&res_node, *dep_idx, slot).unwrap();
-                        arg_vec.push(result);
-                    }
-                }
-                CmTypes::Barrier(_) => {
-                    // Barrier does not require any arguments
-                }
-                _ => {
-                    arg_vec.push(arg.type_.clone());
-                }
+            let result_opt =
+                Self::collect_arg_result(arg, node_index, slot, custom_res.clone(), shared);
+            if let Some(result) = result_opt {
+                arg_vec.extend(result);
             }
         }
         arg_vec
+    }
+
+    fn collect_arg_result(
+        arg: &Arg,
+        node_index: usize,
+        slot: usize,
+        custom_res: Option<CmTypes>,
+        shared: &Arc<ClerkShared>,
+    ) -> Option<Vec<CmTypes>> {
+        match &arg.type_ {
+            CmTypes::Ref(obj_name) => {
+                let init_objects = &shared.graph.init_objects.as_ref().unwrap();
+                // Argument may be node index
+                if obj_name == "$index" {
+                    return Some(vec![CmTypes::Usize(node_index)]);
+                }
+                // Argument may be worker num
+                if obj_name == "$workers" {
+                    return Some(vec![CmTypes::Usize(shared.workers.load(Ordering::SeqCst))]);
+                }
+
+                // object may be either buffer indexed by node_index
+                // or just variable indexed by 0
+                let msg = format!("Object {} not found in init_objects", obj_name);
+                let obj_vec = init_objects.get(obj_name).expect(msg.as_str());
+                let obj = {
+                    if obj_vec.len() > 1 {
+                        // If the object is a buffer, get the object according to node_index
+                        let index = node_index % obj_vec.len();
+                        obj_vec[index].clone()
+                    } else {
+                        // If the object is a variable, get the first element
+                        obj_vec[0].clone()
+                    }
+                };
+                return Some(vec![obj]);
+            }
+            CmTypes::Res(res_node) => {
+                if let Some(ref custom_res) = custom_res {
+                    return Some(vec![custom_res.clone()]);
+                }
+                let indices = arg
+                    .predecessor
+                    .as_ref()
+                    .unwrap()
+                    .indexes
+                    .iter()
+                    .map(|&x| {
+                        // Get the predecessor node factor
+                        let nodes = &shared.graph.nodes;
+                        let pred_node: &Node =
+                            nodes.get(&arg.predecessor.as_ref().unwrap().name).unwrap();
+                        let pred_factor = pred_node.factor;
+
+                        // Find the index of the node in the results
+                        let new_index = find_pred_index(node_index, x, pred_factor);
+                        new_index
+                    })
+                    .collect::<Vec<usize>>();
+
+                let mut result_vec = Vec::new();
+                for dep_idx in indices.iter() {
+                    // for each task index, retrieve the
+                    // corresponding results
+                    // (must exist since they are completed)
+                    let res_read = shared.node_results.read().unwrap();
+
+                    let result = res_read.search_node_idx(&res_node, *dep_idx, slot).unwrap();
+                    result_vec.push(result);
+                }
+                return Some(result_vec);
+            }
+            CmTypes::Barrier(_) => {
+                // Barrier does not require any arguments
+                return None;
+            }
+            _ => return Some(vec![arg.type_.clone()]),
+        }
     }
 
     fn barrier_resolved(shared: &Arc<ClerkShared>, node_name: &str, slot: usize) -> bool {
@@ -761,7 +744,6 @@ impl Clerk {
                 let indexes: Vec<usize> = (0..node_factor).collect();
                 for index in indexes {
                     let node_id = NodeID::new(node_name.clone(), slot, index);
-                    print_debug(&format!("Initial Node {:?} is ready", node_id));
 
                     let arg_vec = Self::create_node_args(shared, node, index, slot);
 

@@ -108,6 +108,10 @@ impl Arg {
     pub fn is_condition(&self) -> bool {
         self.init_condition.is_some()
     }
+
+    pub fn is_barrier(&self) -> bool {
+        self.type_.is_barrier()
+    }
 }
 
 #[derive(Clone)]
