@@ -1,3 +1,4 @@
+use core_affinity;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
@@ -119,16 +120,44 @@ impl Clerk {
         // Initialize node_results
         self.init_results(self.shared.slots);
 
+        // Get available cores and select one for pinning both threads
+        let core_ids = core_affinity::get_core_ids().unwrap_or_default();
+        let target_core = if !core_ids.is_empty() {
+            // Use the last core to avoid interfering with main thread
+            Some(core_ids[core_ids.len() - 1])
+        } else {
+            print_debug("No cores available for affinity setting");
+            None
+        };
+
         // Spawn thread to handle set_ready_nodes
         let shared_for_ready = Arc::clone(&self.shared);
+        let target_core_ready = target_core;
         let ready_handle = spawn(move || {
+            // Pin this thread to the selected core
+            if let Some(core) = target_core_ready {
+                if core_affinity::set_for_current(core) {
+                    print_debug(&format!("Ready thread pinned to core {:?}", core));
+                } else {
+                    print_debug("Failed to pin ready thread to core");
+                }
+            }
             Self::set_ready_nodes(shared_for_ready, checker_rx);
         });
         print_debug("Ready thread spawned");
 
         // Spawn a thread to handle completed nodes
         let shared_for_completed = Arc::clone(&self.shared);
+        let target_core_completed = target_core;
         let complete_handle = spawn(move || {
+            // Pin this thread to the same core as the ready thread
+            if let Some(core) = target_core_completed {
+                if core_affinity::set_for_current(core) {
+                    print_debug(&format!("Completed thread pinned to core {:?}", core));
+                } else {
+                    print_debug("Failed to pin completed thread to core");
+                }
+            }
             Self::process_completed(shared_for_completed, completed_rx, checker_tx);
         });
         print_debug("Completion thread spawned");
@@ -234,6 +263,8 @@ impl Clerk {
                 completed_count_map[slot].insert(name.clone(), 0);
             }
         }
+
+        let condition_nodes = shared.graph.get_condition_nodes();
         // Process completed nodes
         while let Ok((node_id, result)) = completed_rx.recv() {
             let time_read = shared.time_buffer.read().unwrap();
@@ -279,7 +310,13 @@ impl Clerk {
                 node.factor
             };
             if *current_completed < factor {
-                node_index = *current_completed;
+                node_index = {
+                    if condition_nodes.contains(&node_name) {
+                        *current_completed
+                    } else {
+                        node_id.index
+                    }
+                };
                 let completed_write = completed_count_map[slot].get_mut(&node_name).unwrap();
                 *completed_write += 1;
 

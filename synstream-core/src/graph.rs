@@ -193,6 +193,19 @@ impl Graph {
         condition_predecessors
     }
 
+    pub fn get_condition_nodes(&self) -> Vec<String> {
+        let mut condition_nodes: Vec<String> = Vec::new();
+        for (node_name, node) in &self.nodes {
+            for arg in &node.args {
+                if let Some(_) = &arg.init_condition {
+                    condition_nodes.push(node_name.clone());
+                    break;
+                }
+            }
+        }
+        condition_nodes
+    }
+
     pub fn has_barrier(&self, node_name: &str) -> bool {
         if let Some(node) = self.nodes.get(node_name) {
             for arg in &node.args {
