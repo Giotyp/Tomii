@@ -3,7 +3,7 @@ use std::fs::OpenOptions;
 use synstream_core::debug::*;
 use synstream_core::graph::Graph;
 use synstream_core::graph_gen::from_json;
-use synstream_core::runtime::Clerk;
+use synstream_core::runtime::SynRt;
 use synstream_core::scheduler::{create_scheduler, SchedulerType};
 
 #[derive(Parser)]
@@ -102,7 +102,7 @@ fn main() {
     }
     print_debug("Objects Initialized");
 
-    let clerk = run_graph(
+    let synrt = run_graph(
         &graph,
         scheduler_type,
         args.workers,
@@ -116,7 +116,7 @@ fn main() {
     let time_file = args.timing;
     if !time_file.is_empty() {
         let bench_name = time_file.split('/').last().unwrap_or_default();
-        clerk.print_statistics(&bench_name, Some(&time_file));
+        synrt.print_statistics(&bench_name, Some(&time_file));
     }
 }
 
@@ -129,10 +129,10 @@ pub fn run_graph(
     max_streams: usize,
     max_runtime: Option<u64>,
     use_rdtsc: bool,
-) -> Clerk {
-    let mut clerk = Clerk::new(graph, slots, max_streams, max_runtime, use_rdtsc);
+) -> SynRt {
+    let mut synrt = SynRt::new(graph, slots, max_streams, max_runtime, use_rdtsc);
     let scheduler = create_scheduler(scheduler_type, core_offset, workers);
 
-    clerk.run(scheduler);
-    clerk
+    synrt.run(scheduler);
+    synrt
 }

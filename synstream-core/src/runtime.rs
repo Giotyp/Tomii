@@ -14,8 +14,8 @@ use crate::scheduler::{Scheduler, SchedulerImpl};
 use crate::time_buffer::TimeBuffer;
 use synstream_types::*;
 
-/// Shared data across all Clerk threads - immutable or internally synchronized
-pub struct ClerkShared {
+/// Shared data across all SynStream threads - immutable or internally synchronized
+pub struct SharedData {
     // Immutable data
     graph: Graph,
     total_nodes_per_stream: usize,
@@ -37,19 +37,19 @@ pub struct ClerkShared {
     workers: Arc<AtomicUsize>,
 }
 
-/// Main Clerk struct with shared context
-pub struct Clerk {
-    shared: Arc<ClerkShared>,
+/// Main SynStream Runtime struct with shared context
+pub struct SynRt {
+    shared: Arc<SharedData>,
 }
 
-impl Clerk {
+impl SynRt {
     pub fn new(
         app_graph: &Graph,
         slots: usize,
         max_streams: usize,
         max_runtime: Option<u64>,
         use_rdtsc: bool,
-    ) -> Clerk {
+    ) -> SynRt {
         let total_nodes = app_graph.total_executed_nodes();
         print_debug(&format!(
             "Total nodes to execute per stream: {}",
@@ -77,7 +77,7 @@ impl Clerk {
         // Set the fields of the struct's graphs copy - one for each stream
         // Create an additional graph as a static copy
 
-        let shared = Arc::new(ClerkShared {
+        let shared = Arc::new(SharedData {
             graph: app_graph.clone(),
             total_nodes_per_stream: total_nodes,
             slots,
@@ -94,7 +94,7 @@ impl Clerk {
             workers: Arc::new(AtomicUsize::new(1)), // Will be set in run()
         });
 
-        Clerk { shared }
+        SynRt { shared }
     }
 
     pub fn run(&mut self, scheduler: SchedulerImpl) {
@@ -166,7 +166,7 @@ impl Clerk {
         let slot_vec: Vec<usize> = (0..self.shared.slots).collect();
         Self::add_init_nodes(&self.shared, slot_vec);
 
-        // Initiate clerk-thread timing
+        // Initiate synstream-runtime timing
         let mut time_write = self.shared.time_buffer.write().unwrap();
         time_write.start_slot_processing(self.shared.slots);
         drop(time_write);
@@ -207,8 +207,8 @@ impl Clerk {
 }
 
 // Execution Threads
-impl Clerk {
-    fn set_ready_nodes(shared: Arc<ClerkShared>, checker_rx: Receiver<NodeID>) {
+impl SynRt {
+    fn set_ready_nodes(shared: Arc<SharedData>, checker_rx: Receiver<NodeID>) {
         // Checks if the node is ready to be scheduled and
         // adds it to the ready_nodes list
 
@@ -246,7 +246,7 @@ impl Clerk {
     }
 
     fn process_completed(
-        shared: Arc<ClerkShared>,
+        shared: Arc<SharedData>,
         completed_rx: Receiver<(NodeID, CmTypes)>,
         checker_tx: Sender<NodeID>,
     ) {
@@ -374,8 +374,8 @@ impl Clerk {
 }
 
 // Helper Functions
-impl Clerk {
-    fn send_to_scheduler(shared: &Arc<ClerkShared>, node_id: NodeID, arg_vec: Vec<CmTypes>) {
+impl SynRt {
+    fn send_to_scheduler(shared: &Arc<SharedData>, node_id: NodeID, arg_vec: Vec<CmTypes>) {
         // Unwrap node_id
         let node_name = node_id.name.clone();
         let node_index = node_id.index;
@@ -429,7 +429,7 @@ impl Clerk {
     }
 
     fn check_ready_node(
-        shared: &Arc<ClerkShared>,
+        shared: &Arc<SharedData>,
         node: &Node,
         node_index: usize,
         slot: usize,
@@ -469,7 +469,7 @@ impl Clerk {
         }
     }
 
-    fn process_slot_completion(shared: &Arc<ClerkShared>, slot: usize) {
+    fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) {
         // Complete timing
         let mut time_write = shared.time_buffer.write().unwrap();
         time_write.finish_slot_processing(slot);
@@ -503,7 +503,7 @@ impl Clerk {
         }
     }
 
-    fn assign_stream_to_available_slot(shared: &Arc<ClerkShared>, stream: usize) -> usize {
+    fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) -> usize {
         let mut available_slots = shared.available_stream_slots.write().unwrap();
         let mut streams_mapping = shared.stream_to_slot_mapping.write().unwrap();
 
@@ -538,7 +538,7 @@ impl Clerk {
         panic!("No available stream slots for stream: {}", stream);
     }
 
-    fn release_slot(shared: &Arc<ClerkShared>, slot: usize) {
+    fn release_slot(shared: &Arc<SharedData>, slot: usize) {
         let mut available_slots = shared.available_stream_slots.write().unwrap();
 
         let old_stream = available_slots[slot].1.clone();
@@ -549,7 +549,7 @@ impl Clerk {
         ));
     }
 
-    fn process_id_function(shared: &Arc<ClerkShared>, node_id: &NodeID, result: &CmTypes) -> usize {
+    fn process_id_function(shared: &Arc<SharedData>, node_id: &NodeID, result: &CmTypes) -> usize {
         let mut slot = node_id.slot;
 
         let id_function_opt = shared.graph.id_function.clone();
@@ -627,7 +627,7 @@ impl Clerk {
     }
 
     fn create_node_args(
-        shared: &Arc<ClerkShared>,
+        shared: &Arc<SharedData>,
         node: &Node,
         node_index: usize,
         slot: usize,
@@ -657,7 +657,7 @@ impl Clerk {
     }
 
     fn parse_args(
-        shared: &Arc<ClerkShared>,
+        shared: &Arc<SharedData>,
         args: &Vec<Arg>,
         node_index: usize,
         slot: usize,
@@ -684,7 +684,7 @@ impl Clerk {
         node_index: usize,
         slot: usize,
         custom_res: Option<CmTypes>,
-        shared: &Arc<ClerkShared>,
+        shared: &Arc<SharedData>,
     ) -> Option<Vec<CmTypes>> {
         match &arg.type_ {
             CmTypes::Ref(obj_name) => {
@@ -757,7 +757,7 @@ impl Clerk {
         }
     }
 
-    fn barrier_resolved(shared: &Arc<ClerkShared>, node_name: &str, slot: usize) -> bool {
+    fn barrier_resolved(shared: &Arc<SharedData>, node_name: &str, slot: usize) -> bool {
         let barrier_nodes = shared.graph.get_barriers(node_name);
         // Check if all barrier nodes are resolved
         let results_read = shared.node_results.read().unwrap();
@@ -768,7 +768,7 @@ impl Clerk {
         })
     }
 
-    fn add_init_nodes(shared: &Arc<ClerkShared>, slots: Vec<usize>) {
+    fn add_init_nodes(shared: &Arc<SharedData>, slots: Vec<usize>) {
         for slot in slots {
             let initial_nodes = shared.graph.initial_nodes.clone();
             for node_name in initial_nodes {
