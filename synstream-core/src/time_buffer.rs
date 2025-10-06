@@ -1,12 +1,12 @@
 use crate::utils_rdtsc::{cycles_to_ns, rdtsc};
-use std::collections::HashMap;
+use rapidhash::{HashMapExt, RapidHashMap};
 use std::fs::File;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct SlotStats {
-    pub task_times: HashMap<String, Vec<Duration>>,
+    pub task_times: RapidHashMap<String, Vec<Duration>>,
     pub total_time: Duration,
     pub slot_id: usize,
     pub stream_count: usize,
@@ -15,7 +15,7 @@ pub struct SlotStats {
 impl SlotStats {
     pub fn new(slot_id: usize, stream_count: usize) -> Self {
         Self {
-            task_times: HashMap::new(),
+            task_times: RapidHashMap::new(),
             total_time: Duration::ZERO,
             slot_id,
             stream_count,
@@ -57,7 +57,7 @@ pub struct TimeBuffer {
     // Current timing state per slot
     slot_start_times: Vec<Option<TimingMethod>>,
     // Current task times for each slot (accumulated during processing)
-    current_slot_tasks: Vec<HashMap<String, Vec<Duration>>>,
+    current_slot_tasks: Vec<RapidHashMap<String, Vec<Duration>>>,
     // Completed slot statistics
     slot_statistics: Vec<Vec<SlotStats>>, // [slot][stream]
     // Use rdtsc timing instead of Instant
@@ -71,7 +71,7 @@ impl TimeBuffer {
         TimeBuffer {
             slots,
             slot_start_times: vec![None; slots],
-            current_slot_tasks: vec![HashMap::new(); slots],
+            current_slot_tasks: vec![RapidHashMap::new(); slots],
             slot_statistics: vec![Vec::new(); slots],
             use_rdtsc,
         }
@@ -358,13 +358,13 @@ impl TimeBuffer {
     /// Clear all statistics and reset the buffer
     pub fn reset(&mut self) {
         self.slot_start_times = vec![None; self.slots];
-        self.current_slot_tasks = vec![HashMap::new(); self.slots];
+        self.current_slot_tasks = vec![RapidHashMap::new(); self.slots];
         self.slot_statistics = vec![Vec::new(); self.slots];
     }
 
     /// Get a summary of all slots
-    pub fn get_summary(&self) -> HashMap<usize, (usize, Duration, Duration)> {
-        let mut summary = HashMap::new();
+    pub fn get_summary(&self) -> RapidHashMap<usize, (usize, Duration, Duration)> {
+        let mut summary = RapidHashMap::new();
 
         for slot_id in 0..self.slots {
             let slot_stats = &self.slot_statistics[slot_id];

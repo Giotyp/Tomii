@@ -1,7 +1,7 @@
 use lazy_static::lazy_static;
+use rapidhash::{HashMapExt, RapidHashMap};
 use serde::Deserialize;
 use std::any::Any;
-use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -666,8 +666,8 @@ type ParserFn = fn(&str) -> Result<CmTypes, CustomError>;
 
 lazy_static! {
     /// Parsers for every explicit type
-    static ref PARSERS: HashMap<&'static str, ParserFn> = {
-        let mut entry_map: HashMap<&'static str, ParserFn> = HashMap::new();
+    static ref PARSERS: RapidHashMap<&'static str, ParserFn> = {
+        let mut entry_map: RapidHashMap<&'static str, ParserFn> = RapidHashMap::new();
         macro_rules! add {
             ($ty:expr, $p:expr) => { entry_map.insert($ty, $p as ParserFn); };
         }

@@ -1,5 +1,5 @@
 use core_affinity;
-use std::collections::HashMap;
+use rapidhash::{HashMapExt, RapidHashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, RwLock};
@@ -28,7 +28,7 @@ pub struct SharedData {
     stream_complete_counter: Arc<AtomicUsize>,
     stream_completion_counts: Arc<RwLock<Vec<AtomicUsize>>>,
     available_stream_slots: Arc<RwLock<Vec<(bool, usize)>>>,
-    stream_to_slot_mapping: Arc<RwLock<HashMap<usize, usize>>>,
+    stream_to_slot_mapping: Arc<RwLock<RapidHashMap<usize, usize>>>,
     time_buffer: Arc<RwLock<TimeBuffer>>,
 
     // Shared between threads
@@ -87,7 +87,7 @@ impl SynRt {
             stream_complete_counter: Arc::new(AtomicUsize::new(0)),
             stream_completion_counts,
             available_stream_slots,
-            stream_to_slot_mapping: Arc::new(RwLock::new(HashMap::new())),
+            stream_to_slot_mapping: Arc::new(RwLock::new(RapidHashMap::new())),
             time_buffer: Arc::new(RwLock::new(TimeBuffer::new(slots + 1, use_rdtsc))),
             scheduler: Arc::new(RwLock::new(None)),
             completed_tx: Arc::new(RwLock::new(None)),
@@ -256,8 +256,8 @@ impl SynRt {
         };
 
         // Create a hasmap to store how many nodes of each type per slot are completed
-        let mut completed_count_map: Vec<HashMap<String, usize>> =
-            vec![HashMap::new(); shared.slots];
+        let mut completed_count_map: Vec<RapidHashMap<String, usize>> =
+            vec![RapidHashMap::new(); shared.slots];
         for name in &nodes_names {
             for slot in 0..shared.slots {
                 completed_count_map[slot].insert(name.clone(), 0);

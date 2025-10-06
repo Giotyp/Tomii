@@ -1,19 +1,19 @@
 use crate::debug::print_debug;
 use crate::graph_struct::*;
-use std::collections::HashMap;
+use rapidhash::{HashMapExt, RapidHashMap};
 use synstream_types::*;
 
 /// Graph structure
 #[derive(Clone)]
 pub struct Graph {
-    pub nodes: HashMap<String, Node>,
+    pub nodes: RapidHashMap<String, Node>,
     pub initial_nodes: Vec<String>,
-    successors: HashMap<String, Vec<String>>,
+    successors: RapidHashMap<String, Vec<String>>,
     // Map of (successor_name, predecessor_name) to predecessor indexes
-    pred_idxs: HashMap<(String, String), Vec<isize>>,
+    pred_idxs: RapidHashMap<(String, String), Vec<isize>>,
     pub id_function: Option<IdFunction>,
-    pub post_nodes: Option<HashMap<String, Node>>,
-    pub init_objects: Option<HashMap<String, Vec<CmTypes>>>,
+    pub post_nodes: Option<RapidHashMap<String, Node>>,
+    pub init_objects: Option<RapidHashMap<String, Vec<CmTypes>>>,
 }
 
 impl GraphStruct for Graph {
@@ -64,7 +64,7 @@ impl GraphStruct for Graph {
         if let Some(post_nodes) = &mut self.post_nodes {
             post_nodes.insert(node.name.clone(), node);
         } else {
-            let mut post_nodes = HashMap::new();
+            let mut post_nodes = RapidHashMap::new();
             post_nodes.insert(node.name.clone(), node);
             self.post_nodes = Some(post_nodes);
         }
@@ -144,21 +144,21 @@ impl GraphStruct for Graph {
 impl Graph {
     pub fn new() -> Graph {
         Graph {
-            nodes: HashMap::new(),
+            nodes: RapidHashMap::new(),
             initial_nodes: Vec::new(),
-            successors: HashMap::new(),
-            pred_idxs: HashMap::new(),
+            successors: RapidHashMap::new(),
+            pred_idxs: RapidHashMap::new(),
             id_function: None,
             post_nodes: None,
             init_objects: None,
         }
     }
 
-    pub fn set_nodes(&mut self, nodes: HashMap<String, Node>) {
+    pub fn set_nodes(&mut self, nodes: RapidHashMap<String, Node>) {
         self.nodes = nodes;
     }
 
-    pub fn set_init_objects(&mut self, init_objects: &HashMap<String, Vec<CmTypes>>) {
+    pub fn set_init_objects(&mut self, init_objects: &RapidHashMap<String, Vec<CmTypes>>) {
         self.init_objects = Some(init_objects.clone());
     }
 
@@ -166,12 +166,12 @@ impl Graph {
         self.id_function = Some(id_function.clone());
     }
 
-    pub fn set_post_nodes(&mut self, post_nodes: Option<HashMap<String, Node>>) {
+    pub fn set_post_nodes(&mut self, post_nodes: Option<RapidHashMap<String, Node>>) {
         self.post_nodes = post_nodes;
     }
 
-    pub fn get_condition_predecessors(&self) -> HashMap<String, usize> {
-        let mut condition_predecessors: HashMap<String, usize> = HashMap::new();
+    pub fn get_condition_predecessors(&self) -> RapidHashMap<String, usize> {
+        let mut condition_predecessors: RapidHashMap<String, usize> = RapidHashMap::new();
         for (_node_name, node) in &self.nodes {
             for arg in &node.args {
                 if let Some(_) = &arg.init_condition {

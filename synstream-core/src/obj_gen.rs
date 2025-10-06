@@ -1,16 +1,16 @@
 use crate::debug::print_debug;
 use crate::func_reg::get_func;
 use crate::json_structs::*;
+use rapidhash::{HashMapExt, RapidHashMap};
 use serde_json;
-use std::collections::HashMap;
 use synstream_types::*;
 
 pub fn init_objects(
     initializations_json: &Vec<InitJson>,
     workers: usize,
-) -> Result<HashMap<String, Vec<CmTypes>>, serde_json::Error> {
-    // Create a new HashMap to store the initialized objects
-    let mut init_objects: HashMap<String, Vec<CmTypes>> = HashMap::new();
+) -> Result<RapidHashMap<String, Vec<CmTypes>>, serde_json::Error> {
+    // Create a new RapidHashMap to store the initialized objects
+    let mut init_objects: RapidHashMap<String, Vec<CmTypes>> = RapidHashMap::new();
 
     for init in initializations_json.iter() {
         let name = init.name.clone();

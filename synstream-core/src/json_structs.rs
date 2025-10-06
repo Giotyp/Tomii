@@ -1,5 +1,5 @@
+use rapidhash::RapidHashMap;
 use serde::Deserialize;
-use std::collections::HashMap;
 use synstream_types::*;
 // Graph File Structure
 #[derive(Debug, Deserialize)]
@@ -85,7 +85,7 @@ pub enum Factor {
 impl Factor {
     pub fn resolve(
         &self,
-        init_objects: &Option<HashMap<String, Vec<CmTypes>>>,
+        init_objects: &Option<RapidHashMap<String, Vec<CmTypes>>>,
         workers: usize,
     ) -> usize {
         match self {
@@ -116,7 +116,11 @@ impl Factor {
         }
     }
 
-    pub fn search(&self, init_objects: &HashMap<String, Vec<CmTypes>>, workers: usize) -> usize {
+    pub fn search(
+        &self,
+        init_objects: &RapidHashMap<String, Vec<CmTypes>>,
+        workers: usize,
+    ) -> usize {
         match self {
             Factor::Number(num) => *num,
             Factor::Ref(ref_name) => {

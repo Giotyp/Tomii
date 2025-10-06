@@ -1,7 +1,8 @@
 use crate::graph_struct::Node;
+use rapidhash::{HashMapExt, RapidHashMap};
 use std::cmp::PartialEq;
 use std::fmt::Debug;
-use std::{collections::HashMap, vec};
+use std::vec;
 
 #[derive(Clone, PartialEq)]
 pub struct NodeID {
@@ -37,7 +38,7 @@ impl std::fmt::Debug for NodeID {
 }
 
 pub struct Buffer<T> {
-    buffer: Vec<HashMap<String, Vec<T>>>,
+    buffer: Vec<RapidHashMap<String, Vec<T>>>,
     init_val: T,
 }
 
@@ -49,14 +50,14 @@ impl<T: Clone + PartialEq + Debug> Buffer<T> {
         }
     }
 
-    pub fn init_buffer(&mut self, nodes: &HashMap<String, Node>, slots: usize)
+    pub fn init_buffer(&mut self, nodes: &RapidHashMap<String, Node>, slots: usize)
     where
         T: Clone,
     {
         if self.buffer.is_empty() {
             // Initialize buffer with empty HashMaps for each stream
             for _ in 0..slots {
-                self.buffer.push(HashMap::new());
+                self.buffer.push(RapidHashMap::new());
             }
         }
 
@@ -64,19 +65,19 @@ impl<T: Clone + PartialEq + Debug> Buffer<T> {
         for (node_name, node) in nodes.iter() {
             let factor = node.factor;
             let new_vec = vec![self.init_val.clone(); factor];
-            // Initialize HashMap for each stream
+            // Initialize RapidHashMap for each stream
             for stream in 0..self.buffer.len() {
                 self.buffer[stream].insert(node_name.clone(), new_vec.clone());
             }
         }
     }
 
-    pub fn add_buffer(&mut self, nodes: &HashMap<String, Node>)
+    pub fn add_buffer(&mut self, nodes: &RapidHashMap<String, Node>)
     where
         T: Clone,
     {
         // Add a new buffer to self.buffer
-        let mut new_buffer = HashMap::new();
+        let mut new_buffer = RapidHashMap::new();
         for (node_name, node) in nodes.iter() {
             let factor = node.factor;
             let new_vec = vec![self.init_val.clone(); factor];
@@ -106,7 +107,7 @@ impl<T: Clone + PartialEq + Debug> Buffer<T> {
         }
     }
 
-    pub fn get_buffer(&self, slot: usize) -> &HashMap<String, Vec<T>> {
+    pub fn get_buffer(&self, slot: usize) -> &RapidHashMap<String, Vec<T>> {
         &self.buffer[slot]
     }
 
@@ -150,6 +151,113 @@ impl<T: Clone + PartialEq + Debug> Buffer<T> {
             }
         } else {
             panic!("Node {} not found in buffer", node_name);
+        }
+    }
+}
+
+pub struct VecMap<T> {
+    buffer: Vec<Vec<Vec<T>>>,
+    node_to_index: RapidHashMap<String, usize>,
+    init_val: T,
+}
+
+impl<T: Clone + PartialEq + Debug> VecMap<T> {
+    pub fn new(init_val: T) -> VecMap<T> {
+        VecMap {
+            buffer: Vec::new(),
+            node_to_index: RapidHashMap::new(),
+            init_val,
+        }
+    }
+
+    pub fn init_map(&mut self, nodes: &RapidHashMap<String, Node>, slots: usize) {
+        if self.buffer.is_empty() {
+            for _ in 0..slots {
+                self.buffer.push(Vec::new());
+            }
+        }
+
+        // iterate over the nodes map to create a vector for each node
+        for (node_name, node) in nodes.iter() {
+            let new_vec = vec![self.init_val.clone(); node.factor];
+            // Initialize Vec for each stream
+            for stream in 0..self.buffer.len() {
+                self.buffer[stream].push(new_vec.clone());
+            }
+            // Map node name to its index in the Vec
+            self.node_to_index
+                .insert(node_name.clone(), self.node_to_index.len());
+        }
+    }
+
+    pub fn extend_map(&mut self, nodes: &RapidHashMap<String, Node>) {
+        let mut new_buffer = Vec::new();
+        let mut offset_count = 0;
+
+        for (node_name, node) in nodes.iter() {
+            if !self.node_to_index.contains_key(node_name) {
+                let new_vec = vec![self.init_val.clone(); node.factor];
+                new_buffer.push(new_vec);
+
+                self.node_to_index.insert(node_name.clone(), offset_count);
+                offset_count += 1;
+            }
+        }
+        self.buffer.push(new_buffer);
+    }
+
+    pub fn get_id(&self, id: &NodeID) -> Option<T> {
+        if let Some(&node_index) = self.node_to_index.get(&id.name) {
+            if id.slot < self.buffer.len() {
+                let slot_vec = &self.buffer[id.slot];
+                let node_vec = &slot_vec[node_index];
+                if id.index < node_vec.len() {
+                    return Some(node_vec[id.index].clone());
+                }
+            }
+        }
+        None
+    }
+
+    pub fn decrease_id(&mut self, id: &NodeID) -> Option<usize>
+    where
+        T: std::ops::Sub<usize>,
+        T: From<usize>,
+        T: From<<T as std::ops::Sub<usize>>::Output>,
+        T: PartialOrd,
+        usize: From<T>,
+    {
+        if let Some(&node_index) = self.node_to_index.get(&id.name) {
+            if id.slot < self.buffer.len() {
+                let slot_vec = &mut self.buffer[id.slot];
+                let node_vec = &mut slot_vec[node_index];
+                if id.index < node_vec.len() {
+                    let current: usize = node_vec[id.index].clone().into();
+                    if current > 0 {
+                        node_vec[id.index] = (current - 1).into();
+                    }
+                    return Some(current - 1);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn set_id(&mut self, id: &NodeID, element: T) {
+        if let Some(&node_index) = self.node_to_index.get(&id.name) {
+            if id.slot < self.buffer.len() {
+                let slot_vec = &mut self.buffer[id.slot];
+                let node_vec = &mut slot_vec[node_index];
+                if id.index < node_vec.len() {
+                    node_vec[id.index] = element;
+                } else {
+                    panic!("Index {} out of bounds for node {}", id.index, id.name);
+                }
+            } else {
+                panic!("Slot {} out of bounds", id.slot);
+            }
+        } else {
+            panic!("Node {} not found", id.name);
         }
     }
 }

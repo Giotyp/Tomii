@@ -7,11 +7,11 @@ use crate::graph::*;
 use crate::graph_struct::*;
 use crate::json_structs::*;
 use crate::obj_gen::init_objects;
+use rapidhash::RapidHashMap;
 use serde_json;
-use std::collections::HashMap;
 use synstream_types::*;
 
-fn parse_arg(arg_json: &ArgJson, init_objects: Option<&HashMap<String, Vec<CmTypes>>>) -> Arg {
+fn parse_arg(arg_json: &ArgJson, init_objects: Option<&RapidHashMap<String, Vec<CmTypes>>>) -> Arg {
     let arg_value_opt = arg_json.value.clone();
 
     // Check if the argument has a condition
@@ -58,7 +58,7 @@ fn parse_arg(arg_json: &ArgJson, init_objects: Option<&HashMap<String, Vec<CmTyp
 
 fn parse_predecessor(
     pred_json: &PredJson,
-    init_objects: Option<&HashMap<String, Vec<CmTypes>>>,
+    init_objects: Option<&RapidHashMap<String, Vec<CmTypes>>>,
 ) -> Predecessor {
     let pred_name = pred_json.name.clone();
     let mut index_vec = Vec::new();
