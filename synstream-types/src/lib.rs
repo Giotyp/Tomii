@@ -71,7 +71,6 @@ impl CmTypes {
 
     pub fn from_any_sliced<T: Any + Send + Sync + Sliceable<U>, U: Clone + 'static>(
         mut value: T,
-        _chunk_size_elements: usize,
     ) -> CmTypes {
         // Get the mutable slice from the value
         let slice = value.as_mut_slice();
@@ -788,7 +787,7 @@ mod tests {
             buffer: initial_data.clone(),
         };
 
-        let sliced = CmTypes::from_any_sliced(custombuf, 5);
+        let sliced = CmTypes::from_any_sliced(custombuf);
         let total_length = sliced.sliced_total_length().unwrap_or(0);
 
         println!("Total buffer length: {}", total_length);
@@ -899,7 +898,7 @@ mod tests {
         let test_buffer = CustomBuffer {
             buffer: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
         };
-        let sliced_data = CmTypes::from_any_sliced(test_buffer, 5);
+        let sliced_data = CmTypes::from_any_sliced(test_buffer);
 
         println!("Testing sliced_get_range functionality");
 
