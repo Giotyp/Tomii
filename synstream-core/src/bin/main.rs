@@ -1,9 +1,9 @@
 use clap::Parser;
 use std::fs::OpenOptions;
-use synstream_core::clerk::Clerk;
 use synstream_core::debug::*;
 use synstream_core::graph::Graph;
 use synstream_core::graph_gen::from_json;
+use synstream_core::runtime::Clerk;
 use synstream_core::scheduler::{create_scheduler, SchedulerType};
 
 #[derive(Parser)]

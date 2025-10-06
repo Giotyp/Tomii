@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock};
 use std::thread::{sleep, spawn};
 use std::time::{Duration, Instant};
 
-use crate::clerk_structs::*;
+use crate::buffers::*;
 use crate::debug::print_debug;
 use crate::graph::*;
 use crate::graph_struct::*;
