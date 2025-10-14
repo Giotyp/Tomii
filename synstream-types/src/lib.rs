@@ -27,11 +27,12 @@ pub enum CmTypes {
     Usize(usize),
     Isize(isize),
     String(String),
-    Ref(String),
-    Res(String),
+    Ref(usize),
+    Res(usize),
     Barrier(String),
     VecCmt(Vec<CmTypes>),
-    None(),
+    None,
+    Init,
     #[serde(skip)]
     Any(Arc<RwLock<Box<dyn Any + Send + Sync>>>),
     #[serde(skip)]
@@ -557,7 +558,8 @@ impl PartialEq for CmTypes {
             (CmTypes::Ref(a), CmTypes::Ref(b)) => a == b,
             (CmTypes::Res(a), CmTypes::Res(b)) => a == b,
             (CmTypes::Barrier(a), CmTypes::Barrier(b)) => a == b,
-            (CmTypes::None(), CmTypes::None()) => true,
+            (CmTypes::None, CmTypes::None) => true,
+            (CmTypes::Init, CmTypes::Init) => true,
             _ => false,
         }
     }
@@ -587,7 +589,8 @@ impl std::fmt::Debug for CmTypes {
             CmTypes::Ref(val) => write!(f, "Ref({:?})", val),
             CmTypes::Res(val) => write!(f, "Res({:?})", val),
             CmTypes::Barrier(val) => write!(f, "Barrier({:?})", val),
-            CmTypes::None() => write!(f, "None"),
+            CmTypes::None => write!(f, "None"),
+            CmTypes::Init => write!(f, "Init"),
             CmTypes::Any(_) => write!(f, "CustomType"),
             CmTypes::AnySliced(_) => write!(f, "SlicedType"),
         }
@@ -618,7 +621,8 @@ impl fmt::Display for CmTypes {
             CmTypes::Ref(x) => write!(f, "{}", x),
             CmTypes::Res(x) => write!(f, "{}", x),
             CmTypes::Barrier(x) => write!(f, "{}", x),
-            CmTypes::None() => write!(f, "None"),
+            CmTypes::None => write!(f, "None"),
+            CmTypes::Init => write!(f, "Init"),
             CmTypes::VecCmt(x) => {
                 write!(f, "[")?;
                 for (i, item) in x.iter().enumerate() {
@@ -688,10 +692,11 @@ lazy_static! {
         add!("usize",   |s| s.parse::<usize>().map(CmTypes::Usize).map_err(|_| CustomError::new("invalid usize")));
         add!("isize",   |s| s.parse::<isize>().map(CmTypes::Isize).map_err(|_| CustomError::new("invalid isize")));
         add!("String",  |s| Ok(CmTypes::String(s.to_string())));
-        add!("$ref",    |s| Ok(CmTypes::Ref(s.to_string())));
-        add!("$res",    |s| Ok(CmTypes::Res(s.to_string())));
+        add!("$ref",    |s| s.parse::<usize>().map(CmTypes::Ref).map_err(|_| CustomError::new("invalid ref")));
+        add!("$res",    |s| s.parse::<usize>().map(CmTypes::Res).map_err(|_| CustomError::new("invalid res")));
         add!("$barrier", |s| Ok(CmTypes::Barrier(s.to_string())));
-        add!("None",    |_| Ok(CmTypes::None()));
+        add!("None",    |_| Ok(CmTypes::None));
+        add!("Init",    |_| Ok(CmTypes::Init));
         entry_map
     };
 }

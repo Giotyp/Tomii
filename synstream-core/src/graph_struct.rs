@@ -1,13 +1,11 @@
+use crate::prelude::*;
 use synstream_types::*;
 
 pub trait GraphStruct {
     fn add_node(&mut self, node: Node);
     fn add_post_node(&mut self, node: Node);
-    fn find_successors(
-        &self,
-        node_name: &str,
-        node_index: usize,
-    ) -> Vec<(String, Vec<usize>, bool)>;
+    fn find_successors(&self, node_id: IdType, node_index: usize) -> Vec<(IdType, Vec<usize>)>;
+    fn dependency_count_vec(&self) -> Vec<usize>;
     fn total_executed_nodes(&self) -> usize;
 }
 
@@ -91,13 +89,12 @@ impl InitCondition {
 
 #[derive(Clone)]
 pub struct Predecessor {
-    pub name: String,
+    pub id: IdType,
     pub indexes: Vec<isize>,
 }
 
 #[derive(Clone)]
 pub struct Arg {
-    pub value: Option<String>,
     pub type_: CmTypes,
     // Optional condition for initialization
     pub init_condition: Option<InitCondition>,
@@ -124,6 +121,7 @@ pub struct Loop {
 pub struct Node {
     pub name: String,
     pub args: Vec<Arg>,
+    pub id: IdType,
     pub loop_args: Option<Vec<Arg>>,
     // Variable that defines the number of times
     // the node is initiated
@@ -143,21 +141,11 @@ impl Node {
         }
         cond_args
     }
-
-    pub fn predecessor_names(&self) -> Vec<String> {
-        let mut pred_names: Vec<String> = Vec::new();
-        for arg in &self.args {
-            if let Some(pred) = &arg.predecessor {
-                pred_names.push(pred.name.clone());
-            }
-        }
-        pred_names
-    }
 }
 
 #[derive(Clone)]
 pub struct IdFunction {
     pub func_ptr: Option<CmPtr>,
-    pub predecessor: String,
+    pub predecessor: IdType,
     pub args: Vec<Arg>,
 }

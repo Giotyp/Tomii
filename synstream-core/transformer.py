@@ -230,7 +230,7 @@ def create_arg_return(
             lock_obj = f'\tlet{ins_mut}lock_obj = struct_obj.lock().expect("Failed to lock object");\n'
             if retcm_type == "None":
                 func_call = f"\tlock_obj.{func}({arg_names});\n"
-                ret_none = f"\tCmTypes::None()\n}}\n"
+                ret_none = f"\tCmTypes::None\n}}\n"
                 return lock_obj + func_call + ret_none
             else:
                 func_call = (
@@ -264,7 +264,7 @@ def create_arg_return(
         else:
             if retcm_type == "None":
                 # first call function and then return None
-                func_call = f"\t{norm_ret};\n" f"\tCmTypes::None()\n}}\n"
+                func_call = f"\t{norm_ret};\n" f"\tCmTypes::None\n}}\n"
             else:
                 func_call = f"\tCmTypes::{retcm_type}({norm_ret})\n}}\n"
 
@@ -473,7 +473,7 @@ def generate_wrapper(fn_name, args_signature, return_type, mode="rust"):
     signature = f"pub fn {fn_name_sig.lower()}_wrap({arg_sign}) -> CmTypes {{\n"
     if arguments == []:
         func_call = f"\t{fn_name}({arg_names_str});\n"
-        ret_cm = f"\tCmTypes::None()\n}}\n"
+        ret_cm = f"\tCmTypes::None\n}}\n"
         complete = signature + func_call + ret_cm
     else:
         body = f"{match_arms_str}\n\n"

@@ -1,22 +1,32 @@
 use crate::debug::print_debug;
 use crate::func_reg::get_func;
 use crate::json_structs::*;
+use crate::prelude::*;
 use rapidhash::{HashMapExt, RapidHashMap};
 use serde_json;
+use std::sync::atomic::Ordering::SeqCst;
 use synstream_types::*;
 
 pub fn init_objects(
     initializations_json: &Vec<InitJson>,
     workers: usize,
-) -> Result<RapidHashMap<String, Vec<CmTypes>>, serde_json::Error> {
+) -> Result<(Vec<Vec<CmTypes>>, RapidHashMap<String, usize>), serde_json::Error> {
     // Create a new RapidHashMap to store the initialized objects
-    let mut init_objects: RapidHashMap<String, Vec<CmTypes>> = RapidHashMap::new();
+    let mut init_objects: Vec<Vec<CmTypes>> = Vec::new();
+    let mut obj_id_map: RapidHashMap<String, usize> = RapidHashMap::new();
+
+    // Keep index 0 for $index and 1 for $workers -- resolved at runtime
+    let _ = ObjectCount.fetch_add(2, SeqCst);
+    obj_id_map.insert("$index".to_string(), 0);
+    obj_id_map.insert("$workers".to_string(), 1);
+    init_objects.push(vec![CmTypes::Usize(0)]);
+    init_objects.push(vec![CmTypes::Usize(1)]);
 
     for init in initializations_json.iter() {
         let name = init.name.clone();
         print_debug(&format!("Initializing object: {}", name));
         let factor = match &init.factor {
-            Some(factor) => factor.search(&init_objects, workers),
+            Some(factor) => factor.search(&init_objects, &obj_id_map, workers),
             None => 1,
         };
         let args_json: &Vec<ArgInit> = &init.args;
@@ -40,7 +50,10 @@ pub fn init_objects(
             for _ in 0..factor {
                 value_vec.push(value_cmt.clone());
             }
-            init_objects.insert(name.clone(), value_vec);
+            // fetch-add ObjectCount
+            let obj_id = ObjectCount.fetch_add(1, SeqCst);
+            obj_id_map.insert(name.clone(), obj_id as usize);
+            init_objects.push(value_vec);
         } else {
             // function call needed
             let func_name = init.function_name.as_ref().unwrap().clone();
@@ -66,7 +79,8 @@ pub fn init_objects(
                     }
 
                     // check if value_str is in init_objects
-                    if let Some(init_arg) = init_objects.get(&value_str) {
+                    if let Some(obj_id) = obj_id_map.get(&value_str) {
+                        let init_arg = &init_objects[*obj_id];
                         args.push(init_arg[0].clone());
                         continue;
                     }
@@ -85,8 +99,11 @@ pub fn init_objects(
                 let value_cmt = func_ptr(args.clone());
                 value_vec.push(value_cmt.clone());
             }
-            init_objects.insert(name.clone(), value_vec);
+            // fetch-add ObjectCount
+            let obj_id = ObjectCount.fetch_add(1, SeqCst);
+            obj_id_map.insert(name.clone(), obj_id as usize);
+            init_objects.push(value_vec);
         }
     }
-    Ok(init_objects)
+    Ok((init_objects, obj_id_map))
 }

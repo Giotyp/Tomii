@@ -1,24 +1,22 @@
-use crate::debug::print_debug;
 use crate::graph_struct::*;
-use rapidhash::{HashMapExt, RapidHashMap};
+use crate::{debug::print_debug, IdType};
 use synstream_types::*;
 
 /// Graph structure
 #[derive(Clone)]
 pub struct Graph {
-    pub nodes: RapidHashMap<String, Node>,
-    pub initial_nodes: Vec<String>,
-    successors: RapidHashMap<String, Vec<String>>,
-    // Map of (successor_name, predecessor_name) to predecessor indexes
-    pred_idxs: RapidHashMap<(String, String), Vec<isize>>,
+    pub nodes: Vec<Node>,
+    pub initial_nodes: Vec<IdType>,
+    successors: Vec<Vec<IdType>>,
     pub id_function: Option<IdFunction>,
-    pub post_nodes: Option<RapidHashMap<String, Node>>,
-    pub init_objects: Option<RapidHashMap<String, Vec<CmTypes>>>,
+    pub post_nodes: Option<Vec<Node>>,
+    pub init_objects: Option<Vec<Vec<CmTypes>>>,
 }
 
 impl GraphStruct for Graph {
     fn add_node(&mut self, node: Node) {
-        self.nodes.insert(node.name.clone(), node.clone());
+        // assert that node.id === self.nodes.len()
+        assert!(node.id as usize == self.nodes.len());
 
         let mut has_preds = false;
         // Analyze predecessors
@@ -31,134 +29,130 @@ impl GraphStruct for Graph {
                     has_preds = true;
                 }
                 // Add predecessor to successors list
-                let successors_list = self
-                    .successors
-                    .entry(pred.name.clone())
-                    .or_insert_with(Vec::new);
-                if !successors_list.contains(&node.name) {
-                    successors_list.push(node.name.clone());
+                while self.successors.len() <= pred.id as usize {
+                    self.successors.push(Vec::new());
                 }
 
-                // Add predecessor indexes for result predecessors
-                if arg.type_.is_result() {
-                    let key = (node.name.clone(), pred.name.clone());
-                    let indexes = self.pred_idxs.entry(key).or_insert_with(Vec::new);
-                    for idx in pred.indexes.iter() {
-                        if !indexes.contains(idx) {
-                            indexes.push(*idx);
-                        }
-                    }
+                if !self.successors[pred.id as usize].contains(&node.id) {
+                    self.successors[pred.id as usize].push(node.id);
                 }
             }
         }
         if !has_preds {
             print_debug(&format!(
-                "Adding initial node: {} with factor {}",
-                node.name, node.factor
+                "Adding initial node: {} with id {} and factor {}",
+                node.name, node.id, node.factor
             ));
-            self.initial_nodes.push(node.name.clone());
+            self.initial_nodes.push(node.id);
         }
+        self.nodes.push(node);
     }
 
     fn add_post_node(&mut self, node: Node) {
         if let Some(post_nodes) = &mut self.post_nodes {
-            post_nodes.insert(node.name.clone(), node);
+            assert!(node.id as usize == post_nodes.len());
+            post_nodes.push(node);
         } else {
-            let mut post_nodes = RapidHashMap::new();
-            post_nodes.insert(node.name.clone(), node);
+            let mut post_nodes = Vec::new();
+            assert!(node.id == 0);
+            post_nodes.push(node);
             self.post_nodes = Some(post_nodes);
         }
     }
 
-    fn find_successors(
-        &self,
-        node_name: &str,
-        node_index: usize,
-    ) -> Vec<(String, Vec<usize>, bool)> {
-        let mut next_nodes: Vec<(String, Vec<usize>, bool)> = Vec::new();
-        let successor_names = match self.successors.get(node_name) {
-            Some(successors) => successors,
-            None => &Vec::new(),
-        };
-        for successor in successor_names {
-            // If successor has barrier, all indexes are returns
-            if self.has_barrier(successor) {
-                let factor = self.nodes.get(successor).expect("Node not found").factor;
+    fn find_successors(&self, node_id: IdType, node_index: usize) -> Vec<(IdType, Vec<usize>)> {
+        let mut next_nodes: Vec<(IdType, Vec<usize>)> = Vec::new();
+
+        if node_id as usize >= self.successors.len() {
+            return next_nodes;
+        }
+
+        let successor_ids = self.successors[node_id as usize].clone();
+
+        for succ_id in successor_ids {
+            // If succ_id has barrier, all indexes are returns
+            if self.has_barrier(succ_id) {
+                let factor = self.nodes[succ_id as usize].factor;
                 let all_indexes: Vec<usize> = (0..factor).collect();
-                next_nodes.push((successor.to_string(), all_indexes, true));
+                next_nodes.push((succ_id, all_indexes));
                 continue;
             }
 
-            // If successor does not have barrier, find specific indexes
-            let indexes = self
-                .pred_idxs
-                .get(&(successor.to_string(), node_name.to_string()))
-                .unwrap();
+            // If succ_id does not have barrier, find specific indexes
+            let indexes = self.get_pred_indexes(succ_id, node_id);
             // Adjust index
             for dep_idx in indexes {
-                let pred_factor = self.nodes.get(node_name).expect("Node not found").factor;
-                let mut succ_factor = self.nodes.get(successor).expect("Node not found").factor;
+                let pred_factor = self.nodes[node_id as usize].factor;
+                let mut succ_factor = self.nodes[succ_id as usize].factor;
 
                 if pred_factor > succ_factor {
                     succ_factor = pred_factor;
                 }
 
                 let succ_indexes =
-                    calculate_succ_indexes(pred_factor, succ_factor, node_index, *dep_idx);
-                next_nodes.push((successor.to_string(), succ_indexes, false));
+                    calculate_succ_indexes(pred_factor, succ_factor, node_index, dep_idx);
+                next_nodes.push((succ_id, succ_indexes));
             }
         }
         next_nodes
     }
 
-    fn total_executed_nodes(&self) -> usize {
-        let mut total = 0;
-        let condition_predecessors = self.get_condition_predecessors();
+    fn dependency_count_vec(&self) -> Vec<usize> {
+        // Return a vector with the dependency count for each node
+        let mut dep_count_vec: Vec<usize> = Vec::new();
+        for node in &self.nodes {
+            let mut dep_count = 0;
+            let mut preds_seen: Vec<IdType> = Vec::new();
 
-        // First pass: identify all nodes without conditions
-        for (_node_name, node) in &self.nodes {
-            let mut has_condition = false;
+            // first check barriers
             for arg in &node.args {
-                if let Some(_) = &arg.init_condition {
-                    has_condition = true;
-                    break;
+                if arg.type_.is_barrier() {
+                    if let Some(pred) = &arg.predecessor {
+                        if !preds_seen.contains(&pred.id) {
+                            preds_seen.push(pred.id);
+                            dep_count += pred.indexes.len();
+                        }
+                    }
                 }
             }
-            if !has_condition {
-                total += node.factor;
-            }
-        }
 
-        // Second pass: for each group of nodes with the same condition,
-        // add the factor only once (use the predecessor's factor)
-        for condition_key in condition_predecessors.keys() {
-            // Use predecessor's factor
-            if let Some(&pred_factor) = condition_predecessors.get(condition_key) {
-                total += pred_factor;
+            for arg in &node.args {
+                if !arg.type_.is_barrier() {
+                    if let Some(pred) = &arg.predecessor {
+                        if !preds_seen.contains(&pred.id) {
+                            preds_seen.push(pred.id);
+                            dep_count += pred.indexes.len();
+                        }
+                    }
+                }
             }
+            dep_count_vec.push(dep_count);
         }
-        total
+        dep_count_vec
+    }
+
+    fn total_executed_nodes(&self) -> usize {
+        self.nodes.iter().map(|n| n.factor).sum()
     }
 }
 
 impl Graph {
     pub fn new() -> Graph {
         Graph {
-            nodes: RapidHashMap::new(),
+            nodes: Vec::new(),
             initial_nodes: Vec::new(),
-            successors: RapidHashMap::new(),
-            pred_idxs: RapidHashMap::new(),
+            successors: Vec::new(),
             id_function: None,
             post_nodes: None,
             init_objects: None,
         }
     }
 
-    pub fn set_nodes(&mut self, nodes: RapidHashMap<String, Node>) {
+    pub fn set_nodes(&mut self, nodes: Vec<Node>) {
         self.nodes = nodes;
     }
 
-    pub fn set_init_objects(&mut self, init_objects: &RapidHashMap<String, Vec<CmTypes>>) {
+    pub fn set_init_objects(&mut self, init_objects: &Vec<Vec<CmTypes>>) {
         self.init_objects = Some(init_objects.clone());
     }
 
@@ -166,23 +160,22 @@ impl Graph {
         self.id_function = Some(id_function.clone());
     }
 
-    pub fn set_post_nodes(&mut self, post_nodes: Option<RapidHashMap<String, Node>>) {
+    pub fn set_post_nodes(&mut self, post_nodes: Option<Vec<Node>>) {
         self.post_nodes = post_nodes;
     }
 
-    pub fn get_condition_predecessors(&self) -> RapidHashMap<String, usize> {
-        let mut condition_predecessors: RapidHashMap<String, usize> = RapidHashMap::new();
-        for (_node_name, node) in &self.nodes {
+    pub fn get_condition_predecessors(&self) -> usize {
+        let mut total = 0;
+        for node in &self.nodes {
             for arg in &node.args {
                 if let Some(_) = &arg.init_condition {
                     // Check what type of condition this is
                     match &arg.type_ {
-                        CmTypes::Res(pred_name) => {
+                        CmTypes::Res(pred_id) => {
                             // For Res conditions, use the predecessor name
-                            if let Some(pred_node) = self.nodes.get(pred_name) {
-                                // Store the predecessor's factor
-                                condition_predecessors.insert(pred_name.clone(), pred_node.factor);
-                            }
+                            let pred_node = &self.nodes[*pred_id];
+                            // Store the predecessor's factor
+                            total += pred_node.factor;
                         }
                         _ => {}
                     }
@@ -190,46 +183,51 @@ impl Graph {
                 }
             }
         }
-        condition_predecessors
+        total
     }
 
-    pub fn get_condition_nodes(&self) -> Vec<String> {
-        let mut condition_nodes: Vec<String> = Vec::new();
-        for (node_name, node) in &self.nodes {
-            for arg in &node.args {
-                if let Some(_) = &arg.init_condition {
-                    condition_nodes.push(node_name.clone());
-                    break;
-                }
+    pub fn get_condition_nodes(&self) -> (Vec<IdType>, Vec<Vec<usize>>) {
+        let mut condition_nodes: Vec<IdType> = Vec::new();
+        let mut arg_indexes: Vec<Vec<usize>> = Vec::new();
+
+        for node in &self.nodes {
+            let condition_arg_indexes: Vec<usize> = node
+                .args
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, arg)| arg.init_condition.as_ref().map(|_| idx))
+                .collect();
+
+            if !condition_arg_indexes.is_empty() {
+                condition_nodes.push(node.id);
+                arg_indexes.push(condition_arg_indexes);
             }
         }
-        condition_nodes
+
+        (condition_nodes, arg_indexes)
     }
 
-    pub fn has_barrier(&self, node_name: &str) -> bool {
-        if let Some(node) = self.nodes.get(node_name) {
-            for arg in &node.args {
-                if arg.type_.is_barrier() {
-                    return true;
-                }
+    pub fn has_barrier(&self, node_id: IdType) -> bool {
+        let node = &self.nodes[node_id as usize];
+        for arg in &node.args {
+            if arg.type_.is_barrier() {
+                return true;
             }
         }
         false
     }
 
-    pub fn get_barriers(&self, node_name: &str) -> Vec<(String, Vec<usize>)> {
-        let mut barriers = Vec::new();
-        if let Some(node) = self.nodes.get(node_name) {
-            for arg in &node.args {
-                if arg.type_.is_barrier() {
-                    if let Some(pred) = &arg.predecessor {
-                        let pred_usize = pred.indexes.iter().map(|&i| i as usize).collect();
-                        barriers.push((pred.name.clone(), pred_usize));
-                    }
+    pub fn get_pred_indexes(&self, node_id: IdType, pred_id: IdType) -> Vec<isize> {
+        let node = &self.nodes[node_id as usize];
+        let args = &node.args;
+        for arg in args {
+            if let Some(pred) = &arg.predecessor {
+                if pred.id == pred_id {
+                    return pred.indexes.clone();
                 }
             }
         }
-        barriers
+        Vec::new()
     }
 }
 
@@ -238,8 +236,8 @@ impl Graph {
     pub fn print_init_objects(&self) {
         if let Some(init_objects) = &self.init_objects {
             println!("Initialized Objects:");
-            for (name, obj) in init_objects {
-                println!("  {}: {:?}", name, obj);
+            for (id, obj) in init_objects.iter().enumerate() {
+                println!("  {}: {:?}", id, obj);
             }
         } else {
             println!("No initialized objects.");
@@ -248,13 +246,13 @@ impl Graph {
 
     pub fn print_graph(&self) {
         println!("Graph:");
-        for (name, node) in &self.nodes {
-            println!("  {}: {:?} ({:?})", name, node.name, node.factor);
+        for node in &self.nodes {
+            println!("  {}: {:?} ({:?})", node.id, node.name, node.factor);
         }
         if let Some(post_nodes) = &self.post_nodes {
             println!("Post Nodes:");
-            for (name, node) in post_nodes {
-                println!("  {}: {:?} ({:?})", name, node.name, node.factor);
+            for node in post_nodes {
+                println!("  {}: {:?} ({:?})", node.id, node.name, node.factor);
             }
         } else {
             println!("No post nodes.");
@@ -262,6 +260,5 @@ impl Graph {
         println!("Initial Nodes: {:?}", self.initial_nodes);
         println!("Total Executed Nodes: {}", self.total_executed_nodes());
         println!("Successors: {:?}", self.successors);
-        println!("Predecessor Indexes: {:?}", self.pred_idxs);
     }
 }

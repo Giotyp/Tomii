@@ -85,25 +85,26 @@ pub enum Factor {
 impl Factor {
     pub fn resolve(
         &self,
-        init_objects: &Option<RapidHashMap<String, Vec<CmTypes>>>,
+        init_objects: &Vec<Vec<CmTypes>>,
+        obj_id_map: &RapidHashMap<String, usize>,
         workers: usize,
     ) -> usize {
         match self {
             Factor::Number(num) => *num,
             Factor::Ref(ref_name) => {
-                if let Some(table) = init_objects {
-                    if let Some(ref_val) = table.get(ref_name) {
-                        let usize_res = ref_val[0].valid_number_to_usize();
-                        if let Some(usize_val) = usize_res {
-                            return usize_val;
-                        } else {
-                            panic!(
-                                "Variable '{}' found but does not contain a valid number",
-                                ref_name
-                            );
-                        }
+                if let Some(obj_id) = obj_id_map.get(ref_name) {
+                    let ref_val = &init_objects[*obj_id];
+                    let usize_res = ref_val[0].valid_number_to_usize();
+                    if let Some(usize_val) = usize_res {
+                        return usize_val;
+                    } else {
+                        panic!(
+                            "Variable '{}' found but does not contain a valid number",
+                            ref_name
+                        );
                     }
                 }
+
                 // Check if ref_name is $workers
                 if ref_name == "$workers" {
                     return workers;
@@ -118,31 +119,36 @@ impl Factor {
 
     pub fn search(
         &self,
-        init_objects: &RapidHashMap<String, Vec<CmTypes>>,
+        init_objects: &Vec<Vec<CmTypes>>,
+        obj_id_map: &RapidHashMap<String, usize>,
         workers: usize,
     ) -> usize {
         match self {
             Factor::Number(num) => *num,
             Factor::Ref(ref_name) => {
-                if let Some(ref_val) = init_objects.get(ref_name) {
-                    let usize_res = ref_val[0].valid_number_to_usize();
-                    if let Some(usize_val) = usize_res {
-                        return usize_val;
-                    } else {
-                        panic!(
-                            "Variable '{}' found but does not contain a valid number",
-                            ref_name
-                        );
-                    }
-                }
                 // Check if ref_name is $workers
                 if ref_name == "$workers" {
                     return workers;
                 }
-                panic!(
-                    "Variable '{}' not found or does not contain a number",
-                    ref_name
-                );
+
+                let obj_id = obj_id_map.get(ref_name).unwrap();
+
+                if obj_id > &init_objects.len() {
+                    panic!(
+                        "Variable '{}' not found or does not contain a number",
+                        ref_name
+                    );
+                }
+
+                let usize_res = &init_objects[*obj_id][0].valid_number_to_usize();
+                if let Some(usize_val) = usize_res {
+                    return *usize_val;
+                } else {
+                    panic!(
+                        "Variable '{}' found but does not contain a valid number",
+                        ref_name
+                    );
+                }
             }
         }
     }

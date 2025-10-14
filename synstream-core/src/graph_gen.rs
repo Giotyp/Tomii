@@ -7,11 +7,18 @@ use crate::graph::*;
 use crate::graph_struct::*;
 use crate::json_structs::*;
 use crate::obj_gen::init_objects;
-use rapidhash::RapidHashMap;
+use crate::prelude::*;
+use rapidhash::{HashMapExt, RapidHashMap};
 use serde_json;
+use std::sync::atomic::Ordering::SeqCst;
 use synstream_types::*;
 
-fn parse_arg(arg_json: &ArgJson, init_objects: Option<&RapidHashMap<String, Vec<CmTypes>>>) -> Arg {
+fn parse_arg(
+    arg_json: &ArgJson,
+    init_objects: &Vec<Vec<CmTypes>>,
+    obj_id_map: &RapidHashMap<String, usize>,
+    name_to_id: &RapidHashMap<String, IdType>,
+) -> Arg {
     let arg_value_opt = arg_json.value.clone();
 
     // Check if the argument has a condition
@@ -26,7 +33,12 @@ fn parse_arg(arg_json: &ArgJson, init_objects: Option<&RapidHashMap<String, Vec<
     let predecessor: Option<Predecessor> = {
         // Check if the argument has a predecessor
         if let Some(pred_json) = &arg_json.predecessor {
-            Some(parse_predecessor(pred_json, init_objects))
+            Some(parse_predecessor(
+                pred_json,
+                init_objects,
+                obj_id_map,
+                &name_to_id,
+            ))
         } else {
             None
         }
@@ -35,20 +47,23 @@ fn parse_arg(arg_json: &ArgJson, init_objects: Option<&RapidHashMap<String, Vec<
     let arg_cmtype = {
         let type_json = arg_json.type_.clone();
         if predecessor.is_some() {
-            let name = predecessor.as_ref().unwrap().name.clone();
-            string_to_cmtype(type_json.clone(), name).unwrap()
+            let id = predecessor.as_ref().unwrap().id;
+            string_to_cmtype(type_json.clone(), id.to_string()).unwrap()
         } else {
-            if arg_value_opt.is_some() {
-                string_to_cmtype(type_json.clone(), arg_value_opt.clone().unwrap()).unwrap()
+            if let Some(arg_value) = arg_value_opt {
+                if let Some(obj_id) = obj_id_map.get(&arg_value) {
+                    string_to_cmtype(type_json.clone(), obj_id.to_string()).unwrap()
+                } else {
+                    string_to_cmtype(type_json.clone(), arg_value).unwrap()
+                }
             } else {
                 // This should not happen
-                CmTypes::None()
+                CmTypes::None
             }
         }
     };
 
     let arg = Arg {
-        value: arg_value_opt,
         type_: arg_cmtype,
         init_condition: condition,
         predecessor,
@@ -58,9 +73,13 @@ fn parse_arg(arg_json: &ArgJson, init_objects: Option<&RapidHashMap<String, Vec<
 
 fn parse_predecessor(
     pred_json: &PredJson,
-    init_objects: Option<&RapidHashMap<String, Vec<CmTypes>>>,
+    init_objects: &Vec<Vec<CmTypes>>,
+    obj_id_map: &RapidHashMap<String, usize>,
+    name_to_id: &RapidHashMap<String, IdType>,
 ) -> Predecessor {
     let pred_name = pred_json.name.clone();
+    let pred_id = name_to_id.get(&pred_name).unwrap().clone();
+
     let mut index_vec = Vec::new();
     let indexes = pred_json.indexes.clone();
 
@@ -81,12 +100,9 @@ fn parse_predecessor(
                 Ok(end) => end + 1,
                 Err(_) => {
                     // If the second part of the range is not a number, it might be a reference
-                    if let Some(init_objects) = init_objects {
-                        if let Some(ref_val) = init_objects.get(range[1]) {
-                            ref_val[0].valid_number_to_usize().unwrap() as isize
-                        } else {
-                            panic!("Invalid range in predecessor: {}", indexes);
-                        }
+                    if let Some(obj_id) = obj_id_map.get(range[1]) {
+                        let ref_val = &init_objects[*obj_id];
+                        ref_val[0].valid_number_to_usize().unwrap() as isize
                     } else {
                         panic!("Invalid range in predecessor: {}", indexes);
                     }
@@ -102,7 +118,7 @@ fn parse_predecessor(
     }
 
     Predecessor {
-        name: pred_name,
+        id: pred_id,
         indexes: index_vec,
     }
 }
@@ -138,28 +154,28 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
     let graph_parsed: GraphFile = serde_json::from_str(&contents)?;
 
     // Check for initializations in the graph
-    let init_objects = match init_objects(&graph_parsed.initializations, workers) {
-        Ok(init_objects) => Some(init_objects),
+    let (init_vec, obj_id_map) = match init_objects(&graph_parsed.initializations, workers) {
+        Ok((init_vec, obj_id_map)) => (init_vec, obj_id_map),
         Err(e) => {
-            eprintln!("Error parsing initial objects: {}", e);
-            None
+            panic!("Error parsing initial objects: {}", e);
         }
     };
 
     // Create a new Graph
     let mut graph = Graph::new();
+    let mut name_to_id: RapidHashMap<String, IdType> = RapidHashMap::new();
 
-    for node_json in &graph_parsed.nodes {
+    for node_json in graph_parsed.nodes.iter() {
         let mut args = Vec::new();
         let mut loop_args_vec = Vec::new();
 
         for arg_json in &node_json.args {
-            args.push(parse_arg(arg_json, init_objects.as_ref()));
+            args.push(parse_arg(arg_json, &init_vec, &obj_id_map, &name_to_id));
         }
 
         if let Some(loop_args_json) = &node_json.loop_args {
             for arg_json in loop_args_json {
-                loop_args_vec.push(parse_arg(arg_json, init_objects.as_ref()));
+                loop_args_vec.push(parse_arg(arg_json, &init_vec, &obj_id_map, &name_to_id));
             }
         }
 
@@ -174,7 +190,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
         let func_ptr = get_func(&node_json.function_name);
 
         let factor = match &node_json.factor {
-            Some(factor) => factor.resolve(&init_objects, workers),
+            Some(factor) => factor.resolve(&init_vec, &obj_id_map, workers),
             None => 1,
         };
 
@@ -185,16 +201,20 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
                     factor: loop_json
                         .factor
                         .as_ref()
-                        .map_or(1, |f| f.resolve(&init_objects, workers)),
+                        .map_or(1, |f| f.resolve(&init_vec, &obj_id_map, workers)),
                 })
             } else {
                 None
             }
         };
 
+        let node_count = NodeCount.fetch_add(1, SeqCst);
+        name_to_id.insert(node_json.name.clone(), node_count);
+
         let node = Node {
             name: node_json.name.clone(),
             args,
+            id: node_count as IdType,
             loop_args,
             factor: factor,
             func_ptr,
@@ -204,24 +224,27 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
         graph.add_node(node.clone());
     }
 
-    for post_node_json in graph_parsed.post_nodes.unwrap_or_default() {
+    for post_node_json in graph_parsed.post_nodes.unwrap_or_default().iter() {
         let mut args = Vec::new();
         for arg_json in &post_node_json.args {
-            args.push(parse_arg(arg_json, init_objects.as_ref()));
+            args.push(parse_arg(arg_json, &init_vec, &obj_id_map, &name_to_id));
         }
 
         let func_ptr = get_func(&post_node_json.function_name);
 
         let factor = match &post_node_json.factor {
-            Some(factor) => factor.resolve(&init_objects, workers),
+            Some(factor) => factor.resolve(&init_vec, &obj_id_map, workers),
             None => 1,
         };
 
         println!("Adding post-node: {}", post_node_json.name);
 
+        let post_node_count = PostNodeCount.fetch_add(1, SeqCst);
+
         let node = Node {
             name: post_node_json.name.clone(),
             args,
+            id: post_node_count,
             loop_args: None,
             factor,
             func_ptr,
@@ -236,15 +259,19 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
         let func_ptr = get_func(&id_function_json.function_name);
 
         let predecessor = &id_function_json.predecessor;
+        let pred_id = name_to_id
+            .get(predecessor)
+            .expect("ID function predecessor not found")
+            .clone();
 
         let mut args = Vec::new();
         for arg_json in &id_function_json.args {
-            args.push(parse_arg(arg_json, init_objects.as_ref()));
+            args.push(parse_arg(arg_json, &init_vec, &obj_id_map, &name_to_id));
         }
 
         let id_function = IdFunction {
             func_ptr,
-            predecessor: predecessor.clone(),
+            predecessor: pred_id,
             args,
         };
 
@@ -252,27 +279,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
     }
 
     // Set the initialized objects in the graph
-    if let Some(init_objects) = init_objects {
-        graph.set_init_objects(&init_objects);
-    }
+    graph.set_init_objects(&init_vec);
 
     Ok(graph)
-}
-
-pub fn re_init_objects(graph: &mut Graph, graph_json: &str, workers: usize) {
-    let mut file = File::open(graph_json).unwrap();
-    let mut contents = String::new();
-    file.read_to_string(&mut contents).unwrap();
-
-    // Parse JSON file with defined structure
-    let graph_parsed: GraphFile = serde_json::from_str(&contents).unwrap();
-    // Check for initializations in the graph
-    let init_objects = match init_objects(&graph_parsed.initializations, workers) {
-        Ok(init_objects) => Some(init_objects),
-        Err(_) => None,
-    };
-    // Set the initialized objects in the graph
-    if let Some(init_objects) = init_objects {
-        graph.set_init_objects(&init_objects);
-    }
 }
