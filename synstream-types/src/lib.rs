@@ -1,6 +1,7 @@
 use lazy_static::lazy_static;
+use num_complex::{Complex32, Complex64};
 use rapidhash::{HashMapExt, RapidHashMap};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::any::Any;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,6 +31,8 @@ pub enum CmTypes {
     Ref(usize),
     Res(usize),
     Barrier(String),
+    Complex32(C32),
+    Complex64(C64),
     VecCmt(Vec<CmTypes>),
     None,
     Init,
@@ -37,6 +40,96 @@ pub enum CmTypes {
     Any(Arc<RwLock<Box<dyn Any + Send + Sync>>>),
     #[serde(skip)]
     AnySliced(Arc<dyn SlicedAccess>),
+}
+
+// Wrapper for Complex32 to implement Serialize/Deserialize
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct C32(pub Complex32);
+
+impl Serialize for C32 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("Complex32", 2)?;
+        state.serialize_field("re", &self.0.re)?;
+        state.serialize_field("im", &self.0.im)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for C32 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Complex32Fields {
+            re: f32,
+            im: f32,
+        }
+
+        let fields = Complex32Fields::deserialize(deserializer)?;
+        Ok(C32(Complex32::new(fields.re, fields.im)))
+    }
+}
+
+impl From<Complex32> for C32 {
+    fn from(c: Complex32) -> Self {
+        C32(c)
+    }
+}
+
+impl From<C32> for Complex32 {
+    fn from(c: C32) -> Self {
+        c.0
+    }
+}
+
+// Wrapper for Complex64 to implement Serialize/Deserialize
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct C64(pub Complex64);
+
+impl Serialize for C64 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("Complex64", 2)?;
+        state.serialize_field("re", &self.0.re)?;
+        state.serialize_field("im", &self.0.im)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for C64 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Complex64Fields {
+            re: f64,
+            im: f64,
+        }
+
+        let fields = Complex64Fields::deserialize(deserializer)?;
+        Ok(C64(Complex64::new(fields.re, fields.im)))
+    }
+}
+
+impl From<Complex64> for C64 {
+    fn from(c: Complex64) -> Self {
+        C64(c)
+    }
+}
+
+impl From<C64> for Complex64 {
+    fn from(c: C64) -> Self {
+        c.0
+    }
 }
 
 impl CmTypes {
@@ -558,6 +651,8 @@ impl PartialEq for CmTypes {
             (CmTypes::Ref(a), CmTypes::Ref(b)) => a == b,
             (CmTypes::Res(a), CmTypes::Res(b)) => a == b,
             (CmTypes::Barrier(a), CmTypes::Barrier(b)) => a == b,
+            (CmTypes::Complex32(a), CmTypes::Complex32(b)) => a == b,
+            (CmTypes::Complex64(a), CmTypes::Complex64(b)) => a == b,
             (CmTypes::None, CmTypes::None) => true,
             (CmTypes::Init, CmTypes::Init) => true,
             _ => false,
@@ -589,6 +684,8 @@ impl std::fmt::Debug for CmTypes {
             CmTypes::Ref(val) => write!(f, "Ref({:?})", val),
             CmTypes::Res(val) => write!(f, "Res({:?})", val),
             CmTypes::Barrier(val) => write!(f, "Barrier({:?})", val),
+            CmTypes::Complex32(val) => write!(f, "Complex32({:?})", val),
+            CmTypes::Complex64(val) => write!(f, "Complex64({:?})", val),
             CmTypes::None => write!(f, "None"),
             CmTypes::Init => write!(f, "Init"),
             CmTypes::Any(_) => write!(f, "CustomType"),
@@ -621,6 +718,20 @@ impl fmt::Display for CmTypes {
             CmTypes::Ref(x) => write!(f, "{}", x),
             CmTypes::Res(x) => write!(f, "{}", x),
             CmTypes::Barrier(x) => write!(f, "{}", x),
+            CmTypes::Complex32(x) => {
+                if x.0.im >= 0.0 {
+                    write!(f, "{}+{}i", x.0.re, x.0.im)
+                } else {
+                    write!(f, "{}{}i", x.0.re, x.0.im)
+                }
+            }
+            CmTypes::Complex64(x) => {
+                if x.0.im >= 0.0 {
+                    write!(f, "{}+{}i", x.0.re, x.0.im)
+                } else {
+                    write!(f, "{}{}i", x.0.re, x.0.im)
+                }
+            }
             CmTypes::None => write!(f, "None"),
             CmTypes::Init => write!(f, "Init"),
             CmTypes::VecCmt(x) => {
@@ -666,6 +777,112 @@ impl std::error::Error for CustomError {
     }
 }
 
+/// Parse a Complex32 from various string formats:
+/// - JSON: {"re":3.5,"im":2.5}
+/// - Standard: 3.5+2.5i or 3.5-2.5i
+/// - Comma-separated: 3.5,2.5
+fn parse_complex32(s: &str) -> Result<C32, CustomError> {
+    let s = s.trim();
+
+    // Try JSON format first
+    if s.starts_with('{') {
+        return serde_json::from_str::<C32>(s)
+            .map_err(|_| CustomError::new("invalid Complex32 JSON format"));
+    }
+
+    // Try comma-separated format: "3.5,2.5"
+    if let Some(comma_pos) = s.find(',') {
+        let re_str = s[..comma_pos].trim();
+        let im_str = s[comma_pos + 1..].trim();
+
+        let re = re_str
+            .parse::<f32>()
+            .map_err(|_| CustomError::new("invalid Complex32 real part"))?;
+        let im = im_str
+            .parse::<f32>()
+            .map_err(|_| CustomError::new("invalid Complex32 imaginary part"))?;
+
+        return Ok(C32(Complex32::new(re, im)));
+    }
+
+    // Try standard format: "3.5+2.5i" or "3.5-2.5i"
+    // Find the position of 'i' at the end
+    if s.ends_with('i') {
+        let s = &s[..s.len() - 1]; // Remove the 'i'
+
+        // Find the last '+' or '-' that's not at the start
+        let mut split_pos = None;
+        for (i, c) in s.char_indices().skip(1) {
+            if c == '+' || c == '-' {
+                split_pos = Some(i);
+            }
+        }
+
+        if let Some(pos) = split_pos {
+            let re_str = s[..pos].trim();
+            let im_str = s[pos..].trim();
+
+            let re = re_str
+                .parse::<f32>()
+                .map_err(|_| CustomError::new("invalid Complex32 real part"))?;
+            let im = im_str
+                .parse::<f32>()
+                .map_err(|_| CustomError::new("invalid Complex32 imaginary part"))?;
+
+            return Ok(C32(Complex32::new(re, im)));
+        }
+    }
+
+    Err(CustomError::new(
+        "invalid Complex32 format. Use: '3.5+2.5i', '3.5,2.5', or '{\"re\":3.5,\"im\":2.5}'",
+    ))
+}
+
+/// Parse a Complex64 from various string formats:
+/// - JSON: {"re":3.5,"im":2.5}
+/// - Standard: 3.5+2.5i or 3.5-2.5i
+fn parse_complex64(s: &str) -> Result<C64, CustomError> {
+    let s = s.trim();
+
+    // Try JSON format first
+    if s.starts_with('{') {
+        return serde_json::from_str::<C64>(s)
+            .map_err(|_| CustomError::new("invalid Complex64 JSON format"));
+    }
+
+    // Try standard format: "3.5+2.5i" or "3.5-2.5i"
+    // Find the position of 'i' at the end
+    if s.ends_with('i') {
+        let s = &s[..s.len() - 1]; // Remove the 'i'
+
+        // Find the last '+' or '-' that's not at the start
+        let mut split_pos = None;
+        for (i, c) in s.char_indices().skip(1) {
+            if c == '+' || c == '-' {
+                split_pos = Some(i);
+            }
+        }
+
+        if let Some(pos) = split_pos {
+            let re_str = s[..pos].trim();
+            let im_str = s[pos..].trim();
+
+            let re = re_str
+                .parse::<f64>()
+                .map_err(|_| CustomError::new("invalid Complex64 real part"))?;
+            let im = im_str
+                .parse::<f64>()
+                .map_err(|_| CustomError::new("invalid Complex64 imaginary part"))?;
+
+            return Ok(C64(Complex64::new(re, im)));
+        }
+    }
+
+    Err(CustomError::new(
+        "invalid Complex64 format. Use: '3.5+2.5i', '3.5,2.5', or '{\"re\":3.5,\"im\":2.5}'",
+    ))
+}
+
 type ParserFn = fn(&str) -> Result<CmTypes, CustomError>;
 
 lazy_static! {
@@ -692,6 +909,8 @@ lazy_static! {
         add!("usize",   |s| s.parse::<usize>().map(CmTypes::Usize).map_err(|_| CustomError::new("invalid usize")));
         add!("isize",   |s| s.parse::<isize>().map(CmTypes::Isize).map_err(|_| CustomError::new("invalid isize")));
         add!("String",  |s| Ok(CmTypes::String(s.to_string())));
+        add!("Complex32",     |s| parse_complex32(s).map(CmTypes::Complex32));
+        add!("Complex64",     |s| parse_complex64(s).map(CmTypes::Complex64));
         add!("$ref",    |s| s.parse::<usize>().map(CmTypes::Ref).map_err(|_| CustomError::new("invalid ref")));
         add!("$res",    |s| s.parse::<usize>().map(CmTypes::Res).map_err(|_| CustomError::new("invalid res")));
         add!("$barrier", |s| Ok(CmTypes::Barrier(s.to_string())));
@@ -988,5 +1207,97 @@ mod tests {
         if let Some(slice) = sliced_data.sliced_get_range::<usize>(0, 10) {
             println!("Final data after modifications: {:?}", slice);
         }
+    }
+
+    #[test]
+    fn test_complex_serialization() {
+        use num_complex::{Complex32, Complex64};
+
+        // Test Complex32
+        let c32 = C32(Complex32::new(3.5, 2.5));
+        let json = serde_json::to_string(&c32).unwrap();
+        println!("Complex32 serialized: {}", json);
+        let deserialized: C32 = serde_json::from_str(&json).unwrap();
+        assert_eq!(c32, deserialized);
+
+        // Test Complex64
+        let c64 = C64(Complex64::new(7.25, -4.75));
+        let json = serde_json::to_string(&c64).unwrap();
+        println!("Complex64 serialized: {}", json);
+        let deserialized: C64 = serde_json::from_str(&json).unwrap();
+        assert_eq!(c64, deserialized);
+
+        // Test in CmTypes enum
+        let cm_c32 = CmTypes::Complex32(C32(Complex32::new(1.0, 2.0)));
+        let cm_c64 = CmTypes::Complex64(C64(Complex64::new(3.0, 4.0)));
+
+        println!("CmTypes::Complex32 display: {}", cm_c32);
+        println!("CmTypes::Complex64 display: {}", cm_c64);
+        println!("CmTypes::Complex32 debug: {:?}", cm_c32);
+        println!("CmTypes::Complex64 debug: {:?}", cm_c64);
+    }
+
+    #[test]
+    fn test_complex_parsing() {
+        // Test Complex32 parsing with different formats
+
+        // Standard format: a+bi
+        let result = string_to_cmtype("Complex32".to_string(), "3.5+2.5i".to_string());
+        assert!(result.is_ok());
+        if let Ok(CmTypes::Complex32(c)) = result {
+            assert_eq!(c.0.re, 3.5);
+            assert_eq!(c.0.im, 2.5);
+            println!("Parsed '3.5+2.5i' as Complex32: {}", CmTypes::Complex32(c));
+        }
+
+        // Standard format with negative imaginary: a-bi
+        let result = string_to_cmtype("Complex32".to_string(), "3.5-2.5i".to_string());
+        assert!(result.is_ok());
+        if let Ok(CmTypes::Complex32(c)) = result {
+            assert_eq!(c.0.re, 3.5);
+            assert_eq!(c.0.im, -2.5);
+            println!("Parsed '3.5-2.5i' as Complex32: {}", CmTypes::Complex32(c));
+        }
+
+        // Comma-separated format
+        let result = string_to_cmtype("Complex32".to_string(), "1.5,4.5".to_string());
+        assert!(result.is_ok());
+        if let Ok(CmTypes::Complex32(c)) = result {
+            assert_eq!(c.0.re, 1.5);
+            assert_eq!(c.0.im, 4.5);
+            println!("Parsed '1.5,4.5' as Complex32: {}", CmTypes::Complex32(c));
+        }
+
+        // JSON format
+        let result = string_to_cmtype(
+            "Complex32".to_string(),
+            r#"{"re":7.5,"im":-3.5}"#.to_string(),
+        );
+        assert!(result.is_ok());
+        if let Ok(CmTypes::Complex32(c)) = result {
+            assert_eq!(c.0.re, 7.5);
+            assert_eq!(c.0.im, -3.5);
+            println!("Parsed JSON as Complex32: {}", CmTypes::Complex32(c));
+        }
+
+        // Test Complex64 parsing with different formats
+
+        // Standard format: a+bi
+        let result = string_to_cmtype("Complex64".to_string(), "10.5+20.5i".to_string());
+        assert!(result.is_ok());
+        if let Ok(CmTypes::Complex64(c)) = result {
+            assert_eq!(c.0.re, 10.5);
+            assert_eq!(c.0.im, 20.5);
+            println!(
+                "Parsed '10.5+20.5i' as Complex64: {}",
+                CmTypes::Complex64(c)
+            );
+        }
+
+        // Test that defined_type recognizes Complex32 and Complex64
+        assert!(defined_type("Complex32"));
+        assert!(defined_type("Complex64"));
+
+        println!("All complex parsing tests passed!");
     }
 }

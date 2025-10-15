@@ -323,10 +323,10 @@ impl SynRt {
 
                 // Check if this stream iteration is complete
                 if current_count >= shared.total_nodes_per_stream {
-                    print_debug(&format!(
+                    println!(
                         "Completed iteration at slot {} with {} nodes",
-                        slot, current_count
-                    ));
+                        slot, current_count,
+                    );
 
                     let new_iteration = Self::process_slot_completion(&shared, slot);
                     // Reset completed_count_map for this slot
