@@ -1,5 +1,4 @@
 use lazy_static::lazy_static;
-use num_complex::{Complex32, Complex64};
 use rapidhash::{HashMapExt, RapidHashMap};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::any::Any;
@@ -8,6 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
+
+// Re-export num_complex Complex types for convenience
+pub use num_complex::{Complex32, Complex64};
 
 #[derive(Deserialize, Clone)]
 pub enum CmTypes {
