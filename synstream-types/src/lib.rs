@@ -209,7 +209,11 @@ impl CmTypes {
 
     /// Get mutable access to a range in an AnySliced CmTypes with automatic cleanup
     /// Returns a RAII guard that automatically releases write bits when dropped
-    pub fn sliced_get_mut_range<T>(&self, start: usize, len: usize) -> Option<MutSliceGuard<T>> {
+    pub fn sliced_get_mut_range<T>(
+        &self,
+        start: usize,
+        len: usize,
+    ) -> Option<MutSliceGuard<'_, T>> {
         if let CmTypes::AnySliced(container_arc) = self {
             unsafe {
                 if let Some((raw_ptr, byte_len)) = container_arc.get_mut_range_raw(start, len) {

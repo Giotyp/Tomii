@@ -45,11 +45,29 @@ impl FifoScheduler {
         // Create threadpool and pin workers to cores
         let mut core_ids = core_affinity::get_core_ids().unwrap();
         core_ids.sort();
+
+        let available_cores = core_ids.len();
+
+        // If requested workers exceed available cores, ignore offset and use max-1 workers
+        let (actual_offset, actual_workers) = if core_offset + workers > available_cores {
+            eprintln!(
+                "Warning: Requested {} workers with offset {} exceeds available {} cores. \
+                 Using {} workers (max-1) with no offset.",
+                workers,
+                core_offset,
+                available_cores,
+                available_cores - 1
+            );
+            (0, available_cores - 1)
+        } else {
+            (core_offset, workers)
+        };
+
         let cores_to_use: Vec<core_affinity::CoreId> =
-            core_ids[core_offset..core_offset + workers].to_vec();
+            core_ids[actual_offset..actual_offset + actual_workers].to_vec();
 
         let threadpool = ThreadPoolBuilder::new()
-            .num_threads(workers)
+            .num_threads(actual_workers)
             .start_handler(move |thread_index| {
                 // Pin each thread to a specific core
                 let core_id = cores_to_use[thread_index];
@@ -114,11 +132,29 @@ impl WorkStealScheduler {
         // Create threadpool and pin workers to cores
         let mut core_ids = core_affinity::get_core_ids().unwrap();
         core_ids.sort();
+
+        let available_cores = core_ids.len();
+
+        // If requested workers exceed available cores, ignore offset and use max-1 workers
+        let (actual_offset, actual_workers) = if core_offset + workers > available_cores {
+            eprintln!(
+                "Warning: Requested {} workers with offset {} exceeds available {} cores. \
+                 Using {} workers (max-1) with no offset.",
+                workers,
+                core_offset,
+                available_cores,
+                available_cores - 1
+            );
+            (0, available_cores - 1)
+        } else {
+            (core_offset, workers)
+        };
+
         let cores_to_use: Vec<core_affinity::CoreId> =
-            core_ids[core_offset..core_offset + workers].to_vec();
+            core_ids[actual_offset..actual_offset + actual_workers].to_vec();
 
         let threadpool = ThreadPoolBuilder::new()
-            .num_threads(workers)
+            .num_threads(actual_workers)
             .start_handler(move |thread_index| {
                 // Pin each thread to a specific core
                 let core_id = cores_to_use[thread_index];
