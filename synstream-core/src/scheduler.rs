@@ -3,6 +3,8 @@
 use core_affinity;
 use rayon::{prelude::*, vec};
 use rayon::{ThreadPool, ThreadPoolBuilder};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 
 pub trait Scheduler {
@@ -14,10 +16,28 @@ pub trait Scheduler {
         // Default implementation returns 1 worker
         1
     }
+
+    /// Get the number of jobs currently pending/executing in the pool
+    fn pending_jobs(&self) -> usize {
+        0 // Default implementation
+    }
+
+    /// Get the total number of jobs spawned since creation
+    fn total_jobs_spawned(&self) -> usize {
+        0 // Default implementation
+    }
+
+    /// Get the total number of jobs completed since creation
+    fn total_jobs_completed(&self) -> usize {
+        0 // Default implementation
+    }
 }
 
 pub struct FifoScheduler {
     threadpool: ThreadPool,
+    pending_jobs: Arc<AtomicUsize>,
+    total_spawned: Arc<AtomicUsize>,
+    total_completed: Arc<AtomicUsize>,
 }
 
 impl FifoScheduler {
@@ -38,7 +58,12 @@ impl FifoScheduler {
             .build()
             .unwrap();
 
-        Self { threadpool }
+        Self {
+            threadpool,
+            pending_jobs: Arc::new(AtomicUsize::new(0)),
+            total_spawned: Arc::new(AtomicUsize::new(0)),
+            total_completed: Arc::new(AtomicUsize::new(0)),
+        }
     }
 }
 
@@ -47,18 +72,41 @@ impl Scheduler for FifoScheduler {
     where
         F: FnOnce() + Send + 'static,
     {
+        self.pending_jobs.fetch_add(1, Ordering::SeqCst);
+        self.total_spawned.fetch_add(1, Ordering::SeqCst);
+
+        let pending = Arc::clone(&self.pending_jobs);
+        let completed = Arc::clone(&self.total_completed);
+
         self.threadpool.spawn_fifo(move || {
             task();
+            pending.fetch_sub(1, Ordering::SeqCst);
+            completed.fetch_add(1, Ordering::SeqCst);
         });
     }
 
     fn workers(&self) -> usize {
         self.threadpool.current_num_threads()
     }
+
+    fn pending_jobs(&self) -> usize {
+        self.pending_jobs.load(Ordering::SeqCst)
+    }
+
+    fn total_jobs_spawned(&self) -> usize {
+        self.total_spawned.load(Ordering::SeqCst)
+    }
+
+    fn total_jobs_completed(&self) -> usize {
+        self.total_completed.load(Ordering::SeqCst)
+    }
 }
 
 pub struct WorkStealScheduler {
     threadpool: ThreadPool,
+    pending_jobs: Arc<AtomicUsize>,
+    total_spawned: Arc<AtomicUsize>,
+    total_completed: Arc<AtomicUsize>,
 }
 
 impl WorkStealScheduler {
@@ -79,7 +127,12 @@ impl WorkStealScheduler {
             .build()
             .unwrap();
 
-        Self { threadpool }
+        Self {
+            threadpool,
+            pending_jobs: Arc::new(AtomicUsize::new(0)),
+            total_spawned: Arc::new(AtomicUsize::new(0)),
+            total_completed: Arc::new(AtomicUsize::new(0)),
+        }
     }
 }
 
@@ -88,13 +141,33 @@ impl Scheduler for WorkStealScheduler {
     where
         F: FnOnce() + Send + 'static,
     {
+        self.pending_jobs.fetch_add(1, Ordering::SeqCst);
+        self.total_spawned.fetch_add(1, Ordering::SeqCst);
+
+        let pending = Arc::clone(&self.pending_jobs);
+        let completed = Arc::clone(&self.total_completed);
+
         self.threadpool.spawn(move || {
             task_clos();
+            pending.fetch_sub(1, Ordering::SeqCst);
+            completed.fetch_add(1, Ordering::SeqCst);
         });
     }
 
     fn workers(&self) -> usize {
         self.threadpool.current_num_threads()
+    }
+
+    fn pending_jobs(&self) -> usize {
+        self.pending_jobs.load(Ordering::SeqCst)
+    }
+
+    fn total_jobs_spawned(&self) -> usize {
+        self.total_spawned.load(Ordering::SeqCst)
+    }
+
+    fn total_jobs_completed(&self) -> usize {
+        self.total_completed.load(Ordering::SeqCst)
     }
 }
 
@@ -111,6 +184,34 @@ impl Scheduler for SchedulerImpl {
         match self {
             SchedulerImpl::Fifo(scheduler) => scheduler.spawn_task(task),
             SchedulerImpl::WorkStealing(scheduler) => scheduler.spawn_task(task),
+        }
+    }
+
+    fn workers(&self) -> usize {
+        match self {
+            SchedulerImpl::Fifo(scheduler) => scheduler.workers(),
+            SchedulerImpl::WorkStealing(scheduler) => scheduler.workers(),
+        }
+    }
+
+    fn pending_jobs(&self) -> usize {
+        match self {
+            SchedulerImpl::Fifo(scheduler) => scheduler.pending_jobs(),
+            SchedulerImpl::WorkStealing(scheduler) => scheduler.pending_jobs(),
+        }
+    }
+
+    fn total_jobs_spawned(&self) -> usize {
+        match self {
+            SchedulerImpl::Fifo(scheduler) => scheduler.total_jobs_spawned(),
+            SchedulerImpl::WorkStealing(scheduler) => scheduler.total_jobs_spawned(),
+        }
+    }
+
+    fn total_jobs_completed(&self) -> usize {
+        match self {
+            SchedulerImpl::Fifo(scheduler) => scheduler.total_jobs_completed(),
+            SchedulerImpl::WorkStealing(scheduler) => scheduler.total_jobs_completed(),
         }
     }
 }
