@@ -1,3 +1,5 @@
+use core::panic;
+
 use crate::graph_struct::*;
 use crate::{debug::print_debug, IdType};
 use synstream_types::*;
@@ -7,7 +9,8 @@ use synstream_types::*;
 pub struct Graph {
     pub nodes: Vec<Node>,
     pub initial_nodes: Vec<IdType>,
-    successors: Vec<Vec<IdType>>,
+    pub successors: Vec<Vec<IdType>>,
+    pub condition_nodes: Vec<IdType>,
     pub id_function: Option<IdFunction>,
     pub post_nodes: Option<Vec<Node>>,
     pub init_objects: Option<Vec<Vec<CmTypes>>>,
@@ -45,6 +48,9 @@ impl GraphStruct for Graph {
             ));
             self.initial_nodes.push(node.id);
         }
+        if Self::has_condition(&node.args) {
+            self.condition_nodes.push(node.id);
+        }
         self.nodes.push(node);
     }
 
@@ -60,41 +66,15 @@ impl GraphStruct for Graph {
         }
     }
 
-    fn find_successors(&self, node_id: IdType, node_index: usize) -> Vec<(IdType, Vec<usize>)> {
-        let mut next_nodes: Vec<(IdType, Vec<usize>)> = Vec::new();
-
+    fn find_successors(&self, node_id: IdType) -> &Vec<IdType> {
         if node_id as usize >= self.successors.len() {
-            return next_nodes;
+            panic!(
+                "Node id {} out of bounds for successors with length {}",
+                node_id,
+                self.successors.len()
+            );
         }
-
-        let successor_ids = self.successors[node_id as usize].clone();
-
-        for succ_id in successor_ids {
-            // If succ_id has barrier, all indexes are returns
-            if self.has_barrier(succ_id) {
-                let factor = self.nodes[succ_id as usize].factor;
-                let all_indexes: Vec<usize> = (0..factor).collect();
-                next_nodes.push((succ_id, all_indexes));
-                continue;
-            }
-
-            // If succ_id does not have barrier, find specific indexes
-            let indexes = self.get_pred_indexes(succ_id, node_id);
-            // Adjust index
-            for dep_idx in indexes {
-                let pred_factor = self.nodes[node_id as usize].factor;
-                let mut succ_factor = self.nodes[succ_id as usize].factor;
-
-                if pred_factor > succ_factor {
-                    succ_factor = pred_factor;
-                }
-
-                let succ_indexes =
-                    calculate_succ_indexes(pred_factor, succ_factor, node_index, dep_idx);
-                next_nodes.push((succ_id, succ_indexes));
-            }
-        }
-        next_nodes
+        &self.successors[node_id as usize]
     }
 
     fn dependency_count_vec(&self) -> Vec<usize> {
@@ -142,6 +122,7 @@ impl Graph {
             nodes: Vec::new(),
             initial_nodes: Vec::new(),
             successors: Vec::new(),
+            condition_nodes: Vec::new(),
             id_function: None,
             post_nodes: None,
             init_objects: None,
@@ -164,33 +145,10 @@ impl Graph {
         self.post_nodes = post_nodes;
     }
 
-    pub fn get_condition_predecessors(&self) -> usize {
-        let mut total = 0;
-        for node in &self.nodes {
-            for arg in &node.args {
-                if let Some(_) = &arg.init_condition {
-                    // Check what type of condition this is
-                    match &arg.type_ {
-                        CmTypes::Res(pred_id) => {
-                            // For Res conditions, use the predecessor name
-                            let pred_node = &self.nodes[*pred_id];
-                            // Store the predecessor's factor
-                            total += pred_node.factor;
-                        }
-                        _ => {}
-                    }
-                    break;
-                }
-            }
-        }
-        total
-    }
-
-    pub fn get_condition_nodes(&self) -> (Vec<IdType>, Vec<Vec<usize>>) {
-        let mut condition_nodes: Vec<IdType> = Vec::new();
-        let mut arg_indexes: Vec<Vec<usize>> = Vec::new();
-
-        for node in &self.nodes {
+    pub fn get_condition_indexes(&self) -> Vec<Vec<usize>> {
+        let mut condition_indexes: Vec<Vec<usize>> = Vec::new();
+        for cond_id in self.condition_nodes.iter() {
+            let node = &self.nodes[*cond_id as usize];
             let condition_arg_indexes: Vec<usize> = node
                 .args
                 .iter()
@@ -199,12 +157,10 @@ impl Graph {
                 .collect();
 
             if !condition_arg_indexes.is_empty() {
-                condition_nodes.push(node.id);
-                arg_indexes.push(condition_arg_indexes);
+                condition_indexes.push(condition_arg_indexes);
             }
         }
-
-        (condition_nodes, arg_indexes)
+        condition_indexes
     }
 
     pub fn has_barrier(&self, node_id: IdType) -> bool {
@@ -217,17 +173,35 @@ impl Graph {
         false
     }
 
+    pub fn has_condition(args: &Vec<Arg>) -> bool {
+        for arg in args {
+            if arg.init_condition.is_some() {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn get_pred_indexes(&self, node_id: IdType, pred_id: IdType) -> Vec<isize> {
         let node = &self.nodes[node_id as usize];
         let args = &node.args;
+        let mut pred_idxs = Vec::new();
         for arg in args {
+            if arg.type_.is_barrier() {
+                if let Some(pred) = &arg.predecessor {
+                    if pred.id == pred_id {
+                        return pred.indexes.clone();
+                    }
+                }
+            }
+
             if let Some(pred) = &arg.predecessor {
                 if pred.id == pred_id {
-                    return pred.indexes.clone();
+                    pred_idxs = pred.indexes.clone();
                 }
             }
         }
-        Vec::new()
+        pred_idxs
     }
 }
 

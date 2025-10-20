@@ -402,13 +402,11 @@ pub trait SlicedAccess: Any + Send + Sync {
 unsafe impl<T> Send for SendPtr<T> {}
 unsafe impl<T> Sync for SendPtr<T> {}
 
-/// Trait for types that can be sliced into multiple parts for parallel access
 pub trait Sliceable<T> {
-    /// Returns a mutable slice to the complete buffer
     fn as_mut_slice(&mut self) -> &mut [T];
 }
 
-/// A simplified sliced container that tracks mutable borrows with write bits
+// A sliced container that tracks mutable borrows with write bits
 pub struct SlicedContainer<T> {
     data_ptr: SendPtr<T>,
     total_length: usize,

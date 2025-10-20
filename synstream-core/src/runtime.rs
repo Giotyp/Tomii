@@ -1,6 +1,6 @@
 use core_affinity;
+use crossbeam_channel::{Receiver, Sender};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::thread::{sleep, spawn};
 use std::time::{Duration, Instant};
@@ -17,7 +17,6 @@ use synstream_types::*;
 pub struct SharedData {
     // Immutable data
     graph: Graph,
-    total_nodes_per_stream: usize,
     slots: usize,
     max_streams: usize,
     max_runtime: Option<u64>,
@@ -25,7 +24,6 @@ pub struct SharedData {
     // Internally synchronized data
     node_results: Arc<RwLock<VecMap<CmTypes>>>,
     stream_complete_counter: Arc<AtomicUsize>,
-    stream_completion_counts: Arc<RwLock<Vec<AtomicUsize>>>,
     available_stream_slots: Arc<RwLock<Vec<usize>>>,
     time_buffer: Arc<RwLock<TimeBufferManager>>,
 
@@ -48,12 +46,6 @@ impl SynRt {
         max_runtime: Option<u64>,
         use_rdtsc: bool,
     ) -> SynRt {
-        let total_nodes = app_graph.total_executed_nodes();
-        print_debug(&format!(
-            "Total nodes to execute per stream: {}",
-            total_nodes
-        ));
-
         // Initialize stream completion counters
         let stream_completion_counts = Arc::new(RwLock::new(Vec::new()));
         let mut completion_counts = stream_completion_counts.write().unwrap();
@@ -77,13 +69,11 @@ impl SynRt {
 
         let shared = Arc::new(SharedData {
             graph: app_graph.clone(),
-            total_nodes_per_stream: total_nodes,
             slots,
             max_streams,
             max_runtime,
             node_results: Arc::new(RwLock::new(VecMap::new(CmTypes::Init))),
             stream_complete_counter: Arc::new(AtomicUsize::new(0)),
-            stream_completion_counts,
             available_stream_slots,
             time_buffer: Arc::new(RwLock::new(TimeBufferManager::new_async(
                 slots + 1,
@@ -104,13 +94,13 @@ impl SynRt {
             .store(scheduler.workers(), Ordering::SeqCst);
 
         // create completed channel
-        let (completed_tx, completed_rx) = std::sync::mpsc::channel::<(NodeInfo, CmTypes)>();
+        let (completed_tx, completed_rx) = crossbeam_channel::unbounded::<(NodeInfo, CmTypes)>();
         {
             let mut tx_lock = self.shared.completed_tx.write().unwrap();
             *tx_lock = Some(completed_tx);
         }
         // create ready channel
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<NodeInfo>();
+        let (ready_tx, ready_rx) = crossbeam_channel::unbounded::<NodeInfo>();
         // Store scheduler
         {
             let mut scheduler_lock = self.shared.scheduler.write().unwrap();
@@ -182,7 +172,7 @@ impl SynRt {
                     {
                         let tx_lock = self.shared.completed_tx.read().unwrap();
                         if let Some(ref tx) = *tx_lock {
-                            tx.send((NodeInfo::new(IdType::MAX, 0, 0), CmTypes::None))
+                            tx.send((NodeInfo::new(IdType::MAX, 0, 0, 0), CmTypes::None))
                                 .unwrap();
                         }
                     }
@@ -216,12 +206,17 @@ impl SynRt {
 
             let node = &shared.graph.nodes[node_info.id as usize];
 
-            let arg_vec = Self::create_node_args(&shared, node, node_info.index, node_info.slot);
+            let arg_vec = Self::create_node_args(
+                &shared,
+                node,
+                node_info.index,
+                node_info.slot,
+                node_info.pred_index,
+            );
 
             if !arg_vec.is_empty() {
-                let node_id = NodeInfo::new(node_info.id, node_info.slot, node_info.index);
                 // Schedule Task
-                Self::send_to_scheduler(&shared, node_id, arg_vec);
+                Self::send_to_scheduler(&shared, node_info, arg_vec);
             }
 
             let time_read = shared.time_buffer.read().unwrap();
@@ -237,24 +232,20 @@ impl SynRt {
         completed_rx: Receiver<(NodeInfo, CmTypes)>,
         ready_tx: Sender<NodeInfo>,
     ) {
-        // Store how many nodes of each type per slot are completed
-        let mut completed_count_map: Vec<Vec<usize>> = vec![Vec::new(); shared.slots];
-        for node_id in 0..shared.graph.nodes.len() {
-            for slot in 0..shared.slots {
-                completed_count_map[slot].insert(node_id, 0);
-            }
-        }
-
-        let nodes = &shared.graph.nodes;
         let dependency_count_vec: Vec<usize> = shared.graph.dependency_count_vec();
         let mut dependency_map = VecMap::new(0);
-        dependency_map.init_map(&nodes, shared.slots, Some(dependency_count_vec));
+        dependency_map.init_map(
+            &shared.graph.nodes,
+            shared.slots,
+            Some(dependency_count_vec),
+        );
         print_debug(&format!(
-            "Initialized dependency map:\n{}",
-            dependency_map.print_map()
+            "Initialized dependency map:\n{:?}",
+            dependency_map
         ));
 
-        let (condition_nodes, arg_indexes) = shared.graph.get_condition_nodes();
+        // prefetch cond indexes for efficiency
+        let cond_indexes = shared.graph.get_condition_indexes();
 
         // Find and send initial nodes to ready channel
         let slot_vec: Vec<usize> = (0..shared.slots).collect();
@@ -263,25 +254,35 @@ impl SynRt {
             ready_tx.send(node_info).unwrap();
         }
 
+        let mut remaining_proc_nodes = {
+            let mut vec = Vec::new();
+            for slot in 0..shared.slots {
+                vec.push(Vec::new());
+                for node_id in 0..shared.graph.nodes.len() {
+                    if shared.graph.initial_nodes.contains(&(node_id as IdType)) {
+                        vec[slot].push(0);
+                    } else {
+                        vec[slot].push(shared.graph.nodes[node_id].factor);
+                    }
+                }
+            }
+            vec
+        };
+
         // Process completed nodes
         while let Ok((mut node_info, result)) = completed_rx.recv() {
             let time_read = shared.time_buffer.read().unwrap();
             let start_time = time_read.measure_time();
             drop(time_read);
-            // Unwrap node_id
-            let node_id = node_info.id;
-            let node_index;
-            let slot;
-            let post_node = node_info.post_node;
 
-            if node_id == IdType::MAX {
-                println!("Exit signal received, stopping process_completed thread.");
+            if node_info.id == IdType::MAX {
+                // Exit signal received, stopping thread
                 return;
             }
 
             print_debug(&format!("Processing Completed {:?}", node_info));
 
-            if post_node {
+            if node_info.post_node {
                 // Store Result
                 let mut res_lock = shared.node_results.write().unwrap();
                 res_lock.set(&node_info, result);
@@ -290,89 +291,141 @@ impl SynRt {
             }
 
             // Get Id function and validate slot
-            slot = Self::process_id_function(&shared, &node_info, &result);
+            let new_stream_opt = Self::process_id_function(&shared, &node_info, &result);
+            if let Some(new_stream) = new_stream_opt {
+                // Assign streams to an available stream slot
+                node_info.slot = Self::assign_stream_to_available_slot(&shared, new_stream);
+            } else {
+                // ID function failed, skip processing this node
+                print_debug(&format!(
+                    "Skipping further processing of node {:?} due to ID function failure",
+                    node_info
+                ));
+                continue;
+            }
 
-            let current_completed = completed_count_map[slot][node_id as usize];
+            // store result
+            let mut res_lock = shared.node_results.write().unwrap();
+            res_lock.set(&node_info, result);
+            drop(res_lock);
 
-            // Check if all required nodes of this type are already completed
-            let factor = shared.graph.nodes[node_id as usize].factor;
-            if current_completed < factor {
-                node_index = {
-                    if condition_nodes.contains(&node_id) {
-                        current_completed
+            let successors: &Vec<IdType> = {
+                let suc_len = shared.graph.successors.len();
+                if node_info.id as usize >= suc_len {
+                    &Vec::new()
+                } else {
+                    shared.graph.find_successors(node_info.id)
+                }
+            };
+            print_debug(&format!(
+                "{:?} with index {} has successors: {:?}",
+                node_info, node_info.index, successors
+            ));
+
+            let mut nodes_sent = 0;
+            for succ_id in successors {
+                let succ_id = *succ_id;
+                let remaining = remaining_proc_nodes[node_info.slot][succ_id as usize];
+                let succ_factor = shared.graph.nodes[succ_id as usize].factor;
+                let node_factor = shared.graph.nodes[node_info.id as usize].factor;
+
+                if remaining == 0 {
+                    continue;
+                }
+
+                let succ_indexes = {
+                    if succ_factor == node_factor {
+                        vec![node_info.index]
+                    } else if !shared.graph.condition_nodes.contains(&succ_id) {
+                        let num_indexes = std::cmp::max(succ_factor, remaining);
+                        (0..num_indexes).collect::<Vec<_>>()
                     } else {
-                        node_info.index
+                        vec![node_info.index % succ_factor]
                     }
                 };
-                completed_count_map[slot][node_id as usize] += 1;
 
-                // store result
                 print_debug(&format!(
-                    "Storing result {:?} for {:?} at index {}",
-                    result, node_info, node_index
+                    "Processing successor id {} - {:?} of node {:?}",
+                    succ_id, succ_indexes, node_info
                 ));
-                node_info.index = node_index; // Update index in case of condition node
-                let mut res_lock = shared.node_results.write().unwrap();
-                res_lock.set(&node_info, result);
-                drop(res_lock);
 
-                // Increment the completion count for this slot
-                let completion_counts = shared.stream_completion_counts.read().unwrap();
-                let current_count = completion_counts[slot].fetch_add(1, Ordering::SeqCst) + 1;
-                drop(completion_counts);
+                print_debug(&format!(
+                    "Remaining proc nodes: {:?}",
+                    remaining_proc_nodes[node_info.slot]
+                ));
 
-                // Check if this stream iteration is complete
-                if current_count >= shared.total_nodes_per_stream {
-                    println!(
-                        "Completed iteration at slot {} with {} nodes",
-                        slot, current_count,
-                    );
+                for succ_index in succ_indexes {
+                    let succ_info =
+                        NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.index);
+                    let dep_opt = dependency_map.decrease(&succ_info);
+                    if let Some(dep) = dep_opt {
+                        if dep == 0 {
+                            if !shared.graph.condition_nodes.contains(&succ_id) {
+                                print_debug(&format!(
+                                    "Sent successor {:?} to ready channel",
+                                    succ_info
+                                ));
+                                ready_tx.send(succ_info).unwrap();
 
-                    let new_iteration = Self::process_slot_completion(&shared, slot);
-                    // Reset completed_count_map for this slot
-                    for node_id in 0..completed_count_map[slot].len() {
-                        completed_count_map[slot][node_id] = 0;
-                    }
-                    // Add initial nodes for new iteration
-                    if new_iteration {
-                        let init_nodes = Self::init_nodes(&shared, vec![slot]);
-                        for node_info in init_nodes {
-                            ready_tx.send(node_info).unwrap();
-                        }
-                    }
-                } else {
-                    // Add successors to pending
-                    let successors: Vec<(IdType, Vec<usize>)> =
-                        shared.graph.find_successors(node_id, node_index);
-                    print_debug(&format!(
-                        "{:?} with index {} has successors: {:?}",
-                        node_info, node_index, successors
-                    ));
-                    for (succ_id, idxs) in successors {
-                        for idx in idxs {
-                            let succ_info = NodeInfo::new(succ_id, slot, idx);
-                            let dep_opt = dependency_map.decrease(&succ_info);
-                            if let Some(dep) = dep_opt {
-                                if dep == 0 {
-                                    if !condition_nodes.contains(&succ_id) {
-                                        ready_tx.send(succ_info).unwrap();
-                                    } else {
-                                        let index = condition_nodes
-                                            .iter()
-                                            .position(|&x| x == succ_id)
-                                            .unwrap();
-                                        let arg_idx = &arg_indexes[index];
-                                        if Self::conditions_met(&shared, &succ_info, arg_idx) {
-                                            ready_tx.send(succ_info).unwrap();
-                                        }
-                                    }
+                                // Increase nodes_sent and decrease remaining_proc_nodes
+                                nodes_sent += 1;
+                                remaining_proc_nodes[node_info.slot][succ_id as usize] -= 1;
+                            } else {
+                                let index = &shared
+                                    .graph
+                                    .condition_nodes
+                                    .iter()
+                                    .position(|&x| x == succ_id)
+                                    .unwrap();
+                                if Self::conditions_met(&shared, &succ_info, &cond_indexes[*index])
+                                {
+                                    print_debug(&format!(
+                                        "Sent successor {:?} to ready channel",
+                                        succ_info
+                                    ));
+                                    ready_tx.send(succ_info).unwrap();
+                                    nodes_sent += 1;
+                                    remaining_proc_nodes[node_info.slot][succ_id as usize] -= 1;
+                                } else {
+                                    print_debug(&format!(
+                                        "Conditions not met for successor {:?}",
+                                        succ_info
+                                    ));
                                 }
                             }
                         }
                     }
                 }
             }
+            print_debug(&format!("Updated dependency map:\n{:?}", dependency_map));
 
+            // Check for stream completion
+            if nodes_sent == 0 {
+                let scheduler_lock = shared.scheduler.read().unwrap();
+                let pending_sched = scheduler_lock.as_ref().unwrap().pending_jobs();
+                drop(scheduler_lock);
+                let receive_queue_empty = completed_rx.is_empty();
+
+                if pending_sched == 0 && receive_queue_empty {
+                    print_debug(&format!("Completed iteration at slot {}", node_info.slot));
+
+                    let new_iteration = Self::process_slot_completion(&shared, node_info.slot);
+                    // Reset dependency_map for this slot
+                    dependency_map.reinit_slot(node_info.slot);
+                    // Reinint remaining_proc_nodes for this slot
+                    for node_id in 0..remaining_proc_nodes[node_info.slot].len() {
+                        remaining_proc_nodes[node_info.slot][node_id] =
+                            shared.graph.nodes[node_id].factor;
+                    }
+                    // Add initial nodes for new iteration
+                    if new_iteration {
+                        let init_nodes = Self::init_nodes(&shared, vec![node_info.slot]);
+                        for node_info in init_nodes {
+                            ready_tx.send(node_info).unwrap();
+                        }
+                    }
+                }
+            }
             let time_read = shared.time_buffer.read().unwrap();
             let end_time = time_read.measure_time();
             let duration = time_read.measure_duration(start_time, end_time);
@@ -438,15 +491,16 @@ impl SynRt {
             let arg = &node.args[*arg_idx];
             let init_condition: &InitCondition = &arg.init_condition.as_ref().unwrap();
             // We assume condition has a single predecessor
-            let result =
-                Self::collect_arg_result(arg, node_info.index, node_info.slot, None, shared)
-                    .unwrap()[0]
-                    .clone();
-
-            print_debug(&format!(
-                "Evaluating condition {:?} for node {:?} with predecessor result: {:?}",
-                init_condition, node_info, result
-            ));
+            let result = Self::collect_arg_result(
+                arg,
+                node_info.index,
+                node_info.slot,
+                node_info.pred_index,
+                None,
+                shared,
+            )
+            .unwrap()[0]
+                .clone();
 
             let eval = init_condition.evaluate(result.clone());
             if !eval {
@@ -477,11 +531,6 @@ impl SynRt {
 
             // Release the slot
             Self::release_slot(shared, slot);
-
-            // Reset the completion count for this stream
-            let completion_counts = shared.stream_completion_counts.read().unwrap();
-            completion_counts[slot].store(0, Ordering::SeqCst);
-            drop(completion_counts);
 
             // Clear completed nodes for this stream to allow restart
             let mut result_lock = shared.node_results.write().unwrap();
@@ -551,9 +600,7 @@ impl SynRt {
         shared: &Arc<SharedData>,
         node_info: &NodeInfo,
         result: &CmTypes,
-    ) -> usize {
-        let mut slot = node_info.slot;
-
+    ) -> Option<usize> {
         let id_function_opt = shared.graph.id_function.clone();
 
         if let Some(id_function) = id_function_opt {
@@ -566,7 +613,8 @@ impl SynRt {
                     shared,
                     &id_function.args,
                     node_info.index,
-                    slot,
+                    node_info.slot,
+                    node_info.pred_index,
                     Some(result.clone()),
                 );
 
@@ -581,24 +629,19 @@ impl SynRt {
                     let max_allowed_stream = current_counter + shared.slots;
 
                     if new_stream >= max_allowed_stream {
-                        panic!(
+                        eprintln!(
                                 "ID function returned stream {} which exceeds maximum allowed {} (current_counter: {}, slots: {})",
                                 new_stream, max_allowed_stream, current_counter, shared.slots
                             );
+                        return None;
                     }
-
-                    // Assign streams to an available stream slot
-                    slot = Self::assign_stream_to_available_slot(shared, new_stream);
-                    print_debug(&format!(
-                        "ID function determined stream: {} assigned to slot: {}",
-                        new_stream, slot
-                    ));
+                    return Some(new_stream);
                 } else {
                     panic!("ID function did not return a valid number for stream");
                 }
             }
         }
-        return slot;
+        return Some(node_info.slot);
     }
 
     fn create_task(
@@ -634,6 +677,7 @@ impl SynRt {
         node: &Node,
         node_index: usize,
         slot: usize,
+        pred_index: usize,
     ) -> Vec<CmTypes> {
         let args = {
             // check if node is in loop_nodes
@@ -654,7 +698,7 @@ impl SynRt {
             &node.args
         };
 
-        let arg_vec = Self::parse_args(shared, args, node_index, slot, None);
+        let arg_vec = Self::parse_args(shared, args, node_index, slot, pred_index, None);
 
         arg_vec
     }
@@ -664,6 +708,7 @@ impl SynRt {
         args: &Vec<Arg>,
         node_index: usize,
         slot: usize,
+        pred_index: usize,
         custom_res: Option<CmTypes>,
     ) -> Vec<CmTypes> {
         let mut arg_vec = Vec::new();
@@ -673,8 +718,14 @@ impl SynRt {
                 continue;
             }
 
-            let result_opt =
-                Self::collect_arg_result(arg, node_index, slot, custom_res.clone(), shared);
+            let result_opt = Self::collect_arg_result(
+                arg,
+                node_index,
+                slot,
+                pred_index,
+                custom_res.clone(),
+                shared,
+            );
             if let Some(result) = result_opt {
                 arg_vec.extend(result);
             }
@@ -686,6 +737,7 @@ impl SynRt {
         arg: &Arg,
         node_index: usize,
         slot: usize,
+        pred_index: usize,
         custom_res: Option<CmTypes>,
         shared: &Arc<SharedData>,
     ) -> Option<Vec<CmTypes>> {
@@ -723,13 +775,13 @@ impl SynRt {
                 if let Some(ref custom_res) = custom_res {
                     return Some(vec![custom_res.clone()]);
                 }
-                let indices = arg
+                let mut indices = arg
                     .predecessor
                     .as_ref()
                     .unwrap()
                     .indexes
                     .iter()
-                    .map(|&x| {
+                    .map(|&pred_idx| {
                         // Get the predecessor node factor
                         let nodes = &shared.graph.nodes;
                         let pred_node: &Node =
@@ -737,10 +789,14 @@ impl SynRt {
                         let pred_factor = pred_node.factor;
 
                         // Find the index of the node in the results
-                        let new_index = find_pred_index(node_index, x, pred_factor);
+                        let new_index = find_pred_index(node_index, pred_idx, pred_factor);
                         new_index
                     })
                     .collect::<Vec<usize>>();
+
+                if indices.len() == 1 {
+                    indices[0] = pred_index;
+                }
 
                 let mut result_vec = Vec::new();
                 for dep_idx in indices.iter() {
@@ -748,7 +804,7 @@ impl SynRt {
                     // corresponding results
                     // (must exist since they are completed)
                     let res_read = shared.node_results.read().unwrap();
-                    let node_info = NodeInfo::new(*res_node_id as IdType, slot, *dep_idx);
+                    let node_info = NodeInfo::new(*res_node_id as IdType, slot, *dep_idx, 0);
 
                     let result = res_read.get(&node_info).unwrap();
                     result_vec.push(result);
@@ -766,13 +822,13 @@ impl SynRt {
     fn init_nodes(shared: &Arc<SharedData>, slots: Vec<usize>) -> Vec<NodeInfo> {
         let mut node_infos = Vec::new();
         for slot in slots {
-            let initial_nodes = shared.graph.initial_nodes.clone();
+            let initial_nodes = &shared.graph.initial_nodes;
             for node_id in initial_nodes {
-                let node = &shared.graph.nodes[node_id as usize];
+                let node = &shared.graph.nodes[*node_id as usize];
                 let node_factor = node.factor;
                 let indexes: Vec<usize> = (0..node_factor).collect();
                 for index in indexes {
-                    let node_info = NodeInfo::new(node_id, slot, index);
+                    let node_info = NodeInfo::new(*node_id, slot, index, 0);
                     node_infos.push(node_info);
                 }
             }
@@ -786,11 +842,11 @@ impl SynRt {
             let stream_use = self.shared.slots; // initialized +1 in init_results
             for post_node in post_nodes {
                 for index in 0..post_node.factor {
-                    let mut node_info = NodeInfo::new(post_node.id, stream_use, index);
+                    let mut node_info = NodeInfo::new(post_node.id, stream_use, index, 0);
                     node_info.set_post_node(true);
 
                     let arg_vec =
-                        Self::create_node_args(&self.shared, post_node, index, stream_use);
+                        Self::create_node_args(&self.shared, post_node, index, stream_use, 0);
                     Self::send_to_scheduler(&self.shared, node_info, arg_vec);
                 }
                 print_debug(&format!("Added post node: {}", post_node.name));
@@ -801,7 +857,7 @@ impl SynRt {
                     completed_count = 0;
                     let results_read = self.shared.node_results.read().unwrap();
                     for i in 0..post_node.factor {
-                        let node_info = NodeInfo::new(post_node.id, stream_use, i);
+                        let node_info = NodeInfo::new(post_node.id, stream_use, i, 0);
                         if results_read.result_exists(&node_info) {
                             completed_count += 1;
                         }

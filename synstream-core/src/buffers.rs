@@ -9,15 +9,17 @@ pub struct NodeInfo {
     pub id: IdType,
     pub slot: usize,
     pub index: usize,
+    pub pred_index: usize,
     pub post_node: bool,
 }
 
 impl NodeInfo {
-    pub fn new(id: IdType, slot: usize, index: usize) -> NodeInfo {
+    pub fn new(id: IdType, slot: usize, index: usize, pred_index: usize) -> NodeInfo {
         NodeInfo {
             id,
             slot,
             index,
+            pred_index,
             post_node: false,
         }
     }
@@ -123,10 +125,11 @@ impl<T: Clone + PartialEq + Debug> VecMap<T> {
         if node_info.slot < self.buffer.len() {
             let slot_vec = &mut self.buffer[node_info.slot];
             let node_vec = &mut slot_vec[node_info.id as usize];
-            let node_index = node_info.index % node_vec.len();
-            let current: usize = node_vec[node_index].clone().into();
+
+            let cur_val = node_vec[node_info.index].clone();
+            let current: usize = cur_val.into();
             if current > 0 {
-                node_vec[node_index] = (current - 1).into();
+                node_vec[node_info.index] = (current - 1).into();
                 return Some(current - 1);
             }
             return Some(current);
@@ -159,14 +162,33 @@ impl<T: Clone + PartialEq + Debug> VecMap<T> {
         }
     }
 
-    pub fn print_map(&self) -> String {
-        let mut output = String::new();
+    pub fn reinit_elem(&mut self, node_info: &NodeInfo) {
+        if node_info.slot < self.buffer.len() {
+            let slot_vec = &mut self.buffer[node_info.slot];
+            let node_vec = &mut slot_vec[node_info.id as usize];
+            if node_info.index < node_vec.len() {
+                node_vec[node_info.index] = self.init_val.clone();
+            } else {
+                panic!(
+                    "Index {} out of bounds for node {}",
+                    node_info.index, node_info.id
+                );
+            }
+        } else {
+            panic!("Slot {} out of bounds", node_info.slot);
+        }
+    }
+}
+
+impl<T: Clone + PartialEq + Debug> Debug for VecMap<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "VecMap {{")?;
         for (i, slot) in self.buffer.iter().enumerate() {
-            output.push_str(&format!("Slot {}:\n", i));
+            writeln!(f, "  Slot {}:", i)?;
             for (j, node) in slot.iter().enumerate() {
-                output.push_str(&format!("  Node {}: {:?}\n", j, node));
+                writeln!(f, "    Node {}: {:?}", j, node)?;
             }
         }
-        output
+        write!(f, "}}")
     }
 }

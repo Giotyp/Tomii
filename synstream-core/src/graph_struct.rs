@@ -4,7 +4,7 @@ use synstream_types::*;
 pub trait GraphStruct {
     fn add_node(&mut self, node: Node);
     fn add_post_node(&mut self, node: Node);
-    fn find_successors(&self, node_id: IdType, node_index: usize) -> Vec<(IdType, Vec<usize>)>;
+    fn find_successors(&self, node_id: IdType) -> &Vec<IdType>;
     fn dependency_count_vec(&self) -> Vec<usize>;
     fn total_executed_nodes(&self) -> usize;
 }
@@ -18,20 +18,6 @@ pub fn find_pred_index(node_idx: usize, pred_idx: isize, pred_factor: usize) -> 
     }
     let req_idx = (node_idx as isize + pred_idx) % pred_factor as isize;
     req_idx as usize
-}
-
-/// Calculate all successor indexes based on predecessor index and factors
-pub fn calculate_succ_indexes(
-    pred_factor: usize,
-    succ_factor: usize,
-    pred_idx: usize,
-    dep_idx: isize,
-) -> Vec<usize> {
-    let pred_factor_isize = pred_factor as isize;
-    let start_isize = pred_idx as isize - dep_idx;
-    let start = start_isize.rem_euclid(pred_factor_isize) as usize;
-
-    (start as usize..succ_factor).step_by(pred_factor).collect()
 }
 
 /// Comparison operators

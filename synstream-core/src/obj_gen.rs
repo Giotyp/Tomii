@@ -41,7 +41,10 @@ pub fn init_objects(
             let value_cmt = match value_cmt_res {
                 Ok(cmt) => cmt,
                 Err(e) => {
-                    eprintln!("Error parsing type '{}': {}", type_str, e);
+                    eprintln!(
+                        "Error parsing type '{}' with value '{}': {}",
+                        type_str, value_str, e
+                    );
                     panic!("Create an init function to handle this type.");
                 }
             };
@@ -89,7 +92,10 @@ pub fn init_objects(
                     let arg_cmt = match arg_cmt_res {
                         Ok(cmt) => cmt,
                         Err(e) => {
-                            eprintln!("Error parsing type '{}': {}", type_str, e);
+                            eprintln!(
+                                "Error parsing type '{}' with value '{}': {}",
+                                type_str, value_str, e
+                            );
                             panic!("Create an init function to handle this type.");
                         }
                     };
