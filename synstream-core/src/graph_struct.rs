@@ -49,27 +49,18 @@ pub struct InitCondition {
 }
 
 impl InitCondition {
-    pub fn evaluate(&self, arg_value: CmTypes) -> bool {
+    pub fn evaluate(&self, arg_value: &CmTypes) -> bool {
         // Evaluate against arg_value that is decided during runtime
 
         match self.operation {
-            CondOp::Eq => {
-                if arg_value == self.eval_value {
-                    return true;
-                }
-            }
-            CondOp::Neq => {
-                if arg_value != self.eval_value {
-                    return true;
-                }
-            }
+            CondOp::Eq => arg_value == &self.eval_value,
+            CondOp::Neq => arg_value != &self.eval_value,
             _ => {
                 // Handle other operations (Gt, Lt) as needed
                 // Currently returns false
-                return false;
+                false
             }
         }
-        false
     }
 }
 

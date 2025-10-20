@@ -491,7 +491,7 @@ impl SynRt {
             let arg = &node.args[*arg_idx];
             let init_condition: &InitCondition = &arg.init_condition.as_ref().unwrap();
             // We assume condition has a single predecessor
-            let result = Self::collect_arg_result(
+            let result = &Self::collect_arg_result(
                 arg,
                 node_info.index,
                 node_info.slot,
@@ -499,10 +499,9 @@ impl SynRt {
                 None,
                 shared,
             )
-            .unwrap()[0]
-                .clone();
+            .unwrap()[0];
 
-            let eval = init_condition.evaluate(result.clone());
+            let eval = init_condition.evaluate(&result);
             if !eval {
                 is_ready = false;
                 break;
