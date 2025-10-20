@@ -2,7 +2,7 @@ name: Verify SynStream Examples
 
 on:
   push:
-    branches: [ "main", "develop" ]
+    branches: [ "main", "develop", "ci/setup-verification" ]
   pull_request:
     branches: [ "main" ]
 
