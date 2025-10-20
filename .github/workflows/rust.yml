@@ -18,10 +18,10 @@ jobs:
         
     steps:
       - name: Checkout repository
-      - uses: actions/checkout@v4
+        uses: actions/checkout@v4
 
       - name: Set up Rust repository
-      - uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@stable
       
       - name: Run Example
         run: ./examples/${{ matrix.example }}/run_bench.sh
