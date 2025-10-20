@@ -1,0 +1,15 @@
+[package]
+name = "matrix-compute"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "matcomp"
+crate-type = ["dylib"]
+
+[dependencies]
+nalgebra = "0.34.1"
+num-complex = "0.4.6"
+rustfft = "6.4.1"
+synstream-types = { path = "../../synstream-types" }
+

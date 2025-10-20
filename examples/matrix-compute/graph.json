@@ -1,0 +1,136 @@
+{
+    "initializations": [
+        {
+            "name": "buf_size",
+            "args": [
+                {
+                    "type": "usize",
+                    "value": "100"
+                }
+            ]
+        },
+        {
+            "name": "num_nodes",
+            "args": [
+                {
+                    "type": "usize",
+                    "value": "200"
+                }
+            ]
+        },
+        {
+            "name": "fft_planner",
+            "function_name": "fft_planner",
+            "args": [
+                {
+                    "type": "$ref",
+                    "value": "buf_size"
+                }
+            ]
+        },
+        {
+            "name": "result_file",
+            "function_name": "get_out_file",
+            "args": [
+                {
+                    "type": "String",
+                    "value": "SCRIPT_DIR"
+                },
+                {
+                    "type": "String",
+                    "value": "result.txt"
+                }
+            ]
+        }
+    ],
+    "nodes": [
+        {
+            "name": "gen_vec",
+            "factor": "num_nodes",
+            "function_name": "generate_vector",
+            "args": [
+                {
+                    "type": "$ref",
+                    "value": "buf_size"
+                }
+            ]
+        },
+        {
+            "name": "compute_fft",
+            "factor": "num_nodes",
+            "function_name": "compute_fft",
+            "args": [
+                {
+                    "type": "$ref",
+                    "value": "fft_planner"
+                },
+                {
+                    "type": "$res",
+                    "predecessor": {
+                        "name": "gen_vec",
+                        "indexes": "0"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "vec_mat",
+            "factor": "num_nodes",
+            "function_name": "vec_to_mat",
+            "args": [
+                {
+                    "type": "$res",
+                    "predecessor": {
+                        "name": "gen_vec",
+                        "indexes": "0"
+                    }
+                },
+                {
+                    "type": "$barrier",
+                    "predecessor": {
+                        "name": "compute_fft",
+                        "indexes": "0"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "mat_mul",
+            "factor": "num_nodes",
+            "function_name": "mat_mul",
+            "args": [
+                {
+                    "type": "$res",
+                    "predecessor": {
+                        "name": "vec_mat",
+                        "indexes": "0"
+                    }
+                },
+                {
+                    "type": "$res",
+                    "predecessor": {
+                        "name": "vec_mat",
+                        "indexes": "0"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "write_res",
+            "function_name": "write_to_file",
+            "args": [
+                {
+                    "type": "$ref",
+                    "value": "result_file"
+                },
+                {
+                    "type": "$res",
+                    "predecessor": {
+                        "name": "mat_mul",
+                        "indexes": "0-num_nodes"
+                    }
+                }
+            ]
+        }
+    ]
+}
