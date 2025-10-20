@@ -1,0 +1,30 @@
+name: Verify SynStream Examples
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        example: [matrix-compute]
+        
+    steps:
+      - name: Checkout repository
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust repository
+      - uses: dtolnay/rust-toolchain@stable
+      
+      - name: Run Example
+        run: ./examples/${{ matrix.example }}/run_bench.sh
+        
+      - name: Compare files
+        run: diff -u ./examples/${{ matrix.example }}/result.txt ./examples/${{ matrix.example }}/validation.txt 
