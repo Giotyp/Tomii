@@ -1,4 +1,5 @@
 use core::panic;
+use std::collections::HashSet;
 
 use crate::graph_struct::*;
 use crate::{debug::print_debug, IdType};
@@ -10,7 +11,7 @@ pub struct Graph {
     pub nodes: Vec<Node>,
     pub initial_nodes: Vec<IdType>,
     pub successors: Vec<Vec<IdType>>,
-    pub condition_nodes: Vec<IdType>,
+    pub condition_nodes: HashSet<IdType>,
     pub id_function: Option<IdFunction>,
     pub post_nodes: Option<Vec<Node>>,
     pub init_objects: Option<Vec<Vec<CmTypes>>>,
@@ -42,14 +43,16 @@ impl GraphStruct for Graph {
             }
         }
         if !has_preds {
-            print_debug(&format!(
-                "Adding initial node: {} with id {} and factor {}",
-                node.name, node.id, node.factor
-            ));
+            print_debug(|| {
+                format!(
+                    "Adding initial node: {} with id {} and factor {}",
+                    node.name, node.id, node.factor
+                )
+            });
             self.initial_nodes.push(node.id);
         }
         if Self::has_condition(&node.args) {
-            self.condition_nodes.push(node.id);
+            self.condition_nodes.insert(node.id);
         }
         self.nodes.push(node);
     }
@@ -110,10 +113,6 @@ impl GraphStruct for Graph {
         }
         dep_count_vec
     }
-
-    fn total_executed_nodes(&self) -> usize {
-        self.nodes.iter().map(|n| n.factor).sum()
-    }
 }
 
 impl Graph {
@@ -122,7 +121,7 @@ impl Graph {
             nodes: Vec::new(),
             initial_nodes: Vec::new(),
             successors: Vec::new(),
-            condition_nodes: Vec::new(),
+            condition_nodes: HashSet::new(),
             id_function: None,
             post_nodes: None,
             init_objects: None,
@@ -232,7 +231,6 @@ impl Graph {
             println!("No post nodes.");
         }
         println!("Initial Nodes: {:?}", self.initial_nodes);
-        println!("Total Executed Nodes: {}", self.total_executed_nodes());
         println!("Successors: {:?}", self.successors);
     }
 }

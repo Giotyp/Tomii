@@ -418,9 +418,12 @@ impl TimeBuffer {
             );
         }
 
-        let start_time = self.slot_start_times[slot_id]
-            .take()
-            .expect("Slot processing was never started or already finished");
+        let start_time = self.slot_start_times[slot_id].take().unwrap_or_else(|| {
+            panic!(
+                "Slot {} processing was never started or was already finished",
+                slot_id
+            )
+        });
 
         let total_time = match start_time {
             TimingMethod::Instant(start) => Instant::now().duration_since(start),

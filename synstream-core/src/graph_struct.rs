@@ -6,7 +6,6 @@ pub trait GraphStruct {
     fn add_post_node(&mut self, node: Node);
     fn find_successors(&self, node_id: IdType) -> &Vec<IdType>;
     fn dependency_count_vec(&self) -> Vec<usize>;
-    fn total_executed_nodes(&self) -> usize;
 }
 
 /// Helper functions

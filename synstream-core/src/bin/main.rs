@@ -64,7 +64,7 @@ fn main() {
             .truncate(true)
             .open(&args.output)
             .expect("Failed to create output file");
-        print_debug("Output file opened");
+        print_debug(|| "Output file opened".to_string());
 
         // Redirect stdout to file
         Some(gag::Redirect::stdout(file).expect("Failed to redirect stdout"))
@@ -89,9 +89,9 @@ fn main() {
         SchedulerType::WorkStealing
     };
 
-    print_debug("Starting Graph Initialization");
+    print_debug(|| "Starting Graph Initialization".to_string());
     let graph = from_json(&args.json, args.workers).expect("Failed to parse graph from JSON file");
-    print_debug("Graph Initialized");
+    print_debug(|| "Graph Initialized".to_string());
     // check if inits flag is set
     if args.inits {
         println!();
@@ -100,7 +100,7 @@ fn main() {
         graph.print_init_objects();
         println!();
     }
-    print_debug("Objects Initialized");
+    print_debug(|| "Objects Initialized".to_string());
 
     let synrt = run_graph(
         &graph,

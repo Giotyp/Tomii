@@ -13,6 +13,13 @@ use crate::time_buffer::TimeBufferManager;
 use crate::{buffers::*, IdType};
 use synstream_types::*;
 
+/// Cache entry for quick node access - stores commonly accessed node fields
+#[derive(Clone)]
+struct NodeCacheEntry {
+    factor: usize,
+    name: String,
+}
+
 /// Shared data across all SynStream threads - immutable or internally synchronized
 pub struct SharedData {
     // Immutable data
@@ -20,6 +27,9 @@ pub struct SharedData {
     slots: usize,
     max_streams: usize,
     max_runtime: Option<u64>,
+
+    // Node cache for fast repeated access
+    node_cache: Vec<NodeCacheEntry>,
 
     // Internally synchronized data
     node_results: Arc<RwLock<VecMap<CmTypes>>>,
@@ -64,21 +74,31 @@ impl SynRt {
         }
         drop(available_write);
 
-        // Set the fields of the struct's graphs copy - one for each stream
-        // Create an additional graph as a static copy
+        // Build node cache for fast repeated access
+        let node_cache: Vec<NodeCacheEntry> = app_graph
+            .nodes
+            .iter()
+            .map(|node| NodeCacheEntry {
+                factor: node.factor,
+                name: node.name.clone(),
+            })
+            .collect();
+
+        let time_buffer = Arc::new(RwLock::new(TimeBufferManager::new_async(
+            slots + 1,
+            use_rdtsc,
+        )));
 
         let shared = Arc::new(SharedData {
             graph: app_graph.clone(),
             slots,
             max_streams,
             max_runtime,
+            node_cache,
             node_results: Arc::new(RwLock::new(VecMap::new(CmTypes::Init))),
             stream_complete_counter: Arc::new(AtomicUsize::new(0)),
             available_stream_slots,
-            time_buffer: Arc::new(RwLock::new(TimeBufferManager::new_async(
-                slots + 1,
-                use_rdtsc,
-            ))),
+            time_buffer,
             scheduler: Arc::new(RwLock::new(None)),
             completed_tx: Arc::new(RwLock::new(None)),
             workers: Arc::new(AtomicUsize::new(1)), // Will be set in run()
@@ -116,9 +136,14 @@ impl SynRt {
             // Use the last core to avoid interfering with main thread
             Some(core_ids[core_ids.len() - 1])
         } else {
-            print_debug("No cores available for affinity setting");
+            print_debug(|| "No cores available for affinity setting".to_string());
             None
         };
+
+        // Initiate synstream-runtime timing for scheduling threads
+        let time_read = self.shared.time_buffer.read().unwrap();
+        time_read.start_slot_processing(self.shared.slots);
+        drop(time_read);
 
         // Spawn preparation thread
         let shared_for_prep = Arc::clone(&self.shared);
@@ -127,14 +152,14 @@ impl SynRt {
             // Pin this thread to the selected core
             if let Some(core) = target_core_prep {
                 if core_affinity::set_for_current(core) {
-                    print_debug(&format!("Preparation thread pinned to core {:?}", core));
+                    print_debug(|| format!("Preparation thread pinned to core {:?}", core));
                 } else {
-                    print_debug("Failed to pin preparation thread to core");
+                    print_debug(|| "Failed to pin preparation thread to core".to_string());
                 }
             }
             Self::preparation(shared_for_prep, ready_rx);
         });
-        print_debug("Preparation thread spawned");
+        print_debug(|| "Preparation thread spawned".to_string());
 
         // Spawn resolution thread
         let shared_for_resolution = Arc::clone(&self.shared);
@@ -143,23 +168,18 @@ impl SynRt {
             // Pin this thread to the same core as the preparation thread
             if let Some(core) = target_core_resolution {
                 if core_affinity::set_for_current(core) {
-                    print_debug(&format!("Resolution thread pinned to core {:?}", core));
+                    print_debug(|| format!("Resolution thread pinned to core {:?}", core));
                 } else {
-                    print_debug("Failed to pin resolution thread to core");
+                    print_debug(|| "Failed to pin resolution thread to core".to_string());
                 }
             }
             Self::resolution(shared_for_resolution, completed_rx, ready_tx);
         });
-        print_debug("Resolution thread spawned");
-
-        // Initiate synstream-runtime timing
-        let time_read = self.shared.time_buffer.read().unwrap();
-        time_read.start_slot_processing(self.shared.slots);
-        drop(time_read);
+        print_debug(|| "Resolution thread spawned".to_string());
 
         let start_time = Instant::now();
         // Check for max_runtime
-        print_debug("Max runtime check started");
+        print_debug(|| "Max runtime check started".to_string());
         if let Some(max_runtime) = self.shared.max_runtime {
             loop {
                 if start_time.elapsed().as_secs() > max_runtime {
@@ -202,7 +222,7 @@ impl SynRt {
             let start_time = time_read.measure_time();
             drop(time_read);
 
-            print_debug(&format!("Preparing {:?}", node_info));
+            print_debug(|| format!("Preparing {:?}", node_info));
 
             let node = &shared.graph.nodes[node_info.id as usize];
 
@@ -239,13 +259,17 @@ impl SynRt {
             shared.slots,
             Some(dependency_count_vec),
         );
-        print_debug(&format!(
-            "Initialized dependency map:\n{:?}",
-            dependency_map
-        ));
+        print_debug(|| format!("Initialized dependency map:\n{:?}", dependency_map));
 
         // prefetch cond indexes for efficiency
         let cond_indexes = shared.graph.get_condition_indexes();
+
+        // Start timing for all initial slots
+        let time_read = shared.time_buffer.read().unwrap();
+        for slot_id in 0..shared.slots {
+            time_read.start_slot_processing(slot_id);
+        }
+        drop(time_read);
 
         // Find and send initial nodes to ready channel
         let slot_vec: Vec<usize> = (0..shared.slots).collect();
@@ -262,12 +286,16 @@ impl SynRt {
                     if shared.graph.initial_nodes.contains(&(node_id as IdType)) {
                         vec[slot].push(0);
                     } else {
-                        vec[slot].push(shared.graph.nodes[node_id].factor);
+                        vec[slot].push(shared.node_cache[node_id].factor);
                     }
                 }
             }
             vec
         };
+
+        // Track which slots have been completed to avoid double-processing
+        let mut completed_slots: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
 
         // Process completed nodes
         while let Ok((mut node_info, result)) = completed_rx.recv() {
@@ -280,7 +308,7 @@ impl SynRt {
                 return;
             }
 
-            print_debug(&format!("Processing Completed {:?}", node_info));
+            print_debug(|| format!("Processing Completed {:?}", node_info));
 
             if node_info.post_node {
                 // Store Result
@@ -297,10 +325,12 @@ impl SynRt {
                 node_info.slot = Self::assign_stream_to_available_slot(&shared, new_stream);
             } else {
                 // ID function failed, skip processing this node
-                print_debug(&format!(
-                    "Skipping further processing of node {:?} due to ID function failure",
-                    node_info
-                ));
+                print_debug(|| {
+                    format!(
+                        "Skipping further processing of node {:?} due to ID function failure",
+                        node_info
+                    )
+                });
                 continue;
             }
 
@@ -309,29 +339,22 @@ impl SynRt {
             res_lock.set(&node_info, result);
             drop(res_lock);
 
+            // Get successors - cache commonly used values
+            let node_id_usize = node_info.id as usize;
             let successors: &Vec<IdType> = {
-                let suc_len = shared.graph.successors.len();
-                if node_info.id as usize >= suc_len {
+                if node_id_usize >= shared.graph.successors.len() {
                     &Vec::new()
                 } else {
-                    shared.graph.find_successors(node_info.id)
+                    &shared.graph.successors[node_id_usize]
                 }
             };
-            print_debug(&format!(
-                "{:?} with index {} has successors: {:?}",
-                node_info, node_info.index, successors
-            ));
 
             let mut nodes_sent = 0;
             for succ_id in successors {
                 let succ_id = *succ_id;
                 let remaining = remaining_proc_nodes[node_info.slot][succ_id as usize];
-                let succ_factor = shared.graph.nodes[succ_id as usize].factor;
-                let node_factor = shared.graph.nodes[node_info.id as usize].factor;
-
-                if remaining == 0 {
-                    continue;
-                }
+                let succ_factor = shared.node_cache[succ_id as usize].factor;
+                let node_factor = shared.node_cache[node_info.id as usize].factor;
 
                 let succ_indexes = {
                     if succ_factor == node_factor {
@@ -344,27 +367,23 @@ impl SynRt {
                     }
                 };
 
-                print_debug(&format!(
-                    "Processing successor id {} - {:?} of node {:?}",
-                    succ_id, succ_indexes, node_info
-                ));
-
-                print_debug(&format!(
-                    "Remaining proc nodes: {:?}",
-                    remaining_proc_nodes[node_info.slot]
-                ));
+                print_debug(|| {
+                    format!(
+                        "Processing successor id {} - {:?} of node {:?}",
+                        succ_id, succ_indexes, node_info
+                    )
+                });
 
                 for succ_index in succ_indexes {
                     let succ_info =
                         NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.index);
                     let dep_opt = dependency_map.decrease(&succ_info);
                     if let Some(dep) = dep_opt {
-                        if dep == 0 {
+                        if dep == 0 && remaining > 0 {
                             if !shared.graph.condition_nodes.contains(&succ_id) {
-                                print_debug(&format!(
-                                    "Sent successor {:?} to ready channel",
-                                    succ_info
-                                ));
+                                print_debug(|| {
+                                    format!("Sent successor {:?} to ready channel", succ_info)
+                                });
                                 ready_tx.send(succ_info).unwrap();
 
                                 // Increase nodes_sent and decrease remaining_proc_nodes
@@ -379,37 +398,42 @@ impl SynRt {
                                     .unwrap();
                                 if Self::conditions_met(&shared, &succ_info, &cond_indexes[*index])
                                 {
-                                    print_debug(&format!(
-                                        "Sent successor {:?} to ready channel",
-                                        succ_info
-                                    ));
+                                    print_debug(|| {
+                                        format!("Sent successor {:?} to ready channel", succ_info)
+                                    });
                                     ready_tx.send(succ_info).unwrap();
                                     nodes_sent += 1;
                                     remaining_proc_nodes[node_info.slot][succ_id as usize] -= 1;
                                 } else {
-                                    print_debug(&format!(
-                                        "Conditions not met for successor {:?}",
-                                        succ_info
-                                    ));
+                                    print_debug(|| {
+                                        format!("Conditions not met for successor {:?}", succ_info)
+                                    });
                                 }
                             }
                         }
                     }
                 }
             }
-            print_debug(&format!("Updated dependency map:\n{:?}", dependency_map));
 
-            // Check for stream completion
-            if nodes_sent == 0 {
+            // Check for stream completion - only process each slot once
+            if nodes_sent == 0 && !completed_slots.contains(&node_info.slot) {
                 let scheduler_lock = shared.scheduler.read().unwrap();
                 let pending_sched = scheduler_lock.as_ref().unwrap().pending_jobs();
                 drop(scheduler_lock);
                 let receive_queue_empty = completed_rx.is_empty();
 
-                if pending_sched == 0 && receive_queue_empty {
-                    print_debug(&format!("Completed iteration at slot {}", node_info.slot));
+                // Check if all nodes in this slot have been processed
+                let all_nodes_processed = remaining_proc_nodes[node_info.slot]
+                    .iter()
+                    .all(|&count| count == 0);
+
+                if pending_sched == 0 && receive_queue_empty && all_nodes_processed {
+                    print_debug(|| format!("Completed iteration at slot {}", node_info.slot));
 
                     let new_iteration = Self::process_slot_completion(&shared, node_info.slot);
+                    // Mark this slot as completed
+                    completed_slots.insert(node_info.slot);
+
                     // Reset dependency_map for this slot
                     dependency_map.reinit_slot(node_info.slot);
                     // Reinint remaining_proc_nodes for this slot
@@ -419,6 +443,12 @@ impl SynRt {
                     }
                     // Add initial nodes for new iteration
                     if new_iteration {
+                        // Remove from completed set since we're starting again
+                        completed_slots.remove(&node_info.slot);
+                        // Start slot timing
+                        let time_read = shared.time_buffer.read().unwrap();
+                        time_read.start_slot_processing(node_info.slot);
+                        drop(time_read);
                         let init_nodes = Self::init_nodes(&shared, vec![node_info.slot]);
                         for node_info in init_nodes {
                             ready_tx.send(node_info).unwrap();
@@ -462,7 +492,7 @@ impl SynRt {
             tx_lock.as_ref().unwrap().clone()
         };
         let time_buffer_clone = shared.time_buffer.clone();
-        let node_name = shared.graph.nodes[node_info.id as usize].name.clone();
+        let node_name = shared.node_cache[node_info.id as usize].name.clone();
 
         let task = Self::create_task(
             func,
@@ -472,11 +502,11 @@ impl SynRt {
             completed_tx_clone,
             time_buffer_clone,
         );
-        let scheduler = {
-            let scheduler_lock = shared.scheduler.read().unwrap();
-            scheduler_lock.as_ref().unwrap().clone()
-        };
-        scheduler.spawn_task(task);
+
+        // Avoid cloning Arc - use scheduler directly through read lock
+        let scheduler_lock = shared.scheduler.read().unwrap();
+        scheduler_lock.as_ref().unwrap().spawn_task(task);
+        drop(scheduler_lock);
     }
 
     fn conditions_met(
@@ -511,9 +541,11 @@ impl SynRt {
     }
 
     fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
-        // Complete timing
+        // Complete timing - use unwrap_or to handle errors gracefully
         let time_read = shared.time_buffer.read().unwrap();
-        let _ = time_read.finish_slot_processing(slot);
+        if let Err(e) = time_read.finish_slot_processing(slot) {
+            eprintln!("Warning: Failed to finish slot {} timing: {}", slot, e);
+        }
         drop(time_read);
 
         let mut new_iteration = false;
@@ -525,7 +557,7 @@ impl SynRt {
 
         // Check if we should start a new iteration
         if new_counter < shared.max_streams {
-            print_debug(&format!("Starting new iteration {}", new_counter));
+            print_debug(|| format!("Starting new iteration {}", new_counter));
             new_iteration = true;
 
             // Release the slot
@@ -546,10 +578,9 @@ impl SynRt {
         let mut av_slot_id: usize = usize::MAX;
         for (slot_id, &real_stream) in available_slots.iter().enumerate() {
             if real_stream == stream {
-                print_debug(&format!(
-                    "Stream: {} is already assigned to slot {}",
-                    stream, slot_id
-                ));
+                print_debug(|| {
+                    format!("Stream: {} is already assigned to slot {}", stream, slot_id)
+                });
                 return slot_id;
             } else if real_stream == std::usize::MAX && av_slot_id == std::usize::MAX {
                 av_slot_id = slot_id;
@@ -573,14 +604,12 @@ impl SynRt {
         }
 
         available_slots[av_slot_id] = stream; // Mark as busy
-        print_debug(&format!(
-            "Assigned stream: {} to available slot {}",
-            stream, av_slot_id
-        ));
-        // Start slot timing
-        let time_read = shared.time_buffer.read().unwrap();
-        time_read.start_slot_processing(av_slot_id);
-        drop(time_read);
+        print_debug(|| {
+            format!(
+                "Assigned stream: {} to available slot {}",
+                stream, av_slot_id
+            )
+        });
         return av_slot_id;
     }
 
@@ -589,10 +618,7 @@ impl SynRt {
 
         let old_stream = available_slots[slot].clone();
         available_slots[slot] = std::usize::MAX; // Mark as available
-        print_debug(&format!(
-            "Released slot {} (had stream: {})",
-            slot, old_stream
-        ));
+        print_debug(|| format!("Released slot {} (had stream: {})", slot, old_stream));
     }
 
     fn process_id_function(
@@ -614,11 +640,11 @@ impl SynRt {
                     node_info.index,
                     node_info.slot,
                     node_info.pred_index,
-                    Some(result.clone()),
+                    Some(result),
                 );
 
                 // Call the id function
-                print_debug(&format!("Calling ID function for {:?}", node_info));
+                print_debug(|| format!("Calling ID function for {:?}", node_info));
                 let id_result = func_ptr(arg_vec);
 
                 // Extract stream from the result
@@ -708,23 +734,18 @@ impl SynRt {
         node_index: usize,
         slot: usize,
         pred_index: usize,
-        custom_res: Option<CmTypes>,
+        custom_res: Option<&CmTypes>,
     ) -> Vec<CmTypes> {
-        let mut arg_vec = Vec::new();
+        // Pre-allocate capacity to avoid reallocations
+        let mut arg_vec = Vec::with_capacity(args.len());
         for arg in args.iter() {
             // continue if arg is a condition
             if arg.is_condition() {
                 continue;
             }
 
-            let result_opt = Self::collect_arg_result(
-                arg,
-                node_index,
-                slot,
-                pred_index,
-                custom_res.clone(),
-                shared,
-            );
+            let result_opt =
+                Self::collect_arg_result(arg, node_index, slot, pred_index, custom_res, shared);
             if let Some(result) = result_opt {
                 arg_vec.extend(result);
             }
@@ -737,7 +758,7 @@ impl SynRt {
         node_index: usize,
         slot: usize,
         pred_index: usize,
-        custom_res: Option<CmTypes>,
+        custom_res: Option<&CmTypes>,
         shared: &Arc<SharedData>,
     ) -> Option<Vec<CmTypes>> {
         match &arg.type_ {
@@ -771,8 +792,8 @@ impl SynRt {
                 return Some(vec![obj]);
             }
             CmTypes::Res(res_node_id) => {
-                if let Some(ref custom_res) = custom_res {
-                    return Some(vec![custom_res.clone()]);
+                if let Some(custom_res) = custom_res {
+                    return Some(vec![(*custom_res).clone()]);
                 }
                 let mut indices = arg
                     .predecessor
@@ -797,17 +818,18 @@ impl SynRt {
                     indices[0] = pred_index;
                 }
 
-                let mut result_vec = Vec::new();
+                let mut result_vec = Vec::with_capacity(indices.len());
+                // Acquire lock once for all results
+                let res_read = shared.node_results.read().unwrap();
                 for dep_idx in indices.iter() {
                     // for each task index, retrieve the
                     // corresponding results
                     // (must exist since they are completed)
-                    let res_read = shared.node_results.read().unwrap();
                     let node_info = NodeInfo::new(*res_node_id as IdType, slot, *dep_idx, 0);
-
                     let result = res_read.get(&node_info).unwrap();
                     result_vec.push(result);
                 }
+                drop(res_read);
                 return Some(result_vec);
             }
             CmTypes::Barrier(_) => {
@@ -848,7 +870,7 @@ impl SynRt {
                         Self::create_node_args(&self.shared, post_node, index, stream_use, 0);
                     Self::send_to_scheduler(&self.shared, node_info, arg_vec);
                 }
-                print_debug(&format!("Added post node: {}", post_node.name));
+                print_debug(|| format!("Added post node: {}", post_node.name));
                 // Wait until all are completed by checking node_results
                 let mut completed_count = 0;
                 while completed_count < post_node.factor {
@@ -864,7 +886,7 @@ impl SynRt {
                     drop(results_read);
                 }
             }
-            print_debug("All post-nodes completed");
+            print_debug(|| "All post-nodes completed".to_string());
         }
     }
 

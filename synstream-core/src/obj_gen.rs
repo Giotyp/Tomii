@@ -24,7 +24,7 @@ pub fn init_objects(
 
     for init in initializations_json.iter() {
         let name = init.name.clone();
-        print_debug(&format!("Initializing object: {}", name));
+        print_debug(|| format!("Initializing object: {}", name));
         let factor = match &init.factor {
             Some(factor) => factor.search(&init_objects, &obj_id_map, workers),
             None => 1,

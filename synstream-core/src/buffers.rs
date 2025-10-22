@@ -116,9 +116,8 @@ impl<T: Clone + PartialEq + Debug> VecMap<T> {
 
     pub fn decrease(&mut self, node_info: &NodeInfo) -> Option<usize>
     where
-        T: std::ops::Sub<usize>,
+        T: std::ops::Sub<usize, Output = T>,
         T: From<usize>,
-        T: From<<T as std::ops::Sub<usize>>::Output>,
         T: PartialOrd,
         usize: From<T>,
     {
@@ -126,10 +125,10 @@ impl<T: Clone + PartialEq + Debug> VecMap<T> {
             let slot_vec = &mut self.buffer[node_info.slot];
             let node_vec = &mut slot_vec[node_info.id as usize];
 
-            let cur_val = node_vec[node_info.index].clone();
-            let current: usize = cur_val.into();
+            let cur_val = &mut node_vec[node_info.index];
+            let current: usize = (*cur_val).clone().into();
             if current > 0 {
-                node_vec[node_info.index] = (current - 1).into();
+                *cur_val = T::from(current - 1);
                 return Some(current - 1);
             }
             return Some(current);
