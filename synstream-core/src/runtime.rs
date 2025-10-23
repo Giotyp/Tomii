@@ -49,10 +49,7 @@ impl SynRt {
         let node_cache: Vec<NodeCacheEntry> = app_graph
             .nodes
             .iter()
-            .map(|node| NodeCacheEntry {
-                factor: node.factor,
-                name: node.name.clone(),
-            })
+            .map(|node| node_cache_entry(node, app_graph.init_objects.as_ref().unwrap()))
             .collect();
 
         let time_buffer = Arc::new(RwLock::new(TimeBufferManager::new_async(
@@ -195,11 +192,12 @@ impl SynRt {
 
             print_debug(|| format!("Preparing {:?}", node_info));
 
-            let node = &shared.graph.nodes[node_info.id as usize];
+            let node = &shared.node_cache[node_info.id as usize];
 
             let arg_vec = create_node_args(
                 &shared,
                 node,
+                node_info.id,
                 node_info.index,
                 node_info.slot,
                 node_info.pred_index,
@@ -447,7 +445,9 @@ impl SynRt {
                     let mut node_info = NodeInfo::new(post_node.id, stream_use, index, 0);
                     node_info.set_post_node(true);
 
-                    let arg_vec = create_node_args(&self.shared, post_node, index, stream_use, 0);
+                    let arg_vec =
+                        parse_args(&self.shared, &post_node.args, index, stream_use, 0, None);
+
                     send_to_scheduler(&self.shared, node_info, arg_vec);
                 }
                 print_debug(|| format!("Added post node: {}", post_node.name));

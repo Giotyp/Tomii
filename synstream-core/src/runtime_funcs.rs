@@ -11,6 +11,105 @@ use synstream_types::*;
 pub struct NodeCacheEntry {
     pub factor: usize,
     pub name: String,
+    pub arg_cache: ArgCacheEntry,
+}
+
+#[derive(Clone)]
+pub struct ArgCacheEntry {
+    // initially store ref indexes for node id
+    pub args: Vec<CmTypes>,
+    // indexes of buffer ref in args
+    pub buffer_ref_indexes: Vec<usize>,
+    // buffer values
+    pub buffer_values: Vec<Vec<CmTypes>>,
+    // indexes of $ref::index in args
+    pub rt_idxs_indexes: Vec<usize>,
+    // indexes of $ref::worker in args
+    pub rt_workers_indexes: Vec<usize>,
+    // indexes of $res in args
+    pub res_indexes: Vec<usize>,
+    // real indexes of $res
+    pub real_res_indexes: Vec<usize>,
+}
+
+impl std::fmt::Debug for ArgCacheEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArgCacheEntry")
+            .field("args", &self.args)
+            .field("buffer_ref_indexes", &self.buffer_ref_indexes)
+            .field("buffer_values", &self.buffer_values)
+            .field("rt_idxs_indexes", &self.rt_idxs_indexes)
+            .field("rt_workers_indexes", &self.rt_workers_indexes)
+            .field("res_indexes", &self.res_indexes)
+            .field("real_res_indexes", &self.real_res_indexes)
+            .finish()
+    }
+}
+
+pub fn node_cache_entry(node: &Node, init_objects: &Vec<Vec<CmTypes>>) -> NodeCacheEntry {
+    let mut rt_idxs_indexes = Vec::new();
+    let mut buffer_ref_indexes = Vec::new();
+    let mut buffer_values = Vec::new();
+    let mut rt_workers_indexes = Vec::new();
+    let mut real_res_indexes = Vec::new();
+    let mut res_indexes = Vec::new();
+    let mut args = vec![CmTypes::None; node.args.len()];
+
+    let mut idx_count = 0;
+
+    for (idx, arg) in node.args.iter().enumerate() {
+        if arg.is_condition() {
+            continue;
+        }
+        match &arg.type_ {
+            CmTypes::Ref(obj_id) => {
+                if *obj_id == 0 {
+                    // Reserved for $index
+                    rt_idxs_indexes.push(idx_count);
+                } else if *obj_id == 1 {
+                    // Reserved for $workers
+                    rt_workers_indexes.push(idx_count);
+                } else {
+                    // For init_object values
+                    let obj_vec = &init_objects[*obj_id];
+                    if obj_vec.len() > 1 {
+                        // If the object is a buffer, we need node_index
+                        buffer_ref_indexes.push(idx_count);
+                        buffer_values.push(obj_vec.clone());
+                    } else {
+                        // If the object is a variable, get the first element
+                        args[idx_count] = obj_vec[0].clone()
+                    }
+                }
+            }
+            CmTypes::Res(_) => {
+                res_indexes.push(idx_count);
+                real_res_indexes.push(idx);
+            }
+            CmTypes::Barrier(_) => { //ignore
+            }
+            _ => {
+                args[idx_count] = arg.type_.clone();
+            }
+        }
+        idx_count += 1;
+    }
+
+    let arg_cache = ArgCacheEntry {
+        args,
+        buffer_ref_indexes,
+        buffer_values,
+        rt_idxs_indexes,
+        rt_workers_indexes,
+        res_indexes,
+        real_res_indexes,
+    };
+
+    NodeCacheEntry {
+        factor: node.factor,
+        name: node.name.clone(),
+        arg_cache,
+    }
 }
 
 /// Shared data across all SynStream threads - immutable or internally synchronized
@@ -266,12 +365,13 @@ pub fn create_task(
 
 pub fn create_node_args(
     shared: &Arc<SharedData>,
-    node: &Node,
+    node: &NodeCacheEntry,
+    node_id: IdType,
     node_index: usize,
     slot: usize,
     pred_index: usize,
 ) -> Vec<CmTypes> {
-    let args = {
+    let args_cache = {
         // check if node is in loop_nodes
         // let loop_read = self.loop_nodes.read().unwrap();
         // let mut looping = false;
@@ -287,11 +387,60 @@ pub fn create_node_args(
         // } else {
         //     &node.args
         // }
-        &node.args
+        &node.arg_cache
     };
 
-    let arg_vec = parse_args(shared, args, node_index, slot, pred_index, None);
+    let arg_vec = parse_cached_args(
+        shared, args_cache, node_id, node_index, slot, pred_index, None,
+    );
 
+    arg_vec
+}
+
+pub fn parse_cached_args(
+    shared: &Arc<SharedData>,
+    args_cache: &ArgCacheEntry,
+    node_id: IdType,
+    node_index: usize,
+    slot: usize,
+    pred_index: usize,
+    custom_res: Option<&CmTypes>,
+) -> Vec<CmTypes> {
+    let mut arg_vec = args_cache.args.clone();
+
+    for (i, idx) in args_cache.buffer_ref_indexes.iter().enumerate() {
+        let buffer = &args_cache.buffer_values[i];
+        arg_vec[*idx] = buffer[node_index % buffer.len()].clone();
+    }
+
+    for idx in args_cache.rt_idxs_indexes.iter() {
+        arg_vec[*idx] = CmTypes::Usize(node_index);
+    }
+    for idx in args_cache.rt_workers_indexes.iter() {
+        let workers = shared.workers.load(Ordering::SeqCst);
+        arg_vec[*idx] = CmTypes::Usize(workers);
+    }
+
+    for (res_idx, real_idx) in args_cache
+        .res_indexes
+        .iter()
+        .zip(args_cache.real_res_indexes.iter())
+    {
+        let arg = shared.graph.nodes[node_id as usize]
+            .args
+            .get(*real_idx)
+            .expect("Argument index out of bounds");
+
+        let result_opt = collect_arg_result(arg, node_index, slot, pred_index, custom_res, shared);
+        if let Some(mut result) = result_opt {
+            if result.len() == 1 {
+                arg_vec[*res_idx] = result.remove(0);
+            } else {
+                // insert to res_idx and next positions by expanding vec
+                arg_vec.splice(*res_idx..*res_idx + 1, result);
+            }
+        }
+    }
     arg_vec
 }
 
@@ -312,9 +461,8 @@ pub fn parse_args(
         }
 
         let result_opt = collect_arg_result(arg, node_index, slot, pred_index, custom_res, shared);
-        if let Some(mut result) = result_opt {
-            arg_vec.reserve(result.len());
-            arg_vec.append(&mut result);
+        if let Some(result) = result_opt {
+            arg_vec.extend(result);
         }
     }
     arg_vec
