@@ -127,7 +127,7 @@ pub struct SharedData {
     pub node_results: Arc<RwLock<VecMap<CmTypes>>>,
     pub stream_complete_counter: Arc<AtomicUsize>,
     pub available_stream_slots: Arc<RwLock<Vec<usize>>>,
-    pub time_buffer: Arc<RwLock<TimeBufferManager>>,
+    pub time_buffer: Arc<TimeBufferManager>,
 
     // Shared between threads
     pub scheduler: Arc<RwLock<Option<Arc<SchedulerImpl>>>>,
@@ -210,11 +210,9 @@ pub fn conditions_met(
 
 pub fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
     // Complete timing - use unwrap_or to handle errors gracefully
-    let time_read = shared.time_buffer.read().unwrap();
-    if let Err(e) = time_read.finish_slot_processing(slot) {
+    if let Err(e) = shared.time_buffer.finish_slot_processing(slot) {
         eprintln!("Warning: Failed to finish slot {} timing: {}", slot, e);
     }
-    drop(time_read);
 
     let mut new_iteration = false;
     // Increment global completion counter
@@ -341,21 +339,17 @@ pub fn create_task(
     node_info: NodeInfo,
     node_name: String,
     completed_tx: Sender<(NodeInfo, CmTypes)>,
-    time_buf: Arc<RwLock<TimeBufferManager>>,
+    time_buf: Arc<TimeBufferManager>,
 ) -> impl FnOnce() {
     let task = move || {
-        let time_read = time_buf.read().unwrap();
-        let start_time = time_read.measure_time();
-        drop(time_read);
+        let start_time = time_buf.measure_time();
 
         let result = func(arg_vec);
 
         if !node_info.post_node {
-            let time_read = time_buf.read().unwrap();
-            let end_time = time_read.measure_time();
-            let duration = time_read.measure_duration(start_time, end_time);
-            time_read.add_task_time(node_info.slot, &node_name, duration);
-            drop(time_read);
+            let end_time = time_buf.measure_time();
+            let duration = time_buf.measure_duration(start_time, end_time);
+            time_buf.add_task_time(node_info.slot, &node_name, duration);
         }
         // Send result through channel
         completed_tx.send((node_info, result)).unwrap();

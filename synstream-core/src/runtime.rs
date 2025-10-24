@@ -52,10 +52,7 @@ impl SynRt {
             .map(|node| node_cache_entry(node, app_graph.init_objects.as_ref().unwrap()))
             .collect();
 
-        let time_buffer = Arc::new(RwLock::new(TimeBufferManager::new_async(
-            slots + 1,
-            use_rdtsc,
-        )));
+        let time_buffer = Arc::new(TimeBufferManager::new_async(slots + 1, use_rdtsc));
 
         let shared = Arc::new(SharedData {
             graph: app_graph.clone(),
@@ -109,9 +106,9 @@ impl SynRt {
         };
 
         // Initiate synstream-runtime timing for scheduling threads
-        let time_read = self.shared.time_buffer.read().unwrap();
-        time_read.start_slot_processing(self.shared.slots);
-        drop(time_read);
+        self.shared
+            .time_buffer
+            .start_slot_processing(self.shared.slots);
 
         // Spawn preparation thread
         let shared_for_prep = Arc::clone(&self.shared);
@@ -174,9 +171,10 @@ impl SynRt {
         preparation_handle.join().unwrap();
         resolution_handle.join().unwrap();
 
-        let time_read = self.shared.time_buffer.read().unwrap();
-        let _ = time_read.finish_slot_processing(self.shared.slots);
-        drop(time_read);
+        let _ = self
+            .shared
+            .time_buffer
+            .finish_slot_processing(self.shared.slots);
     }
 }
 
@@ -186,9 +184,7 @@ impl SynRt {
         // Gathers arguments and sends node to scheduler
 
         while let Ok(node_info) = ready_rx.recv() {
-            let time_read = shared.time_buffer.read().unwrap();
-            let start_time = time_read.measure_time();
-            drop(time_read);
+            let start_time = shared.time_buffer.measure_time();
 
             print_debug(|| format!("Preparing {:?}", node_info));
 
@@ -203,16 +199,29 @@ impl SynRt {
                 node_info.pred_index,
             );
 
+            let prep_time = shared.time_buffer.measure_time();
+            let duration = shared
+                .time_buffer
+                .measure_duration(start_time.clone(), prep_time.clone());
+            shared
+                .time_buffer
+                .add_task_time(shared.slots, "Argument Preparation", duration);
+
             if !arg_vec.is_empty() {
                 // Schedule Task
                 send_to_scheduler(&shared, node_info, arg_vec);
             }
+            let sched_time = shared.time_buffer.measure_time();
+            let duration = shared.time_buffer.measure_duration(prep_time, sched_time);
+            shared
+                .time_buffer
+                .add_task_time(shared.slots, "Argument Scheduling", duration);
 
-            let time_read = shared.time_buffer.read().unwrap();
-            let end_time = time_read.measure_time();
-            let duration = time_read.measure_duration(start_time, end_time);
-            time_read.add_task_time(shared.slots, "Preparation Thread", duration);
-            drop(time_read);
+            let end_time = shared.time_buffer.measure_time();
+            let duration = shared.time_buffer.measure_duration(start_time, end_time);
+            shared
+                .time_buffer
+                .add_task_time(shared.slots, "Preparation Thread", duration);
         }
     }
 
@@ -234,11 +243,9 @@ impl SynRt {
         let cond_indexes = shared.graph.get_condition_indexes();
 
         // Start timing for all initial slots
-        let time_read = shared.time_buffer.read().unwrap();
         for slot_id in 0..shared.slots {
-            time_read.start_slot_processing(slot_id);
+            shared.time_buffer.start_slot_processing(slot_id);
         }
-        drop(time_read);
 
         // Find and send initial nodes to ready channel
         let slot_vec: Vec<usize> = (0..shared.slots).collect();
@@ -269,9 +276,7 @@ impl SynRt {
 
         // Process completed nodes
         while let Ok((mut node_info, result)) = completed_rx.recv() {
-            let time_read = shared.time_buffer.read().unwrap();
-            let start_time = time_read.measure_time();
-            drop(time_read);
+            let start_time = shared.time_buffer.measure_time();
 
             if node_info.id == IdType::MAX {
                 // Exit signal received, stopping thread
@@ -415,9 +420,7 @@ impl SynRt {
                         // Remove from completed set since we're starting again
                         completed_slots.remove(&node_info.slot);
                         // Start slot timing
-                        let time_read = shared.time_buffer.read().unwrap();
-                        time_read.start_slot_processing(node_info.slot);
-                        drop(time_read);
+                        shared.time_buffer.start_slot_processing(node_info.slot);
                         let init_nodes = initial_nodes(&shared, vec![node_info.slot]);
                         for node_info in init_nodes {
                             ready_tx.send(node_info).unwrap();
@@ -425,11 +428,11 @@ impl SynRt {
                     }
                 }
             }
-            let time_read = shared.time_buffer.read().unwrap();
-            let end_time = time_read.measure_time();
-            let duration = time_read.measure_duration(start_time, end_time);
-            time_read.add_task_time(shared.slots, "Resolution Thread", duration);
-            drop(time_read);
+            let end_time = shared.time_buffer.measure_time();
+            let duration = shared.time_buffer.measure_duration(start_time, end_time);
+            shared
+                .time_buffer
+                .add_task_time(shared.slots, "Resolution Thread", duration);
         }
     }
 }
@@ -484,7 +487,6 @@ impl SynRt {
     }
 
     pub fn print_statistics(&self, bench_name: &str, out_file: Option<&str>) {
-        let time_read = self.shared.time_buffer.read().unwrap();
-        time_read.print_stats(bench_name, out_file);
+        self.shared.time_buffer.print_stats(bench_name, out_file);
     }
 }
