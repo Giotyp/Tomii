@@ -164,10 +164,20 @@ fn execute_task(
     let _ = completed_tx.send((node_info, result));
 }
 
-pub fn send_to_scheduler(shared: &Arc<SharedData>, node_info: NodeInfo, arg_vec: Vec<CmTypes>) {
-    // Get cached data first - no locks needed
+pub fn send_to_scheduler(
+    shared: &Arc<SharedData>,
+    node_info: NodeInfo,
+    arg_vec: Vec<CmTypes>,
+    custom_func: Option<CmPtr>,
+) {
     let cache_entry = &shared.node_cache[node_info.id as usize];
-    let func = cache_entry.func_ptr;
+    let func = {
+        if custom_func.is_some() {
+            custom_func.unwrap()
+        } else {
+            cache_entry.func_ptr
+        }
+    };
     let node_name = cache_entry.name.clone();
     let time_buf = Arc::clone(&shared.time_buffer);
 

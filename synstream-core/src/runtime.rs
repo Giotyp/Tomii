@@ -209,7 +209,7 @@ impl SynRt {
 
             if !arg_vec.is_empty() {
                 // Schedule Task
-                send_to_scheduler(&shared, node_info, arg_vec);
+                send_to_scheduler(&shared, node_info, arg_vec, None);
             }
             let sched_time = shared.time_buffer.measure_time();
             let duration = shared.time_buffer.measure_duration(prep_time, sched_time);
@@ -255,16 +255,27 @@ impl SynRt {
         }
 
         // Initialize remaining processing nodes tracker
-        let mut remaining_proc_nodes = {
+        let mut remaining_nodes = {
             let mut vec = Vec::new();
             for slot in 0..shared.slots {
                 vec.push(Vec::new());
                 for node_id in 0..shared.graph.nodes.len() {
                     if shared.graph.initial_nodes.contains(&(node_id as IdType)) {
                         vec[slot].push(0);
-                    } else {
+                    } else if !shared.graph.condition_nodes.contains(&(node_id as IdType)) {
                         vec[slot].push(shared.node_cache[node_id].factor);
                     }
+                }
+            }
+            vec
+        };
+
+        let mut remaining_cond_nodes = {
+            let mut vec = Vec::new();
+            for slot in 0..shared.slots {
+                vec.push(Vec::new());
+                for &cond_id in &shared.graph.condition_nodes {
+                    vec[slot].push(shared.node_cache[cond_id as usize].factor);
                 }
             }
             vec
@@ -327,7 +338,21 @@ impl SynRt {
             let mut nodes_sent = 0;
             for succ_id in successors {
                 let succ_id = *succ_id;
-                let remaining = remaining_proc_nodes[node_info.slot][succ_id as usize];
+
+                let has_condition = shared.graph.condition_nodes.contains(&succ_id);
+
+                let remaining = {
+                    if has_condition {
+                        remaining_cond_nodes[node_info.slot][succ_id as usize]
+                    } else {
+                        remaining_nodes[node_info.slot][succ_id as usize]
+                    }
+                };
+
+                if remaining == 0 {
+                    continue;
+                }
+
                 let succ_factor = shared.node_cache[succ_id as usize].factor;
                 let node_factor = shared.node_cache[node_info.id as usize].factor;
 
@@ -354,7 +379,7 @@ impl SynRt {
                         NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.index);
                     let dep_opt = dependency_map.decrease(&succ_info);
                     if let Some(dep) = dep_opt {
-                        if dep == 0 && remaining > 0 {
+                        if dep == 0 {
                             if !shared.graph.condition_nodes.contains(&succ_id) {
                                 print_debug(|| {
                                     format!("Sent successor {:?} to ready channel", succ_info)
@@ -363,7 +388,7 @@ impl SynRt {
 
                                 // Increase nodes_sent and decrease remaining_proc_nodes
                                 nodes_sent += 1;
-                                remaining_proc_nodes[node_info.slot][succ_id as usize] -= 1;
+                                remaining_nodes[node_info.slot][succ_id as usize] -= 1;
                             } else {
                                 let index = &shared
                                     .graph
@@ -377,7 +402,7 @@ impl SynRt {
                                     });
                                     ready_tx.send(succ_info).unwrap();
                                     nodes_sent += 1;
-                                    remaining_proc_nodes[node_info.slot][succ_id as usize] -= 1;
+                                    remaining_cond_nodes[node_info.slot][succ_id as usize] -= 1;
                                 } else {
                                     print_debug(|| {
                                         format!("Conditions not met for successor {:?}", succ_info)
@@ -397,7 +422,7 @@ impl SynRt {
                 let receive_queue_empty = completed_rx.is_empty();
 
                 // Check if all nodes in this slot have been processed
-                let all_nodes_processed = remaining_proc_nodes[node_info.slot]
+                let all_nodes_processed = remaining_nodes[node_info.slot]
                     .iter()
                     .all(|&count| count == 0);
 
@@ -411,8 +436,8 @@ impl SynRt {
                     // Reset dependency_map for this slot
                     dependency_map.reinit_slot(node_info.slot);
                     // Reinint remaining_proc_nodes for this slot
-                    for node_id in 0..remaining_proc_nodes[node_info.slot].len() {
-                        remaining_proc_nodes[node_info.slot][node_id] =
+                    for node_id in 0..remaining_nodes[node_info.slot].len() {
+                        remaining_nodes[node_info.slot][node_id] =
                             shared.graph.nodes[node_id].factor;
                     }
                     // Add initial nodes for new iteration
@@ -451,7 +476,9 @@ impl SynRt {
                     let arg_vec =
                         parse_args(&self.shared, &post_node.args, index, stream_use, 0, None);
 
-                    send_to_scheduler(&self.shared, node_info, arg_vec);
+                    let func = post_node.func_ptr;
+
+                    send_to_scheduler(&self.shared, node_info, arg_vec, func);
                 }
                 print_debug(|| format!("Added post node: {}", post_node.name));
                 // Wait until all are completed by checking node_results
