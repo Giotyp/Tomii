@@ -416,11 +416,9 @@ pub fn create_node_args(
         &node.arg_cache
     };
 
-    let arg_vec = parse_cached_args(
+    parse_cached_args(
         shared, args_cache, node_id, node_index, slot, pred_index, None,
-    );
-
-    arg_vec
+    )
 }
 
 pub fn parse_cached_args(
@@ -505,78 +503,78 @@ pub fn collect_arg_result(
     match &arg.type_ {
         CmTypes::Ref(obj_id) => {
             let obj_id = *obj_id;
-            let init_objects = &shared.graph.init_objects.as_ref().unwrap();
-            // Argument may be node index
-            if obj_id == 0 {
-                // reserved for $index
-                return Some(vec![CmTypes::Usize(node_index)]);
-            }
-            // Argument may be worker num
-            if obj_id == 1 {
-                // reserved for $workers
-                return Some(vec![CmTypes::Usize(shared.workers.load(Ordering::SeqCst))]);
-            }
-
-            // object may be either buffer indexed by node_index
-            // or just variable indexed by 0
-            let obj_vec = &init_objects[obj_id as usize];
-            let obj = {
-                if obj_vec.len() > 1 {
-                    // If the object is a buffer, get the object according to node_index
-                    let index = node_index % obj_vec.len();
-                    obj_vec[index].clone()
-                } else {
-                    // If the object is a variable, get the first element
-                    obj_vec[0].clone()
+            // Fast path for special indices
+            match obj_id {
+                0 => return Some(vec![CmTypes::Usize(node_index)]), // $index
+                1 => return Some(vec![CmTypes::Usize(shared.workers.load(Ordering::Relaxed))]), // $workers - use Relaxed ordering
+                _ => {
+                    // Regular object reference - avoid unnecessary block
+                    let obj_vec = &shared.graph.init_objects.as_ref().unwrap()[obj_id as usize];
+                    return Some(vec![if obj_vec.len() > 1 {
+                        obj_vec[node_index % obj_vec.len()].clone()
+                    } else {
+                        obj_vec[0].clone()
+                    }]);
                 }
-            };
-            return Some(vec![obj]);
+            }
         }
         CmTypes::Res(res_node_id) => {
+            // Fast path for custom result
             if let Some(custom_res) = custom_res {
                 return Some(vec![(*custom_res).clone()]);
             }
-            let mut indices = arg
-                .predecessor
-                .as_ref()
-                .unwrap()
-                .indexes
-                .iter()
-                .map(|&pred_idx| {
-                    // Get the predecessor node factor
-                    let nodes = &shared.graph.nodes;
-                    let pred_node: &Node = &nodes[arg.predecessor.as_ref().unwrap().id as usize];
-                    let pred_factor = pred_node.factor;
 
-                    // Find the index of the node in the results
-                    let new_index = find_pred_index(node_index, pred_idx, pred_factor);
-                    new_index
-                })
-                .collect::<Vec<usize>>();
+            // Get predecessor info once
+            let predecessor = match arg.predecessor.as_ref() {
+                Some(p) => p,
+                None => return None, // Early return if no predecessor
+            };
 
-            if indices.len() == 1 {
-                indices[0] = pred_index;
+            // Special case for single index
+            if predecessor.indexes.len() == 1 {
+                let node_info = NodeInfo::new(*res_node_id as IdType, slot, pred_index, 0);
+                // Single read lock acquisition
+                if let Ok(res_read) = shared.node_results.read() {
+                    if let Some(result) = res_read.get(&node_info) {
+                        return Some(vec![result]);
+                    }
+                }
+                return None;
             }
 
-            let mut result_vec = Vec::with_capacity(indices.len());
-            // Acquire lock once for all results
-            let res_read = shared.node_results.read().unwrap();
-            for dep_idx in indices.iter() {
-                // for each task index, retrieve the
-                // corresponding results
-                // (must exist since they are completed)
-                let node_info = NodeInfo::new(*res_node_id as IdType, slot, *dep_idx, 0);
-                let result = res_read.get(&node_info).unwrap();
-                result_vec.push(result);
+            // Batch process multiple indices
+            let pred_node = &shared.graph.nodes[predecessor.id as usize];
+            let pred_factor = pred_node.factor;
+
+            // Pre-allocate vectors with exact sizes
+            let mut indices = Vec::with_capacity(predecessor.indexes.len());
+            for &pred_idx in predecessor.indexes.iter() {
+                indices.push(find_pred_index(node_index, pred_idx, pred_factor));
             }
-            drop(res_read);
-            return Some(result_vec);
+
+            // Single read lock acquisition for all results
+            if let Ok(res_read) = shared.node_results.read() {
+                let mut result_vec = Vec::with_capacity(indices.len());
+
+                // Batch collect all results under single lock
+                for dep_idx in indices.iter() {
+                    let node_info = NodeInfo::new(*res_node_id as IdType, slot, *dep_idx, 0);
+                    if let Some(result) = res_read.get(&node_info) {
+                        result_vec.push(result);
+                    } else {
+                        return None; // Early return if any result is missing
+                    }
+                }
+
+                // Only return Some if we got all results
+                if result_vec.len() == indices.len() {
+                    return Some(result_vec);
+                }
+            }
+            None
         }
-        CmTypes::Barrier(_) => {
-            // Barrier does not require any arguments
-            return None;
-        }
-        _ => return Some(vec![arg.type_.clone()]),
+        CmTypes::Barrier(_) => None,
+        _ => Some(vec![arg.type_.clone()]),
     }
 }
 
