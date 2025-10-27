@@ -11,6 +11,7 @@ use synstream_types::*;
 pub struct NodeCacheEntry {
     pub factor: usize,
     pub name: String,
+    pub func_ptr: CmPtr,
     pub arg_cache: ArgCacheEntry,
 }
 
@@ -108,6 +109,7 @@ pub fn node_cache_entry(node: &Node, init_objects: &Vec<Vec<CmTypes>>) -> NodeCa
     NodeCacheEntry {
         factor: node.factor,
         name: node.name.clone(),
+        func_ptr: node.func_ptr.expect("Node function pointer is None"),
         arg_cache,
     }
 }
@@ -135,46 +137,76 @@ pub struct SharedData {
     pub workers: Arc<AtomicUsize>,
 }
 
+#[inline(always)]
+fn execute_task(
+    func: CmPtr,
+    arg_vec: Vec<CmTypes>,
+    node_info: NodeInfo,
+    time_buf: &Arc<TimeBufferManager>,
+    node_name: &str,
+    completed_tx: &Sender<(NodeInfo, CmTypes)>,
+) {
+    let start_time = if !node_info.post_node {
+        Some(time_buf.measure_time())
+    } else {
+        None
+    };
+
+    let result = func(arg_vec);
+
+    if let Some(start) = start_time {
+        let end_time = time_buf.measure_time();
+        let duration = time_buf.measure_duration(start, end_time);
+        time_buf.add_task_time(node_info.slot, node_name, duration);
+    }
+
+    // Send result
+    let _ = completed_tx.send((node_info, result));
+}
+
 pub fn send_to_scheduler(shared: &Arc<SharedData>, node_info: NodeInfo, arg_vec: Vec<CmTypes>) {
-    let nodes = {
-        if node_info.post_node {
-            // Use the static graph for post nodes
-            &shared.graph.post_nodes.as_ref().unwrap()
-        } else {
-            // Use the appropriate graph for this slot
-            &shared.graph.nodes
+    // Get cached data first - no locks needed
+    let cache_entry = &shared.node_cache[node_info.id as usize];
+    let func = cache_entry.func_ptr;
+    let node_name = cache_entry.name.clone();
+    let time_buf = Arc::clone(&shared.time_buffer);
+
+    // Get scheduler with proper error handling
+    let scheduler_guard = match shared.scheduler.read() {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("Failed to acquire scheduler lock: {}", e);
+            return;
         }
     };
 
-    let node = &nodes[node_info.id as usize];
-
-    let error = format!(
-        "Node {} with index {} has no function pointer",
-        node_info.id, node_info.index
-    );
-    let func: CmPtr = node.func_ptr.expect(error.as_str());
-
-    // Schedule Task
-    let completed_tx_clone = {
-        let tx_lock = shared.completed_tx.read().unwrap();
-        tx_lock.as_ref().unwrap().clone()
+    let scheduler = match scheduler_guard.as_ref() {
+        Some(s) => s,
+        None => {
+            eprintln!("Scheduler is not initialized");
+            return;
+        }
     };
-    let time_buffer_clone = shared.time_buffer.clone();
-    let node_name = shared.node_cache[node_info.id as usize].name.clone();
 
-    let task = create_task(
-        func,
-        arg_vec,
-        node_info,
-        node_name,
-        completed_tx_clone,
-        time_buffer_clone,
-    );
+    let completed_tx = match shared.completed_tx.read() {
+        Ok(guard) => guard.as_ref().unwrap().clone(),
+        Err(e) => {
+            eprintln!("Failed to acquire completed_tx lock: {}", e);
+            return;
+        }
+    };
 
-    // Avoid cloning Arc - use scheduler directly through read lock
-    let scheduler_lock = shared.scheduler.read().unwrap();
-    scheduler_lock.as_ref().unwrap().spawn_task(task);
-    drop(scheduler_lock);
+    // Spawn task
+    scheduler.spawn_task(move || {
+        execute_task(
+            func,
+            arg_vec,
+            node_info,
+            &time_buf,
+            &node_name,
+            &completed_tx,
+        )
+    });
 }
 
 pub fn conditions_met(
