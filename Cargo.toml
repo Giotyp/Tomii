@@ -1,3 +1,9 @@
 [workspace]
 members = ["synstream-core", "synstream-types", "examples/matrix-compute"]
 resolver = "3"
+
+[profile.release]
+opt-level = 3
+debug = false 
+lto = "thin"
+codegen-units = 1

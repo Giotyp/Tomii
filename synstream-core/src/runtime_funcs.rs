@@ -389,6 +389,7 @@ pub fn create_task(
     task
 }
 
+#[inline]
 pub fn create_node_args(
     shared: &Arc<SharedData>,
     node: &NodeCacheEntry,
@@ -421,6 +422,42 @@ pub fn create_node_args(
     )
 }
 
+#[inline(always)]
+fn process_buffer_refs(arg_vec: &mut Vec<CmTypes>, cache: &ArgCacheEntry, node_index: usize) {
+    for (i, idx) in cache.buffer_ref_indexes.iter().enumerate() {
+        arg_vec[*idx] = get_object_value(&cache.buffer_values[i], node_index);
+    }
+}
+
+#[inline(always)]
+fn process_runtime_refs(
+    arg_vec: &mut Vec<CmTypes>,
+    cache: &ArgCacheEntry,
+    node_index: usize,
+    workers: usize,
+) {
+    // Process both types of runtime refs in a single iteration if possible
+    if cache.rt_idxs_indexes.len() == cache.rt_workers_indexes.len() {
+        for (idx_idx, worker_idx) in cache
+            .rt_idxs_indexes
+            .iter()
+            .zip(cache.rt_workers_indexes.iter())
+        {
+            arg_vec[*idx_idx] = CmTypes::Usize(node_index);
+            arg_vec[*worker_idx] = CmTypes::Usize(workers);
+        }
+    } else {
+        // Fall back to separate processing
+        for idx in cache.rt_idxs_indexes.iter() {
+            arg_vec[*idx] = CmTypes::Usize(node_index);
+        }
+        for idx in cache.rt_workers_indexes.iter() {
+            arg_vec[*idx] = CmTypes::Usize(workers);
+        }
+    }
+}
+
+#[inline(always)]
 pub fn parse_cached_args(
     shared: &Arc<SharedData>,
     args_cache: &ArgCacheEntry,
@@ -430,20 +467,25 @@ pub fn parse_cached_args(
     pred_index: usize,
     custom_res: Option<&CmTypes>,
 ) -> Vec<CmTypes> {
+    if args_cache.buffer_ref_indexes.is_empty()
+        && args_cache.rt_idxs_indexes.is_empty()
+        && args_cache.rt_workers_indexes.is_empty()
+        && args_cache.res_indexes.is_empty()
+    {
+        return args_cache.args.clone();
+    }
+
     let mut arg_vec = args_cache.args.clone();
 
-    for (i, idx) in args_cache.buffer_ref_indexes.iter().enumerate() {
-        let buffer = &args_cache.buffer_values[i];
-        arg_vec[*idx] = buffer[node_index % buffer.len()].clone();
-    }
+    // Pre-fetch workers count if needed
+    let workers = if !args_cache.rt_workers_indexes.is_empty() {
+        shared.workers.load(Ordering::Relaxed)
+    } else {
+        0
+    };
 
-    for idx in args_cache.rt_idxs_indexes.iter() {
-        arg_vec[*idx] = CmTypes::Usize(node_index);
-    }
-    for idx in args_cache.rt_workers_indexes.iter() {
-        let workers = shared.workers.load(Ordering::SeqCst);
-        arg_vec[*idx] = CmTypes::Usize(workers);
-    }
+    process_buffer_refs(&mut arg_vec, args_cache, node_index);
+    process_runtime_refs(&mut arg_vec, args_cache, node_index, workers);
 
     for (res_idx, real_idx) in args_cache
         .res_indexes
@@ -492,6 +534,29 @@ pub fn parse_args(
     arg_vec
 }
 
+#[inline(always)]
+fn handle_special_ref(
+    obj_id: usize,
+    node_index: usize,
+    workers: &Arc<AtomicUsize>,
+) -> Option<Vec<CmTypes>> {
+    match obj_id {
+        0 => Some(vec![CmTypes::Usize(node_index)]),
+        1 => Some(vec![CmTypes::Usize(workers.load(Ordering::Relaxed))]),
+        _ => None,
+    }
+}
+
+#[inline(always)]
+fn get_object_value(obj_vec: &[CmTypes], node_index: usize) -> CmTypes {
+    if obj_vec.len() > 1 {
+        obj_vec[node_index % obj_vec.len()].clone()
+    } else {
+        obj_vec[0].clone()
+    }
+}
+
+#[inline]
 pub fn collect_arg_result(
     arg: &Arg,
     node_index: usize,
@@ -503,28 +568,19 @@ pub fn collect_arg_result(
     match &arg.type_ {
         CmTypes::Ref(obj_id) => {
             let obj_id = *obj_id;
-            // Fast path for special indices
-            match obj_id {
-                0 => return Some(vec![CmTypes::Usize(node_index)]), // $index
-                1 => return Some(vec![CmTypes::Usize(shared.workers.load(Ordering::Relaxed))]), // $workers - use Relaxed ordering
-                _ => {
-                    // Regular object reference - avoid unnecessary block
-                    let obj_vec = &shared.graph.init_objects.as_ref().unwrap()[obj_id as usize];
-                    return Some(vec![if obj_vec.len() > 1 {
-                        obj_vec[node_index % obj_vec.len()].clone()
-                    } else {
-                        obj_vec[0].clone()
-                    }]);
-                }
+            if let Some(result) = handle_special_ref(obj_id, node_index, &shared.workers) {
+                return Some(result);
             }
+
+            let obj_vec = &shared.graph.init_objects.as_ref().unwrap()[obj_id as usize];
+            Some(vec![get_object_value(obj_vec, node_index)])
         }
         CmTypes::Res(res_node_id) => {
-            // Fast path for custom result
             if let Some(custom_res) = custom_res {
                 return Some(vec![(*custom_res).clone()]);
             }
 
-            // Get predecessor info once
+            // Get predecessor info
             let predecessor = match arg.predecessor.as_ref() {
                 Some(p) => p,
                 None => return None, // Early return if no predecessor
@@ -533,7 +589,6 @@ pub fn collect_arg_result(
             // Special case for single index
             if predecessor.indexes.len() == 1 {
                 let node_info = NodeInfo::new(*res_node_id as IdType, slot, pred_index, 0);
-                // Single read lock acquisition
                 if let Ok(res_read) = shared.node_results.read() {
                     if let Some(result) = res_read.get(&node_info) {
                         return Some(vec![result]);
@@ -546,17 +601,16 @@ pub fn collect_arg_result(
             let pred_node = &shared.graph.nodes[predecessor.id as usize];
             let pred_factor = pred_node.factor;
 
-            // Pre-allocate vectors with exact sizes
+            // Pre-allocate vectors
             let mut indices = Vec::with_capacity(predecessor.indexes.len());
             for &pred_idx in predecessor.indexes.iter() {
                 indices.push(find_pred_index(node_index, pred_idx, pred_factor));
             }
 
-            // Single read lock acquisition for all results
             if let Ok(res_read) = shared.node_results.read() {
                 let mut result_vec = Vec::with_capacity(indices.len());
 
-                // Batch collect all results under single lock
+                // Batch collect all results
                 for dep_idx in indices.iter() {
                     let node_info = NodeInfo::new(*res_node_id as IdType, slot, *dep_idx, 0);
                     if let Some(result) = res_read.get(&node_info) {
@@ -566,7 +620,6 @@ pub fn collect_arg_result(
                     }
                 }
 
-                // Only return Some if we got all results
                 if result_vec.len() == indices.len() {
                     return Some(result_vec);
                 }
