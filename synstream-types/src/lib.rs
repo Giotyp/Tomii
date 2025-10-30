@@ -3,7 +3,7 @@ use rapidhash::{HashMapExt, RapidHashMap};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::any::Any;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -286,6 +286,43 @@ impl CmTypes {
         }
     }
 
+    /// Get mutable access with a timeout and retry backoff between attempts.
+    pub fn sliced_get_mut_range_timeout<T>(
+        &self,
+        start: usize,
+        len: usize,
+        timeout: Duration,
+        retry: Duration,
+    ) -> Option<MutSliceGuard<'_, T>> {
+        if let CmTypes::AnySliced(container_arc) = self {
+            unsafe {
+                if let Some((raw_ptr, byte_len)) =
+                    container_arc.get_mut_range_raw_timeout(start, len, timeout, retry)
+                {
+                    let element_size = std::mem::size_of::<T>();
+                    if element_size == 0 || byte_len % element_size != 0 {
+                        container_arc.unset_range(start, len);
+                        return None;
+                    }
+                    let element_len = byte_len / element_size;
+                    let typed_ptr = raw_ptr as *mut T;
+                    let slice = std::slice::from_raw_parts_mut(typed_ptr, element_len);
+
+                    Some(MutSliceGuard {
+                        slice,
+                        container: container_arc.as_ref(),
+                        start,
+                        len,
+                    })
+                } else {
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
     /// Returns a raw mutable pointer to the inner type `T` if it matches.
     pub unsafe fn as_mut_ptr<T: Any + Send + Sync>(&self) -> Option<SendPtr<T>> {
         if let CmTypes::Any(lock) = self {
@@ -441,6 +478,15 @@ pub trait SlicedAccess: Any + Send + Sync {
     /// Get raw mutable pointer and length for a range, returns None if range is already borrowed
     unsafe fn get_mut_range_raw(&self, start: usize, len: usize) -> Option<(*mut u8, usize)>;
 
+    /// Get raw mutable pointer with timeout and optional backoff between retries
+    unsafe fn get_mut_range_raw_timeout(
+        &self,
+        start: usize,
+        len: usize,
+        timeout: Duration,
+        retry: Duration,
+    ) -> Option<(*mut u8, usize)>;
+
     /// Get raw immutable pointer and length for a range without setting write bits
     /// Returns None if any mutable borrows are active in the range
     unsafe fn get_range_raw(&self, start: usize, len: usize) -> Option<(*const u8, usize)>;
@@ -464,71 +510,168 @@ pub trait Sliceable<T> {
     fn as_mut_slice(&mut self) -> &mut [T];
 }
 
-// A sliced container that tracks mutable borrows with write bits
+// A sliced container that tracks mutable borrows with chunked write bitsets
 pub struct SlicedContainer<T> {
     data_ptr: SendPtr<T>,
     total_length: usize,
-    write_bits: Vec<AtomicBool>,
+    write_chunks: Vec<AtomicU64>,
     _data: Box<dyn Any + Send + Sync>,
 }
 
 impl<T> SlicedContainer<T> {
+    const CHUNK_BITS: usize = u64::BITS as usize;
+
     /// Create a new sliced container with write bits tracking
     pub fn new(
         value: Box<dyn Any + Send + Sync>,
         data_ptr: SendPtr<T>,
         total_length: usize,
     ) -> Self {
-        let write_bits = (0..total_length).map(|_| AtomicBool::new(false)).collect();
+        let chunk_count = (total_length + Self::CHUNK_BITS - 1) / Self::CHUNK_BITS;
+        let write_chunks = (0..chunk_count).map(|_| AtomicU64::new(0)).collect();
 
         Self {
             data_ptr,
             total_length,
-            write_bits,
+            write_chunks,
             _data: value,
         }
     }
 
-    /// Get mutable access to a chunk of the buffer with spin lock protection
-    /// Returns a mutable slice reference if successful, None if already borrowed
-    pub fn sliced_data_mut(&self, start: usize, len: usize) -> Option<&mut [T]> {
-        if start + len > self.total_length {
+    #[inline]
+    fn range_end(&self, start: usize, len: usize) -> Option<usize> {
+        if start > self.total_length {
             return None;
         }
+        len.checked_add(start)
+            .filter(|end| *end <= self.total_length)
+    }
 
-        // Try to acquire all write bits for this range
-        let mut acquired_indices = Vec::new();
-        for i in start..(start + len) {
-            // Spin lock: keep trying until we can acquire the bit
+    #[inline]
+    fn mask_for_chunk(range_start: usize, range_end: usize, chunk_idx: usize) -> u64 {
+        let chunk_start = chunk_idx * Self::CHUNK_BITS;
+        let chunk_end = chunk_start + Self::CHUNK_BITS;
+
+        let from = range_start.max(chunk_start);
+        let to = range_end.min(chunk_end);
+        if from >= to {
+            return 0;
+        }
+
+        let bit_start = from - chunk_start;
+        let bit_len = to - from;
+        if bit_len >= Self::CHUNK_BITS {
+            return u64::MAX;
+        }
+
+        let base = u64::MAX >> (Self::CHUNK_BITS - bit_len);
+        base << bit_start
+    }
+
+    /// Get mutable access to a range of the buffer using chunked atomic bitsets
+    /// Returns a mutable slice reference if successful, None if any part of the range overlaps
+    pub fn sliced_data_mut(&self, start: usize, len: usize) -> Option<&mut [T]> {
+        let Some(range_end) = self.range_end(start, len) else {
+            return None;
+        };
+
+        if len == 0 {
+            unsafe {
+                let ptr = self.data_ptr.0.add(start);
+                return Some(std::slice::from_raw_parts_mut(ptr, 0));
+            }
+        }
+
+        let first_chunk = start / Self::CHUNK_BITS;
+        let last_chunk = (range_end - 1) / Self::CHUNK_BITS;
+        let mut acquired: Vec<(usize, u64)> = Vec::with_capacity(last_chunk - first_chunk + 1);
+
+        for chunk_idx in first_chunk..=last_chunk {
+            let mask = Self::mask_for_chunk(start, range_end, chunk_idx);
+            if mask == 0 {
+                continue;
+            }
+
+            let chunk = &self.write_chunks[chunk_idx];
+            let mut current = chunk.load(Ordering::Acquire);
             loop {
-                if self.write_bits[i]
-                    .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    acquired_indices.push(i);
-                    break;
-                } else {
-                    // Spin wait - small delay to reduce CPU usage
-                    thread::sleep(Duration::from_nanos(10));
+                if current & mask != 0 {
+                    for (idx, release_mask) in acquired.into_iter() {
+                        self.write_chunks[idx].fetch_and(!release_mask, Ordering::Release);
+                    }
+                    return None;
+                }
+
+                let next = current | mask;
+                match chunk.compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire) {
+                    Ok(_) => {
+                        acquired.push((chunk_idx, mask));
+                        break;
+                    }
+                    Err(actual) => current = actual,
                 }
             }
         }
 
-        // All bits acquired successfully, return the mutable slice
         unsafe {
             let ptr = self.data_ptr.0.add(start);
             Some(std::slice::from_raw_parts_mut(ptr, len))
         }
     }
 
+    /// Try to acquire mutable access with retries until timeout expires.
+    pub fn sliced_data_mut_timeout(
+        &self,
+        start: usize,
+        len: usize,
+        timeout: Duration,
+        retry: Duration,
+    ) -> Option<&mut [T]> {
+        let Some(_) = self.range_end(start, len) else {
+            return None;
+        };
+
+        if timeout.as_nanos() == 0 {
+            return self.sliced_data_mut(start, len);
+        }
+
+        let sleep_dur = if retry.as_nanos() == 0 {
+            Duration::from_micros(100)
+        } else {
+            retry
+        };
+
+        let start_time = std::time::Instant::now();
+        loop {
+            if let Some(slice) = self.sliced_data_mut(start, len) {
+                return Some(slice);
+            }
+
+            if start_time.elapsed() >= timeout {
+                return None;
+            }
+
+            thread::sleep(sleep_dur);
+        }
+    }
+
     /// Manually unset write bits for a range
     pub fn unset_range(&self, start: usize, len: usize) {
-        if start + len > self.total_length {
+        let Some(range_end) = self.range_end(start, len) else {
+            return;
+        };
+
+        if len == 0 {
             return;
         }
 
-        for i in start..(start + len) {
-            self.write_bits[i].store(false, Ordering::Release);
+        let first_chunk = start / Self::CHUNK_BITS;
+        let last_chunk = (range_end - 1) / Self::CHUNK_BITS;
+        for chunk_idx in first_chunk..=last_chunk {
+            let mask = Self::mask_for_chunk(start, range_end, chunk_idx);
+            if mask != 0 {
+                self.write_chunks[chunk_idx].fetch_and(!mask, Ordering::Release);
+            }
         }
     }
 
@@ -539,12 +682,19 @@ impl<T> SlicedContainer<T> {
 
     /// Check if a range is currently borrowed
     pub fn is_range_borrowed(&self, start: usize, len: usize) -> bool {
-        if start + len > self.total_length {
+        let Some(range_end) = self.range_end(start, len) else {
+            return false;
+        };
+
+        if len == 0 {
             return false;
         }
 
-        for i in start..(start + len) {
-            if self.write_bits[i].load(Ordering::Acquire) {
+        let first_chunk = start / Self::CHUNK_BITS;
+        let last_chunk = (range_end - 1) / Self::CHUNK_BITS;
+        for chunk_idx in first_chunk..=last_chunk {
+            let mask = Self::mask_for_chunk(start, range_end, chunk_idx);
+            if mask != 0 && (self.write_chunks[chunk_idx].load(Ordering::Acquire) & mask) != 0 {
                 return true;
             }
         }
@@ -555,18 +705,26 @@ impl<T> SlicedContainer<T> {
     /// Returns Some(&[T]) if no mutable borrows are active in the range, None otherwise
     /// This allows multiple concurrent read-only accesses to the same data
     pub fn sliced_get_range(&self, start: usize, len: usize) -> Option<&[T]> {
-        if start + len > self.total_length {
+        let Some(range_end) = self.range_end(start, len) else {
             return None;
-        }
+        };
 
-        // Check if any element in the range is currently mutably borrowed
-        for i in start..(start + len) {
-            if self.write_bits[i].load(Ordering::Acquire) {
-                return None; // Mutable borrow is active, cannot provide read access
+        if len == 0 {
+            unsafe {
+                let ptr = self.data_ptr.0.add(start);
+                return Some(std::slice::from_raw_parts(ptr, 0));
             }
         }
 
-        // Safe to return immutable reference since no mutable borrows are active
+        let first_chunk = start / Self::CHUNK_BITS;
+        let last_chunk = (range_end - 1) / Self::CHUNK_BITS;
+        for chunk_idx in first_chunk..=last_chunk {
+            let mask = Self::mask_for_chunk(start, range_end, chunk_idx);
+            if mask != 0 && (self.write_chunks[chunk_idx].load(Ordering::Acquire) & mask) != 0 {
+                return None;
+            }
+        }
+
         unsafe {
             let ptr = self.data_ptr.0.add(start);
             Some(std::slice::from_raw_parts(ptr, len))
@@ -582,24 +740,32 @@ impl<T> SlicedContainer<T> {
         len: usize,
         timeout: Duration,
     ) -> Option<&[T]> {
-        if start + len > self.total_length {
+        let Some(range_end) = self.range_end(start, len) else {
             return None;
+        };
+
+        if len == 0 {
+            unsafe {
+                let ptr = self.data_ptr.0.add(start);
+                return Some(std::slice::from_raw_parts(ptr, 0));
+            }
         }
 
         let start_time = std::time::Instant::now();
 
         loop {
-            // Check if any element in the range is currently mutably borrowed
-            let mut all_available = true;
-            for i in start..(start + len) {
-                if self.write_bits[i].load(Ordering::Acquire) {
-                    all_available = false;
+            let first_chunk = start / Self::CHUNK_BITS;
+            let last_chunk = (range_end - 1) / Self::CHUNK_BITS;
+            let mut clear = true;
+            for chunk_idx in first_chunk..=last_chunk {
+                let mask = Self::mask_for_chunk(start, range_end, chunk_idx);
+                if mask != 0 && (self.write_chunks[chunk_idx].load(Ordering::Acquire) & mask) != 0 {
+                    clear = false;
                     break;
                 }
             }
 
-            if all_available {
-                // Safe to return immutable reference since no mutable borrows are active
+            if clear {
                 unsafe {
                     let ptr = self.data_ptr.0.add(start);
                     return Some(std::slice::from_raw_parts(ptr, len));
@@ -619,12 +785,19 @@ impl<T> SlicedContainer<T> {
     /// Non-blocking check if a range can be read without conflicts
     /// Returns true if sliced_get_range() would succeed for this range
     pub fn can_read_range(&self, start: usize, len: usize) -> bool {
-        if start + len > self.total_length {
+        let Some(range_end) = self.range_end(start, len) else {
             return false;
+        };
+
+        if len == 0 {
+            return true;
         }
 
-        for i in start..(start + len) {
-            if self.write_bits[i].load(Ordering::Acquire) {
+        let first_chunk = start / Self::CHUNK_BITS;
+        let last_chunk = (range_end - 1) / Self::CHUNK_BITS;
+        for chunk_idx in first_chunk..=last_chunk {
+            let mask = Self::mask_for_chunk(start, range_end, chunk_idx);
+            if mask != 0 && (self.write_chunks[chunk_idx].load(Ordering::Acquire) & mask) != 0 {
                 return false;
             }
         }
@@ -648,6 +821,22 @@ impl<T: 'static> SlicedAccess for SlicedContainer<T> {
     unsafe fn get_mut_range_raw(&self, start: usize, len: usize) -> Option<(*mut u8, usize)> {
         // First try to get the mutable slice using our existing method
         if let Some(slice) = self.sliced_data_mut(start, len) {
+            let ptr = slice.as_mut_ptr() as *mut u8;
+            let byte_len = len * std::mem::size_of::<T>();
+            Some((ptr, byte_len))
+        } else {
+            None
+        }
+    }
+
+    unsafe fn get_mut_range_raw_timeout(
+        &self,
+        start: usize,
+        len: usize,
+        timeout: Duration,
+        retry: Duration,
+    ) -> Option<(*mut u8, usize)> {
+        if let Some(slice) = self.sliced_data_mut_timeout(start, len, timeout, retry) {
             let ptr = slice.as_mut_ptr() as *mut u8;
             let byte_len = len * std::mem::size_of::<T>();
             Some((ptr, byte_len))
