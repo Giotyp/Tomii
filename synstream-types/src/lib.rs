@@ -145,8 +145,30 @@ impl CmTypes {
         F: FnOnce(&T) -> R,
     {
         if let CmTypes::Any(lock) = self {
-            let guard = lock.read().unwrap();
-            guard.downcast_ref::<T>().map(f)
+            match lock.read() {
+                Ok(guard) => match guard.downcast_ref::<T>() {
+                    Some(value) => Some(f(value)),
+                    None => {
+                        // Print both expected and actual type for debugging
+                        println!(
+                            "Downcast failed: Expected type '{}', but got type '{:?}'",
+                            std::any::type_name::<T>(),
+                            std::any::type_name_of_val(guard.as_ref())
+                        );
+                        None
+                    }
+                },
+                Err(poison) => {
+                    // Lock is poisoned — try to extract the inner guard for debugging
+                    let guard = poison.into_inner();
+                    println!(
+                        "RwLock poisoned while reading Any: Expected type '{}', actual type '{:?}'",
+                        std::any::type_name::<T>(),
+                        std::any::type_name_of_val(guard.as_ref())
+                    );
+                    None
+                }
+            }
         } else {
             None
         }
@@ -158,8 +180,30 @@ impl CmTypes {
         F: FnOnce(&mut T) -> R,
     {
         if let CmTypes::Any(lock) = self {
-            let mut guard = lock.write().unwrap();
-            guard.downcast_mut::<T>().map(f)
+            match lock.write() {
+                Ok(mut guard) => match guard.downcast_mut::<T>() {
+                    Some(value) => Some(f(value)),
+                    None => {
+                        // Print both expected and actual type for debugging
+                        println!(
+                            "Downcast failed: Expected type '{}', but got type '{:?}'",
+                            std::any::type_name::<T>(),
+                            std::any::type_name_of_val(guard.as_ref())
+                        );
+                        None
+                    }
+                },
+                Err(poison) => {
+                    // Lock is poisoned — try to extract the inner guard for debugging
+                    let guard = poison.into_inner();
+                    println!(
+                        "RwLock poisoned while writing Any: Expected type '{}', actual type '{:?}'",
+                        std::any::type_name::<T>(),
+                        std::any::type_name_of_val(guard.as_ref())
+                    );
+                    None
+                }
+            }
         } else {
             None
         }
@@ -245,10 +289,20 @@ impl CmTypes {
     /// Returns a raw mutable pointer to the inner type `T` if it matches.
     pub unsafe fn as_mut_ptr<T: Any + Send + Sync>(&self) -> Option<SendPtr<T>> {
         if let CmTypes::Any(lock) = self {
-            let guard = lock.read().unwrap();
-            guard
-                .downcast_ref::<T>()
-                .map(|r| SendPtr(r as *const T as *mut T))
+            match lock.read() {
+                Ok(guard) => guard
+                    .downcast_ref::<T>()
+                    .map(|r| SendPtr(r as *const T as *mut T)),
+                Err(poison) => {
+                    // Lock poisoned — extract inner guard to aid debugging
+                    let guard = poison.into_inner();
+                    eprintln!(
+                        "RwLock poisoned in as_mut_ptr(): actual type = '{:?}'",
+                        std::any::type_name_of_val(guard.as_ref())
+                    );
+                    None
+                }
+            }
         } else {
             None
         }
