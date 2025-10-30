@@ -522,13 +522,20 @@ impl TimeBuffer {
                 continue;
             }
 
-            output_buffer.push_str(&format!("{}\nSlot {} Statistics:\n", filler, slot_id));
+            // for last slot_id use SynStream Runtime as Header
+            if slot_id == self.slots - 1 {
+                output_buffer.push_str(&format!("{}\nSynStream Runtime Statistics:\n", filler));
+            } else {
+                output_buffer.push_str(&format!("{}\nSlot {} Statistics:\n", filler, slot_id));
+            }
+
             output_buffer.push_str(&format!("  Completed Streams: {}\n", slot_stats.len()));
 
             // Calculate average total time per stream
             let total_times: Vec<Duration> = slot_stats.iter().map(|s| s.total_time).collect();
+            let total_time: Duration = total_times.iter().sum::<Duration>();
             let avg_total_time = if !total_times.is_empty() {
-                total_times.iter().sum::<Duration>() / total_times.len() as u32
+                total_time / total_times.len() as u32
             } else {
                 Duration::ZERO
             };
@@ -537,8 +544,8 @@ impl TimeBuffer {
             let max_total_time = total_times.iter().max().unwrap_or(&Duration::ZERO);
 
             output_buffer.push_str(&format!(
-                "  Total Time - Avg: {:.4?}, Min: {:.4?}, Max: {:.4?}\n",
-                avg_total_time, min_total_time, max_total_time
+                "  Total Time {:.4?} - Avg: {:.4?}, Min: {:.4?}, Max: {:.4?}\n",
+                total_time, avg_total_time, min_total_time, max_total_time
             ));
 
             // Collect all unique task names for this slot

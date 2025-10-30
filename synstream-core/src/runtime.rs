@@ -255,31 +255,26 @@ impl SynRt {
         }
 
         // Initialize remaining processing nodes tracker
-        let mut remaining_nodes = {
-            let mut vec = Vec::new();
-            for slot in 0..shared.slots {
-                vec.push(Vec::new());
-                for node_id in 0..shared.graph.nodes.len() {
-                    if shared.graph.initial_nodes.contains(&(node_id as IdType)) {
-                        vec[slot].push(0);
-                    } else if !shared.graph.condition_nodes.contains(&(node_id as IdType)) {
-                        vec[slot].push(shared.node_cache[node_id].factor);
-                    }
-                }
-            }
-            vec
-        };
+        let mut node_id_to_rem = vec![0; shared.graph.nodes.len()];
+        let mut remaining_nodes = Vec::new();
+        let mut remaining_cond_nodes = Vec::new();
 
-        let mut remaining_cond_nodes = {
-            let mut vec = Vec::new();
-            for slot in 0..shared.slots {
-                vec.push(Vec::new());
-                for &cond_id in &shared.graph.condition_nodes {
-                    vec[slot].push(shared.node_cache[cond_id as usize].factor);
+        for slot in 0..shared.slots {
+            remaining_nodes.push(Vec::new());
+            remaining_cond_nodes.push(Vec::new());
+            for node_id in 0..shared.graph.nodes.len() {
+                if shared.graph.initial_nodes.contains(&(node_id as IdType)) {
+                    remaining_nodes[slot].push(0);
+                    node_id_to_rem[node_id] = remaining_nodes[slot].len() - 1;
+                } else if !shared.graph.condition_nodes.contains(&(node_id as IdType)) {
+                    remaining_nodes[slot].push(shared.node_cache[node_id].factor);
+                    node_id_to_rem[node_id] = remaining_nodes[slot].len() - 1;
+                } else {
+                    remaining_cond_nodes[slot].push(shared.node_cache[node_id].factor);
+                    node_id_to_rem[node_id] = remaining_cond_nodes[slot].len() - 1;
                 }
             }
-            vec
-        };
+        }
 
         // Track which slots have been completed to avoid double-processing
         let mut completed_slots: std::collections::HashSet<usize> =
@@ -335,6 +330,21 @@ impl SynRt {
                 }
             };
 
+            print_debug(|| format!("Successors of node {:?}: {:?}", node_info, successors));
+
+            print_debug(|| {
+                format!(
+                    "Remaining nodes before processing successors: {:?}",
+                    remaining_nodes[node_info.slot]
+                )
+            });
+            print_debug(|| {
+                format!(
+                    "Remaining conditional nodes before processing successors: {:?}",
+                    remaining_cond_nodes[node_info.slot]
+                )
+            });
+
             let mut nodes_sent = 0;
             for succ_id in successors {
                 let succ_id = *succ_id;
@@ -343,9 +353,9 @@ impl SynRt {
 
                 let remaining = {
                     if has_condition {
-                        remaining_cond_nodes[node_info.slot][succ_id as usize]
+                        remaining_cond_nodes[node_info.slot][node_id_to_rem[succ_id as usize]]
                     } else {
-                        remaining_nodes[node_info.slot][succ_id as usize]
+                        remaining_nodes[node_info.slot][node_id_to_rem[succ_id as usize]]
                     }
                 };
 
@@ -388,7 +398,8 @@ impl SynRt {
 
                                 // Increase nodes_sent and decrease remaining_proc_nodes
                                 nodes_sent += 1;
-                                remaining_nodes[node_info.slot][succ_id as usize] -= 1;
+                                remaining_nodes[node_info.slot]
+                                    [node_id_to_rem[succ_id as usize]] -= 1;
                             } else {
                                 let index = &shared
                                     .graph
@@ -402,7 +413,8 @@ impl SynRt {
                                     });
                                     ready_tx.send(succ_info).unwrap();
                                     nodes_sent += 1;
-                                    remaining_cond_nodes[node_info.slot][succ_id as usize] -= 1;
+                                    remaining_cond_nodes[node_info.slot]
+                                        [node_id_to_rem[succ_id as usize]] -= 1;
                                 } else {
                                     print_debug(|| {
                                         format!("Conditions not met for successor {:?}", succ_info)
