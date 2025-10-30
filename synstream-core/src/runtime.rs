@@ -242,11 +242,6 @@ impl SynRt {
         // prefetch cond indexes for efficiency
         let cond_indexes = shared.graph.get_condition_indexes();
 
-        // Start timing for all initial slots
-        for slot_id in 0..shared.slots {
-            shared.time_buffer.start_slot_processing(slot_id);
-        }
-
         // Find and send initial nodes to ready channel
         let slot_vec: Vec<usize> = (0..shared.slots).collect();
         let init_nodes = initial_nodes(&shared, slot_vec);

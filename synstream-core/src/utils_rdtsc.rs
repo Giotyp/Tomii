@@ -1,9 +1,8 @@
 extern crate libc;
 
 use libc::{clock_gettime, timespec, CLOCK_REALTIME};
-use std::mem::zeroed;
 use std::arch::asm;
-
+use std::mem::zeroed;
 
 pub fn rdtsc() -> u64 {
     let rax: u32;
@@ -27,7 +26,7 @@ fn measure_rdtsc_freq() -> f64 {
         let mut end: timespec = zeroed();
         clock_gettime(CLOCK_REALTIME, &mut start);
         let rdtsc_start = rdtsc();
-    
+
         // Do not change this loop! The hardcoded value below depends on this
         // loop and prevents it from being optimized out.
         let mut sum: u64 = 5;
@@ -39,34 +38,31 @@ fn measure_rdtsc_freq() -> f64 {
             println!("Error in RDTSC freq measurement");
             panic!("Error in RDTSC freq measurement");
         }
-    
+
         clock_gettime(CLOCK_REALTIME, &mut end);
         let clock_ns = (end.tv_sec - start.tv_sec) * 1000000000 + (end.tv_nsec - start.tv_nsec);
         let rdtsc_cycles = rdtsc() - rdtsc_start;
-    
+
         let freq_ghz = rdtsc_cycles as f64 * 1.0 / clock_ns as f64;
-    
+
         // RDTSC frequencies outside these ranges are rare
         if freq_ghz < 1.0 && freq_ghz > 4.0 {
             println!("Invalid RDTSC frequency {:.2?}", freq_ghz);
             panic!("Invalid RDTSC frequency");
         }
-       freq_ghz
+        freq_ghz
     }
 }
-
 
 pub fn cycles_to_sec(cycles: u64) -> f64 {
     let freq_ghz = measure_rdtsc_freq();
     cycles as f64 / (freq_ghz * 1_000_000_000.0)
 }
 
-
 pub fn cycles_to_ms(cycles: u64) -> f64 {
     let freq_ghz = measure_rdtsc_freq();
     cycles as f64 / (freq_ghz * 1_000_000.0)
 }
-
 
 pub fn cycles_to_us(cycles: u64) -> f64 {
     let freq_ghz = measure_rdtsc_freq();

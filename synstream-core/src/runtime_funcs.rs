@@ -316,6 +316,8 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
             stream, av_slot_id
         )
     });
+    // Start Slot Timing
+    shared.time_buffer.start_slot_processing(av_slot_id);
     return av_slot_id;
 }
 
