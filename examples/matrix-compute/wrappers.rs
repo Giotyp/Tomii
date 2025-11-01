@@ -56,7 +56,7 @@ pub fn compute_fft_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
 
     let buffer = match &args[1] {
         CmTypes::VecCmt(x) => x.clone(),
-        _ => panic!("Expected Vec<Complex32> argument"),
+        _ => panic!("Expected Vec<CmTypes> argument"),
     };
     let mut vec: Vec<Complex32> = Vec::new();
     for i in 0..buffer.len() {
