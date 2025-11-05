@@ -3,9 +3,25 @@
 use core_affinity;
 use rayon::{prelude::*, vec};
 use rayon::{ThreadPool, ThreadPoolBuilder};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
+
+thread_local! {
+    // Worker id assigned to each thread in the pool. usize::MAX means unassigned.
+    static WORKER_ID: Cell<usize> = Cell::new(usize::MAX);
+}
+
+/// Get the current thread's worker id if assigned by the scheduler
+pub fn get_current_worker_id() -> Option<usize> {
+    let id = WORKER_ID.with(|c| c.get());
+    if id == usize::MAX {
+        None
+    } else {
+        Some(id)
+    }
+}
 
 pub trait Scheduler {
     fn spawn_task<F>(&self, task: F)
@@ -66,9 +82,17 @@ impl FifoScheduler {
         let cores_to_use: Vec<core_affinity::CoreId> =
             core_ids[actual_offset..actual_offset + actual_workers].to_vec();
 
+        // Print worker->core correspondence
+        println!("FifoScheduler: Worker -> Core Mapping:");
+        for (idx, core_id) in cores_to_use.iter().enumerate() {
+            println!("  Worker {}: Core {:?}", idx, core_id);
+        }
+
         let threadpool = ThreadPoolBuilder::new()
             .num_threads(actual_workers)
             .start_handler(move |thread_index| {
+                // Assign a worker id to this thread for timing attribution
+                WORKER_ID.with(|c| c.set(thread_index));
                 // Pin each thread to a specific core
                 let core_id = cores_to_use[thread_index];
                 core_affinity::set_for_current(core_id);
@@ -153,9 +177,17 @@ impl WorkStealScheduler {
         let cores_to_use: Vec<core_affinity::CoreId> =
             core_ids[actual_offset..actual_offset + actual_workers].to_vec();
 
+        // Print worker->core correspondence
+        println!("WorkStealScheduler: Worker -> Core Mapping:");
+        for (idx, core_id) in cores_to_use.iter().enumerate() {
+            println!("  Worker {}: Core {:?}", idx, core_id);
+        }
+
         let threadpool = ThreadPoolBuilder::new()
             .num_threads(actual_workers)
             .start_handler(move |thread_index| {
+                // Assign a worker id to this thread for timing attribution
+                WORKER_ID.with(|c| c.set(thread_index));
                 // Pin each thread to a specific core
                 let core_id = cores_to_use[thread_index];
                 core_affinity::set_for_current(core_id);

@@ -157,7 +157,8 @@ fn execute_task(
     if let Some(start) = start_time {
         let end_time = time_buf.measure_time();
         let duration = time_buf.measure_duration(start, end_time);
-        time_buf.add_task_time(node_info.slot, node_name, duration);
+        let worker_id = crate::scheduler::get_current_worker_id().unwrap_or(usize::MAX);
+        time_buf.add_task_time(node_info.slot, node_name, worker_id, duration);
     }
 
     // Send result
@@ -170,15 +171,40 @@ pub fn send_to_scheduler(
     arg_vec: Vec<CmTypes>,
     custom_func: Option<CmPtr>,
 ) {
-    let cache_entry = &shared.node_cache[node_info.id as usize];
-    let func = {
-        if custom_func.is_some() {
-            custom_func.unwrap()
+    let (func_ptr, node_name) = {
+        if node_info.post_node {
+            let nodes = &shared
+                .graph
+                .post_nodes
+                .as_ref()
+                .expect("Post nodes not initialized");
+
+            let node = &nodes[node_info.id as usize];
+
+            let func = {
+                if custom_func.is_some() {
+                    custom_func.unwrap()
+                } else {
+                    node.func_ptr.expect("Post node function pointer is None")
+                }
+            };
+
+            let node_name = node.name.clone();
+            (func, node_name)
         } else {
-            cache_entry.func_ptr
+            let cache_entry = &shared.node_cache[node_info.id as usize];
+            let func = {
+                if custom_func.is_some() {
+                    custom_func.unwrap()
+                } else {
+                    cache_entry.func_ptr
+                }
+            };
+
+            (func, cache_entry.name.clone())
         }
     };
-    let node_name = cache_entry.name.clone();
+
     let time_buf = Arc::clone(&shared.time_buffer);
 
     // Get scheduler with proper error handling
@@ -209,7 +235,7 @@ pub fn send_to_scheduler(
     // Spawn task
     scheduler.spawn_task(move || {
         execute_task(
-            func,
+            func_ptr,
             arg_vec,
             node_info,
             &time_buf,
@@ -393,7 +419,8 @@ pub fn create_task(
         if !node_info.post_node {
             let end_time = time_buf.measure_time();
             let duration = time_buf.measure_duration(start_time, end_time);
-            time_buf.add_task_time(node_info.slot, &node_name, duration);
+            let worker_id = crate::scheduler::get_current_worker_id().unwrap_or(usize::MAX);
+            time_buf.add_task_time(node_info.slot, &node_name, worker_id, duration);
         }
         // Send result through channel
         completed_tx.send((node_info, result)).unwrap();

@@ -203,9 +203,12 @@ impl SynRt {
             let duration = shared
                 .time_buffer
                 .measure_duration(start_time.clone(), prep_time.clone());
-            shared
-                .time_buffer
-                .add_task_time(shared.slots, "Argument Preparation", duration);
+            shared.time_buffer.add_task_time(
+                shared.slots,
+                "Argument Preparation",
+                usize::MAX,
+                duration,
+            );
 
             if !arg_vec.is_empty() {
                 // Schedule Task
@@ -213,15 +216,21 @@ impl SynRt {
             }
             let sched_time = shared.time_buffer.measure_time();
             let duration = shared.time_buffer.measure_duration(prep_time, sched_time);
-            shared
-                .time_buffer
-                .add_task_time(shared.slots, "Argument Scheduling", duration);
+            shared.time_buffer.add_task_time(
+                shared.slots,
+                "Argument Scheduling",
+                usize::MAX,
+                duration,
+            );
 
             let end_time = shared.time_buffer.measure_time();
             let duration = shared.time_buffer.measure_duration(start_time, end_time);
-            shared
-                .time_buffer
-                .add_task_time(shared.slots, "Preparation Thread", duration);
+            shared.time_buffer.add_task_time(
+                shared.slots,
+                "Preparation Thread",
+                usize::MAX,
+                duration,
+            );
         }
     }
 
@@ -462,9 +471,12 @@ impl SynRt {
             }
             let end_time = shared.time_buffer.measure_time();
             let duration = shared.time_buffer.measure_duration(start_time, end_time);
-            shared
-                .time_buffer
-                .add_task_time(shared.slots, "Resolution Thread", duration);
+            shared.time_buffer.add_task_time(
+                shared.slots,
+                "Resolution Thread",
+                usize::MAX,
+                duration,
+            );
         }
     }
 }

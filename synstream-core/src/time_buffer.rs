@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct SlotStats {
-    pub task_times: RapidHashMap<String, Vec<Duration>>,
+    /// Maps task name to (worker_id, Duration) pairs for per-worker tracking
+    pub task_times: RapidHashMap<String, Vec<(usize, Duration)>>,
     pub total_time: Duration,
     pub slot_id: usize,
     pub stream_count: usize,
@@ -25,24 +26,25 @@ impl SlotStats {
         }
     }
 
-    pub fn add_task_time(&mut self, task_name: &str, duration: Duration) {
+    /// Add a task timing measurement with worker ID tracking
+    pub fn add_task_time(&mut self, task_name: &str, worker_id: usize, duration: Duration) {
         self.task_times
             .entry(task_name.to_string())
             .or_insert_with(Vec::new)
-            .push(duration);
+            .push((worker_id, duration));
     }
 
     pub fn get_task_total_time(&self, task_name: &str) -> Duration {
         self.task_times
             .get(task_name)
-            .map(|times| times.iter().sum())
+            .map(|times| times.iter().map(|(_, d)| d).sum())
             .unwrap_or(Duration::ZERO)
     }
 
     pub fn get_task_avg_time(&self, task_name: &str) -> Duration {
         if let Some(times) = self.task_times.get(task_name) {
             if !times.is_empty() {
-                return times.iter().sum::<Duration>() / times.len() as u32;
+                return times.iter().map(|(_, d)| d).sum::<Duration>() / times.len() as u32;
             }
         }
         Duration::ZERO
@@ -61,22 +63,26 @@ pub enum TimingRequest {
     AddTaskTime {
         slot_id: usize,
         task_name: String,
+        worker_id: usize,
         duration: Duration,
     },
     AddTaskTimeCycles {
         slot_id: usize,
         task_name: String,
+        worker_id: usize,
         cycles: u64,
     },
     AddTaskTimeInstant {
         slot_id: usize,
         task_name: String,
+        worker_id: usize,
         start: Instant,
         end: Instant,
     },
     AddTaskTimeRdtsc {
         slot_id: usize,
         task_name: String,
+        worker_id: usize,
         start_cycles: u64,
         end_cycles: u64,
     },
@@ -117,34 +123,40 @@ impl AsyncTimeBuffer {
                     TimingRequest::AddTaskTime {
                         slot_id,
                         task_name,
+                        worker_id,
                         duration,
                     } => {
-                        time_buffer.add_task_time(slot_id, &task_name, duration);
+                        time_buffer.add_task_time(slot_id, &task_name, worker_id, duration);
                     }
                     TimingRequest::AddTaskTimeCycles {
                         slot_id,
                         task_name,
+                        worker_id,
                         cycles,
                     } => {
-                        time_buffer.add_task_time_cycles(slot_id, &task_name, cycles);
+                        time_buffer.add_task_time_cycles(slot_id, &task_name, worker_id, cycles);
                     }
                     TimingRequest::AddTaskTimeInstant {
                         slot_id,
                         task_name,
+                        worker_id,
                         start,
                         end,
                     } => {
-                        time_buffer.add_task_time_instant(slot_id, &task_name, start, end);
+                        time_buffer
+                            .add_task_time_instant(slot_id, &task_name, worker_id, start, end);
                     }
                     TimingRequest::AddTaskTimeRdtsc {
                         slot_id,
                         task_name,
+                        worker_id,
                         start_cycles,
                         end_cycles,
                     } => {
                         time_buffer.add_task_time_rdtsc(
                             slot_id,
                             &task_name,
+                            worker_id,
                             start_cycles,
                             end_cycles,
                         );
@@ -186,10 +198,17 @@ impl AsyncTimeBuffer {
     }
 
     /// Add a task timing measurement asynchronously (non-blocking)
-    pub fn add_task_time_async(&self, slot_id: usize, task_name: &str, duration: Duration) {
+    pub fn add_task_time_async(
+        &self,
+        slot_id: usize,
+        task_name: &str,
+        worker_id: usize,
+        duration: Duration,
+    ) {
         let request = TimingRequest::AddTaskTime {
             slot_id,
             task_name: task_name.to_string(),
+            worker_id,
             duration,
         };
         // Send is non-blocking if the channel has capacity
@@ -199,10 +218,17 @@ impl AsyncTimeBuffer {
     }
 
     /// Add a task timing measurement using rdtsc cycles asynchronously
-    pub fn add_task_time_cycles_async(&self, slot_id: usize, task_name: &str, cycles: u64) {
+    pub fn add_task_time_cycles_async(
+        &self,
+        slot_id: usize,
+        task_name: &str,
+        worker_id: usize,
+        cycles: u64,
+    ) {
         let request = TimingRequest::AddTaskTimeCycles {
             slot_id,
             task_name: task_name.to_string(),
+            worker_id,
             cycles,
         };
         if let Err(_) = self.request_tx.send(request) {
@@ -215,12 +241,14 @@ impl AsyncTimeBuffer {
         &self,
         slot_id: usize,
         task_name: &str,
+        worker_id: usize,
         start: Instant,
         end: Instant,
     ) {
         let request = TimingRequest::AddTaskTimeInstant {
             slot_id,
             task_name: task_name.to_string(),
+            worker_id,
             start,
             end,
         };
@@ -234,12 +262,14 @@ impl AsyncTimeBuffer {
         &self,
         slot_id: usize,
         task_name: &str,
+        worker_id: usize,
         start_cycles: u64,
         end_cycles: u64,
     ) {
         let request = TimingRequest::AddTaskTimeRdtsc {
             slot_id,
             task_name: task_name.to_string(),
+            worker_id,
             start_cycles,
             end_cycles,
         };
@@ -320,7 +350,7 @@ pub struct TimeBuffer {
     // Current timing state per slot
     slot_start_times: Vec<Option<TimingMethod>>,
     // Current task times for each slot (accumulated during processing)
-    current_slot_tasks: Vec<RapidHashMap<String, Vec<Duration>>>,
+    current_slot_tasks: Vec<RapidHashMap<String, Vec<(usize, Duration)>>>,
     // Completed slot statistics
     slot_statistics: Vec<Vec<SlotStats>>, // [slot][stream]
     // Use rdtsc timing instead of Instant
@@ -362,7 +392,13 @@ impl TimeBuffer {
     }
 
     /// Add a task timing measurement to a specific slot
-    pub fn add_task_time(&mut self, slot_id: usize, task_name: &str, duration: Duration) {
+    pub fn add_task_time(
+        &mut self,
+        slot_id: usize,
+        task_name: &str,
+        worker_id: usize,
+        duration: Duration,
+    ) {
         if slot_id >= self.slots {
             panic!(
                 "Slot ID {} out of bounds (max: {})",
@@ -374,13 +410,19 @@ impl TimeBuffer {
         self.current_slot_tasks[slot_id]
             .entry(task_name.to_string())
             .or_insert_with(Vec::new)
-            .push(duration);
+            .push((worker_id, duration));
     }
 
     /// Add a task timing measurement using rdtsc cycles
-    pub fn add_task_time_cycles(&mut self, slot_id: usize, task_name: &str, cycles: u64) {
+    pub fn add_task_time_cycles(
+        &mut self,
+        slot_id: usize,
+        task_name: &str,
+        worker_id: usize,
+        cycles: u64,
+    ) {
         let duration = Duration::from_nanos(cycles_to_ns(cycles) as u64);
-        self.add_task_time(slot_id, task_name, duration);
+        self.add_task_time(slot_id, task_name, worker_id, duration);
     }
 
     /// Add a task timing measurement using start/end Instant
@@ -388,11 +430,12 @@ impl TimeBuffer {
         &mut self,
         slot_id: usize,
         task_name: &str,
+        worker_id: usize,
         start: Instant,
         end: Instant,
     ) {
         let duration = end.duration_since(start);
-        self.add_task_time(slot_id, task_name, duration);
+        self.add_task_time(slot_id, task_name, worker_id, duration);
     }
 
     /// Add a task timing measurement using start/end rdtsc cycles
@@ -400,11 +443,12 @@ impl TimeBuffer {
         &mut self,
         slot_id: usize,
         task_name: &str,
+        worker_id: usize,
         start_cycles: u64,
         end_cycles: u64,
     ) {
         let cycles = end_cycles.saturating_sub(start_cycles);
-        self.add_task_time_cycles(slot_id, task_name, cycles);
+        self.add_task_time_cycles(slot_id, task_name, worker_id, cycles);
     }
 
     /// Finish processing for a slot and calculate total time
@@ -440,8 +484,8 @@ impl TimeBuffer {
 
         // Copy task times from current slot to slot stats
         for (task_name, times) in &self.current_slot_tasks[slot_id] {
-            for &time in times {
-                slot_stats.add_task_time(task_name, time);
+            for &(worker_id, duration) in times {
+                slot_stats.add_task_time(task_name, worker_id, duration);
             }
         }
 
@@ -506,7 +550,7 @@ impl TimeBuffer {
         self.slot_statistics[slot_id].len()
     }
 
-    /// Print comprehensive statistics for all slots
+    /// Print comprehensive statistics for all slots with per-worker parallelism accounting
     pub fn print_stats(&self, bench_name: &str, out_file: Option<&str>) {
         let filler = "****************";
         let mut output_buffer = format!("Time Statistics for {}\n", bench_name);
@@ -554,12 +598,23 @@ impl TimeBuffer {
                 all_tasks.extend(stats.task_times.keys().cloned());
             }
 
-            // Print task statistics
+            // Print task statistics with per-worker breakdown
             for task_name in all_tasks.iter() {
-                let mut all_task_times = Vec::new();
+                let mut all_task_times: Vec<Duration> = Vec::new();
+                let mut per_worker_counts: std::collections::HashMap<usize, usize> =
+                    std::collections::HashMap::new();
+                let mut per_worker_totals: std::collections::HashMap<usize, Duration> =
+                    std::collections::HashMap::new();
+
                 for stats in slot_stats {
-                    if let Some(times) = stats.task_times.get(task_name) {
-                        all_task_times.extend(times.iter().cloned());
+                    if let Some(entries) = stats.task_times.get(task_name) {
+                        for (worker_id, d) in entries.iter() {
+                            all_task_times.push(*d);
+                            *per_worker_counts.entry(*worker_id).or_insert(0) += 1;
+                            *per_worker_totals
+                                .entry(*worker_id)
+                                .or_insert(Duration::ZERO) += *d;
+                        }
                     }
                 }
 
@@ -571,8 +626,41 @@ impl TimeBuffer {
                     let max_task_time = all_task_times.iter().max().unwrap();
 
                     output_buffer.push_str(&format!(
-                        "  Task '{}' - Executions: {}, Avg: {:.4?}, Min: {:.4?}, Max: {:.4?}, Total: {:.4?}\n",
-                        task_name, total_executions, avg_task_time, min_task_time, max_task_time, total_time
+                        "  Task '{}' - Workers: {}, Executions: {}, Avg: {:.4?}, Min: {:.4?}, Max: {:.4?}, Total: {:.4?}\n",
+                        task_name, per_worker_counts.len(), total_executions, avg_task_time, min_task_time, max_task_time, total_time
+                    ));
+
+                    // Tasks per worker (counts + percentage)
+                    output_buffer.push_str("    Tasks per Worker: ");
+                    let mut worker_items: Vec<String> = Vec::new();
+                    for (worker_id, count) in per_worker_counts.iter() {
+                        let pct = (*count as f64) / (total_executions as f64) * 100.0;
+                        let label = if *worker_id == usize::MAX {
+                            "runtime".to_string()
+                        } else {
+                            format!("W{}", worker_id)
+                        };
+                        worker_items.push(format!("{}: {} ({:.1}%)", label, count, pct));
+                    }
+                    output_buffer.push_str(&format!("{}\n", worker_items.join(", ")));
+
+                    // Time per worker for this task
+                    output_buffer.push_str("    Time per Worker: ");
+                    let mut worker_time_items: Vec<String> = Vec::new();
+                    for (worker_id, total) in per_worker_totals.iter() {
+                        let label = if *worker_id == usize::MAX {
+                            "runtime".to_string()
+                        } else {
+                            format!("W-{}", worker_id)
+                        };
+                        worker_time_items.push(format!("{}: {:.4?}", label, total));
+                    }
+                    output_buffer.push_str(&format!("{}\n", worker_time_items.join(", ")));
+
+                    // Average compute per task execution: avg_time / n_executions * n_workers
+                    output_buffer.push_str(&format!(
+                        "    Avg Time Per Task: {:.4?}\n",
+                        avg_task_time / per_worker_counts.len() as u32
                     ));
                 }
             }
@@ -611,11 +699,16 @@ impl TimeBuffer {
 
                 for (task_name, times) in &stats.task_times {
                     output_buffer.push_str(&format!("    Task '{}': [", task_name));
-                    for (i, time) in times.iter().enumerate() {
-                        if i == times.len() - 1 {
-                            output_buffer.push_str(&format!("{:.4?}", time));
+                    for (i, (worker_id, time)) in times.iter().enumerate() {
+                        let label = if *worker_id == usize::MAX {
+                            "runtime".to_string()
                         } else {
-                            output_buffer.push_str(&format!("{:.4?}, ", time));
+                            format!("W{}", worker_id)
+                        };
+                        if i == times.len() - 1 {
+                            output_buffer.push_str(&format!("({}: {:.4?})", label, time));
+                        } else {
+                            output_buffer.push_str(&format!("({}: {:.4?}), ", label, time));
                         }
                     }
                     output_buffer.push_str("]\n");
@@ -685,15 +778,21 @@ impl TimeBufferManager {
     }
 
     /// Add task time - async if manager is async, sync if manager is sync
-    pub fn add_task_time(&self, slot_id: usize, task_name: &str, duration: Duration) {
+    pub fn add_task_time(
+        &self,
+        slot_id: usize,
+        task_name: &str,
+        worker_id: usize,
+        duration: Duration,
+    ) {
         if self.is_async {
             if let Some(ref async_buf) = self.async_buffer {
-                async_buf.add_task_time_async(slot_id, task_name, duration);
+                async_buf.add_task_time_async(slot_id, task_name, worker_id, duration);
             }
         } else {
             if let Some(ref sync_buf) = self.sync_buffer {
                 if let Ok(mut buf) = sync_buf.lock() {
-                    buf.add_task_time(slot_id, task_name, duration);
+                    buf.add_task_time(slot_id, task_name, worker_id, duration);
                 }
             }
         }
@@ -783,7 +882,7 @@ impl TimeBufferManager {
         }
     }
 
-    /// Print stats - async if possible, sync otherwise
+    /// Print stats with worker accounting - async if possible, sync otherwise
     pub fn print_stats(&self, bench_name: &str, out_file: Option<&str>) {
         if self.is_async {
             if let Some(ref async_buf) = self.async_buffer {
