@@ -29,7 +29,7 @@ pub fn fft_planner_cm(buf_size: usize) -> CmTypes {
 }
 
 #[no_mangle]
-pub fn compute_fft_cm(fft_planner: CmTypes, buffer: &mut Vec<Complex32>) {
+pub fn compute_fft_cm(fft_planner: &CmTypes, buffer: &mut Vec<Complex32>) {
     fft_planner
         .with_any(|fft_planner_ref: &Arc<dyn Fft<f32>>| {
             compute_fft(fft_planner_ref.clone(), buffer);
@@ -43,7 +43,7 @@ pub fn vec_to_mat_cm(vector: &Vec<Complex32>) -> CmTypes {
 }
 
 #[no_mangle]
-pub fn mat_mul_cm(a: CmTypes, b: CmTypes) -> CmTypes {
+pub fn mat_mul_cm(a: &CmTypes, b: &CmTypes) -> CmTypes {
     a.with_any(|a_ref: &DMatrix<Complex32>| {
         b.with_any(|b_ref: &DMatrix<Complex32>| CmTypes::from_any(mat_mul(a_ref, b_ref)))
             .expect("Failed to access matrix b or wrong type")

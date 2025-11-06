@@ -49,10 +49,10 @@ pub fn fft_planner_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
 }
 
 cache_sym! {
-    pub static COMPUTE_FFT_CM_SYM: fn(CmTypes, &mut Vec<Complex32>) = b"compute_fft_cm";
+    pub static COMPUTE_FFT_CM_SYM: fn(&CmTypes, &mut Vec<Complex32>) = b"compute_fft_cm";
 }
 pub fn compute_fft_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
-    let fft_planner = args[0].clone();
+    let fft_planner = &args[0];
 
     let buffer = match &args[1] {
         CmTypes::VecCmt(x) => x.clone(),
@@ -90,12 +90,10 @@ pub fn vec_to_mat_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
 }
 
 cache_sym! {
-    pub static MAT_MUL_CM_SYM: fn(CmTypes, CmTypes) -> CmTypes = b"mat_mul_cm";
+    pub static MAT_MUL_CM_SYM: fn(&CmTypes, &CmTypes) -> CmTypes = b"mat_mul_cm";
 }
 pub fn mat_mul_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
-    let a = args[0].clone();
-    let b = args[1].clone();
-    MAT_MUL_CM_SYM(a, b)
+    MAT_MUL_CM_SYM(&args[0], &args[1])
 }
 
 cache_sym! {
