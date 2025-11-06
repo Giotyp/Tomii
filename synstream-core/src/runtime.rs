@@ -199,29 +199,10 @@ impl SynRt {
                 node_info.pred_index,
             );
 
-            let prep_time = shared.time_buffer.measure_time();
-            let duration = shared
-                .time_buffer
-                .measure_duration(start_time.clone(), prep_time.clone());
-            shared.time_buffer.add_task_time(
-                shared.slots,
-                "Argument Preparation",
-                usize::MAX,
-                duration,
-            );
-
             if !arg_vec.is_empty() {
                 // Schedule Task
                 send_to_scheduler(&shared, node_info, arg_vec, None);
             }
-            let sched_time = shared.time_buffer.measure_time();
-            let duration = shared.time_buffer.measure_duration(prep_time, sched_time);
-            shared.time_buffer.add_task_time(
-                shared.slots,
-                "Argument Scheduling",
-                usize::MAX,
-                duration,
-            );
 
             let end_time = shared.time_buffer.measure_time();
             let duration = shared.time_buffer.measure_duration(start_time, end_time);
@@ -432,17 +413,12 @@ impl SynRt {
 
             // Check for stream completion - only process each slot once
             if nodes_sent == 0 && !completed_slots.contains(&node_info.slot) {
-                let scheduler_lock = shared.scheduler.read().unwrap();
-                let pending_sched = scheduler_lock.as_ref().unwrap().pending_jobs();
-                drop(scheduler_lock);
-                let receive_queue_empty = completed_rx.is_empty();
-
                 // Check if all nodes in this slot have been processed
                 let all_nodes_processed = remaining_nodes[node_info.slot]
                     .iter()
                     .all(|&count| count == 0);
 
-                if pending_sched == 0 && receive_queue_empty && all_nodes_processed {
+                if all_nodes_processed {
                     print_debug(|| format!("Completed iteration at slot {}", node_info.slot));
 
                     let new_iteration = process_slot_completion(&shared, node_info.slot);
@@ -460,8 +436,6 @@ impl SynRt {
                     if new_iteration {
                         // Remove from completed set since we're starting again
                         completed_slots.remove(&node_info.slot);
-                        // Start slot timing
-                        shared.time_buffer.start_slot_processing(node_info.slot);
                         let init_nodes = initial_nodes(&shared, vec![node_info.slot]);
                         for node_info in init_nodes {
                             ready_tx.send(node_info).unwrap();

@@ -638,7 +638,7 @@ impl TimeBuffer {
                         let label = if *worker_id == usize::MAX {
                             "runtime".to_string()
                         } else {
-                            format!("W{}", worker_id)
+                            format!("W-{}", worker_id)
                         };
                         worker_items.push(format!("{}: {} ({:.1}%)", label, count, pct));
                     }
@@ -657,10 +657,16 @@ impl TimeBuffer {
                     }
                     output_buffer.push_str(&format!("{}\n", worker_time_items.join(", ")));
 
-                    // Average compute per task execution: avg_time / n_executions * n_workers
+                    // Average compute per task execution: avg_task_time * n_workers
                     output_buffer.push_str(&format!(
                         "    Avg Time Per Task: {:.4?}\n",
-                        avg_task_time / per_worker_counts.len() as u32
+                        avg_task_time * per_worker_counts.len() as u32
+                    ));
+
+                    // Average compute per task execution: total_time * n_workers
+                    output_buffer.push_str(&format!(
+                        "    Time All Cores: {:.4?}\n",
+                        total_time * per_worker_counts.len() as u32
                     ));
                 }
             }
