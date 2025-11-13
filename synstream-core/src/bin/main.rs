@@ -48,6 +48,8 @@ struct Args {
     max_streams: usize,
     #[clap(long, value_name = "FILE", required = false, help = "Enable timing")]
     timing: String,
+    #[clap(long, help = "Enable scheduler recording")]
+    record_sched: bool,
     #[clap(long, help = "Use rdtsc for timing")]
     use_rdtsc: bool,
 }
@@ -110,13 +112,20 @@ fn main() {
         args.slots,
         args.max_streams,
         runtime,
+        args.record_sched,
         args.use_rdtsc,
     );
 
     let time_file = args.timing;
     if !time_file.is_empty() {
-        let bench_name = time_file.split('/').last().unwrap_or_default();
-        synrt.print_statistics(&bench_name, Some(&time_file));
+        let time_name = time_file.split('/').last().unwrap_or_default();
+        synrt.print_statistics(&time_name, Some(&time_file));
+
+        if args.record_sched {
+            // remove  extension if present
+            let time_name = time_name.split('.').next().unwrap_or_default();
+            synrt.write_record(&format!("{}_schedule.csv", time_name));
+        }
     }
 }
 
@@ -128,11 +137,11 @@ pub fn run_graph(
     slots: usize,
     max_streams: usize,
     max_runtime: Option<u64>,
+    record_sched: bool,
     use_rdtsc: bool,
 ) -> SynRt {
     let mut synrt = SynRt::new(graph, slots, max_streams, max_runtime, use_rdtsc);
-    let scheduler = create_scheduler(scheduler_type, core_offset, workers);
-
+    let scheduler = create_scheduler(scheduler_type, core_offset, workers, record_sched);
     synrt.run(scheduler);
     synrt
 }

@@ -233,7 +233,8 @@ pub fn send_to_scheduler(
     };
 
     // Spawn task
-    scheduler.spawn_task(move || {
+    let meta_data = (node_info.id, node_info.slot, node_info.index);
+    scheduler.spawn_task_with_meta(Some(meta_data), move || {
         execute_task(
             func_ptr,
             arg_vec,

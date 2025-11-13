@@ -540,4 +540,25 @@ impl SynRt {
     pub fn print_statistics(&self, bench_name: &str, out_file: Option<&str>) {
         self.shared.time_buffer.print_stats(bench_name, out_file);
     }
+
+    pub fn write_record(&self, path: &str) {
+        // Get scheduler with proper error handling
+        let scheduler_guard = match self.shared.scheduler.read() {
+            Ok(guard) => guard,
+            Err(e) => {
+                eprintln!("Failed to acquire scheduler lock: {}", e);
+                return;
+            }
+        };
+
+        let scheduler = match scheduler_guard.as_ref() {
+            Some(s) => s,
+            None => {
+                eprintln!("Scheduler is not initialized");
+                return;
+            }
+        };
+
+        scheduler.write_record(path);
+    }
 }
