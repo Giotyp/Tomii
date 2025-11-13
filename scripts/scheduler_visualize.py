@@ -81,6 +81,61 @@ def visualize(csv_path, out_path, units="us", exclude=None):
         scale = 1.0
         xlabel = "Time (ns)"
 
+    # Calculate per-task statistics
+    print("\n" + "=" * 80)
+    print("Per-Task Timing Statistics")
+    print("=" * 80)
+
+    task_stats = defaultdict(
+        lambda: {"count": 0, "total_duration": 0, "min": float("inf"), "max": 0}
+    )
+
+    for rec in records:
+        _, job_id, start_ns, end_ns, worker, task_id, index = rec
+        duration_ns = end_ns - start_ns
+        task_stats[task_id]["count"] += 1
+        task_stats[task_id]["total_duration"] += duration_ns
+        task_stats[task_id]["min"] = min(task_stats[task_id]["min"], duration_ns)
+        task_stats[task_id]["max"] = max(task_stats[task_id]["max"], duration_ns)
+
+    # Print statistics for each task_id
+    for task_id in sorted(task_stats.keys()):
+        stats = task_stats[task_id]
+        count = stats["count"]
+        total_duration = stats["total_duration"]
+        avg_duration = total_duration / count
+        min_duration = stats["min"]
+        max_duration = stats["max"]
+
+        if units == "us":
+            total_scaled = total_duration / 1e3
+            avg_scaled = avg_duration / 1e3
+            min_scaled = min_duration / 1e3
+            max_scaled = max_duration / 1e3
+            unit_str = "µs"
+        elif units == "ms":
+            total_scaled = total_duration / 1e6
+            avg_scaled = avg_duration / 1e6
+            min_scaled = min_duration / 1e6
+            max_scaled = max_duration / 1e6
+            unit_str = "ms"
+        else:
+            total_scaled = total_duration
+            avg_scaled = avg_duration
+            min_scaled = min_duration
+            max_scaled = max_duration
+            unit_str = "ns"
+
+        print(f"Task ID {task_id}:")
+        print(f"  Executions: {count}")
+        print(f"  Total Time: {total_scaled:.4f} {unit_str}")
+        print(f"  Avg/Task: {avg_scaled:.4f} {unit_str}")
+        print(f"  Min: {min_scaled:.4f} {unit_str}")
+        print(f"  Max: {max_scaled:.4f} {unit_str}")
+        print()
+
+    print("=" * 80 + "\n")
+
     n_slots = len(slots)
     # dynamic figure size: height depends on number of slots and workers
     fig_height = max(2.5 * n_slots, 4)
