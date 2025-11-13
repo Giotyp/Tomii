@@ -4,7 +4,7 @@ use std::cmp::PartialEq;
 use std::fmt::Debug;
 use std::vec;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct NodeInfo {
     pub id: IdType,
     pub slot: usize,

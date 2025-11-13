@@ -243,10 +243,13 @@ impl SynRt {
         let mut node_id_to_rem = vec![0; shared.graph.nodes.len()];
         let mut remaining_nodes = Vec::new();
         let mut remaining_cond_nodes = Vec::new();
+        // Track which nodes have been sent to ready_queue to avoid double-sends
+        let mut nodes_sent_to_queue: Vec<std::collections::HashSet<NodeInfo>> = Vec::new();
 
         for slot in 0..shared.slots {
             remaining_nodes.push(Vec::new());
             remaining_cond_nodes.push(Vec::new());
+            nodes_sent_to_queue.push(std::collections::HashSet::new());
             for node_id in 0..shared.graph.nodes.len() {
                 if shared.graph.initial_nodes.contains(&(node_id as IdType)) {
                     remaining_nodes[slot].push(0);
@@ -305,8 +308,23 @@ impl SynRt {
             res_lock.set(&node_info, result);
             drop(res_lock);
 
-            // Get successors
+            // Decrement remaining_nodes counter now that this task is confirmed completed
             let node_id_usize = node_info.id as usize;
+            if shared
+                .graph
+                .condition_nodes
+                .contains(&(node_id_usize as IdType))
+            {
+                remaining_cond_nodes[node_info.slot][node_id_to_rem[node_id_usize]] -= 1;
+            } else if !shared
+                .graph
+                .initial_nodes
+                .contains(&(node_id_usize as IdType))
+            {
+                remaining_nodes[node_info.slot][node_id_to_rem[node_id_usize]] -= 1;
+            }
+
+            // Get successors
             let successors: &Vec<IdType> = {
                 if node_id_usize >= shared.graph.successors.len() {
                     &Vec::new()
@@ -372,6 +390,12 @@ impl SynRt {
                 for succ_index in succ_indexes {
                     let succ_info =
                         NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.index);
+
+                    // Skip if this node has already been sent to the queue
+                    if nodes_sent_to_queue[node_info.slot].contains(&succ_info) {
+                        continue;
+                    }
+
                     let dep_opt = dependency_map.decrease(&succ_info);
                     if let Some(dep) = dep_opt {
                         if dep == 0 {
@@ -379,12 +403,14 @@ impl SynRt {
                                 print_debug(|| {
                                     format!("Sent successor {:?} to ready channel", succ_info)
                                 });
-                                ready_tx.send(succ_info).unwrap();
+                                ready_tx.send(succ_info.clone()).unwrap();
 
-                                // Increase nodes_sent and decrease remaining_proc_nodes
+                                // Mark this node as sent to avoid double-sends
+                                nodes_sent_to_queue[node_info.slot].insert(succ_info);
+
+                                // Increase nodes_sent counter
                                 nodes_sent += 1;
-                                remaining_nodes[node_info.slot]
-                                    [node_id_to_rem[succ_id as usize]] -= 1;
+                                // DO NOT decrement remaining_nodes here - only when task completes
                             } else {
                                 let index = &shared
                                     .graph
@@ -396,10 +422,13 @@ impl SynRt {
                                     print_debug(|| {
                                         format!("Sent successor {:?} to ready channel", succ_info)
                                     });
-                                    ready_tx.send(succ_info).unwrap();
+                                    ready_tx.send(succ_info.clone()).unwrap();
+
+                                    // Mark this node as sent to avoid double-sends
+                                    nodes_sent_to_queue[node_info.slot].insert(succ_info);
+
                                     nodes_sent += 1;
-                                    remaining_cond_nodes[node_info.slot]
-                                        [node_id_to_rem[succ_id as usize]] -= 1;
+                                    // DO NOT decrement remaining_cond_nodes here - only when task completes
                                 } else {
                                     print_debug(|| {
                                         format!("Conditions not met for successor {:?}", succ_info)
@@ -432,6 +461,8 @@ impl SynRt {
                         remaining_nodes[node_info.slot][node_id] =
                             shared.graph.nodes[node_id].factor;
                     }
+                    // Clear nodes_sent_to_queue for this slot for new iteration
+                    nodes_sent_to_queue[node_info.slot].clear();
                     // Add initial nodes for new iteration
                     if new_iteration {
                         // Remove from completed set since we're starting again

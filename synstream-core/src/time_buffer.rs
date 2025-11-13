@@ -550,7 +550,7 @@ impl TimeBuffer {
         self.slot_statistics[slot_id].len()
     }
 
-    /// Print comprehensive statistics for all slots with per-worker parallelism accounting
+    /// Print comprehensive statistics for all slots with aggregated per-task analysis
     pub fn print_stats(&self, bench_name: &str, out_file: Option<&str>) {
         let filler = "****************";
         let mut output_buffer = format!("Time Statistics for {}\n", bench_name);
@@ -560,116 +560,218 @@ impl TimeBuffer {
             if self.use_rdtsc { "RDTSC" } else { "Instant" }
         ));
 
+        // Statistics from all slots (excluding runtime slot)
+        let mut global_total_times: Vec<Duration> = Vec::new();
+        let mut global_task_data: std::collections::HashMap<String, Vec<Duration>> =
+            std::collections::HashMap::new();
+        let mut global_per_worker_counts: std::collections::HashMap<
+            String,
+            std::collections::HashMap<usize, usize>,
+        > = std::collections::HashMap::new();
+        let mut global_per_worker_totals: std::collections::HashMap<
+            String,
+            std::collections::HashMap<usize, Duration>,
+        > = std::collections::HashMap::new();
+
+        // Separate storage for runtime task data
+        let mut runtime_task_data: std::collections::HashMap<String, Vec<Duration>> =
+            std::collections::HashMap::new();
+
+        let mut total_streams = 0;
+        let runtime_slot_id = if self.slots > 0 { self.slots - 1 } else { 0 };
+
         for slot_id in 0..self.slots {
             let slot_stats = &self.slot_statistics[slot_id];
             if slot_stats.is_empty() {
                 continue;
             }
 
-            // for last slot_id use SynStream Runtime as Header
-            if slot_id == self.slots - 1 {
-                output_buffer.push_str(&format!("{}\nSynStream Runtime Statistics:\n", filler));
-            } else {
-                output_buffer.push_str(&format!("{}\nSlot {} Statistics:\n", filler, slot_id));
-            }
-
-            output_buffer.push_str(&format!("  Completed Streams: {}\n", slot_stats.len()));
-
-            // Calculate average total time per stream
-            let total_times: Vec<Duration> = slot_stats.iter().map(|s| s.total_time).collect();
-            let total_time: Duration = total_times.iter().sum::<Duration>();
-            let avg_total_time = if !total_times.is_empty() {
-                total_time / total_times.len() as u32
-            } else {
-                Duration::ZERO
-            };
-
-            let min_total_time = total_times.iter().min().unwrap_or(&Duration::ZERO);
-            let max_total_time = total_times.iter().max().unwrap_or(&Duration::ZERO);
-
-            output_buffer.push_str(&format!(
-                "  Total Time {:.4?} - Avg: {:.4?}, Min: {:.4?}, Max: {:.4?}\n",
-                total_time, avg_total_time, min_total_time, max_total_time
-            ));
-
-            // Collect all unique task names for this slot
-            let mut all_tasks: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for stats in slot_stats {
-                all_tasks.extend(stats.task_times.keys().cloned());
-            }
-
-            // Print task statistics with per-worker breakdown
-            for task_name in all_tasks.iter() {
-                let mut all_task_times: Vec<Duration> = Vec::new();
-                let mut per_worker_counts: std::collections::HashMap<usize, usize> =
-                    std::collections::HashMap::new();
-                let mut per_worker_totals: std::collections::HashMap<usize, Duration> =
-                    std::collections::HashMap::new();
-
+            // Skip the runtime slot
+            if slot_id == runtime_slot_id {
+                // Collect runtime task data separately
                 for stats in slot_stats {
-                    if let Some(entries) = stats.task_times.get(task_name) {
-                        for (worker_id, d) in entries.iter() {
-                            all_task_times.push(*d);
-                            *per_worker_counts.entry(*worker_id).or_insert(0) += 1;
-                            *per_worker_totals
-                                .entry(*worker_id)
-                                .or_insert(Duration::ZERO) += *d;
+                    for (task_name, times) in &stats.task_times {
+                        let task_durations = runtime_task_data
+                            .entry(task_name.clone())
+                            .or_insert_with(Vec::new);
+                        for (_, duration) in times {
+                            task_durations.push(*duration);
                         }
                     }
                 }
+                continue;
+            }
 
-                if !all_task_times.is_empty() {
-                    let total_time = all_task_times.iter().sum::<Duration>();
-                    let total_executions = all_task_times.len();
-                    let avg_task_time = total_time / total_executions as u32;
-                    let min_task_time = all_task_times.iter().min().unwrap();
-                    let max_task_time = all_task_times.iter().max().unwrap();
+            total_streams += slot_stats.len();
 
-                    output_buffer.push_str(&format!(
-                        "  Task '{}' - Workers: {}, Executions: {}, Avg: {:.4?}, Min: {:.4?}, Max: {:.4?}, Total: {:.4?}\n",
-                        task_name, per_worker_counts.len(), total_executions, avg_task_time, min_task_time, max_task_time, total_time
-                    ));
+            // Collect total times from all streams in this slot
+            for stats in slot_stats {
+                global_total_times.push(stats.total_time);
 
-                    // Tasks per worker (counts + percentage)
-                    output_buffer.push_str("    Tasks per Worker: ");
-                    let mut worker_items: Vec<String> = Vec::new();
-                    for (worker_id, count) in per_worker_counts.iter() {
-                        let pct = (*count as f64) / (total_executions as f64) * 100.0;
-                        let label = if *worker_id == usize::MAX {
-                            "runtime".to_string()
-                        } else {
-                            format!("W-{}", worker_id)
-                        };
-                        worker_items.push(format!("{}: {} ({:.1}%)", label, count, pct));
+                // Collect task data from all streams in this slot
+                for (task_name, times) in &stats.task_times {
+                    let task_durations = global_task_data
+                        .entry(task_name.clone())
+                        .or_insert_with(Vec::new);
+
+                    for (worker_id, duration) in times {
+                        task_durations.push(*duration);
+
+                        let worker_counts = global_per_worker_counts
+                            .entry(task_name.clone())
+                            .or_insert_with(std::collections::HashMap::new);
+                        *worker_counts.entry(*worker_id).or_insert(0) += 1;
+
+                        let worker_totals = global_per_worker_totals
+                            .entry(task_name.clone())
+                            .or_insert_with(std::collections::HashMap::new);
+                        *worker_totals.entry(*worker_id).or_insert(Duration::ZERO) += *duration;
                     }
-                    output_buffer.push_str(&format!("{}\n", worker_items.join(", ")));
+                }
+            }
+        }
 
-                    // Time per worker for this task
-                    output_buffer.push_str("    Time per Worker: ");
-                    let mut worker_time_items: Vec<String> = Vec::new();
-                    for (worker_id, total) in per_worker_totals.iter() {
-                        let label = if *worker_id == usize::MAX {
-                            "runtime".to_string()
-                        } else {
-                            format!("W-{}", worker_id)
-                        };
-                        worker_time_items.push(format!("{}: {:.4?}", label, total));
-                    }
-                    output_buffer.push_str(&format!("{}\n", worker_time_items.join(", ")));
+        // Print aggregated statistics header
+        output_buffer.push_str(&format!("{}\nAggregated Statistics (All Slots):\n", filler));
+        output_buffer.push_str(&format!("  Total Streams Processed: {}\n", total_streams));
 
-                    // Average compute per task execution: avg_task_time * n_workers
-                    output_buffer.push_str(&format!(
-                        "    Avg Time Per Task: {:.4?}\n",
-                        avg_task_time * per_worker_counts.len() as u32
+        // Print per-slot stream breakdown
+        output_buffer.push_str("  Streams per Slot: ");
+        let mut slot_stream_items: Vec<String> = Vec::new();
+        for slot_id in 0..self.slots {
+            let slot_stats = &self.slot_statistics[slot_id];
+            if slot_id == self.slots - 1 && !slot_stats.is_empty() {
+                // Skip runtime slot
+                continue;
+            }
+            let stream_count = slot_stats.len();
+            slot_stream_items.push(format!("Slot {}: {}", slot_id, stream_count));
+        }
+        output_buffer.push_str(&format!("{}\n", slot_stream_items.join(", ")));
+
+        // Calculate statistics for total times
+        if !global_total_times.is_empty() {
+            let global_total: Duration = global_total_times.iter().sum();
+            let avg_total_time = global_total / global_total_times.len() as u32;
+            let min_total_time = global_total_times.iter().min().unwrap();
+            let max_total_time = global_total_times.iter().max().unwrap();
+
+            output_buffer.push_str(&format!("  Total Runtime: {:.4?}\n", global_total));
+            output_buffer.push_str(&format!("  Avg Time Per Stream: {:.4?}\n", avg_total_time));
+            output_buffer.push_str(&format!(
+                "  Min/Max Per Stream: {:.4?} / {:.4?}\n",
+                min_total_time, max_total_time
+            ));
+        }
+
+        // Print per-task analysis for all slots combined
+        output_buffer.push_str(&format!("{}\nPer-Task Analysis (Aggregated):\n", filler));
+
+        let mut sorted_tasks: Vec<_> = global_task_data.keys().cloned().collect();
+        sorted_tasks.sort();
+
+        for task_name in sorted_tasks {
+            if let Some(task_times) = global_task_data.get(&task_name) {
+                if task_times.is_empty() {
+                    continue;
+                }
+
+                output_buffer.push_str(&format!("  {}\n", filler));
+
+                let total_executions = task_times.len();
+                let total_time: Duration = task_times.iter().sum();
+
+                let avg_time = if total_streams > 0 {
+                    total_time / total_streams as u32
+                } else {
+                    Duration::ZERO
+                };
+
+                let avg_task = total_time / total_executions as u32;
+                let min_time = task_times.iter().min().unwrap();
+                let max_time = task_times.iter().max().unwrap();
+
+                let worker_counts = global_per_worker_counts.get(&task_name).unwrap();
+                let worker_totals = global_per_worker_totals.get(&task_name).unwrap();
+
+                output_buffer.push_str(&format!(
+                    "  Task '{}' - Workers: {}, Total Executions: {}\n",
+                    task_name,
+                    worker_counts.len(),
+                    total_executions
+                ));
+
+                output_buffer.push_str(&format!(
+                    "    Timing - Avg/Stream: {:.4?}, Avg/Task: {:.4?}, Min: {:.4?}, Max: {:.4?}, Total: {:.4?}\n",
+                    avg_time, avg_task, min_time, max_time, total_time
+                ));
+
+                // Tasks and time per worker combined
+                output_buffer.push_str("    Worker Summary: ");
+                let mut worker_items: Vec<String> = Vec::new();
+                for (worker_id, count) in worker_counts.iter() {
+                    let pct = (*count as f64) / (total_executions as f64) * 100.0;
+                    let time_total = worker_totals.get(worker_id).unwrap_or(&Duration::ZERO);
+                    let label = if *worker_id == usize::MAX {
+                        "runtime".to_string()
+                    } else {
+                        format!("W-{}", worker_id)
+                    };
+                    worker_items.push(format!(
+                        "{}: {} ({:.1}%) - {:.4?}",
+                        label, count, pct, time_total
                     ));
+                }
+                output_buffer.push_str(&format!("{}\n", worker_items.join(", ")));
+            }
+        }
 
-                    // Average compute per task execution: total_time * n_workers
+        // Print runtime task analysis (separate section)
+        if !runtime_task_data.is_empty() {
+            output_buffer.push_str(&format!("{}\nRuntime Tasks (Final Slot):\n", filler));
+
+            let mut sorted_runtime_tasks: Vec<_> = runtime_task_data.keys().cloned().collect();
+            sorted_runtime_tasks.sort();
+
+            for task_name in sorted_runtime_tasks {
+                if let Some(task_times) = runtime_task_data.get(&task_name) {
+                    if task_times.is_empty() {
+                        continue;
+                    }
+
+                    let total_executions = task_times.len();
+                    let min_time = task_times.iter().min().unwrap();
+                    let max_time = task_times.iter().max().unwrap();
+                    let total_time: Duration = task_times.iter().sum();
+
                     output_buffer.push_str(&format!(
-                        "    Time All Cores: {:.4?}\n",
-                        total_time * per_worker_counts.len() as u32
+                        "  Task '{}' - Total Executions: {}, Min: {:.4?}, Max: {:.4?}, Total: {:.4?}\n",
+                        task_name, total_executions, min_time, max_time, total_time
                     ));
                 }
             }
+        }
+
+        // Print per-slot summary
+        output_buffer.push_str(&format!("{}\nPer-Slot Summary:\n", filler));
+        for slot_id in 0..self.slots {
+            let slot_stats = &self.slot_statistics[slot_id];
+            if slot_stats.is_empty() {
+                output_buffer.push_str(&format!("  Slot {}: No data\n", slot_id));
+                continue;
+            }
+
+            let slot_header = if slot_id == self.slots - 1 {
+                "SynStream Runtime".to_string()
+            } else {
+                format!("Slot {}", slot_id)
+            };
+
+            output_buffer.push_str(&format!(
+                "  {} - Streams: {}\n",
+                slot_header,
+                slot_stats.len()
+            ));
         }
 
         if let Some(out_file) = out_file {
