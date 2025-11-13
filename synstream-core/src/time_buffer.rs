@@ -387,8 +387,7 @@ impl TimeBuffer {
         };
 
         self.slot_start_times[slot_id] = Some(start_time);
-        // Clear any previous task times for this slot
-        self.current_slot_tasks[slot_id].clear();
+        // Preserves any pre-slot-start timings
     }
 
     /// Add a task timing measurement to a specific slot
@@ -491,6 +490,9 @@ impl TimeBuffer {
 
         // Store the completed slot stats
         self.slot_statistics[slot_id].push(slot_stats.clone());
+
+        // Clear task times for this slot after finishing (for next stream on this slot)
+        self.current_slot_tasks[slot_id].clear();
 
         slot_stats
     }
