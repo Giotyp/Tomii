@@ -745,7 +745,7 @@ impl TimeBuffer {
                     let min_time = task_times.iter().min().unwrap();
                     let max_time = task_times.iter().max().unwrap();
                     let total_time: Duration = task_times.iter().sum();
-                    let avg_time = total_time / total_executions as u128;
+                    let avg_time = total_time / total_executions as u32;
 
                     output_buffer.push_str(&format!(
                         "  Task '{}' - Total Executions: {}, Avg: {:.4?}, Min: {:.4?}, Max: {:.4?}, Total: {:.4?}\n",
