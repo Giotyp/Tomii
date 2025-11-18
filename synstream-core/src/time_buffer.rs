@@ -1,7 +1,5 @@
 use crate::utils_rdtsc::{cycles_to_ns, rdtsc};
 use rapidhash::{HashMapExt, RapidHashMap};
-use std::fs::File;
-use std::io::Write;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -658,11 +656,28 @@ impl TimeBuffer {
             let min_total_time = global_total_times.iter().min().unwrap();
             let max_total_time = global_total_times.iter().max().unwrap();
 
+            let total_compute_time = global_task_data
+                .iter()
+                .map(|(_, times)| {
+                    let total: Duration = times.iter().sum();
+                    total
+                })
+                .sum::<Duration>();
+            let avg_compute_time = total_compute_time / total_streams as u32;
+
             output_buffer.push_str(&format!("  Total Runtime: {:.4?}\n", global_total));
             output_buffer.push_str(&format!("  Avg Time Per Stream: {:.4?}\n", avg_total_time));
             output_buffer.push_str(&format!(
                 "  Min/Max Per Stream: {:.4?} / {:.4?}\n",
                 min_total_time, max_total_time
+            ));
+            output_buffer.push_str(&format!(
+                "  Total Compute Time: {:.4?}\n",
+                total_compute_time
+            ));
+            output_buffer.push_str(&format!(
+                "  Avg Compute Time Per Stream: {:.4?}\n",
+                avg_compute_time
             ));
         }
 
@@ -755,81 +770,11 @@ impl TimeBuffer {
             }
         }
 
-        // Print per-slot summary
-        output_buffer.push_str(&format!("{}\nPer-Slot Summary:\n", filler));
-        for slot_id in 0..self.slots {
-            let slot_stats = &self.slot_statistics[slot_id];
-            if slot_stats.is_empty() {
-                output_buffer.push_str(&format!("  Slot {}: No data\n", slot_id));
-                continue;
-            }
-
-            let slot_header = if slot_id == self.slots - 1 {
-                "SynStream Runtime".to_string()
-            } else {
-                format!("Slot {}", slot_id)
-            };
-
-            output_buffer.push_str(&format!(
-                "  {} - Streams: {}\n",
-                slot_header,
-                slot_stats.len()
-            ));
-        }
-
         if let Some(out_file) = out_file {
             std::fs::write(out_file, &output_buffer).expect("Unable to write file");
         } else {
             print!("{}", output_buffer);
         }
-    }
-
-    /// Export detailed statistics to a file
-    pub fn export_detailed_stats(&self, bench_name: &str, out_file: &str) {
-        let filler = "****************";
-        let mut output_buffer = format!("Detailed Time Statistics for {}\n", bench_name);
-        output_buffer.push_str(&format!("Total Slots: {}\n", self.slots));
-        output_buffer.push_str(&format!(
-            "Timing Method: {}\n\n",
-            if self.use_rdtsc { "RDTSC" } else { "Instant" }
-        ));
-
-        for slot_id in 0..self.slots {
-            let slot_stats = &self.slot_statistics[slot_id];
-            if slot_stats.is_empty() {
-                continue;
-            }
-
-            output_buffer.push_str(&format!("{}\nSlot {}\n", filler, slot_id));
-
-            for (cycle_idx, stats) in slot_stats.iter().enumerate() {
-                output_buffer.push_str(&format!(
-                    "  Stream {}: Total Time: {:.4?}\n",
-                    cycle_idx, stats.total_time
-                ));
-
-                for (task_name, times) in &stats.task_times {
-                    output_buffer.push_str(&format!("    Task '{}': [", task_name));
-                    for (i, (worker_id, time)) in times.iter().enumerate() {
-                        let label = if *worker_id == usize::MAX {
-                            "runtime".to_string()
-                        } else {
-                            format!("W{}", worker_id)
-                        };
-                        if i == times.len() - 1 {
-                            output_buffer.push_str(&format!("({}: {:.4?})", label, time));
-                        } else {
-                            output_buffer.push_str(&format!("({}: {:.4?}), ", label, time));
-                        }
-                    }
-                    output_buffer.push_str("]\n");
-                }
-            }
-        }
-
-        let mut file = File::create(out_file).expect("Unable to create file");
-        file.write_all(output_buffer.as_bytes())
-            .expect("Unable to write to file");
     }
 
     /// Clear all statistics and reset the buffer
@@ -1025,83 +970,3 @@ impl Drop for TimeBufferManager {
         }
     }
 }
-
-/*
-Example Usage:
-
-=== SYNCHRONOUS (Original) ===
-// Create a synchronous TimeBuffer for 4 slots using rdtsc timing
-let mut time_buffer = TimeBuffer::new(4, true);
-
-// Start processing for slot 0
-time_buffer.start_slot_processing(0);
-
-// Add task timings during processing (BLOCKING)
-time_buffer.add_task_time(0, "fft", Duration::from_micros(100));
-time_buffer.add_task_time(0, "beam", Duration::from_micros(50));
-
-// Finish processing and get stats
-let slot_stats = time_buffer.finish_slot_processing(0);
-println!("Slot 0 total time: {:?}", slot_stats.total_time);
-
-=== ASYNCHRONOUS (New) ===
-// Create an asynchronous TimeBuffer for 4 slots using rdtsc timing
-let async_buffer = AsyncTimeBuffer::new(4, true);
-
-// Start processing for slot 0 (NON-BLOCKING)
-async_buffer.start_slot_processing_async(0);
-
-// Add task timings during processing (NON-BLOCKING)
-async_buffer.add_task_time_async(0, "fft", Duration::from_micros(100));
-async_buffer.add_task_time_async(0, "beam", Duration::from_micros(50));
-
-// Using rdtsc cycles (NON-BLOCKING)
-let start_cycles = rdtsc();
-// ... do some work ...
-let end_cycles = rdtsc();
-async_buffer.add_task_time_rdtsc_async(0, "decode", start_cycles, end_cycles);
-
-// Using Instant (NON-BLOCKING)
-let start = Instant::now();
-// ... do some work ...
-let end = Instant::now();
-async_buffer.add_task_time_instant_async(0, "process", start, end);
-
-// Finish processing and get stats (BLOCKING - returns result)
-let slot_stats = async_buffer.finish_slot_processing(0).unwrap();
-println!("Slot 0 total time: {:?}", slot_stats.total_time);
-
-// Print stats asynchronously (NON-BLOCKING)
-async_buffer.print_stats_async("My Benchmark", Some("stats.txt"));
-
-// Shutdown the controller when done
-async_buffer.shutdown();
-
-=== UNIFIED MANAGER (Recommended) ===
-// Create manager for async mode
-let manager = TimeBufferManager::new_async(4, true);
-
-// Or create manager for sync mode
-// let manager = TimeBufferManager::new_sync(4, true);
-
-// Use the same interface regardless of sync/async mode
-manager.start_slot_processing(0);
-manager.add_task_time(0, "fft", Duration::from_micros(100)); // Non-blocking if async
-
-// Fast timing measurements are synchronous for both modes
-let start_time = manager.measure_time(); // Always synchronous and fast
-// ... do some work ...
-let end_time = manager.measure_time();
-let duration = manager.measure_duration(start_time, end_time); // Always synchronous
-manager.add_task_time(0, "measured_task", duration);
-
-// This is always blocking to return the result
-let slot_stats = manager.finish_slot_processing(0).unwrap();
-println!("Slot 0 total time: {:?}", slot_stats.total_time);
-
-// Print stats (non-blocking if async)
-manager.print_stats("My Benchmark", Some("stats.txt"));
-
-// Shutdown (only needed for async mode, but safe to call for sync too)
-manager.shutdown();
-*/
