@@ -7,6 +7,10 @@ edition = "2021"
 name = "matcomp"
 crate-type = ["dylib"]
 
+[[bin]]
+name = "perf_test"
+path = "src/main.rs"
+
 [dependencies]
 nalgebra = "0.34.1"
 num-complex = "0.4.6"

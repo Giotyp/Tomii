@@ -68,3 +68,16 @@ pub fn mat_mul(vectors: &Vec<CmTypes>) -> DMatrix<Complex32> {
     }
     c_res.into_inner()
 }
+
+pub fn mat_mul_dm(vectors: &Vec<DMatrix<Complex32>>) -> DMatrix<Complex32> {
+    let n = vectors.len();
+
+    // first matrix multiplication: vectors[0] * vectors[n-1]
+    let mut c_res = &vectors[0] * &vectors[n - 1];
+
+    for i in 1..n / 2 {
+        let current = c_res.clone();
+        c_res = &vectors[i] * &vectors[n - i - 1] + current;
+    }
+    c_res
+}
