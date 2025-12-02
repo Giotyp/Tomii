@@ -892,35 +892,10 @@ impl TimeBufferManager {
 
     /// Get timing method for measurements (synchronous for both async and sync modes)
     pub fn measure_time(&self) -> TimingMethod {
-        if self.is_async {
-            // For async mode, we can measure time directly without going through the controller
-            // since timing measurement is fast and doesn't require buffer access
-            if self.use_rdtsc {
-                TimingMethod::Rdtsc(rdtsc())
-            } else {
-                TimingMethod::Instant(Instant::now())
-            }
+        if self.use_rdtsc {
+            TimingMethod::Rdtsc(rdtsc())
         } else {
-            // For sync mode, use the buffer's measure_time method
-            if let Some(ref sync_buf) = self.sync_buffer {
-                if let Ok(buf) = sync_buf.lock() {
-                    buf.measure_time()
-                } else {
-                    // Fallback if lock fails
-                    if self.use_rdtsc {
-                        TimingMethod::Rdtsc(rdtsc())
-                    } else {
-                        TimingMethod::Instant(Instant::now())
-                    }
-                }
-            } else {
-                // Fallback if buffer not initialized
-                if self.use_rdtsc {
-                    TimingMethod::Rdtsc(rdtsc())
-                } else {
-                    TimingMethod::Instant(Instant::now())
-                }
-            }
+            TimingMethod::Instant(Instant::now())
         }
     }
 

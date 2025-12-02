@@ -10,6 +10,7 @@ use synstream_types::*;
 #[derive(Clone)]
 pub struct NodeCacheEntry {
     pub factor: usize,
+    pub pred_vec: Vec<usize>,
     pub name: String,
     pub func_ptr: CmPtr,
     pub arg_cache: ArgCacheEntry,
@@ -57,6 +58,7 @@ pub fn node_cache_entry(node: &Node, init_objects: &Vec<Vec<CmTypes>>) -> NodeCa
     let mut args = vec![CmTypes::None; node.args.len()];
 
     let mut idx_count = 0;
+    let mut pred_hash: std::collections::HashMap<IdType, usize> = std::collections::HashMap::new();
 
     for (idx, arg) in node.args.iter().enumerate() {
         if arg.is_condition() {
@@ -86,6 +88,18 @@ pub fn node_cache_entry(node: &Node, init_objects: &Vec<Vec<CmTypes>>) -> NodeCa
             CmTypes::Res(_) => {
                 res_indexes.push(idx_count);
                 real_res_indexes.push(idx);
+                let pred = arg
+                    .predecessor
+                    .as_ref()
+                    .expect("Result argument missing predecessor");
+                let pred_id = pred.id;
+                let pred_idx_count = pred.indexes.len();
+
+                if !pred_hash.contains_key(&pred_id) {
+                    pred_hash.insert(pred_id, pred_idx_count);
+                } else {
+                    pred_hash.insert(pred_id, pred_hash[&pred_id] + pred_idx_count);
+                }
             }
             CmTypes::Barrier(_) => { //ignore
             }
@@ -106,8 +120,19 @@ pub fn node_cache_entry(node: &Node, init_objects: &Vec<Vec<CmTypes>>) -> NodeCa
         real_res_indexes,
     };
 
+    let max_pred_id = pred_hash.keys().max().cloned().unwrap_or(0);
+    let mut pred_vec = Vec::new();
+    for pred_id in 0..max_pred_id + 1 {
+        if let Some(count) = pred_hash.get(&pred_id) {
+            pred_vec.push(*count);
+        } else {
+            pred_vec.push(0);
+        }
+    }
+
     NodeCacheEntry {
         factor: node.factor,
+        pred_vec,
         name: node.name.clone(),
         func_ptr: node.func_ptr.expect("Node function pointer is None"),
         arg_cache,

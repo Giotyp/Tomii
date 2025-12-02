@@ -208,7 +208,7 @@ impl SynRt {
             let duration = shared.time_buffer.measure_duration(start_time, end_time);
             shared.time_buffer.add_task_time(
                 shared.slots,
-                "Preparation Thread",
+                &format!("Preparation Thread - Node {}", node.name),
                 usize::MAX,
                 duration,
             );
@@ -369,8 +369,14 @@ impl SynRt {
                 let succ_factor = shared.node_cache[succ_id as usize].factor;
                 let node_factor = shared.node_cache[node_info.id as usize].factor;
 
+                let pred_count = shared.node_cache[succ_id as usize]
+                    .pred_vec
+                    .get(node_info.id as usize)
+                    .cloned()
+                    .unwrap_or(0);
+
                 let succ_indexes = {
-                    if succ_factor == node_factor {
+                    if succ_factor == node_factor && pred_count <= 1 {
                         vec![node_info.index]
                     } else if !shared.graph.condition_nodes.contains(&succ_id) {
                         let num_indexes = std::cmp::max(succ_factor, remaining);
@@ -435,10 +441,24 @@ impl SynRt {
                                     });
                                 }
                             }
+                        } else {
+                            print_debug(|| {
+                                format!(
+                                    "Successor {:?} not ready, remaining dependencies: {}",
+                                    succ_info, dep
+                                )
+                            });
                         }
                     }
                 }
             }
+            // print dependency map state
+            print_debug(|| {
+                format!(
+                    "Dependency map state after processing node {:?}:\n{:?}",
+                    node_info, dependency_map
+                )
+            });
 
             // Check for stream completion - only process each slot once
             if nodes_sent == 0 && !completed_slots.contains(&node_info.slot) {
