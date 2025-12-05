@@ -29,6 +29,52 @@ pub fn get_current_worker_id() -> Option<usize> {
     }
 }
 
+/// Create Threadpool with Rayon
+pub fn create_threadpool(core_offset: usize, workers: usize) -> ThreadPool {
+    // Create threadpool and pin workers to cores
+    let mut core_ids = core_affinity::get_core_ids().unwrap();
+    core_ids.sort();
+
+    let available_cores = core_ids.len();
+    let worker_offset = core_offset + 1;
+
+    // If requested workers exceed available cores, ignore offset and use max-1 workers
+    let (actual_offset, actual_workers) = if worker_offset + workers > available_cores {
+        eprintln!(
+                "Warning: Requested {} workers with offset {}+1 exceeds available {} cores. \nUsing {} workers (max-2) with offset 2.",
+                workers,
+                worker_offset,
+                available_cores,
+                available_cores.saturating_sub(2)
+            );
+        (2, available_cores.saturating_sub(2))
+    } else {
+        (worker_offset, workers)
+    };
+
+    let cores_to_use: Vec<core_affinity::CoreId> =
+        core_ids[actual_offset..actual_offset + actual_workers].to_vec();
+
+    // Print worker->core correspondence
+    println!("WorkStealScheduler: Worker -> Core Mapping:");
+    for (idx, core_id) in cores_to_use.iter().enumerate() {
+        println!("  Worker {}: Core {:?}", idx, core_id);
+    }
+
+    let threadpool = ThreadPoolBuilder::new()
+        .num_threads(actual_workers)
+        .start_handler(move |thread_index| {
+            // Assign a worker id to this thread for timing attribution
+            WORKER_ID.with(|c| c.set(thread_index));
+            // Pin each thread to a specific core
+            let core_id = cores_to_use[thread_index];
+            core_affinity::set_for_current(core_id);
+        })
+        .build()
+        .unwrap();
+    threadpool
+}
+
 pub trait Scheduler {
     fn spawn_task<F>(&self, task: F)
     where
@@ -61,6 +107,10 @@ pub trait Scheduler {
     fn total_jobs_completed(&self) -> usize {
         0 // Default implementation
     }
+
+    fn core_offset(&self) -> Option<usize> {
+        None // Default implementation
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -76,60 +126,20 @@ struct Record {
 /// Recorder type: maps "slot" -> Vec<Record>
 type Recorder = Arc<Mutex<HashMap<usize, Vec<Record>>>>;
 
-pub struct FifoScheduler {
+/// Shared base for schedulers with common state and logic.
+#[derive(Debug)]
+struct SchedulerBase {
     threadpool: ThreadPool,
+    core_offset: usize,
     pending_jobs: Arc<AtomicUsize>,
     total_spawned: Arc<AtomicUsize>,
     total_completed: Arc<AtomicUsize>,
-
-    // low-overhead recorder: optional
     recorder: Option<Recorder>,
     base_instant: Arc<Instant>,
 }
 
-impl FifoScheduler {
+impl SchedulerBase {
     fn new(core_offset: usize, workers: usize, record: bool) -> Self {
-        // Create threadpool and pin workers to cores
-        let mut core_ids = core_affinity::get_core_ids().unwrap();
-        core_ids.sort();
-
-        let available_cores = core_ids.len();
-
-        // If requested workers exceed available cores, ignore offset and use max-1 workers
-        let (actual_offset, actual_workers) = if core_offset + workers > available_cores {
-            eprintln!(
-                "Warning: Requested {} workers with offset {} exceeds available {} cores. \n                 Using {} workers (max-1) with no offset.",
-                workers,
-                core_offset,
-                available_cores,
-                available_cores.saturating_sub(1)
-            );
-            (0, available_cores.saturating_sub(1))
-        } else {
-            (core_offset, workers)
-        };
-
-        let cores_to_use: Vec<core_affinity::CoreId> =
-            core_ids[actual_offset..actual_offset + actual_workers].to_vec();
-
-        // Print worker->core correspondence
-        println!("FifoScheduler: Worker -> Core Mapping:");
-        for (idx, core_id) in cores_to_use.iter().enumerate() {
-            println!("  Worker {}: Core {:?}", idx, core_id);
-        }
-
-        let threadpool = ThreadPoolBuilder::new()
-            .num_threads(actual_workers)
-            .start_handler(move |thread_index| {
-                // Assign a worker id to this thread for timing attribution
-                WORKER_ID.with(|c| c.set(thread_index));
-                // Pin each thread to a specific core
-                let core_id = cores_to_use[thread_index];
-                core_affinity::set_for_current(core_id);
-            })
-            .build()
-            .unwrap();
-
         let recorder = if record {
             Some(Arc::new(Mutex::new(HashMap::new())))
         } else {
@@ -137,7 +147,8 @@ impl FifoScheduler {
         };
 
         Self {
-            threadpool,
+            threadpool: create_threadpool(core_offset, workers),
+            core_offset,
             pending_jobs: Arc::new(AtomicUsize::new(0)),
             total_spawned: Arc::new(AtomicUsize::new(0)),
             total_completed: Arc::new(AtomicUsize::new(0)),
@@ -150,7 +161,7 @@ impl FifoScheduler {
         if let Some(rec) = &self.recorder {
             if let Ok(map) = rec.lock() {
                 if map.is_empty() {
-                    println!("FifoScheduler: no recorded events to write");
+                    println!("SchedulerBase: no recorded events to write");
                     return;
                 }
                 match File::create(path) {
@@ -171,33 +182,44 @@ impl FifoScheduler {
                                 );
                             }
                         }
-                        println!("FifoScheduler: wrote {} slots to {}", map.len(), path);
+                        println!("SchedulerBase: wrote {} slots to {}", map.len(), path);
                     }
                     Err(e) => {
-                        eprintln!("FifoScheduler: failed to create {}: {}", path, e);
+                        eprintln!("SchedulerBase: failed to create {}: {}", path, e);
                     }
                 }
             }
         } else {
-            println!("FifoScheduler: recorder not enabled");
+            println!("SchedulerBase: recorder not enabled");
         }
     }
-}
 
-impl Scheduler for FifoScheduler {
-    fn spawn_task<F>(&self, task: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        // delegate to spawn_task_with_meta with no metadata
-        self.spawn_task_with_meta(None, task)
+    fn workers(&self) -> usize {
+        self.threadpool.current_num_threads()
     }
 
-    fn spawn_task_with_meta<F>(&self, meta: Option<(IdType, usize, usize)>, task: F)
+    fn core_offset(&self) -> Option<usize> {
+        Some(self.core_offset)
+    }
+
+    fn pending_jobs(&self) -> usize {
+        self.pending_jobs.load(Ordering::SeqCst)
+    }
+
+    fn total_jobs_spawned(&self) -> usize {
+        self.total_spawned.load(Ordering::SeqCst)
+    }
+
+    fn total_jobs_completed(&self) -> usize {
+        self.total_completed.load(Ordering::SeqCst)
+    }
+
+    /// Common task spawning logic. `spawn_fn` handles the specific spawning (e.g., FIFO or work-stealing).
+    fn spawn_task_common<F, S>(&self, meta: Option<(IdType, usize, usize)>, task: F, spawn_fn: S)
     where
         F: FnOnce() + Send + 'static,
+        S: FnOnce(Box<dyn FnOnce() + Send + 'static>),
     {
-        // job id
         let job_id = self.total_spawned.fetch_add(1, Ordering::SeqCst);
         self.pending_jobs.fetch_add(1, Ordering::SeqCst);
 
@@ -206,14 +228,9 @@ impl Scheduler for FifoScheduler {
         let base = Arc::clone(&self.base_instant);
         let recorder_opt = self.recorder.as_ref().map(Arc::clone);
 
-        // parse meta: expected format "slot=<num>;name=<task>"; fallback slot=usize::MAX
-        let (task_id, slot, index) = if let Some(data) = meta {
-            data
-        } else {
-            (IdType::MIN, usize::MIN, usize::MIN)
-        };
+        let (task_id, slot, index) = meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN));
 
-        self.threadpool.spawn_fifo(move || {
+        let wrapped_task = move || {
             let start = (*base).elapsed().as_nanos();
             let worker = get_current_worker_id().unwrap_or(usize::MAX);
             task();
@@ -235,198 +252,117 @@ impl Scheduler for FifoScheduler {
 
             pending.fetch_sub(1, Ordering::SeqCst);
             completed.fetch_add(1, Ordering::SeqCst);
-        });
-    }
+        };
 
-    fn workers(&self) -> usize {
-        self.threadpool.current_num_threads()
-    }
-
-    fn pending_jobs(&self) -> usize {
-        self.pending_jobs.load(Ordering::SeqCst)
-    }
-
-    fn total_jobs_spawned(&self) -> usize {
-        self.total_spawned.load(Ordering::SeqCst)
-    }
-
-    fn total_jobs_completed(&self) -> usize {
-        self.total_completed.load(Ordering::SeqCst)
+        spawn_fn(Box::new(wrapped_task));
     }
 }
 
-pub struct WorkStealScheduler {
-    threadpool: ThreadPool,
-    pending_jobs: Arc<AtomicUsize>,
-    total_spawned: Arc<AtomicUsize>,
-    total_completed: Arc<AtomicUsize>,
-
-    recorder: Option<Recorder>,
-    base_instant: Arc<Instant>,
+#[derive(Debug)]
+pub struct FifoScheduler {
+    base: SchedulerBase,
 }
 
-impl WorkStealScheduler {
+impl FifoScheduler {
     fn new(core_offset: usize, workers: usize, record: bool) -> Self {
-        // Create threadpool and pin workers to cores
-        let mut core_ids = core_affinity::get_core_ids().unwrap();
-        core_ids.sort();
-
-        let available_cores = core_ids.len();
-
-        // If requested workers exceed available cores, ignore offset and use max-1 workers
-        let (actual_offset, actual_workers) = if core_offset + workers > available_cores {
-            eprintln!(
-                "Warning: Requested {} workers with offset {} exceeds available {} cores. \n                 Using {} workers (max-1) with no offset.",
-                workers,
-                core_offset,
-                available_cores,
-                available_cores.saturating_sub(1)
-            );
-            (0, available_cores.saturating_sub(1))
-        } else {
-            (core_offset, workers)
-        };
-
-        let cores_to_use: Vec<core_affinity::CoreId> =
-            core_ids[actual_offset..actual_offset + actual_workers].to_vec();
-
-        // Print worker->core correspondence
-        println!("WorkStealScheduler: Worker -> Core Mapping:");
-        for (idx, core_id) in cores_to_use.iter().enumerate() {
-            println!("  Worker {}: Core {:?}", idx, core_id);
-        }
-
-        let threadpool = ThreadPoolBuilder::new()
-            .num_threads(actual_workers)
-            .start_handler(move |thread_index| {
-                // Assign a worker id to this thread for timing attribution
-                WORKER_ID.with(|c| c.set(thread_index));
-                // Pin each thread to a specific core
-                let core_id = cores_to_use[thread_index];
-                core_affinity::set_for_current(core_id);
-            })
-            .build()
-            .unwrap();
-
-        let recorder = if record {
-            Some(Arc::new(Mutex::new(HashMap::new())))
-        } else {
-            None
-        };
-
         Self {
-            threadpool,
-            pending_jobs: Arc::new(AtomicUsize::new(0)),
-            total_spawned: Arc::new(AtomicUsize::new(0)),
-            total_completed: Arc::new(AtomicUsize::new(0)),
-            recorder,
-            base_instant: Arc::new(Instant::now()),
+            base: SchedulerBase::new(core_offset, workers, record),
         }
     }
 
     fn write_records_to_csv(&self, path: &str) {
-        if let Some(rec) = &self.recorder {
-            if let Ok(map) = rec.lock() {
-                if map.is_empty() {
-                    println!("WorkStealScheduler: no recorded events to write");
-                    return;
-                }
-                match File::create(path) {
-                    Ok(mut f) => {
-                        let _ = writeln!(f, "slot,job_id,start_ns,end_ns,worker,task_id,index");
-                        for (slot, vec) in map.iter() {
-                            for r in vec.iter() {
-                                let _ = writeln!(
-                                    f,
-                                    "{},{},{},{},{},{},{}",
-                                    slot,
-                                    r.job_id,
-                                    r.start_ns,
-                                    r.end_ns,
-                                    r.worker,
-                                    r.task_id,
-                                    r.index
-                                );
-                            }
-                        }
-                        println!("WorkStealScheduler: wrote {} slots to {}", map.len(), path);
-                    }
-                    Err(e) => {
-                        eprintln!("WorkStealScheduler: failed to create {}: {}", path, e);
-                    }
-                }
-            }
-        } else {
-            println!("WorkStealScheduler: recorder not enabled");
+        self.base.write_records_to_csv(path);
+    }
+
+    fn core_offset(&self) -> Option<usize> {
+        self.base.core_offset()
+    }
+}
+
+impl Scheduler for FifoScheduler {
+    fn spawn_task<F>(&self, task: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.spawn_task_with_meta(None, task)
+    }
+
+    fn spawn_task_with_meta<F>(&self, meta: Option<(IdType, usize, usize)>, task: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.base
+            .spawn_task_common(meta, task, |t| self.base.threadpool.spawn_fifo(t));
+    }
+
+    fn workers(&self) -> usize {
+        self.base.workers()
+    }
+
+    fn pending_jobs(&self) -> usize {
+        self.base.pending_jobs()
+    }
+
+    fn total_jobs_spawned(&self) -> usize {
+        self.base.total_jobs_spawned()
+    }
+
+    fn total_jobs_completed(&self) -> usize {
+        self.base.total_jobs_completed()
+    }
+}
+
+#[derive(Debug)]
+pub struct WorkStealScheduler {
+    base: SchedulerBase,
+}
+
+impl WorkStealScheduler {
+    fn new(core_offset: usize, workers: usize, record: bool) -> Self {
+        Self {
+            base: SchedulerBase::new(core_offset, workers, record),
         }
+    }
+
+    fn write_records_to_csv(&self, path: &str) {
+        self.base.write_records_to_csv(path);
+    }
+
+    fn core_offset(&self) -> Option<usize> {
+        self.base.core_offset()
     }
 }
 
 impl Scheduler for WorkStealScheduler {
-    fn spawn_task<F>(&self, task_clos: F)
+    fn spawn_task<F>(&self, task: F)
     where
         F: FnOnce() + Send + 'static,
     {
-        self.spawn_task_with_meta(None, task_clos)
+        self.spawn_task_with_meta(None, task)
     }
 
-    fn spawn_task_with_meta<F>(&self, meta: Option<(IdType, usize, usize)>, task_clos: F)
+    fn spawn_task_with_meta<F>(&self, meta: Option<(IdType, usize, usize)>, task: F)
     where
         F: FnOnce() + Send + 'static,
     {
-        let job_id = self.total_spawned.fetch_add(1, Ordering::SeqCst);
-        self.pending_jobs.fetch_add(1, Ordering::SeqCst);
-
-        let pending = Arc::clone(&self.pending_jobs);
-        let completed = Arc::clone(&self.total_completed);
-        let base = Arc::clone(&self.base_instant);
-        let recorder_opt = self.recorder.as_ref().map(Arc::clone);
-
-        let (task_id, slot, index) = if let Some(data) = meta {
-            data
-        } else {
-            (IdType::MIN, usize::MIN, usize::MIN)
-        };
-
-        self.threadpool.spawn(move || {
-            let start = (*base).elapsed().as_nanos();
-            let worker = get_current_worker_id().unwrap_or(usize::MAX);
-            task_clos();
-            let end = (*base).elapsed().as_nanos();
-
-            if let Some(rec) = recorder_opt.as_ref() {
-                if let Ok(mut map) = rec.lock() {
-                    let vec = map.entry(slot).or_insert_with(Vec::new);
-                    vec.push(Record {
-                        job_id,
-                        start_ns: start,
-                        end_ns: end,
-                        worker,
-                        task_id,
-                        index,
-                    });
-                }
-            }
-
-            pending.fetch_sub(1, Ordering::SeqCst);
-            completed.fetch_add(1, Ordering::SeqCst);
-        });
+        self.base
+            .spawn_task_common(meta, task, |t| self.base.threadpool.spawn(t));
     }
 
     fn workers(&self) -> usize {
-        self.threadpool.current_num_threads()
+        self.base.workers()
     }
 
     fn pending_jobs(&self) -> usize {
-        self.pending_jobs.load(Ordering::SeqCst)
+        self.base.pending_jobs()
     }
 
     fn total_jobs_spawned(&self) -> usize {
-        self.total_spawned.load(Ordering::SeqCst)
+        self.base.total_jobs_spawned()
     }
 
     fn total_jobs_completed(&self) -> usize {
-        self.total_completed.load(Ordering::SeqCst)
+        self.base.total_jobs_completed()
     }
 }
 
@@ -481,6 +417,13 @@ impl Scheduler for SchedulerImpl {
         match self {
             SchedulerImpl::Fifo(scheduler) => scheduler.total_jobs_completed(),
             SchedulerImpl::WorkStealing(scheduler) => scheduler.total_jobs_completed(),
+        }
+    }
+
+    fn core_offset(&self) -> Option<usize> {
+        match self {
+            SchedulerImpl::Fifo(scheduler) => scheduler.core_offset(),
+            SchedulerImpl::WorkStealing(scheduler) => scheduler.core_offset(),
         }
     }
 }

@@ -1,5 +1,5 @@
 use core_affinity;
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::Receiver;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread::{sleep, spawn};
@@ -84,61 +84,31 @@ impl SynRt {
             let mut tx_lock = self.shared.completed_tx.write().unwrap();
             *tx_lock = Some(completed_tx);
         }
-        // create ready channel
-        let (ready_tx, ready_rx) = crossbeam_channel::unbounded::<NodeInfo>();
         // Store scheduler
+        let core_offset: usize;
         {
             let mut scheduler_lock = self.shared.scheduler.write().unwrap();
+            core_offset = scheduler.core_offset().unwrap_or(0);
             *scheduler_lock = Some(Arc::new(scheduler));
         }
 
         // Initialize node_results
         self.init_results(self.shared.slots);
 
-        // Get available cores and select one for pinning both threads
-        let core_ids = core_affinity::get_core_ids().unwrap_or_default();
-        let target_core = if !core_ids.is_empty() {
-            // Use the last core to avoid interfering with main thread
-            Some(core_ids[core_ids.len() - 1])
-        } else {
-            print_debug(|| "No cores available for affinity setting".to_string());
-            None
-        };
-
         // Initiate synstream-runtime timing for scheduling threads
         self.shared
             .time_buffer
             .start_slot_processing(self.shared.slots);
 
-        // Spawn preparation thread
-        let shared_for_prep = Arc::clone(&self.shared);
-        let target_core_prep = target_core;
-        let preparation_handle = spawn(move || {
-            // Pin this thread to the selected core
-            if let Some(core) = target_core_prep {
-                if core_affinity::set_for_current(core) {
-                    print_debug(|| format!("Preparation thread pinned to core {:?}", core));
-                } else {
-                    print_debug(|| "Failed to pin preparation thread to core".to_string());
-                }
-            }
-            Self::preparation(shared_for_prep, ready_rx);
-        });
-        print_debug(|| "Preparation thread spawned".to_string());
-
         // Spawn resolution thread
         let shared_for_resolution = Arc::clone(&self.shared);
-        let target_core_resolution = target_core;
         let resolution_handle = spawn(move || {
-            // Pin this thread to the same core as the preparation thread
-            if let Some(core) = target_core_resolution {
-                if core_affinity::set_for_current(core) {
-                    print_debug(|| format!("Resolution thread pinned to core {:?}", core));
-                } else {
-                    print_debug(|| "Failed to pin resolution thread to core".to_string());
-                }
+            if core_affinity::set_for_current(core_affinity::CoreId { id: core_offset }) {
+                print_debug(|| format!("Resolution thread pinned to core {:?}", core_offset));
+            } else {
+                print_debug(|| "Failed to pin resolution thread to core".to_string());
             }
-            Self::resolution(shared_for_resolution, completed_rx, ready_tx);
+            Self::resolution(shared_for_resolution, completed_rx);
         });
         print_debug(|| "Resolution thread spawned".to_string());
 
@@ -167,8 +137,7 @@ impl SynRt {
             }
         }
 
-        // Wait for threads to finish
-        preparation_handle.join().unwrap();
+        // Wait for thread to finish
         resolution_handle.join().unwrap();
 
         let _ = self
@@ -180,10 +149,8 @@ impl SynRt {
 
 // Execution Threads
 impl SynRt {
-    fn preparation(shared: Arc<SharedData>, ready_rx: Receiver<NodeInfo>) {
-        // Gathers arguments and sends node to scheduler
-
-        while let Ok(node_info) = ready_rx.recv() {
+    fn preparation(shared: &Arc<SharedData>, nodes_to_schedule: &Vec<NodeInfo>) {
+        for node_info in nodes_to_schedule {
             let start_time = shared.time_buffer.measure_time();
 
             print_debug(|| format!("Preparing {:?}", node_info));
@@ -208,18 +175,14 @@ impl SynRt {
             let duration = shared.time_buffer.measure_duration(start_time, end_time);
             shared.time_buffer.add_task_time(
                 shared.slots,
-                &format!("Preparation Thread - Node {}", node.name),
+                "Preparation Thread",
                 usize::MAX,
                 duration,
             );
         }
     }
 
-    fn resolution(
-        shared: Arc<SharedData>,
-        completed_rx: Receiver<(NodeInfo, CmTypes)>,
-        ready_tx: Sender<NodeInfo>,
-    ) {
+    fn resolution(shared: Arc<SharedData>, completed_rx: Receiver<(NodeInfo, CmTypes)>) {
         let dependency_count_vec: Vec<usize> = shared.graph.dependency_count_vec();
         let mut dependency_map = VecMap::new(0);
         dependency_map.init_map(
@@ -235,9 +198,11 @@ impl SynRt {
         // Find and send initial nodes to ready channel
         let slot_vec: Vec<usize> = (0..shared.slots).collect();
         let init_nodes = initial_nodes(&shared, slot_vec);
+        let mut nodes_to_schedule = Vec::new();
         for node_info in init_nodes {
-            ready_tx.send(node_info).unwrap();
+            nodes_to_schedule.push(node_info);
         }
+        Self::preparation(&shared, &nodes_to_schedule);
 
         // Initialize remaining processing nodes tracker
         let mut node_id_to_rem = vec![0; shared.graph.nodes.len()];
@@ -267,6 +232,8 @@ impl SynRt {
         // Track which slots have been completed to avoid double-processing
         let mut completed_slots: std::collections::HashSet<usize> =
             std::collections::HashSet::new();
+
+        let mut complete_iteration: bool;
 
         // Process completed nodes
         while let Ok((mut node_info, result)) = completed_rx.recv() {
@@ -349,6 +316,7 @@ impl SynRt {
             });
 
             let mut nodes_sent = 0;
+            let mut nodes_to_schedule: Vec<NodeInfo> = Vec::new();
             for succ_id in successors {
                 let succ_id = *succ_id;
 
@@ -409,7 +377,7 @@ impl SynRt {
                                 print_debug(|| {
                                     format!("Sent successor {:?} to ready channel", succ_info)
                                 });
-                                ready_tx.send(succ_info.clone()).unwrap();
+                                nodes_to_schedule.push(succ_info.clone());
 
                                 // Mark this node as sent to avoid double-sends
                                 nodes_sent_to_queue[node_info.slot].insert(succ_info);
@@ -428,7 +396,7 @@ impl SynRt {
                                     print_debug(|| {
                                         format!("Sent successor {:?} to ready channel", succ_info)
                                     });
-                                    ready_tx.send(succ_info.clone()).unwrap();
+                                    nodes_to_schedule.push(succ_info.clone());
 
                                     // Mark this node as sent to avoid double-sends
                                     nodes_sent_to_queue[node_info.slot].insert(succ_info);
@@ -452,6 +420,8 @@ impl SynRt {
                     }
                 }
             }
+            // Schedule Nodes
+            Self::preparation(&shared, &nodes_to_schedule);
             // print dependency map state
             print_debug(|| {
                 format!(
@@ -461,6 +431,7 @@ impl SynRt {
             });
 
             // Check for stream completion - only process each slot once
+            complete_iteration = false;
             if nodes_sent == 0 && !completed_slots.contains(&node_info.slot) {
                 // Check if all nodes in this slot have been processed
                 let all_nodes_processed = remaining_nodes[node_info.slot]
@@ -469,8 +440,6 @@ impl SynRt {
 
                 if all_nodes_processed {
                     print_debug(|| format!("Completed iteration at slot {}", node_info.slot));
-
-                    let new_iteration = process_slot_completion(&shared, node_info.slot);
                     // Mark this slot as completed
                     completed_slots.insert(node_info.slot);
 
@@ -483,15 +452,8 @@ impl SynRt {
                     }
                     // Clear nodes_sent_to_queue for this slot for new iteration
                     nodes_sent_to_queue[node_info.slot].clear();
-                    // Add initial nodes for new iteration
-                    if new_iteration {
-                        // Remove from completed set since we're starting again
-                        completed_slots.remove(&node_info.slot);
-                        let init_nodes = initial_nodes(&shared, vec![node_info.slot]);
-                        for node_info in init_nodes {
-                            ready_tx.send(node_info).unwrap();
-                        }
-                    }
+
+                    complete_iteration = true;
                 }
             }
             let end_time = shared.time_buffer.measure_time();
@@ -502,6 +464,19 @@ impl SynRt {
                 usize::MAX,
                 duration,
             );
+            if complete_iteration {
+                // Add initial nodes for new iteration
+                if process_slot_completion(&shared, node_info.slot) {
+                    // Remove from completed set since we're starting again
+                    completed_slots.remove(&node_info.slot);
+                    let init_nodes = initial_nodes(&shared, vec![node_info.slot]);
+                    let mut nodes_to_schedule = Vec::new();
+                    for node_info in init_nodes {
+                        nodes_to_schedule.push(node_info);
+                    }
+                    Self::preparation(&shared, &nodes_to_schedule);
+                }
+            }
         }
     }
 }
@@ -522,7 +497,7 @@ impl SynRt {
 
                     let func = post_node.func_ptr;
 
-                    send_to_scheduler(&self.shared, node_info, arg_vec, func);
+                    send_to_scheduler(&self.shared, &node_info, arg_vec, func);
                 }
                 print_debug(|| format!("Added post node: {}", post_node.name));
                 // Wait until all are completed by checking node_results

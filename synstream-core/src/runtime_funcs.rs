@@ -58,7 +58,8 @@ pub fn node_cache_entry(node: &Node, init_objects: &Vec<Vec<CmTypes>>) -> NodeCa
     let mut args = vec![CmTypes::None; node.args.len()];
 
     let mut idx_count = 0;
-    let mut pred_hash: std::collections::HashMap<IdType, usize> = std::collections::HashMap::new();
+    let mut pred_hash: std::collections::HashMap<IdType, Vec<usize>> =
+        std::collections::HashMap::new();
 
     for (idx, arg) in node.args.iter().enumerate() {
         if arg.is_condition() {
@@ -96,9 +97,9 @@ pub fn node_cache_entry(node: &Node, init_objects: &Vec<Vec<CmTypes>>) -> NodeCa
                 let pred_idx_count = pred.indexes.len();
 
                 if !pred_hash.contains_key(&pred_id) {
-                    pred_hash.insert(pred_id, pred_idx_count);
+                    pred_hash.insert(pred_id, vec![pred_idx_count]);
                 } else {
-                    pred_hash.insert(pred_id, pred_hash[&pred_id] + pred_idx_count);
+                    pred_hash.get_mut(&pred_id).unwrap().push(pred_idx_count);
                 }
             }
             CmTypes::Barrier(_) => { //ignore
@@ -123,7 +124,11 @@ pub fn node_cache_entry(node: &Node, init_objects: &Vec<Vec<CmTypes>>) -> NodeCa
     let max_pred_id = pred_hash.keys().max().cloned().unwrap_or(0);
     let mut pred_vec = Vec::new();
     for pred_id in 0..max_pred_id + 1 {
-        if let Some(count) = pred_hash.get(&pred_id) {
+        if let Some(pred_ids_count) = pred_hash.get(&pred_id) {
+            // count unique elements in pred_ids_count
+            let unique_counts: std::collections::HashSet<usize> =
+                pred_ids_count.iter().cloned().collect();
+            let count = unique_counts.iter().max().unwrap();
             pred_vec.push(*count);
         } else {
             pred_vec.push(0);
@@ -166,7 +171,7 @@ pub struct SharedData {
 fn execute_task(
     func: CmPtr,
     arg_vec: Vec<CmTypes>,
-    node_info: NodeInfo,
+    node_info: &NodeInfo,
     time_buf: &Arc<TimeBufferManager>,
     node_name: &str,
     completed_tx: &Sender<(NodeInfo, CmTypes)>,
@@ -187,12 +192,12 @@ fn execute_task(
     }
 
     // Send result
-    let _ = completed_tx.send((node_info, result));
+    let _ = completed_tx.send((node_info.clone(), result));
 }
 
 pub fn send_to_scheduler(
     shared: &Arc<SharedData>,
-    node_info: NodeInfo,
+    node_info: &NodeInfo,
     arg_vec: Vec<CmTypes>,
     custom_func: Option<CmPtr>,
 ) {
@@ -259,11 +264,12 @@ pub fn send_to_scheduler(
 
     // Spawn task
     let meta_data = (node_info.id, node_info.slot, node_info.index);
+    let node_info = node_info.clone();
     scheduler.spawn_task_with_meta(Some(meta_data), move || {
         execute_task(
             func_ptr,
             arg_vec,
-            node_info,
+            &node_info,
             &time_buf,
             &node_name,
             &completed_tx,

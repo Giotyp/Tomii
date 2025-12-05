@@ -19,7 +19,7 @@ struct Args {
         long,
         value_name = "CORE_OFFSET",
         required = false,
-        default_value = "0"
+        default_value = "1"
     )]
     core_offset: usize,
     #[clap(
