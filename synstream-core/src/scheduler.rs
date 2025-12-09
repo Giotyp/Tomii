@@ -30,6 +30,9 @@ pub fn get_current_worker_id() -> Option<usize> {
 }
 
 /// Create Threadpool with Rayon
+///
+/// `core_offset` specifies which core to reserve for the system thread.
+/// Workers will be allocated starting from `core_offset + 1`.
 pub fn create_threadpool(core_offset: usize, workers: usize) -> (ThreadPool, usize) {
     // Create threadpool and pin workers to cores
     let mut core_ids = core_affinity::get_core_ids().unwrap();
@@ -38,17 +41,47 @@ pub fn create_threadpool(core_offset: usize, workers: usize) -> (ThreadPool, usi
     let available_cores = core_ids.len();
     let worker_offset = core_offset + 1;
 
-    // If requested workers exceed available cores, ignore offset and use max-1 workers
+    // Check if the requested configuration fits
     let (actual_offset, actual_workers) = if worker_offset + workers > available_cores {
-        eprintln!(
-                "Warning: Requested {} workers with offset {}+1 exceeds available {} cores. \nUsing {} workers (max-2) with offset 2.",
+        // Not enough cores for requested config - need fallback strategy
+        if available_cores >= core_offset + 2 {
+            // We have enough cores to honor core_offset and allocate some workers
+            let max_workers = available_cores - worker_offset;
+            eprintln!(
+                "Warning: Requested {} workers starting at core {} exceeds available {} cores.\n\
+                Using {} workers (max available) with system thread at core {} (workers start at core {}).",
                 workers,
                 worker_offset,
                 available_cores,
-                available_cores.saturating_sub(2)
+                max_workers,
+                core_offset,
+                worker_offset
             );
-        (2, available_cores.saturating_sub(2))
+            (worker_offset, max_workers)
+        } else if available_cores >= 3 {
+            // Can't honor requested core_offset, fall back to core 0 for system
+            let max_workers = available_cores - 1;
+            eprintln!(
+                "Warning: Requested core_offset {} + workers exceeds available {} cores.\n\
+                Falling back: system thread at core 0, using {} workers (max) starting at core 1.",
+                core_offset, available_cores, max_workers
+            );
+            (1, max_workers)
+        } else if available_cores == 2 {
+            // Only 2 cores: system at core 0, one worker at core 1
+            eprintln!(
+                "Warning: Only 2 cores available. System thread at core 0, 1 worker at core 1."
+            );
+            (1, 1)
+        } else {
+            // Only 1 core: use it for everything
+            eprintln!(
+                "Warning: Only 1 core available. Using 1 worker with no offset (system and workers share core 0)."
+            );
+            (0, 1)
+        }
     } else {
+        // Requested config fits
         (worker_offset, workers)
     };
 
@@ -141,7 +174,7 @@ impl SchedulerBase {
 
         Self {
             threadpool: threadpool,
-            core_offset: worker_offset - 1,
+            core_offset: worker_offset.saturating_sub(1),
             worker_offset,
             pending_jobs: Arc::new(AtomicUsize::new(0)),
             total_spawned: Arc::new(AtomicUsize::new(0)),
