@@ -1,9 +1,11 @@
 use crate::debug::print_debug;
 use crate::time_buffer::TimeBufferManager;
-use crate::{buffers::*, graph::*, graph_struct::*, scheduler::*, IdType};
+use crate::{buffers::*, graph::*, graph_struct::*, scheduler::*, IdType, Record};
 use crossbeam_channel::Sender;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 use synstream_types::*;
 
 /// Cache entry for quick node access - stores commonly accessed node fields
@@ -165,6 +167,10 @@ pub struct SharedData {
     pub scheduler: Arc<RwLock<Option<Arc<SchedulerImpl>>>>,
     pub completed_tx: Arc<RwLock<Option<Sender<(NodeInfo, CmTypes)>>>>,
     pub workers: Arc<AtomicUsize>,
+    pub recorder: Option<Arc<Mutex<HashMap<usize, Vec<Record>>>>>,
+    pub base_instant: Arc<Instant>,
+    pub job_counter: Arc<AtomicUsize>,
+    pub core_offset: Arc<AtomicUsize>,
 }
 
 #[inline(always)]

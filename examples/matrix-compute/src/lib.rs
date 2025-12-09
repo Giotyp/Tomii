@@ -1,4 +1,5 @@
 pub mod functions;
+pub mod wrap;
 
 /// Functions that Return CmTypes and will be wrapped
 use functions::*;
@@ -6,21 +7,12 @@ use nalgebra::*;
 use num_complex::Complex32;
 use rustfft::Fft;
 use std::sync::Arc;
-use synstream_types::{CmTypes, C32};
+use synstream_types::CmTypes;
 
 #[no_mangle]
 pub fn generate_vector_cm(n: usize) -> CmTypes {
     let vector = generate_vector(n);
-
-    let vector_cm: CmTypes = {
-        let mut vec_cmt = Vec::with_capacity(vector.len());
-        for &val in &vector {
-            let comp_val = C32(val);
-            vec_cmt.push(CmTypes::Complex32(comp_val));
-        }
-        CmTypes::VecCmt(vec_cmt)
-    };
-    vector_cm
+    CmTypes::from_any(vector)
 }
 
 #[no_mangle]
@@ -29,17 +21,23 @@ pub fn fft_planner_cm(buf_size: usize) -> CmTypes {
 }
 
 #[no_mangle]
-pub fn compute_fft_cm(fft_planner: &CmTypes, buffer: &mut Vec<Complex32>) {
+pub fn compute_fft_cm(fft_planner: &CmTypes, buffer: &CmTypes) {
     fft_planner
         .with_any(|fft_planner_ref: &Arc<dyn Fft<f32>>| {
-            compute_fft(fft_planner_ref.clone(), buffer);
+            buffer
+                .with_any_mut(|buffer_mut: &mut Vec<Complex32>| {
+                    compute_fft(fft_planner_ref.clone(), buffer_mut);
+                })
+                .expect("Failed to access buffer struct or wrong type")
         })
         .expect("Failed to access fft_planner struct or wrong type")
 }
 
 #[no_mangle]
-pub fn vec_to_mat_cm(vector: &Vec<Complex32>) -> CmTypes {
-    CmTypes::from_any(vec_to_mat(vector))
+pub fn vec_to_mat_cm(vector: &CmTypes) -> CmTypes {
+    vector
+        .with_any(|vector_ref: &Vec<Complex32>| CmTypes::from_any(vec_to_mat(vector_ref)))
+        .expect("Failed to access vector or wrong type")
 }
 
 #[no_mangle]

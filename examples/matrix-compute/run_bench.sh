@@ -28,7 +28,7 @@ EXP_STREAMS=1
 OUTPUT="$SCRIPT_DIR/out.txt"
 TIMING_FILE="$SCRIPT_DIR/timing.txt"
 DEBUG="" # Set to "--debug" to enable debug mode
-RECORD_SCHED="--record-sched" # Set to "--record-sched" to enable scheduler recording
+RECORD="--record" # Set to "--record-sched" to enable scheduler recording
 
 
 cargo clean --manifest-path "$SCRIPT_DIR/../../synstream-core/Cargo.toml"
@@ -75,5 +75,6 @@ else
         --max-streams $EXP_STREAMS \
         --timing $TIMING_FILE \
         $DEBUG \
-        $RECORD_SCHED
+        $RECORD
+
 fi

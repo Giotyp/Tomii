@@ -21,6 +21,17 @@ lazy_static! {
     pub static ref PostNodeCount: AtomicU16 = AtomicU16::new(0);
 }
 
+// Record for thread executions
+#[derive(Debug, Clone)]
+pub struct Record {
+    job_id: usize,
+    start_ns: u128,
+    end_ns: u128,
+    worker: usize,
+    task_id: IdType,
+    index: usize,
+}
+
 pub mod prelude {
     pub use crate::{IdType, NodeCount, ObjectCount, PostNodeCount};
 }

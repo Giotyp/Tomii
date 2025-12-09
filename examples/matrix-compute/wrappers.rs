@@ -49,44 +49,21 @@ pub fn fft_planner_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
 }
 
 cache_sym! {
-    pub static COMPUTE_FFT_CM_SYM: fn(&CmTypes, &mut Vec<Complex32>) = b"compute_fft_cm";
+    pub static COMPUTE_FFT_CM_SYM: fn(&CmTypes, &CmTypes) = b"compute_fft_cm";
 }
 pub fn compute_fft_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
     let fft_planner = &args[0];
-
-    let buffer = match &args[1] {
-        CmTypes::VecCmt(x) => x.clone(),
-        _ => panic!("Expected Vec<CmTypes> argument"),
-    };
-    let mut vec: Vec<Complex32> = Vec::new();
-    for i in 0..buffer.len() {
-        let x = match buffer[i] {
-            CmTypes::Complex32(x) => x.into(),
-            _ => panic!("Invalid argument type"),
-        };
-        vec.push(x);
-    }
-    COMPUTE_FFT_CM_SYM(fft_planner, &mut vec);
+    let buffer = &args[1];
+    COMPUTE_FFT_CM_SYM(fft_planner, buffer);
     CmTypes::None
 }
 
 cache_sym! {
-    pub static VEC_TO_MAT_CM_SYM: fn(&Vec<Complex32>) -> CmTypes = b"vec_to_mat_cm";
+    pub static VEC_TO_MAT_CM_SYM: fn(&CmTypes) -> CmTypes = b"vec_to_mat_cm";
 }
 pub fn vec_to_mat_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
-    let vector = match &args[0] {
-        CmTypes::VecCmt(x) => x.clone(),
-        _ => panic!("Expected Vec<Complex32> argument"),
-    };
-    let mut vec: Vec<Complex32> = Vec::new();
-    for i in 0..vector.len() {
-        let x = match vector[i] {
-            CmTypes::Complex32(x) => x.into(),
-            _ => panic!("Invalid argument type"),
-        };
-        vec.push(x);
-    }
-    VEC_TO_MAT_CM_SYM(&vec)
+    let vector = &args[0];
+    VEC_TO_MAT_CM_SYM(vector)
 }
 
 cache_sym! {

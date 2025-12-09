@@ -1,7 +1,9 @@
 use core_affinity;
 use crossbeam_channel::Receiver;
+use std::collections::HashMap;
+use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{sleep, spawn};
 use std::time::{Duration, Instant};
 
@@ -11,7 +13,7 @@ use crate::graph_struct::*;
 use crate::runtime_funcs::*;
 use crate::scheduler::{Scheduler, SchedulerImpl};
 use crate::time_buffer::TimeBufferManager;
-use crate::{buffers::*, IdType};
+use crate::{buffers::*, IdType, Record};
 use synstream_types::*;
 
 /// Main SynStream Runtime struct with shared context
@@ -26,6 +28,7 @@ impl SynRt {
         max_streams: usize,
         max_runtime: Option<u64>,
         use_rdtsc: bool,
+        record: bool,
     ) -> SynRt {
         // Initialize stream completion counters
         let stream_completion_counts = Arc::new(RwLock::new(Vec::new()));
@@ -54,6 +57,16 @@ impl SynRt {
 
         let time_buffer = Arc::new(TimeBufferManager::new_async(slots + 1, use_rdtsc));
 
+        let recorder = if record {
+            Some(Arc::new(Mutex::new(HashMap::new())))
+        } else {
+            None
+        };
+        let base_instant = Arc::new(Instant::now());
+        let job_counter = Arc::new(AtomicUsize::new(0));
+        // core_offset is updated in run()
+        let core_offset = Arc::new(AtomicUsize::new(0));
+
         let shared = Arc::new(SharedData {
             graph: app_graph.clone(),
             slots,
@@ -67,9 +80,17 @@ impl SynRt {
             scheduler: Arc::new(RwLock::new(None)),
             completed_tx: Arc::new(RwLock::new(None)),
             workers: Arc::new(AtomicUsize::new(1)), // Will be set in run()
+            recorder,
+            base_instant,
+            job_counter,
+            core_offset,
         });
 
         SynRt { shared }
+    }
+
+    pub fn base_instant(&self) -> Instant {
+        self.shared.base_instant.as_ref().clone()
     }
 
     pub fn run(&mut self, scheduler: SchedulerImpl) {
@@ -92,6 +113,8 @@ impl SynRt {
             *scheduler_lock = Some(Arc::new(scheduler));
         }
 
+        self.shared.core_offset.store(core_offset, Ordering::SeqCst);
+
         // Initialize node_results
         self.init_results(self.shared.slots);
 
@@ -108,7 +131,7 @@ impl SynRt {
             } else {
                 print_debug(|| "Failed to pin resolution thread to core".to_string());
             }
-            Self::resolution(shared_for_resolution, completed_rx);
+            Self::resolution(shared_for_resolution, completed_rx, core_offset);
         });
         print_debug(|| "Resolution thread spawned".to_string());
 
@@ -149,10 +172,13 @@ impl SynRt {
 
 // Execution Threads
 impl SynRt {
-    fn preparation(shared: &Arc<SharedData>, nodes_to_schedule: &Vec<NodeInfo>) {
+    fn preparation(
+        shared: &Arc<SharedData>,
+        nodes_to_schedule: &Vec<NodeInfo>,
+        core_offset: usize,
+    ) {
         for node_info in nodes_to_schedule {
-            let start_time = shared.time_buffer.measure_time();
-
+            let start_ns = shared.base_instant.elapsed().as_nanos();
             print_debug(|| format!("Preparing {:?}", node_info));
 
             let node = &shared.node_cache[node_info.id as usize];
@@ -171,18 +197,39 @@ impl SynRt {
                 send_to_scheduler(&shared, node_info, arg_vec, None);
             }
 
-            let end_time = shared.time_buffer.measure_time();
-            let duration = shared.time_buffer.measure_duration(start_time, end_time);
+            let end_ns = shared.base_instant.elapsed().as_nanos();
+            let duration = shared.time_buffer.measure_duration(
+                shared.time_buffer.measure_time(),
+                shared.time_buffer.measure_time(),
+            ); // approximate
             shared.time_buffer.add_task_time(
                 shared.slots,
                 "Preparation Thread",
                 usize::MAX,
                 duration,
             );
+
+            if let Some(rec) = &shared.recorder {
+                let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
+                let mut map = rec.lock().unwrap();
+                let vec = map.entry(shared.slots).or_insert_with(Vec::new);
+                vec.push(Record {
+                    job_id,
+                    start_ns,
+                    end_ns,
+                    worker: core_offset,
+                    task_id: node_info.id,
+                    index: node_info.index,
+                });
+            }
         }
     }
 
-    fn resolution(shared: Arc<SharedData>, completed_rx: Receiver<(NodeInfo, CmTypes)>) {
+    fn resolution(
+        shared: Arc<SharedData>,
+        completed_rx: Receiver<(NodeInfo, CmTypes)>,
+        core_offset: usize,
+    ) {
         let dependency_count_vec: Vec<usize> = shared.graph.dependency_count_vec();
         let mut dependency_map = VecMap::new(0);
         dependency_map.init_map(
@@ -202,7 +249,7 @@ impl SynRt {
         for node_info in init_nodes {
             nodes_to_schedule.push(node_info);
         }
-        Self::preparation(&shared, &nodes_to_schedule);
+        Self::preparation(&shared, &nodes_to_schedule, core_offset);
 
         // Initialize remaining processing nodes tracker
         let mut node_id_to_rem = vec![0; shared.graph.nodes.len()];
@@ -237,6 +284,7 @@ impl SynRt {
 
         // Process completed nodes
         while let Ok((mut node_info, result)) = completed_rx.recv() {
+            let start_ns = shared.base_instant.elapsed().as_nanos();
             let start_time = shared.time_buffer.measure_time();
 
             if node_info.id == IdType::MAX {
@@ -421,7 +469,7 @@ impl SynRt {
                 }
             }
             // Schedule Nodes
-            Self::preparation(&shared, &nodes_to_schedule);
+            Self::preparation(&shared, &nodes_to_schedule, core_offset);
             // print dependency map state
             print_debug(|| {
                 format!(
@@ -457,6 +505,22 @@ impl SynRt {
                 }
             }
             let end_time = shared.time_buffer.measure_time();
+
+            if let Some(rec) = &shared.recorder {
+                let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
+                let end_ns = shared.base_instant.elapsed().as_nanos();
+                let mut map = rec.lock().unwrap();
+                let vec = map.entry(shared.slots).or_insert_with(Vec::new);
+                vec.push(Record {
+                    job_id,
+                    start_ns,
+                    end_ns,
+                    worker: core_offset,
+                    task_id: IdType::MAX,
+                    index: 0,
+                });
+            }
+
             let duration = shared.time_buffer.measure_duration(start_time, end_time);
             shared.time_buffer.add_task_time(
                 shared.slots,
@@ -474,7 +538,7 @@ impl SynRt {
                     for node_info in init_nodes {
                         nodes_to_schedule.push(node_info);
                     }
-                    Self::preparation(&shared, &nodes_to_schedule);
+                    Self::preparation(&shared, &nodes_to_schedule, core_offset);
                 }
             }
         }
@@ -555,5 +619,42 @@ impl SynRt {
         };
 
         scheduler.write_record(path);
+        self.write_runtime_record(path);
+    }
+
+    pub fn write_runtime_record(&self, path: &str) {
+        if let Some(rec) = &self.shared.recorder {
+            if let Ok(map) = rec.lock() {
+                if map.is_empty() {
+                    println!("Runtime: no recorded events to write");
+                    return;
+                }
+                match std::fs::OpenOptions::new().append(true).open(path) {
+                    Ok(mut f) => {
+                        for (slot, vec) in map.iter() {
+                            for r in vec.iter() {
+                                let _ = writeln!(
+                                    f,
+                                    "{},{},{},{},{},{},{}",
+                                    slot,
+                                    r.job_id,
+                                    r.start_ns,
+                                    r.end_ns,
+                                    self.shared.core_offset.load(Ordering::SeqCst),
+                                    r.task_id,
+                                    r.index
+                                );
+                            }
+                        }
+                        println!("Runtime: appended {} slots to {}", map.len(), path);
+                    }
+                    Err(e) => {
+                        eprintln!("Runtime: failed to open {} for append: {}", path, e);
+                    }
+                }
+            }
+        } else {
+            println!("Runtime: recorder not enabled");
+        }
     }
 }

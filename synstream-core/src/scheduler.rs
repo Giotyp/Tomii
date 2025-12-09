@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use crate::IdType;
+use crate::{IdType, Record};
 
 thread_local! {
     // Worker id assigned to each thread in the pool. usize::MAX means unassigned.
@@ -30,7 +30,7 @@ pub fn get_current_worker_id() -> Option<usize> {
 }
 
 /// Create Threadpool with Rayon
-pub fn create_threadpool(core_offset: usize, workers: usize) -> ThreadPool {
+pub fn create_threadpool(core_offset: usize, workers: usize) -> (ThreadPool, usize) {
     // Create threadpool and pin workers to cores
     let mut core_ids = core_affinity::get_core_ids().unwrap();
     core_ids.sort();
@@ -72,7 +72,7 @@ pub fn create_threadpool(core_offset: usize, workers: usize) -> ThreadPool {
         })
         .build()
         .unwrap();
-    threadpool
+    (threadpool, actual_offset)
 }
 
 pub trait Scheduler {
@@ -113,16 +113,6 @@ pub trait Scheduler {
     }
 }
 
-#[derive(Debug, Clone)]
-struct Record {
-    job_id: usize,
-    start_ns: u128,
-    end_ns: u128,
-    worker: usize,
-    task_id: IdType,
-    index: usize,
-}
-
 /// Recorder type: maps "slot" -> Vec<Record>
 type Recorder = Arc<Mutex<HashMap<usize, Vec<Record>>>>;
 
@@ -131,6 +121,7 @@ type Recorder = Arc<Mutex<HashMap<usize, Vec<Record>>>>;
 struct SchedulerBase {
     threadpool: ThreadPool,
     core_offset: usize,
+    worker_offset: usize,
     pending_jobs: Arc<AtomicUsize>,
     total_spawned: Arc<AtomicUsize>,
     total_completed: Arc<AtomicUsize>,
@@ -139,21 +130,24 @@ struct SchedulerBase {
 }
 
 impl SchedulerBase {
-    fn new(core_offset: usize, workers: usize, record: bool) -> Self {
+    fn new(core_offset: usize, workers: usize, record: bool, base_instant: Instant) -> Self {
         let recorder = if record {
             Some(Arc::new(Mutex::new(HashMap::new())))
         } else {
             None
         };
 
+        let (threadpool, worker_offset) = create_threadpool(core_offset, workers);
+
         Self {
-            threadpool: create_threadpool(core_offset, workers),
-            core_offset,
+            threadpool: threadpool,
+            core_offset: worker_offset - 1,
+            worker_offset,
             pending_jobs: Arc::new(AtomicUsize::new(0)),
             total_spawned: Arc::new(AtomicUsize::new(0)),
             total_completed: Arc::new(AtomicUsize::new(0)),
             recorder,
-            base_instant: Arc::new(Instant::now()),
+            base_instant: Arc::new(base_instant),
         }
     }
 
@@ -176,7 +170,7 @@ impl SchedulerBase {
                                     r.job_id,
                                     r.start_ns,
                                     r.end_ns,
-                                    r.worker,
+                                    r.worker + self.worker_offset,
                                     r.task_id,
                                     r.index
                                 );
@@ -231,8 +225,8 @@ impl SchedulerBase {
         let (task_id, slot, index) = meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN));
 
         let wrapped_task = move || {
-            let start = (*base).elapsed().as_nanos();
             let worker = get_current_worker_id().unwrap_or(usize::MAX);
+            let start = (*base).elapsed().as_nanos();
             task();
             let end = (*base).elapsed().as_nanos();
 
@@ -264,9 +258,9 @@ pub struct FifoScheduler {
 }
 
 impl FifoScheduler {
-    fn new(core_offset: usize, workers: usize, record: bool) -> Self {
+    fn new(core_offset: usize, workers: usize, record: bool, base_instant: Instant) -> Self {
         Self {
-            base: SchedulerBase::new(core_offset, workers, record),
+            base: SchedulerBase::new(core_offset, workers, record, base_instant),
         }
     }
 
@@ -318,9 +312,9 @@ pub struct WorkStealScheduler {
 }
 
 impl WorkStealScheduler {
-    fn new(core_offset: usize, workers: usize, record: bool) -> Self {
+    fn new(core_offset: usize, workers: usize, record: bool, base_instant: Instant) -> Self {
         Self {
-            base: SchedulerBase::new(core_offset, workers, record),
+            base: SchedulerBase::new(core_offset, workers, record, base_instant),
         }
     }
 
@@ -448,13 +442,20 @@ pub fn create_scheduler(
     core_offset: usize,
     num_workers: usize,
     record: bool,
+    base_instant: Instant,
 ) -> SchedulerImpl {
     match scheduler_type {
-        SchedulerType::Fifo => {
-            SchedulerImpl::Fifo(FifoScheduler::new(core_offset, num_workers, record))
-        }
-        SchedulerType::WorkStealing => {
-            SchedulerImpl::WorkStealing(WorkStealScheduler::new(core_offset, num_workers, record))
-        }
+        SchedulerType::Fifo => SchedulerImpl::Fifo(FifoScheduler::new(
+            core_offset,
+            num_workers,
+            record,
+            base_instant,
+        )),
+        SchedulerType::WorkStealing => SchedulerImpl::WorkStealing(WorkStealScheduler::new(
+            core_offset,
+            num_workers,
+            record,
+            base_instant,
+        )),
     }
 }
