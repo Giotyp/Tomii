@@ -93,7 +93,7 @@ impl SynRt {
         self.shared.base_instant.as_ref().clone()
     }
 
-    pub fn run(&mut self, scheduler: SchedulerImpl) {
+    pub fn run(&mut self, scheduler: SchedulerImpl, batching_size: usize, batching_limit: u64) {
         // Overwrite workers
         self.shared
             .workers
@@ -131,7 +131,13 @@ impl SynRt {
             } else {
                 print_debug(|| "Failed to pin resolution thread to core".to_string());
             }
-            Self::resolution(shared_for_resolution, completed_rx, core_offset);
+            Self::resolution(
+                shared_for_resolution,
+                completed_rx,
+                core_offset,
+                batching_size,
+                batching_limit,
+            );
         });
         print_debug(|| "Resolution thread spawned".to_string());
 
@@ -229,6 +235,8 @@ impl SynRt {
         shared: Arc<SharedData>,
         completed_rx: Receiver<(NodeInfo, CmTypes)>,
         core_offset: usize,
+        batching_size: usize,
+        batching_limit: u64,
     ) {
         let dependency_count_vec: Vec<usize> = shared.graph.dependency_count_vec();
         let mut dependency_map = VecMap::new(0);
@@ -282,165 +290,177 @@ impl SynRt {
 
         let mut complete_iteration: bool;
 
-        // Process completed nodes
-        while let Ok((mut node_info, result)) = completed_rx.recv() {
-            let start_ns = shared.base_instant.elapsed().as_nanos();
-            let start_time = shared.time_buffer.measure_time();
+        // Process completed nodes with dynamic batching
+        let batch_timeout = Duration::from_micros(batching_limit);
+        loop {
+            let mut batch: Vec<(NodeInfo, CmTypes)> = Vec::with_capacity(batching_size);
 
-            if node_info.id == IdType::MAX {
-                // Exit signal received, stopping thread
-                return;
-            }
-
-            print_debug(|| format!("Processing Completed {:?}", node_info));
-
-            if node_info.post_node {
-                // Store Result
-                let mut res_lock = shared.node_results.write().unwrap();
-                res_lock.set(&node_info, result);
-                drop(res_lock);
-                continue;
-            }
-
-            // Get Id function and validate slot
-            let new_stream_opt = process_id_function(&shared, &node_info, &result);
-            if let Some(new_stream) = new_stream_opt {
-                // Assign streams to an available stream slot
-                node_info.slot = assign_stream_to_available_slot(&shared, new_stream);
-            } else {
-                // ID function failed, skip processing this node
-                print_debug(|| {
-                    format!(
-                        "Skipping further processing of node {:?} due to ID function failure",
-                        node_info
-                    )
-                });
-                continue;
-            }
-
-            // store result
-            let mut res_lock = shared.node_results.write().unwrap();
-            res_lock.set(&node_info, result);
-            drop(res_lock);
-
-            // Decrement remaining_nodes counter now that this task is confirmed completed
-            let node_id_usize = node_info.id as usize;
-            if shared
-                .graph
-                .condition_nodes
-                .contains(&(node_id_usize as IdType))
-            {
-                remaining_cond_nodes[node_info.slot][node_id_to_rem[node_id_usize]] -= 1;
-            } else if !shared
-                .graph
-                .initial_nodes
-                .contains(&(node_id_usize as IdType))
-            {
-                remaining_nodes[node_info.slot][node_id_to_rem[node_id_usize]] -= 1;
-            }
-
-            // Get successors
-            let successors: &Vec<IdType> = {
-                if node_id_usize >= shared.graph.successors.len() {
-                    &Vec::new()
-                } else {
-                    &shared.graph.successors[node_id_usize]
-                }
-            };
-
-            print_debug(|| format!("Successors of node {:?}: {:?}", node_info, successors));
-
-            print_debug(|| {
-                format!(
-                    "Remaining nodes before processing successors: {:?}",
-                    remaining_nodes[node_info.slot]
-                )
-            });
-            print_debug(|| {
-                format!(
-                    "Remaining conditional nodes before processing successors: {:?}",
-                    remaining_cond_nodes[node_info.slot]
-                )
-            });
-
-            let mut nodes_sent = 0;
-            let mut nodes_to_schedule: Vec<NodeInfo> = Vec::new();
-            for succ_id in successors {
-                let succ_id = *succ_id;
-
-                let has_condition = shared.graph.condition_nodes.contains(&succ_id);
-
-                let remaining = {
-                    if has_condition {
-                        remaining_cond_nodes[node_info.slot][node_id_to_rem[succ_id as usize]]
-                    } else {
-                        remaining_nodes[node_info.slot][node_id_to_rem[succ_id as usize]]
+            // Collect first item (blocking)
+            match completed_rx.recv() {
+                Ok(first_item) => {
+                    if first_item.0.id == IdType::MAX {
+                        // Exit signal received, stopping thread
+                        return;
                     }
-                };
+                    batch.push(first_item);
+                }
+                Err(_) => return, // Channel closed
+            }
 
-                if remaining == 0 {
+            // Try to collect more items up to batching_size or until timeout
+            let batch_start = Instant::now();
+            while batch.len() < batching_size {
+                let remaining_time = batch_timeout.saturating_sub(batch_start.elapsed());
+
+                match completed_rx.recv_timeout(remaining_time) {
+                    Ok(item) => {
+                        if item.0.id == IdType::MAX {
+                            // Exit signal received, process current batch then stop
+                            break;
+                        }
+                        batch.push(item);
+                    }
+                    Err(_) => break, // Timeout or channel closed
+                }
+            }
+
+            print_debug(|| format!("Processing batch of {} nodes", batch.len()));
+
+            // Process the entire batch
+            for (mut node_info, result) in batch {
+                let start_ns = shared.base_instant.elapsed().as_nanos();
+                let start_time = shared.time_buffer.measure_time();
+
+                print_debug(|| format!("Processing Completed {:?}", node_info));
+
+                if node_info.post_node {
+                    // Store Result
+                    let mut res_lock = shared.node_results.write().unwrap();
+                    res_lock.set(&node_info, result);
+                    drop(res_lock);
                     continue;
                 }
 
-                let succ_factor = shared.node_cache[succ_id as usize].factor;
-                let node_factor = shared.node_cache[node_info.id as usize].factor;
+                // Get Id function and validate slot
+                let new_stream_opt = process_id_function(&shared, &node_info, &result);
+                if let Some(new_stream) = new_stream_opt {
+                    // Assign streams to an available stream slot
+                    node_info.slot = assign_stream_to_available_slot(&shared, new_stream);
+                } else {
+                    // ID function failed, skip processing this node
+                    print_debug(|| {
+                        format!(
+                            "Skipping further processing of node {:?} due to ID function failure",
+                            node_info
+                        )
+                    });
+                    continue;
+                }
 
-                let pred_count = shared.node_cache[succ_id as usize]
-                    .pred_vec
-                    .get(node_info.id as usize)
-                    .cloned()
-                    .unwrap_or(0);
+                // store result
+                let mut res_lock = shared.node_results.write().unwrap();
+                res_lock.set(&node_info, result);
+                drop(res_lock);
 
-                let succ_indexes = {
-                    if succ_factor == node_factor && pred_count <= 1 {
-                        vec![node_info.index]
-                    } else if !shared.graph.condition_nodes.contains(&succ_id) {
-                        let num_indexes = std::cmp::max(succ_factor, remaining);
-                        (0..num_indexes).collect::<Vec<_>>()
+                // Decrement remaining_nodes counter now that this task is confirmed completed
+                let node_id_usize = node_info.id as usize;
+                if shared
+                    .graph
+                    .condition_nodes
+                    .contains(&(node_id_usize as IdType))
+                {
+                    remaining_cond_nodes[node_info.slot][node_id_to_rem[node_id_usize]] -= 1;
+                } else if !shared
+                    .graph
+                    .initial_nodes
+                    .contains(&(node_id_usize as IdType))
+                {
+                    remaining_nodes[node_info.slot][node_id_to_rem[node_id_usize]] -= 1;
+                }
+
+                // Get successors
+                let successors: &Vec<IdType> = {
+                    if node_id_usize >= shared.graph.successors.len() {
+                        &Vec::new()
                     } else {
-                        vec![node_info.index % succ_factor]
+                        &shared.graph.successors[node_id_usize]
                     }
                 };
 
+                print_debug(|| format!("Successors of node {:?}: {:?}", node_info, successors));
+
                 print_debug(|| {
                     format!(
-                        "Processing successor id {} - {:?} of node {:?}",
-                        succ_id, succ_indexes, node_info
+                        "Remaining nodes before processing successors: {:?}",
+                        remaining_nodes[node_info.slot]
+                    )
+                });
+                print_debug(|| {
+                    format!(
+                        "Remaining conditional nodes before processing successors: {:?}",
+                        remaining_cond_nodes[node_info.slot]
                     )
                 });
 
-                for succ_index in succ_indexes {
-                    let succ_info =
-                        NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.index);
+                let mut nodes_sent = 0;
+                let mut nodes_to_schedule: Vec<NodeInfo> = Vec::new();
+                for succ_id in successors {
+                    let succ_id = *succ_id;
 
-                    // Skip if this node has already been sent to the queue
-                    if nodes_sent_to_queue[node_info.slot].contains(&succ_info) {
+                    let has_condition = shared.graph.condition_nodes.contains(&succ_id);
+
+                    let remaining = {
+                        if has_condition {
+                            remaining_cond_nodes[node_info.slot][node_id_to_rem[succ_id as usize]]
+                        } else {
+                            remaining_nodes[node_info.slot][node_id_to_rem[succ_id as usize]]
+                        }
+                    };
+
+                    if remaining == 0 {
                         continue;
                     }
 
-                    let dep_opt = dependency_map.decrease(&succ_info);
-                    if let Some(dep) = dep_opt {
-                        if dep == 0 {
-                            if !shared.graph.condition_nodes.contains(&succ_id) {
-                                print_debug(|| {
-                                    format!("Sent successor {:?} to ready channel", succ_info)
-                                });
-                                nodes_to_schedule.push(succ_info.clone());
+                    let succ_factor = shared.node_cache[succ_id as usize].factor;
+                    let node_factor = shared.node_cache[node_info.id as usize].factor;
 
-                                // Mark this node as sent to avoid double-sends
-                                nodes_sent_to_queue[node_info.slot].insert(succ_info);
+                    let pred_count = shared.node_cache[succ_id as usize]
+                        .pred_vec
+                        .get(node_info.id as usize)
+                        .cloned()
+                        .unwrap_or(0);
 
-                                // Increase nodes_sent counter
-                                nodes_sent += 1;
-                                // DO NOT decrement remaining_nodes here - only when task completes
-                            } else {
-                                let index = &shared
-                                    .graph
-                                    .condition_nodes
-                                    .iter()
-                                    .position(|&x| x == succ_id)
-                                    .unwrap();
-                                if conditions_met(&shared, &succ_info, &cond_indexes[*index]) {
+                    let succ_indexes = {
+                        if succ_factor == node_factor && pred_count <= 1 {
+                            vec![node_info.index]
+                        } else if !shared.graph.condition_nodes.contains(&succ_id) {
+                            let num_indexes = std::cmp::max(succ_factor, remaining);
+                            (0..num_indexes).collect::<Vec<_>>()
+                        } else {
+                            vec![node_info.index % succ_factor]
+                        }
+                    };
+
+                    print_debug(|| {
+                        format!(
+                            "Processing successor id {} - {:?} of node {:?}",
+                            succ_id, succ_indexes, node_info
+                        )
+                    });
+
+                    for succ_index in succ_indexes {
+                        let succ_info =
+                            NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.index);
+
+                        // Skip if this node has already been sent to the queue
+                        if nodes_sent_to_queue[node_info.slot].contains(&succ_info) {
+                            continue;
+                        }
+
+                        let dep_opt = dependency_map.decrease(&succ_info);
+                        if let Some(dep) = dep_opt {
+                            if dep == 0 {
+                                if !shared.graph.condition_nodes.contains(&succ_id) {
                                     print_debug(|| {
                                         format!("Sent successor {:?} to ready channel", succ_info)
                                     });
@@ -449,99 +469,125 @@ impl SynRt {
                                     // Mark this node as sent to avoid double-sends
                                     nodes_sent_to_queue[node_info.slot].insert(succ_info);
 
+                                    // Increase nodes_sent counter
                                     nodes_sent += 1;
-                                    // DO NOT decrement remaining_cond_nodes here - only when task completes
+                                    // DO NOT decrement remaining_nodes here - only when task completes
                                 } else {
-                                    print_debug(|| {
-                                        format!("Conditions not met for successor {:?}", succ_info)
-                                    });
+                                    let index = &shared
+                                        .graph
+                                        .condition_nodes
+                                        .iter()
+                                        .position(|&x| x == succ_id)
+                                        .unwrap();
+                                    if conditions_met(&shared, &succ_info, &cond_indexes[*index]) {
+                                        print_debug(|| {
+                                            format!(
+                                                "Sent successor {:?} to ready channel",
+                                                succ_info
+                                            )
+                                        });
+                                        nodes_to_schedule.push(succ_info.clone());
+
+                                        // Mark this node as sent to avoid double-sends
+                                        nodes_sent_to_queue[node_info.slot].insert(succ_info);
+
+                                        nodes_sent += 1;
+                                        // DO NOT decrement remaining_cond_nodes here - only when task completes
+                                    } else {
+                                        print_debug(|| {
+                                            format!(
+                                                "Conditions not met for successor {:?}",
+                                                succ_info
+                                            )
+                                        });
+                                    }
                                 }
+                            } else {
+                                print_debug(|| {
+                                    format!(
+                                        "Successor {:?} not ready, remaining dependencies: {}",
+                                        succ_info, dep
+                                    )
+                                });
                             }
-                        } else {
-                            print_debug(|| {
-                                format!(
-                                    "Successor {:?} not ready, remaining dependencies: {}",
-                                    succ_info, dep
-                                )
-                            });
                         }
                     }
                 }
-            }
-            // Schedule Nodes
-            Self::preparation(&shared, &nodes_to_schedule, core_offset);
-            // print dependency map state
-            print_debug(|| {
-                format!(
-                    "Dependency map state after processing node {:?}:\n{:?}",
-                    node_info, dependency_map
-                )
-            });
-
-            // Check for stream completion - only process each slot once
-            complete_iteration = false;
-            if nodes_sent == 0 && !completed_slots.contains(&node_info.slot) {
-                // Check if all nodes in this slot have been processed
-                let all_nodes_processed = remaining_nodes[node_info.slot]
-                    .iter()
-                    .all(|&count| count == 0);
-
-                if all_nodes_processed {
-                    print_debug(|| format!("Completed iteration at slot {}", node_info.slot));
-                    // Mark this slot as completed
-                    completed_slots.insert(node_info.slot);
-
-                    // Reset dependency_map for this slot
-                    dependency_map.reinit_slot(node_info.slot);
-                    // Reinint remaining_proc_nodes for this slot
-                    for node_id in 0..remaining_nodes[node_info.slot].len() {
-                        remaining_nodes[node_info.slot][node_id] =
-                            shared.graph.nodes[node_id].factor;
-                    }
-                    // Clear nodes_sent_to_queue for this slot for new iteration
-                    nodes_sent_to_queue[node_info.slot].clear();
-
-                    complete_iteration = true;
-                }
-            }
-            let end_time = shared.time_buffer.measure_time();
-
-            if let Some(rec) = &shared.recorder {
-                let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
-                let end_ns = shared.base_instant.elapsed().as_nanos();
-                let mut map = rec.lock().unwrap();
-                let vec = map.entry(shared.slots).or_insert_with(Vec::new);
-                vec.push(Record {
-                    job_id,
-                    start_ns,
-                    end_ns,
-                    worker: core_offset,
-                    task_id: IdType::MAX,
-                    index: 0,
+                // Schedule Nodes
+                Self::preparation(&shared, &nodes_to_schedule, core_offset);
+                // print dependency map state
+                print_debug(|| {
+                    format!(
+                        "Dependency map state after processing node {:?}:\n{:?}",
+                        node_info, dependency_map
+                    )
                 });
-            }
 
-            let duration = shared.time_buffer.measure_duration(start_time, end_time);
-            shared.time_buffer.add_task_time(
-                shared.slots,
-                "Resolution Thread",
-                usize::MAX,
-                duration,
-            );
-            if complete_iteration {
-                // Add initial nodes for new iteration
-                if process_slot_completion(&shared, node_info.slot) {
-                    // Remove from completed set since we're starting again
-                    completed_slots.remove(&node_info.slot);
-                    let init_nodes = initial_nodes(&shared, vec![node_info.slot]);
-                    let mut nodes_to_schedule = Vec::new();
-                    for node_info in init_nodes {
-                        nodes_to_schedule.push(node_info);
+                // Check for stream completion - only process each slot once
+                complete_iteration = false;
+                if nodes_sent == 0 && !completed_slots.contains(&node_info.slot) {
+                    // Check if all nodes in this slot have been processed
+                    let all_nodes_processed = remaining_nodes[node_info.slot]
+                        .iter()
+                        .all(|&count| count == 0);
+
+                    if all_nodes_processed {
+                        print_debug(|| format!("Completed iteration at slot {}", node_info.slot));
+                        // Mark this slot as completed
+                        completed_slots.insert(node_info.slot);
+
+                        // Reset dependency_map for this slot
+                        dependency_map.reinit_slot(node_info.slot);
+                        // Reinint remaining_proc_nodes for this slot
+                        for node_id in 0..remaining_nodes[node_info.slot].len() {
+                            remaining_nodes[node_info.slot][node_id] =
+                                shared.graph.nodes[node_id].factor;
+                        }
+                        // Clear nodes_sent_to_queue for this slot for new iteration
+                        nodes_sent_to_queue[node_info.slot].clear();
+
+                        complete_iteration = true;
                     }
-                    Self::preparation(&shared, &nodes_to_schedule, core_offset);
                 }
-            }
-        }
+                let end_time = shared.time_buffer.measure_time();
+
+                if let Some(rec) = &shared.recorder {
+                    let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
+                    let end_ns = shared.base_instant.elapsed().as_nanos();
+                    let mut map = rec.lock().unwrap();
+                    let vec = map.entry(shared.slots).or_insert_with(Vec::new);
+                    vec.push(Record {
+                        job_id,
+                        start_ns,
+                        end_ns,
+                        worker: core_offset,
+                        task_id: IdType::MAX,
+                        index: 0,
+                    });
+                }
+
+                let duration = shared.time_buffer.measure_duration(start_time, end_time);
+                shared.time_buffer.add_task_time(
+                    shared.slots,
+                    "Resolution Thread",
+                    usize::MAX,
+                    duration,
+                );
+                if complete_iteration {
+                    // Add initial nodes for new iteration
+                    if process_slot_completion(&shared, node_info.slot) {
+                        // Remove from completed set since we're starting again
+                        completed_slots.remove(&node_info.slot);
+                        let init_nodes = initial_nodes(&shared, vec![node_info.slot]);
+                        let mut nodes_to_schedule = Vec::new();
+                        for node_info in init_nodes {
+                            nodes_to_schedule.push(node_info);
+                        }
+                        Self::preparation(&shared, &nodes_to_schedule, core_offset);
+                    }
+                }
+            } // End of batch processing for loop
+        } // End of batching loop
     }
 }
 

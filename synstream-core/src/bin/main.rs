@@ -52,6 +52,22 @@ struct Args {
     record: bool,
     #[clap(long, help = "Use rdtsc for timing")]
     use_rdtsc: bool,
+    #[clap(
+        long,
+        value_name = "BATCHING_SIZE",
+        required = false,
+        default_value = "1",
+        help = "Number of completed tasks to batch before processing"
+    )]
+    batching_size: usize,
+    #[clap(
+        long,
+        value_name = "BATCHING_LIMIT",
+        required = false,
+        default_value = "100",
+        help = "Maximum time to wait for batch in microseconds"
+    )]
+    batching_limit: u64,
 }
 
 fn main() {
@@ -114,6 +130,8 @@ fn main() {
         runtime,
         args.record,
         args.use_rdtsc,
+        args.batching_size,
+        args.batching_limit,
     );
 
     let time_file = args.timing;
@@ -139,9 +157,17 @@ pub fn run_graph(
     max_runtime: Option<u64>,
     record: bool,
     use_rdtsc: bool,
+    batching_size: usize,
+    batching_limit: u64,
 ) -> SynRt {
     let mut synrt = SynRt::new(graph, slots, max_streams, max_runtime, use_rdtsc, record);
-    let scheduler = create_scheduler(scheduler_type, core_offset, workers, record, synrt.base_instant());
-    synrt.run(scheduler);
+    let scheduler = create_scheduler(
+        scheduler_type,
+        core_offset,
+        workers,
+        record,
+        synrt.base_instant(),
+    );
+    synrt.run(scheduler, batching_size, batching_limit);
     synrt
 }
