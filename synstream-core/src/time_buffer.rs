@@ -110,11 +110,11 @@ pub struct AsyncTimeBuffer {
 
 impl AsyncTimeBuffer {
     /// Create a new AsyncTimeBuffer with a background controller
-    pub fn new(slots: usize, use_rdtsc: bool) -> Self {
+    pub fn new(slots: usize, system_threads: usize, use_rdtsc: bool) -> Self {
         let (request_tx, request_rx) = mpsc::channel();
 
         let controller_handle = thread::spawn(move || {
-            let mut time_buffer = TimeBuffer::new(slots, use_rdtsc);
+            let mut time_buffer = TimeBuffer::new(slots, system_threads, use_rdtsc);
 
             while let Ok(request) = request_rx.recv() {
                 match request {
@@ -345,6 +345,7 @@ impl AsyncTimeBuffer {
 
 pub struct TimeBuffer {
     slots: usize,
+    system_threads: usize,
     // Current timing state per slot
     slot_start_times: Vec<Option<TimingMethod>>,
     // Current task times for each slot (accumulated during processing)
@@ -358,9 +359,10 @@ pub struct TimeBuffer {
 impl TimeBuffer {
     /// Create a new TimeBuffer for the specified number of slots
     /// Use rdtsc_timing=true for high-precision timing, false for Instant-based timing
-    pub fn new(slots: usize, use_rdtsc: bool) -> Self {
+    pub fn new(slots: usize, system_threads: usize, use_rdtsc: bool) -> Self {
         TimeBuffer {
             slots,
+            system_threads,
             slot_start_times: vec![None; slots],
             current_slot_tasks: vec![RapidHashMap::new(); slots],
             slot_statistics: vec![Vec::new(); slots],
@@ -560,7 +562,16 @@ impl TimeBuffer {
             if self.use_rdtsc { "RDTSC" } else { "Instant" }
         ));
 
-        // Statistics from all slots (excluding runtime slot)
+        // Calculate worker and system slot ranges
+        let worker_slots_end = self.slots.saturating_sub(self.system_threads);
+        let system_slots_start = worker_slots_end;
+
+        output_buffer.push_str(&format!(
+            "Worker Slots: 0..{}, System Thread Slots: {}..{}\n",
+            worker_slots_end, system_slots_start, self.slots
+        ));
+
+        // Statistics from worker slots only (excluding system thread slots)
         let mut global_total_times: Vec<Duration> = Vec::new();
         let mut global_task_data: std::collections::HashMap<String, Vec<Duration>> =
             std::collections::HashMap::new();
@@ -573,12 +584,13 @@ impl TimeBuffer {
             std::collections::HashMap<usize, Duration>,
         > = std::collections::HashMap::new();
 
-        // Separate storage for runtime task data
-        let mut runtime_task_data: std::collections::HashMap<String, Vec<Duration>> =
-            std::collections::HashMap::new();
+        // Separate storage for system thread task data - track by slot for per-thread reporting
+        let mut system_task_data_by_slot: std::collections::HashMap<
+            usize,
+            std::collections::HashMap<String, Vec<Duration>>,
+        > = std::collections::HashMap::new();
 
         let mut total_streams = 0;
-        let runtime_slot_id = if self.slots > 0 { self.slots - 1 } else { 0 };
 
         for slot_id in 0..self.slots {
             let slot_stats = &self.slot_statistics[slot_id];
@@ -586,12 +598,16 @@ impl TimeBuffer {
                 continue;
             }
 
-            // Skip the runtime slot
-            if slot_id == runtime_slot_id {
-                // Collect runtime task data separately
+            // Separate system thread slots from worker slots
+            if slot_id >= system_slots_start {
+                // Collect system thread task data by slot
+                let slot_task_data = system_task_data_by_slot
+                    .entry(slot_id)
+                    .or_insert_with(std::collections::HashMap::new);
+
                 for stats in slot_stats {
                     for (task_name, times) in &stats.task_times {
-                        let task_durations = runtime_task_data
+                        let task_durations = slot_task_data
                             .entry(task_name.clone())
                             .or_insert_with(Vec::new);
                         for (_, duration) in times {
@@ -635,15 +651,11 @@ impl TimeBuffer {
         output_buffer.push_str(&format!("{}\nAggregated Statistics (All Slots):\n", filler));
         output_buffer.push_str(&format!("  Total Streams Processed: {}\n", total_streams));
 
-        // Print per-slot stream breakdown
+        // Print per-slot stream breakdown (worker slots only)
         output_buffer.push_str("  Streams per Slot: ");
         let mut slot_stream_items: Vec<String> = Vec::new();
-        for slot_id in 0..self.slots {
+        for slot_id in 0..worker_slots_end {
             let slot_stats = &self.slot_statistics[slot_id];
-            if slot_id == self.slots - 1 && !slot_stats.is_empty() {
-                // Skip runtime slot
-                continue;
-            }
             let stream_count = slot_stats.len();
             slot_stream_items.push(format!("Slot {}: {}", slot_id, stream_count));
         }
@@ -743,29 +755,43 @@ impl TimeBuffer {
             }
         }
 
-        // Print runtime task analysis (separate section)
-        if !runtime_task_data.is_empty() {
-            output_buffer.push_str(&format!("{}\nRuntime Tasks (Final Slot):\n", filler));
+        // Print system thread task analysis (separate section, per-slot)
+        if !system_task_data_by_slot.is_empty() {
+            output_buffer.push_str(&format!(
+                "{}\nSystem Thread Tasks (Slots {}..{}):\n",
+                filler, system_slots_start, self.slots
+            ));
 
-            let mut sorted_runtime_tasks: Vec<_> = runtime_task_data.keys().cloned().collect();
-            sorted_runtime_tasks.sort();
+            for slot_id in system_slots_start..self.slots {
+                let thread_id = slot_id - system_slots_start;
 
-            for task_name in sorted_runtime_tasks {
-                if let Some(task_times) = runtime_task_data.get(&task_name) {
-                    if task_times.is_empty() {
-                        continue;
-                    }
-
-                    let total_executions = task_times.len();
-                    let min_time = task_times.iter().min().unwrap();
-                    let max_time = task_times.iter().max().unwrap();
-                    let total_time: Duration = task_times.iter().sum();
-                    let avg_time = total_time / total_executions as u32;
-
+                if let Some(slot_task_data) = system_task_data_by_slot.get(&slot_id) {
                     output_buffer.push_str(&format!(
-                        "  Task '{}' - Total Executions: {}, Avg: {:.4?}, Min: {:.4?}, Max: {:.4?}, Total: {:.4?}\n",
-                        task_name, total_executions, avg_time, min_time, max_time, total_time
+                        "  Resolution Thread {} (Slot {}):\n",
+                        thread_id, slot_id
                     ));
+
+                    let mut sorted_system_tasks: Vec<_> = slot_task_data.keys().cloned().collect();
+                    sorted_system_tasks.sort();
+
+                    for task_name in sorted_system_tasks {
+                        if let Some(task_times) = slot_task_data.get(&task_name) {
+                            if task_times.is_empty() {
+                                continue;
+                            }
+
+                            let total_executions = task_times.len();
+                            let min_time = task_times.iter().min().unwrap();
+                            let max_time = task_times.iter().max().unwrap();
+                            let total_time: Duration = task_times.iter().sum();
+                            let avg_time = total_time / total_executions as u32;
+
+                            output_buffer.push_str(&format!(
+                                "    Task '{}' - Executions: {}, Avg: {:.4?}, Min: {:.4?}, Max: {:.4?}, Total: {:.4?}\n",
+                                task_name, total_executions, avg_time, min_time, max_time, total_time
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -782,6 +808,7 @@ impl TimeBuffer {
         self.slot_start_times = vec![None; self.slots];
         self.current_slot_tasks = vec![RapidHashMap::new(); self.slots];
         self.slot_statistics = vec![Vec::new(); self.slots];
+        // Note: system_threads is preserved as it's a constant configuration
     }
 
     /// Get a summary of all slots
@@ -814,19 +841,23 @@ pub struct TimeBufferManager {
 
 impl TimeBufferManager {
     /// Create a new synchronous TimeBuffer manager
-    pub fn new_sync(slots: usize, use_rdtsc: bool) -> Self {
+    pub fn new_sync(slots: usize, system_threads: usize, use_rdtsc: bool) -> Self {
         Self {
             async_buffer: None,
-            sync_buffer: Some(Arc::new(Mutex::new(TimeBuffer::new(slots, use_rdtsc)))),
+            sync_buffer: Some(Arc::new(Mutex::new(TimeBuffer::new(
+                slots,
+                system_threads,
+                use_rdtsc,
+            )))),
             is_async: false,
             use_rdtsc,
         }
     }
 
     /// Create a new asynchronous TimeBuffer manager
-    pub fn new_async(slots: usize, use_rdtsc: bool) -> Self {
+    pub fn new_async(slots: usize, system_threads: usize, use_rdtsc: bool) -> Self {
         Self {
-            async_buffer: Some(AsyncTimeBuffer::new(slots, use_rdtsc)),
+            async_buffer: Some(AsyncTimeBuffer::new(slots, system_threads, use_rdtsc)),
             sync_buffer: None,
             is_async: true,
             use_rdtsc,

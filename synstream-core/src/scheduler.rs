@@ -30,31 +30,34 @@ pub fn get_current_worker_id() -> Option<usize> {
 }
 
 /// Create Threadpool with Rayon
-///
-/// `core_offset` specifies which core to reserve for the system thread.
-/// Workers will be allocated starting from `core_offset + 1`.
-pub fn create_threadpool(core_offset: usize, workers: usize) -> (ThreadPool, usize) {
+pub fn create_threadpool(
+    core_offset: usize,
+    workers: usize,
+    system_threads: usize,
+) -> (ThreadPool, usize, usize) {
     // Create threadpool and pin workers to cores
     let mut core_ids = core_affinity::get_core_ids().unwrap();
     core_ids.sort();
 
     let available_cores = core_ids.len();
-    let worker_offset = core_offset + 1;
+    let worker_offset = core_offset + system_threads;
 
     // Check if the requested configuration fits
     let (actual_offset, actual_workers) = if worker_offset + workers > available_cores {
         // Not enough cores for requested config - need fallback strategy
-        if available_cores >= core_offset + 2 {
+        if available_cores >= core_offset + system_threads + 1 {
             // We have enough cores to honor core_offset and allocate some workers
             let max_workers = available_cores - worker_offset;
             eprintln!(
                 "Warning: Requested {} workers starting at core {} exceeds available {} cores.\n\
-                Using {} workers (max available) with system thread at core {} (workers start at core {}).",
+                Using {} workers (max available) with {} system threads at cores {}..{} (workers start at core {}).",
                 workers,
                 worker_offset,
                 available_cores,
                 max_workers,
+                system_threads,
                 core_offset,
+                core_offset + system_threads - 1,
                 worker_offset
             );
             (worker_offset, max_workers)
@@ -62,15 +65,15 @@ pub fn create_threadpool(core_offset: usize, workers: usize) -> (ThreadPool, usi
             // Can't honor requested core_offset, fall back to core 0 for system
             let max_workers = available_cores - 1;
             eprintln!(
-                "Warning: Requested core_offset {} + workers exceeds available {} cores.\n\
-                Falling back: system thread at core 0, using {} workers (max) starting at core 1.",
-                core_offset, available_cores, max_workers
+                "Warning: Requested core_offset {} + system_threads {} + workers exceeds available {} cores.\n\
+                Falling back: system thread(s) at core 0, using {} workers (max) starting at core 1.",
+                core_offset, system_threads, available_cores, max_workers
             );
             (1, max_workers)
         } else if available_cores == 2 {
             // Only 2 cores: system at core 0, one worker at core 1
             eprintln!(
-                "Warning: Only 2 cores available. System thread at core 0, 1 worker at core 1."
+                "Warning: Only 2 cores available. System thread(s) at core 0, 1 worker at core 1."
             );
             (1, 1)
         } else {
@@ -83,6 +86,15 @@ pub fn create_threadpool(core_offset: usize, workers: usize) -> (ThreadPool, usi
     } else {
         // Requested config fits
         (worker_offset, workers)
+    };
+
+    // Determine the actual system thread core offset
+    let system_core_offset = if worker_offset == actual_offset {
+        // Normal case: system threads use core_offset..core_offset+system_threads
+        core_offset
+    } else {
+        // Fallback case: system threads start where workers would normally start minus system_threads
+        actual_offset.saturating_sub(system_threads)
     };
 
     let cores_to_use: Vec<core_affinity::CoreId> =
@@ -105,7 +117,19 @@ pub fn create_threadpool(core_offset: usize, workers: usize) -> (ThreadPool, usi
         })
         .build()
         .unwrap();
-    (threadpool, actual_offset)
+
+    println!(
+        "System threads will use cores: {}..{}",
+        system_core_offset,
+        system_core_offset + system_threads
+    );
+    println!(
+        "Worker threads will use cores: {}..{}",
+        actual_offset,
+        actual_offset + actual_workers
+    );
+
+    (threadpool, system_core_offset, actual_offset)
 }
 
 pub trait Scheduler {
@@ -153,8 +177,8 @@ type Recorder = Arc<Mutex<HashMap<usize, Vec<Record>>>>;
 #[derive(Debug)]
 struct SchedulerBase {
     threadpool: ThreadPool,
-    core_offset: usize,
-    worker_offset: usize,
+    system_core_offset: usize,
+    worker_core_offset: usize,
     pending_jobs: Arc<AtomicUsize>,
     total_spawned: Arc<AtomicUsize>,
     total_completed: Arc<AtomicUsize>,
@@ -163,19 +187,26 @@ struct SchedulerBase {
 }
 
 impl SchedulerBase {
-    fn new(core_offset: usize, workers: usize, record: bool, base_instant: Instant) -> Self {
+    fn new(
+        core_offset: usize,
+        workers: usize,
+        record: bool,
+        base_instant: Instant,
+        system_threads: usize,
+    ) -> Self {
         let recorder = if record {
             Some(Arc::new(Mutex::new(HashMap::new())))
         } else {
             None
         };
 
-        let (threadpool, worker_offset) = create_threadpool(core_offset, workers);
+        let (threadpool, system_core_offset, worker_core_offset) =
+            create_threadpool(core_offset, workers, system_threads);
 
         Self {
             threadpool: threadpool,
-            core_offset: worker_offset.saturating_sub(1),
-            worker_offset,
+            system_core_offset,
+            worker_core_offset,
             pending_jobs: Arc::new(AtomicUsize::new(0)),
             total_spawned: Arc::new(AtomicUsize::new(0)),
             total_completed: Arc::new(AtomicUsize::new(0)),
@@ -203,7 +234,7 @@ impl SchedulerBase {
                                     r.job_id,
                                     r.start_ns,
                                     r.end_ns,
-                                    r.worker + self.worker_offset,
+                                    r.worker + self.worker_core_offset,
                                     r.task_id,
                                     r.index
                                 );
@@ -226,7 +257,7 @@ impl SchedulerBase {
     }
 
     fn core_offset(&self) -> Option<usize> {
-        Some(self.core_offset)
+        Some(self.system_core_offset)
     }
 
     fn pending_jobs(&self) -> usize {
@@ -291,9 +322,15 @@ pub struct FifoScheduler {
 }
 
 impl FifoScheduler {
-    fn new(core_offset: usize, workers: usize, record: bool, base_instant: Instant) -> Self {
+    fn new(
+        core_offset: usize,
+        workers: usize,
+        record: bool,
+        base_instant: Instant,
+        system_threads: usize,
+    ) -> Self {
         Self {
-            base: SchedulerBase::new(core_offset, workers, record, base_instant),
+            base: SchedulerBase::new(core_offset, workers, record, base_instant, system_threads),
         }
     }
 
@@ -345,9 +382,15 @@ pub struct WorkStealScheduler {
 }
 
 impl WorkStealScheduler {
-    fn new(core_offset: usize, workers: usize, record: bool, base_instant: Instant) -> Self {
+    fn new(
+        core_offset: usize,
+        workers: usize,
+        record: bool,
+        base_instant: Instant,
+        system_threads: usize,
+    ) -> Self {
         Self {
-            base: SchedulerBase::new(core_offset, workers, record, base_instant),
+            base: SchedulerBase::new(core_offset, workers, record, base_instant, system_threads),
         }
     }
 
@@ -476,6 +519,7 @@ pub fn create_scheduler(
     num_workers: usize,
     record: bool,
     base_instant: Instant,
+    system_threads: usize,
 ) -> SchedulerImpl {
     match scheduler_type {
         SchedulerType::Fifo => SchedulerImpl::Fifo(FifoScheduler::new(
@@ -483,12 +527,14 @@ pub fn create_scheduler(
             num_workers,
             record,
             base_instant,
+            system_threads,
         )),
         SchedulerType::WorkStealing => SchedulerImpl::WorkStealing(WorkStealScheduler::new(
             core_offset,
             num_workers,
             record,
             base_instant,
+            system_threads,
         )),
     }
 }

@@ -24,6 +24,14 @@ struct Args {
     core_offset: usize,
     #[clap(
         long,
+        value_name = "SYSTEM_THREADS",
+        required = false,
+        default_value = "1",
+        help = "Number of threads for resolution operation"
+    )]
+    system_threads: usize,
+    #[clap(
+        long,
         value_name = "MAX_RUNTIME",
         required = false,
         default_value = "3"
@@ -125,6 +133,7 @@ fn main() {
         scheduler_type,
         args.workers,
         args.core_offset,
+        args.system_threads,
         args.slots,
         args.max_streams,
         runtime,
@@ -152,6 +161,7 @@ pub fn run_graph(
     scheduler_type: SchedulerType,
     workers: usize,
     core_offset: usize,
+    system_threads: usize,
     slots: usize,
     max_streams: usize,
     max_runtime: Option<u64>,
@@ -160,14 +170,15 @@ pub fn run_graph(
     batching_size: usize,
     batching_limit: u64,
 ) -> SynRt {
-    let mut synrt = SynRt::new(graph, slots, max_streams, max_runtime, use_rdtsc, record);
+    let mut synrt = SynRt::new(graph, slots, max_streams, max_runtime, use_rdtsc, record, system_threads);
     let scheduler = create_scheduler(
         scheduler_type,
         core_offset,
         workers,
         record,
         synrt.base_instant(),
+        system_threads,
     );
-    synrt.run(scheduler, batching_size, batching_limit);
+    synrt.run(scheduler, system_threads, batching_size, batching_limit);
     synrt
 }

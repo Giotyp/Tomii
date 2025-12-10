@@ -171,6 +171,16 @@ pub struct SharedData {
     pub base_instant: Arc<Instant>,
     pub job_counter: Arc<AtomicUsize>,
     pub core_offset: Arc<AtomicUsize>,
+
+    // Shared dependency tracking for multi-threaded resolution
+    pub dependency_map: Arc<RwLock<VecMap<usize>>>,
+    pub remaining_nodes: Arc<RwLock<Vec<Vec<AtomicUsize>>>>,
+    pub remaining_cond_nodes: Arc<RwLock<Vec<Vec<AtomicUsize>>>>,
+    pub nodes_sent_to_queue: Arc<Mutex<Vec<std::collections::HashSet<NodeInfo>>>>,
+    pub completed_slots: Arc<Mutex<std::collections::HashSet<usize>>>,
+    pub node_id_to_rem: Arc<Vec<usize>>,
+    pub initial_prep_done: Arc<AtomicUsize>,
+    pub system_threads: usize,
 }
 
 #[inline(always)]
