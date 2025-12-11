@@ -1,155 +1,85 @@
-mod functions;
-mod wrap;
+use clap::Parser;
+use matcomp::{kernel_perf, validation};
+use serde::Deserialize;
+use std::fs;
+use std::path::PathBuf;
 
-use functions::*;
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
-use synstream_types::CmTypes;
+#[derive(Parser, Debug)]
+#[command(name = "perf_test")]
+#[command(about = "Matrix computation performance and validation tool", long_about = None)]
+struct Args {
+    /// Run performance measurements
+    #[arg(long)]
+    perf: bool,
+
+    /// Run validation tests
+    #[arg(long)]
+    valid: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GraphFile {
+    pub initializations: Vec<InitJson>,
+}
+#[derive(Debug, Deserialize)]
+pub struct InitJson {
+    pub name: String,
+    pub args: Vec<ArgInit>,
+    pub function_name: Option<String>,
+}
+#[derive(Debug, Deserialize)]
+pub struct ArgInit {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub value: String,
+}
+
+fn parse_graph(script_dir: &str) -> (usize, usize) {
+    let graph_path = PathBuf::from(script_dir).join("graph.json");
+
+    let graph_content = fs::read_to_string(&graph_path).expect("Failed to read graph.json");
+
+    let graph: GraphFile =
+        serde_json::from_str(&graph_content).expect("Failed to parse graph.json");
+
+    let mut buf_size = 0;
+    let mut num_nodes = 0;
+
+    for init in graph.initializations {
+        if init.name == "buf_size" {
+            if let Some(arg) = init.args.first() {
+                buf_size = arg.value.parse().expect("Failed to parse buf_size");
+            }
+        } else if init.name == "num_nodes" {
+            if let Some(arg) = init.args.first() {
+                num_nodes = arg.value.parse().expect("Failed to parse num_nodes");
+            }
+        }
+    }
+
+    if buf_size == 0 || num_nodes == 0 {
+        panic!("Error: Could not find buf_size or num_nodes in graph.json");
+    }
+    (buf_size, num_nodes)
+}
 
 pub fn main() {
-    let buf_size = 100;
-    let repeat = 100;
-    let warmup = 10;
-    let fft_planner = fft_planner(buf_size);
+    let args = Args::parse();
 
-    let mut timings: HashMap<&str, Vec<Duration>> = HashMap::new();
-
-    // Time gen_vec
-    timings.insert("gen_vec", vec![]);
-    for _ in 0..warmup {
-        let _ = generate_vector(buf_size);
-    }
-    for _ in 0..repeat {
-        let start = Instant::now();
-        let _ = generate_vector(buf_size);
-        let duration = start.elapsed();
-        timings.get_mut("gen_vec").unwrap().push(duration);
+    if !args.perf && !args.valid {
+        eprintln!("Error: Please specify either --perf or --valid");
+        std::process::exit(1);
     }
 
-    // Time wrapper
-    let buf_size_cm = CmTypes::Usize(buf_size);
-    timings.insert("gen_vec_wrap", vec![]);
-    for _ in 0..warmup {
-        let _ = wrap::generate_vector_cm_wrap(vec![buf_size_cm.clone()]);
-    }
-    for _ in 0..repeat {
-        let vec = vec![buf_size_cm.clone()];
-        let start = Instant::now();
-        let _ = wrap::generate_vector_cm_wrap(vec);
-        let duration = start.elapsed();
-        timings.get_mut("gen_vec_wrap").unwrap().push(duration);
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let (buf_size, num_nodes) = parse_graph(manifest_dir);
+
+    if args.perf {
+        let warmup = 10;
+        kernel_perf::measure_performance(buf_size, num_nodes, warmup);
     }
 
-    // Time compute_fft
-    timings.insert("compute_fft", vec![]);
-    let orig_vector = generate_vector(buf_size);
-    for _ in 0..warmup {
-        let mut vector = orig_vector.clone();
-        compute_fft(fft_planner.clone(), &mut vector);
-    }
-    for _ in 0..repeat {
-        let mut vector = orig_vector.clone();
-        let planner = fft_planner.clone();
-        let start = Instant::now();
-        compute_fft(planner, &mut vector);
-        let duration = start.elapsed();
-        timings.get_mut("compute_fft").unwrap().push(duration);
-    }
-
-    // Time compute_fft_wrap
-    timings.insert("compute_fft_wrap", vec![]);
-    let fft_planner_cm = wrap::fft_planner_cm_wrap(vec![buf_size_cm.clone()]);
-    let buf_cm = wrap::generate_vector_cm_wrap(vec![buf_size_cm.clone()]);
-    for _ in 0..warmup {
-        let args = vec![fft_planner_cm.clone(), buf_cm.clone()];
-        wrap::compute_fft_cm_wrap(args);
-    }
-    for _ in 0..repeat {
-        let args = vec![fft_planner_cm.clone(), buf_cm.clone()];
-        let start = Instant::now();
-        wrap::compute_fft_cm_wrap(args);
-        let duration = start.elapsed();
-        timings.get_mut("compute_fft_wrap").unwrap().push(duration);
-    }
-
-    // Time vec_to_mat
-    timings.insert("vec_to_mat", vec![]);
-    let mut orig_vector = generate_vector(buf_size);
-    compute_fft(fft_planner.clone(), &mut orig_vector);
-    for _ in 0..warmup {
-        let v = orig_vector.clone();
-        let _ = vec_to_mat(&v);
-    }
-    for _ in 0..repeat {
-        let v = orig_vector.clone();
-        let start = Instant::now();
-        let _ = vec_to_mat(&v);
-        let duration = start.elapsed();
-        timings.get_mut("vec_to_mat").unwrap().push(duration);
-    }
-
-    // Time wrap vec_to_mat
-    timings.insert("vec_to_mat_wrap", vec![]);
-    for _ in 0..warmup {
-        let fft_buf_cm = wrap::generate_vector_cm_wrap(vec![buf_size_cm.clone()]);
-        wrap::compute_fft_cm_wrap(vec![fft_planner_cm.clone(), fft_buf_cm.clone()]);
-        let args = vec![fft_buf_cm.clone()];
-        let _ = wrap::vec_to_mat_cm_wrap(args);
-    }
-    for _ in 0..repeat {
-        let fft_buf_cm = wrap::generate_vector_cm_wrap(vec![buf_size_cm.clone()]);
-        wrap::compute_fft_cm_wrap(vec![fft_planner_cm.clone(), fft_buf_cm.clone()]);
-        let args = vec![fft_buf_cm.clone()];
-        let start = Instant::now();
-        let _ = wrap::vec_to_mat_cm_wrap(args);
-        let duration = start.elapsed();
-        timings.get_mut("vec_to_mat_wrap").unwrap().push(duration);
-    }
-
-    // Time mat_mul
-    timings.insert("mat_mul", vec![]);
-    let mut orig_vector = generate_vector(buf_size);
-    compute_fft(fft_planner.clone(), &mut orig_vector);
-    let orig_matrix = vec_to_mat(&orig_vector);
-    for _ in 0..warmup {
-        let a = orig_matrix.clone();
-        let b = orig_matrix.clone();
-        let _ = mat_mul(&a, &b);
-    }
-    for _ in 0..repeat {
-        let a = orig_matrix.clone();
-        let b = orig_matrix.clone();
-        let start = Instant::now();
-        let _ = mat_mul(&a, &b);
-        let duration = start.elapsed();
-        timings.get_mut("mat_mul").unwrap().push(duration);
-    }
-    // Time wrap mat_mul
-    timings.insert("mat_mul_wrap", vec![]);
-    for _ in 0..warmup {
-        let fft_buf_cm = wrap::generate_vector_cm_wrap(vec![buf_size_cm.clone()]);
-        wrap::compute_fft_cm_wrap(vec![fft_planner_cm.clone(), fft_buf_cm.clone()]);
-        let mat_cm = wrap::vec_to_mat_cm_wrap(vec![fft_buf_cm.clone()]);
-        let args = vec![mat_cm.clone(), mat_cm.clone()];
-        let _ = wrap::mat_mul_cm_wrap(args);
-    }
-    for _ in 0..repeat {
-        let fft_buf_cm = wrap::generate_vector_cm_wrap(vec![buf_size_cm.clone()]);
-        wrap::compute_fft_cm_wrap(vec![fft_planner_cm.clone(), fft_buf_cm.clone()]);
-        let mat_cm = wrap::vec_to_mat_cm_wrap(vec![fft_buf_cm.clone()]);
-        let args = vec![mat_cm.clone(), mat_cm.clone()];
-        let start = Instant::now();
-        let _ = wrap::mat_mul_cm_wrap(args);
-        let duration = start.elapsed();
-        timings.get_mut("mat_mul_wrap").unwrap().push(duration);
-    }
-
-    // Print timings - Avg, Min, Max for each function
-    for (func, times) in &timings {
-        let total: Duration = times.iter().sum();
-        let avg = total / (times.len() as u32);
-        let min = times.iter().min().unwrap();
-        let max = times.iter().max().unwrap();
-        println!("{} - Avg: {:?}, Min: {:?}, Max: {:?}", func, avg, min, max);
+    if args.valid {
+        validation::validate(buf_size, num_nodes, manifest_dir);
     }
 }

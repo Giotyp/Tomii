@@ -24,7 +24,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       
       - name: Run Example
-        run: ./examples/${{ matrix.example }}/run_bench.sh
-        
+        working-directory: ./examples/${{ matrix.example }}
+        run: ./run_bench.sh
+
+      - name: Produce validation file
+        working-directory: ./examples/${{ matrix.example }}
+        run: cargo run --release -- --valid
+
       - name: Compare files
-        run: diff -u ./examples/${{ matrix.example }}/result.txt ./examples/${{ matrix.example }}/validation.txt 
+        working-directory: ./examples/${{ matrix.example }}
+        run: diff -u result.txt validation.txt

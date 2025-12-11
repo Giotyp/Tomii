@@ -114,6 +114,23 @@
                     }
                 }
             ]
+        },
+        {
+            "name": "write_res",
+            "function_name": "write_to_file",
+            "args": [
+                {
+                    "type": "$ref",
+                    "value": "result_file"
+                },
+                {
+                    "type": "$res",
+                    "predecessor": {
+                        "name": "mat_mul",
+                        "indexes": "0-num_nodes"
+                    }
+                }
+            ]
         }
     ]
 }

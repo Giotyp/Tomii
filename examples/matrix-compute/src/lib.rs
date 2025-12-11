@@ -1,4 +1,6 @@
 pub mod functions;
+pub mod kernel_perf;
+pub mod validation;
 pub mod wrap;
 
 /// Functions that Return CmTypes and will be wrapped
