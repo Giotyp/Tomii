@@ -57,7 +57,7 @@ def group_by_slot(records):
     return dict(sorted(slots.items()))
 
 
-def visualize(csv_path, out_path, units="us", exclude=None, task_names=None):
+def visualize(csv_path, out_path, title, units="us", exclude=None, task_names=None, system_threads=0):
     records = read_csv(csv_path)
     # filter excluded task_ids if provided
     exclude_set = set()
@@ -74,40 +74,90 @@ def visualize(csv_path, out_path, units="us", exclude=None, task_names=None):
 
     slots = group_by_slot(records)
 
-    # Find systems thread which corresponds to maximum slot value
-    system_slot = max(slots.keys())
-    print("System Thread executed in slot:", system_slot)
-
-    # Separate system records and filter by excluded task_ids
-    all_system_records = slots.pop(system_slot)
+    # Separate worker slots from system thread slots based on system_threads parameter
+    all_slots = sorted(slots.keys())
     
-    # Identify resolution task_id
+    worker_slots = {}
+    system_slots = {}
+    
+    if system_threads > 0 and len(all_slots) > system_threads:
+        # System thread slots are the highest numbered slots
+        system_slot_threshold = max(all_slots) - system_threads + 1
+        
+        for slot_id, slot_records in slots.items():
+            if slot_id >= system_slot_threshold:
+                system_slots[slot_id] = slot_records
+            else:
+                worker_slots[slot_id] = slot_records
+    else:
+        # Fallback: use heuristic if system_threads not specified
+        for slot_id, slot_records in slots.items():
+            task_ids = [r[5] for r in slot_records]
+            if slot_id >= all_slots[-1] - 10:  # Assume last ~10 slots could be system
+                is_system = True
+                for r in slot_records:
+                    if r[5] < 100:  # Arbitrary threshold
+                        is_system = False
+                        break
+                if is_system:
+                    system_slots[slot_id] = slot_records
+                else:
+                    worker_slots[slot_id] = slot_records
+            else:
+                worker_slots[slot_id] = slot_records
+        
+        if not system_slots and all_slots:
+            max_slot = max(all_slots)
+            system_slots[max_slot] = slots[max_slot]
+            worker_slots = {k: v for k, v in slots.items() if k != max_slot}
+    
+    print(f"Worker slots: {sorted(worker_slots.keys())}")
+    print(f"System slots: {sorted(system_slots.keys())}")
+    
+    # Identify resolution task_id from system slots
     resolution_task_id = -1
+    all_system_records = []
+    for sys_slot_records in system_slots.values():
+        all_system_records.extend(sys_slot_records)
+    
     if all_system_records:
         sys_task_ids = [r[5] for r in all_system_records]
         resolution_task_id = max(sys_task_ids)
+        print(f"Resolution task_id identified as: {resolution_task_id}")
     
     # choose global baseline so all subplots share same time origin
-    # Use the earliest start time from remaining (non-excluded) worker records only (exclude system records)
-    worker_records = [r for slot_recs in slots.values() for r in slot_recs]
-    global_min = min(r[2] for r in worker_records)
-    global_max = max(r[3] for r in worker_records)
+    # Use the earliest start time from worker records only
+    worker_records = [r for slot_recs in worker_slots.values() for r in slot_recs]
+    if worker_records:
+        global_min = min(r[2] for r in worker_records)
+        global_max = max(r[3] for r in worker_records)
+    else:
+        # Fallback if no worker records
+        global_min = min(r[2] for r in all_system_records)
+        global_max = max(r[3] for r in all_system_records)
     
     # Filter system records: exclude by task_id and for resolution tasks, exclude anything before global_min
-    system_records = []
-    for r in all_system_records:
-        task_id = r[5]
-        start_ns = r[2]
-        
-        # Skip if task_id is excluded
-        if task_id in exclude_set:
-            continue
-        
-        # For resolution tasks, skip if they start before the earliest remaining task
-        if task_id == resolution_task_id and start_ns < global_min:
-            continue
-        
-        system_records.append(r)
+    filtered_system_slots = {}
+    for slot_id, sys_slot_records in system_slots.items():
+        filtered_records = []
+        for r in sys_slot_records:
+            task_id = r[5]
+            start_ns = r[2]
+            
+            # Skip if task_id is excluded
+            if task_id in exclude_set:
+                continue
+            
+            # For resolution tasks, skip if they start before the earliest remaining task
+            if task_id == resolution_task_id and start_ns < global_min:
+                continue
+            
+            filtered_records.append(r)
+        if filtered_records:
+            filtered_system_slots[slot_id] = filtered_records
+    
+    system_slots = filtered_system_slots
+    slots = worker_slots  # Continue with worker slots for main visualization
 
     if units == "us":
         scale = 1e3
@@ -168,7 +218,8 @@ def visualize(csv_path, out_path, units="us", exclude=None, task_names=None):
 
     for rec in records:
         slot, job_id, start_ns, end_ns, worker, task_id, index = rec
-        if slot == system_slot:
+        # Skip system slots
+        if slot in system_slots:
             continue
         duration_ns = end_ns - start_ns
         task_stats[task_id]["count"] += 1
@@ -221,15 +272,16 @@ def visualize(csv_path, out_path, units="us", exclude=None, task_names=None):
 
     print("=" * 80 + "\n")
 
-    n_slots = len(slots)
-    if n_slots == 0:
+    n_worker_slots = len(slots)
+    
+    if n_worker_slots == 0:
         print("No worker slots found to plot.")
         return
 
-    # dynamic figure size: height depends on number of slots and workers
-    fig_height = max(2.5 * n_slots, 4)
-    fig, axs = plt.subplots(n_slots, 1, sharex=True, figsize=(12, fig_height))
-    if n_slots == 1:
+    # dynamic figure size: height depends on number of worker slots only
+    fig_height = max(2.5 * n_worker_slots, 4)
+    fig, axs = plt.subplots(n_worker_slots, 1, sharex=True, figsize=(12, fig_height))
+    if n_worker_slots == 1:
         axs = [axs]
 
     # overall x limits - add small margin to show tasks clearly
@@ -241,16 +293,19 @@ def visualize(csv_path, out_path, units="us", exclude=None, task_names=None):
     for label in id_map.values():
         unique_keys.add(label)
 
-    # System records
+    # System records - now grouped by slot
     system_workers = set()
-    for r in system_records:
-        tid = r[5]
-        idx = r[6]
-        system_workers.add(r[4])
-        if tid == resolution_task_id:
-            unique_keys.add("system-res")
-        else:
-            unique_keys.add(f"system-prep")
+    all_system_records_flat = []
+    for sys_slot_id, sys_slot_records in system_slots.items():
+        for r in sys_slot_records:
+            tid = r[5]
+            idx = r[6]
+            system_workers.add(r[4])
+            all_system_records_flat.append(r)
+            if tid == resolution_task_id:
+                unique_keys.add("system-res")
+            else:
+                unique_keys.add(f"system-prep")
 
     # Define order for legend/colors
     list_keys = []
@@ -270,18 +325,36 @@ def visualize(csv_path, out_path, units="us", exclude=None, task_names=None):
     color_map = {}
     for i, k in enumerate(list_keys):
         color_map[k] = cmap[i % len(cmap)]
-    # Force system-thread entries (resolution and prep) to use a consistent gray
+    # Force system-thread entries (resolution and prep) to use a consistent color
     system_res_color = csscolors['black']
     system_prep_color = csscolors['peru']
     if "system-res" in color_map:
         color_map["system-res"] = system_res_color
     if "system-prep" in color_map:
         color_map["system-prep"] = system_prep_color
-    for ax, (slot, recs) in zip(axs, slots.items()):
-        # collect unique workers for y ticks
+    
+    # Plot worker slots with system thread activities side-by-side
+    plot_idx = 0
+    
+    # Collect all system records grouped by worker
+    prep_tasks_by_worker = defaultdict(list)
+    res_tasks_by_worker = defaultdict(list)
+    for sys_slot_id, sys_slot_records in system_slots.items():
+        for rec in sys_slot_records:
+            worker = rec[4]
+            if rec[5] == resolution_task_id:
+                res_tasks_by_worker[worker].append(rec)
+            else:
+                prep_tasks_by_worker[worker].append(rec)
+    
+    # Plot each worker slot
+    for slot, recs in sorted(slots.items()):
+        ax = axs[plot_idx]
+        plot_idx += 1
         workers = set()
+        system_workers_in_slot = set()
 
-        # Plot worker records
+        # First, plot worker records
         for rec in recs:
             _, job_id, start_ns, end_ns, worker, task_id, index = rec
             workers.add(worker)
@@ -291,26 +364,46 @@ def visualize(csv_path, out_path, units="us", exclude=None, task_names=None):
 
             label = id_map.get(task_id, task_id)
             col = color_map.get(label, "gray")
-            ax.barh(worker, width, left=start, height=0.6, align="center", color=col)
-
-        # Plot system records
-        for rec in system_records:
-            _, job_id, start_ns, end_ns, worker, task_id, index = rec
-            workers.add(worker)
-            start = start_ns / scale
-            end = end_ns / scale
-            width = max(end - start, 1e-6)
-
-            if task_id == resolution_task_id:
+            ax.barh(worker, width, left=start, height=0.6, align="center", color=col, zorder=2)
+        
+        # Collect all system thread workers
+        all_system_workers = set(prep_tasks_by_worker.keys()) | set(res_tasks_by_worker.keys())
+        system_workers_in_slot.update(all_system_workers)
+        workers.update(all_system_workers)
+        
+        # Plot system threads with half-height bars side by side
+        bar_height = 0.4  # Half of normal height for each type
+        
+        # Plot resolution tasks (bottom half)
+        for worker in all_system_workers:
+            for rec in res_tasks_by_worker[worker]:
+                _, job_id, start_ns, end_ns, _, task_id, index = rec
+                start = start_ns / scale
+                end = end_ns / scale
+                width = max(end - start, 1e-6)
+                
                 label = "system-res"
-            else:
+                col = color_map.get(label, system_res_color)
+                # Position at worker - bar_height/2 (bottom half)
+                ax.barh(worker - bar_height/2, width, left=start, height=bar_height, 
+                       align="center", color=col, alpha=0.8, zorder=1)
+        
+        # Plot preparation tasks (top half)
+        for worker in all_system_workers:
+            for rec in prep_tasks_by_worker[worker]:
+                _, job_id, start_ns, end_ns, _, task_id, index = rec
+                start = start_ns / scale
+                end = end_ns / scale
+                width = max(end - start, 1e-6)
+                
                 label = "system-prep"
-
-            col = color_map.get(label, "gray")
-            ax.barh(worker, width, left=start, height=0.6, align="center", color=col)
-
-        # Draw separator line for system workers
-        for sys_worker in system_workers:
+                col = color_map.get(label, system_prep_color)
+                # Position at worker + bar_height/2 (top half)
+                ax.barh(worker + bar_height/2, width, left=start, height=bar_height, 
+                       align="center", color=col, alpha=0.8, zorder=1)
+        
+        # Draw separator lines for system workers
+        for sys_worker in system_workers_in_slot:
             ax.axhline(
                 y=sys_worker + 0.5,
                 color="black",
@@ -320,19 +413,37 @@ def visualize(csv_path, out_path, units="us", exclude=None, task_names=None):
             )
 
         ax.set_ylabel(f"slot {slot}")
-        ax.set_yticks(sorted(list(workers)))
-        ax.set_ylim(min(workers) - 1, max(workers) + 1)
+        if workers:
+            ax.set_yticks(sorted(list(workers)))
+            ax.set_ylim(min(workers) - 1, max(workers) + 1)
         ax.grid(axis="x", linestyle=":", alpha=0.6)
 
     axs[-1].set_xlabel(xlabel)
     axs[-1].set_xlim(x_min, x_max)
 
     # add title on top of the whole graph
-    num_workers = len(workers)
-    num_system_workers = len(system_workers)
-    num_slots = len(slots)
+    # Count unique worker cores from worker slots (excluding system workers)
+    all_worker_cores = set()
+    system_workers_set = set()
+    
+    for slot_recs in slots.values():
+        for rec in slot_recs:
+            all_worker_cores.add(rec[4])
+    
+    for sys_recs in system_slots.values():
+        for rec in sys_recs:
+            system_workers_set.add(rec[4])
+    
+    # Remove system workers from worker core count
+    pure_worker_cores = all_worker_cores - system_workers_set
+    
+    num_worker_cores = len(pure_worker_cores)
+    num_system_threads = len(system_slots)
+    num_worker_slots = len(slots)
     plt.suptitle(
-        f"Task Scheduler Visualization\nWorker Cores: {num_workers-num_system_workers} / System Workers: {num_system_workers} / Slots: {num_slots}"
+        f"{title}\n"
+        f"Worker Cores: {num_worker_cores} / System Threads: {num_system_threads} / "
+        f"Worker Slots: {num_worker_slots}"
     )
 
     # add legend
@@ -370,6 +481,7 @@ def main():
     p = argparse.ArgumentParser(description="Visualize scheduler CSV")
     p.add_argument("csv", help="Path to CSV produced by scheduler")
     p.add_argument("-o", "--out", help="Output image path", default="schedule.png")
+    p.add_argument("--title", help="Title for the plot", default="Scheduler Visualization")
     p.add_argument(
         "--units",
         choices=["ns", "us", "ms"],
@@ -387,6 +499,12 @@ def main():
         help="Comma-separated list of task names (e.g. [gen,fft,mult]) to label task_ids. Must match count of unique worker tasks.",
         default=None,
     )
+    p.add_argument(
+        "--system-threads",
+        type=int,
+        help="Number of system threads (slots at the end are system thread slots)",
+        default=1,
+    )
     args = p.parse_args()
     task_names = args.tasks
     print("Task names:", task_names)
@@ -394,9 +512,11 @@ def main():
     visualize(
         args.csv,
         args.out,
+        title=args.title,
         units=args.units,
         exclude=args.exclude,
         task_names=task_names,
+        system_threads=args.system_threads,
     )
 
 

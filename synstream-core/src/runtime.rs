@@ -657,7 +657,7 @@ impl SynRt {
                         start_ns,
                         end_ns,
                         worker: thread_core,
-                        task_id: node_info.id,
+                        task_id: IdType::MAX,
                         index: node_info.index,
                     });
                 }
