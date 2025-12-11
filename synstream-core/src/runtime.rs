@@ -457,6 +457,9 @@ impl SynRt {
 
                 let mut nodes_sent = 0;
                 let mut nodes_to_schedule: Vec<NodeInfo> = Vec::new();
+
+                // Collect all potential successors first with their succ_id
+                let mut succ_updates: Vec<(NodeInfo, bool, IdType)> = Vec::new();
                 for succ_id in successors {
                     let succ_id = *succ_id;
 
@@ -515,31 +518,27 @@ impl SynRt {
                             queue_lock[node_info.slot].contains(&succ_info)
                         };
 
-                        if already_sent {
-                            continue;
+                        if !already_sent {
+                            let has_cond = shared.graph.condition_nodes.contains(&succ_id);
+                            succ_updates.push((succ_info, has_cond, succ_id));
                         }
+                    }
+                }
 
-                        let dep_opt = {
-                            let mut dep_map = shared.dependency_map.write().unwrap();
-                            dep_map.decrease(&succ_info)
-                        };
+                // Batch process dependency decrements - acquire lock once
+                {
+                    let mut dep_map = shared.dependency_map.write().unwrap();
+                    let mut queue_lock = shared.nodes_sent_to_queue.lock().unwrap();
 
-                        if let Some(dep) = dep_opt {
+                    for (succ_info, has_cond, succ_id) in succ_updates {
+                        if let Some(dep) = dep_map.decrease(&succ_info) {
                             if dep == 0 {
-                                if !shared.graph.condition_nodes.contains(&succ_id) {
+                                if !has_cond {
                                     print_debug(|| {
                                         format!("Sent successor {:?} to ready channel", succ_info)
                                     });
                                     nodes_to_schedule.push(succ_info.clone());
-
-                                    // Mark this node as sent to avoid double-sends (thread-safe)
-                                    {
-                                        let mut queue_lock =
-                                            shared.nodes_sent_to_queue.lock().unwrap();
-                                        queue_lock[node_info.slot].insert(succ_info);
-                                    }
-
-                                    // Increase nodes_sent counter
+                                    queue_lock[node_info.slot].insert(succ_info);
                                     nodes_sent += 1;
                                     // DO NOT decrement remaining_nodes here - only when task completes
                                 } else {
@@ -557,14 +556,7 @@ impl SynRt {
                                             )
                                         });
                                         nodes_to_schedule.push(succ_info.clone());
-
-                                        // Mark this node as sent to avoid double-sends (thread-safe)
-                                        {
-                                            let mut queue_lock =
-                                                shared.nodes_sent_to_queue.lock().unwrap();
-                                            queue_lock[node_info.slot].insert(succ_info);
-                                        }
-
+                                        queue_lock[node_info.slot].insert(succ_info);
                                         nodes_sent += 1;
                                         // DO NOT decrement remaining_cond_nodes here - only when task completes
                                     } else {

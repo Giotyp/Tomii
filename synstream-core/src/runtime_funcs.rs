@@ -50,6 +50,7 @@ impl std::fmt::Debug for ArgCacheEntry {
     }
 }
 
+#[inline]
 pub fn node_cache_entry(node: &Node, init_objects: &Vec<Vec<CmTypes>>) -> NodeCacheEntry {
     let mut rt_idxs_indexes = Vec::new();
     let mut buffer_ref_indexes = Vec::new();
@@ -211,6 +212,7 @@ fn execute_task(
     let _ = completed_tx.send((node_info.clone(), result));
 }
 
+#[inline]
 pub fn send_to_scheduler(
     shared: &Arc<SharedData>,
     node_info: &NodeInfo,
@@ -293,6 +295,7 @@ pub fn send_to_scheduler(
     });
 }
 
+#[inline]
 pub fn conditions_met(
     shared: &Arc<SharedData>,
     node_info: &NodeInfo,
@@ -324,6 +327,7 @@ pub fn conditions_met(
     is_ready
 }
 
+#[inline]
 pub fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
     // Complete timing - use unwrap_or to handle errors gracefully
     if let Err(e) = shared.time_buffer.finish_slot_processing(slot) {
@@ -353,6 +357,7 @@ pub fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
     new_iteration
 }
 
+#[inline]
 pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) -> usize {
     let mut available_slots = shared.available_stream_slots.write().unwrap();
 
@@ -403,6 +408,7 @@ pub fn release_slot(shared: &Arc<SharedData>, slot: usize) {
     print_debug(|| format!("Released slot {} (had stream: {})", slot, old_stream));
 }
 
+#[inline]
 pub fn process_id_function(
     shared: &Arc<SharedData>,
     node_info: &NodeInfo,
@@ -597,6 +603,7 @@ pub fn parse_cached_args(
     arg_vec
 }
 
+#[inline]
 pub fn parse_args(
     shared: &Arc<SharedData>,
     args: &Vec<Arg>,
