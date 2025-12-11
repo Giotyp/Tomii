@@ -78,15 +78,17 @@ cache_sym! {
 }
 pub fn get_out_file_wrap(args: Vec<CmTypes>) -> CmTypes {
     let env_var = match &args[0] {
-        CmTypes::String(x) => x.clone(),
+        CmTypes::String(x) => x.to_string(),
         _ => panic!("Expected string argument"),
     };
 
     let out_file = match &args[1] {
-        CmTypes::String(x) => x.clone(),
+        CmTypes::String(x) => x.to_string(),
         _ => panic!("Expected string argument"),
     };
-    CmTypes::String(GET_OUT_FILE_SYM(&env_var, &out_file))
+    CmTypes::String(std::sync::Arc::from(
+        GET_OUT_FILE_SYM(&env_var, &out_file).as_str(),
+    ))
 }
 
 cache_sym! {
@@ -94,7 +96,7 @@ cache_sym! {
 }
 pub fn write_to_file_wrap(args: Vec<CmTypes>) -> CmTypes {
     let file_path = match &args[0] {
-        CmTypes::String(x) => x.clone(),
+        CmTypes::String(x) => x.to_string(),
         _ => panic!("Expected string argument"),
     };
 

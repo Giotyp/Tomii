@@ -136,7 +136,7 @@ impl SynRt {
     }
 
     pub fn base_instant(&self) -> Instant {
-        self.shared.base_instant.as_ref().clone()
+        *self.shared.base_instant
     }
 
     pub fn run(

@@ -398,7 +398,7 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
 pub fn release_slot(shared: &Arc<SharedData>, slot: usize) {
     let mut available_slots = shared.available_stream_slots.write().unwrap();
 
-    let old_stream = available_slots[slot].clone();
+    let old_stream = available_slots[slot];
     available_slots[slot] = std::usize::MAX; // Mark as available
     print_debug(|| format!("Released slot {} (had stream: {})", slot, old_stream));
 }

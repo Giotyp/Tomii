@@ -11,37 +11,106 @@ use std::time::Duration;
 // Re-export num_complex Complex types for convenience
 pub use num_complex::{Complex32, Complex64};
 
-#[derive(Deserialize, Clone)]
+#[derive(Clone)]
 pub enum CmTypes {
+    // Small Copy types - remain unboxed for efficiency (≤8 bytes)
     Bool(bool),
     I8(i8),
     I16(i16),
     I32(i32),
     I64(i64),
-    I128(i128),
     U8(u8),
     U16(u16),
     U32(u32),
     U64(u64),
-    U128(u128),
     F32(f32),
     F64(f64),
     Char(char),
     Usize(usize),
     Isize(isize),
-    String(String),
+
+    // Large or heap-allocated types - wrapped in Arc for cheap cloning
+    I128(Arc<i128>),
+    U128(Arc<u128>),
+    String(Arc<str>),
+    Complex32(Arc<C32>),
+    Complex64(Arc<C64>),
+    VecCmt(Arc<Vec<CmTypes>>),
+
+    // Special types
     Ref(usize),
     Res(usize),
-    Barrier(String),
-    Complex32(C32),
-    Complex64(C64),
-    VecCmt(Vec<CmTypes>),
+    Barrier(Arc<str>),
     None,
     Init,
-    #[serde(skip)]
+    // Note: Any and AnySliced are not deserialized via the custom Deserialize impl
     Any(Arc<RwLock<Box<dyn Any + Send + Sync>>>),
-    #[serde(skip)]
     AnySliced(Arc<dyn SlicedAccess>),
+}
+
+// Custom Deserialize implementation for CmTypes to handle Arc-wrapped types
+impl<'de> Deserialize<'de> for CmTypes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Define a temporary enum with the same structure but without Arc
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum CmTypesHelper {
+            Bool(bool),
+            I8(i8),
+            I16(i16),
+            I32(i32),
+            I64(i64),
+            I128(i128),
+            U8(u8),
+            U16(u16),
+            U32(u32),
+            U64(u64),
+            U128(u128),
+            F32(f32),
+            F64(f64),
+            Char(char),
+            Usize(usize),
+            Isize(isize),
+            String(std::string::String),
+            Ref(usize),
+            Res(usize),
+            Barrier(std::string::String),
+            Complex32(C32),
+            Complex64(C64),
+            VecCmt(Vec<CmTypes>),
+        }
+
+        let helper = CmTypesHelper::deserialize(deserializer)?;
+
+        Ok(match helper {
+            CmTypesHelper::Bool(v) => CmTypes::Bool(v),
+            CmTypesHelper::I8(v) => CmTypes::I8(v),
+            CmTypesHelper::I16(v) => CmTypes::I16(v),
+            CmTypesHelper::I32(v) => CmTypes::I32(v),
+            CmTypesHelper::I64(v) => CmTypes::I64(v),
+            CmTypesHelper::I128(v) => CmTypes::I128(Arc::new(v)),
+            CmTypesHelper::U8(v) => CmTypes::U8(v),
+            CmTypesHelper::U16(v) => CmTypes::U16(v),
+            CmTypesHelper::U32(v) => CmTypes::U32(v),
+            CmTypesHelper::U64(v) => CmTypes::U64(v),
+            CmTypesHelper::U128(v) => CmTypes::U128(Arc::new(v)),
+            CmTypesHelper::F32(v) => CmTypes::F32(v),
+            CmTypesHelper::F64(v) => CmTypes::F64(v),
+            CmTypesHelper::Char(v) => CmTypes::Char(v),
+            CmTypesHelper::Usize(v) => CmTypes::Usize(v),
+            CmTypesHelper::Isize(v) => CmTypes::Isize(v),
+            CmTypesHelper::String(v) => CmTypes::String(Arc::from(v.as_str())),
+            CmTypesHelper::Ref(v) => CmTypes::Ref(v),
+            CmTypesHelper::Res(v) => CmTypes::Res(v),
+            CmTypesHelper::Barrier(v) => CmTypes::Barrier(Arc::from(v.as_str())),
+            CmTypesHelper::Complex32(v) => CmTypes::Complex32(Arc::new(v)),
+            CmTypesHelper::Complex64(v) => CmTypes::Complex64(Arc::new(v)),
+            CmTypesHelper::VecCmt(v) => CmTypes::VecCmt(Arc::new(v)),
+        })
+    }
 }
 
 // Wrapper for Complex32 to implement Serialize/Deserialize
@@ -135,6 +204,102 @@ impl From<C64> for Complex64 {
 }
 
 impl CmTypes {
+    // Helper constructors for Arc-wrapped types - more ergonomic than calling Arc::new directly
+    pub fn new_string<S: AsRef<str>>(s: S) -> Self {
+        CmTypes::String(Arc::from(s.as_ref()))
+    }
+
+    pub fn new_i128(val: i128) -> Self {
+        CmTypes::I128(Arc::new(val))
+    }
+
+    pub fn new_u128(val: u128) -> Self {
+        CmTypes::U128(Arc::new(val))
+    }
+
+    pub fn new_complex32(val: C32) -> Self {
+        CmTypes::Complex32(Arc::new(val))
+    }
+
+    pub fn new_complex64(val: C64) -> Self {
+        CmTypes::Complex64(Arc::new(val))
+    }
+
+    pub fn new_vec(vec: Vec<CmTypes>) -> Self {
+        CmTypes::VecCmt(Arc::new(vec))
+    }
+
+    pub fn new_barrier<S: AsRef<str>>(s: S) -> Self {
+        CmTypes::Barrier(Arc::from(s.as_ref()))
+    }
+
+    // Helper methods to extract values from Arc-wrapped types
+    /// Extract String from Arc<str> - for compatibility with existing code
+    pub fn to_string_owned(&self) -> String {
+        match self {
+            CmTypes::String(s) => s.to_string(),
+            CmTypes::Barrier(s) => s.to_string(),
+            _ => format!("{}", self),
+        }
+    }
+
+    /// Extract String from Arc<str>
+    pub fn as_string(&self) -> Option<String> {
+        match self {
+            CmTypes::String(s) => Some(s.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Get reference to str from Arc<str>
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            CmTypes::String(s) => Some(s),
+            CmTypes::Barrier(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Extract i128 value
+    pub fn as_i128(&self) -> Option<i128> {
+        match self {
+            CmTypes::I128(v) => Some(**v),
+            _ => None,
+        }
+    }
+
+    /// Extract u128 value
+    pub fn as_u128(&self) -> Option<u128> {
+        match self {
+            CmTypes::U128(v) => Some(**v),
+            _ => None,
+        }
+    }
+
+    /// Get reference to Vec<CmTypes>
+    pub fn as_vec(&self) -> Option<&Vec<CmTypes>> {
+        match self {
+            CmTypes::VecCmt(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Extract Complex32 value
+    pub fn as_complex32(&self) -> Option<C32> {
+        match self {
+            CmTypes::Complex32(c) => Some(**c),
+            _ => None,
+        }
+    }
+
+    /// Extract Complex64 value
+    pub fn as_complex64(&self) -> Option<C64> {
+        match self {
+            CmTypes::Complex64(c) => Some(**c),
+            _ => None,
+        }
+    }
+
     pub fn from_any<T: Any + Send + Sync>(value: T) -> CmTypes {
         CmTypes::Any(Arc::new(RwLock::new(Box::new(value))))
     }
@@ -352,12 +517,12 @@ impl CmTypes {
             CmTypes::U16(x) => Some(*x as usize),
             CmTypes::U32(x) => Some(*x as usize),
             CmTypes::U64(x) => Some(*x as usize),
-            CmTypes::U128(x) => Some(*x as usize),
+            CmTypes::U128(x) => Some(**x as usize),
             CmTypes::I8(x) if *x >= 0 => Some(*x as usize),
             CmTypes::I16(x) if *x >= 0 => Some(*x as usize),
             CmTypes::I32(x) if *x >= 0 => Some(*x as usize),
             CmTypes::I64(x) if *x >= 0 => Some(*x as usize),
-            CmTypes::I128(x) if *x >= 0 => Some(*x as usize),
+            CmTypes::I128(x) if **x >= 0 => Some(**x as usize),
             _ => None,
         }
     }
@@ -883,23 +1048,23 @@ impl PartialEq for CmTypes {
             (CmTypes::I16(a), CmTypes::I16(b)) => a == b,
             (CmTypes::I32(a), CmTypes::I32(b)) => a == b,
             (CmTypes::I64(a), CmTypes::I64(b)) => a == b,
-            (CmTypes::I128(a), CmTypes::I128(b)) => a == b,
+            (CmTypes::I128(a), CmTypes::I128(b)) => **a == **b,
             (CmTypes::U8(a), CmTypes::U8(b)) => a == b,
             (CmTypes::U16(a), CmTypes::U16(b)) => a == b,
             (CmTypes::U32(a), CmTypes::U32(b)) => a == b,
             (CmTypes::U64(a), CmTypes::U64(b)) => a == b,
-            (CmTypes::U128(a), CmTypes::U128(b)) => a == b,
+            (CmTypes::U128(a), CmTypes::U128(b)) => **a == **b,
             (CmTypes::F32(a), CmTypes::F32(b)) => a == b,
             (CmTypes::F64(a), CmTypes::F64(b)) => a == b,
             (CmTypes::Char(a), CmTypes::Char(b)) => a == b,
             (CmTypes::Usize(a), CmTypes::Usize(b)) => a == b,
-            (CmTypes::String(a), CmTypes::String(b)) => a == b,
-            (CmTypes::VecCmt(a), CmTypes::VecCmt(b)) => a == b,
+            (CmTypes::String(a), CmTypes::String(b)) => &**a == &**b,
+            (CmTypes::VecCmt(a), CmTypes::VecCmt(b)) => **a == **b,
             (CmTypes::Ref(a), CmTypes::Ref(b)) => a == b,
             (CmTypes::Res(a), CmTypes::Res(b)) => a == b,
-            (CmTypes::Barrier(a), CmTypes::Barrier(b)) => a == b,
-            (CmTypes::Complex32(a), CmTypes::Complex32(b)) => a == b,
-            (CmTypes::Complex64(a), CmTypes::Complex64(b)) => a == b,
+            (CmTypes::Barrier(a), CmTypes::Barrier(b)) => &**a == &**b,
+            (CmTypes::Complex32(a), CmTypes::Complex32(b)) => **a == **b,
+            (CmTypes::Complex64(a), CmTypes::Complex64(b)) => **a == **b,
             (CmTypes::None, CmTypes::None) => true,
             (CmTypes::Init, CmTypes::Init) => true,
             _ => false,
@@ -915,24 +1080,24 @@ impl std::fmt::Debug for CmTypes {
             CmTypes::I16(val) => write!(f, "I16({:?})", val),
             CmTypes::I32(val) => write!(f, "I32({:?})", val),
             CmTypes::I64(val) => write!(f, "I64({:?})", val),
-            CmTypes::I128(val) => write!(f, "I128({:?})", val),
+            CmTypes::I128(val) => write!(f, "I128({:?})", **val),
             CmTypes::U8(val) => write!(f, "U8({:?})", val),
             CmTypes::U16(val) => write!(f, "U16({:?})", val),
             CmTypes::U32(val) => write!(f, "U32({:?})", val),
             CmTypes::U64(val) => write!(f, "U64({:?})", val),
-            CmTypes::U128(val) => write!(f, "U128({:?})", val),
+            CmTypes::U128(val) => write!(f, "U128({:?})", **val),
             CmTypes::F32(val) => write!(f, "F32({:?})", val),
             CmTypes::F64(val) => write!(f, "F64({:?})", val),
             CmTypes::Char(val) => write!(f, "Char({:?})", val),
             CmTypes::Usize(val) => write!(f, "Usize({:?})", val),
             CmTypes::Isize(val) => write!(f, "Isize({:?})", val),
-            CmTypes::VecCmt(val) => write!(f, "VecCmt({:?})", val),
-            CmTypes::String(val) => write!(f, "String({:?})", val),
+            CmTypes::VecCmt(val) => write!(f, "VecCmt({:?})", **val),
+            CmTypes::String(val) => write!(f, "String({:?})", &**val),
             CmTypes::Ref(val) => write!(f, "Ref({:?})", val),
             CmTypes::Res(val) => write!(f, "Res({:?})", val),
-            CmTypes::Barrier(val) => write!(f, "Barrier({:?})", val),
-            CmTypes::Complex32(val) => write!(f, "Complex32({:?})", val),
-            CmTypes::Complex64(val) => write!(f, "Complex64({:?})", val),
+            CmTypes::Barrier(val) => write!(f, "Barrier({:?})", &**val),
+            CmTypes::Complex32(val) => write!(f, "Complex32({:?})", **val),
+            CmTypes::Complex64(val) => write!(f, "Complex64({:?})", **val),
             CmTypes::None => write!(f, "None"),
             CmTypes::Init => write!(f, "Init"),
             CmTypes::Any(_) => write!(f, "CustomType"),
@@ -950,21 +1115,21 @@ impl fmt::Display for CmTypes {
             CmTypes::I16(x) => write!(f, "{}", x),
             CmTypes::I32(x) => write!(f, "{}", x),
             CmTypes::I64(x) => write!(f, "{}", x),
-            CmTypes::I128(x) => write!(f, "{}", x),
+            CmTypes::I128(x) => write!(f, "{}", **x),
             CmTypes::U8(x) => write!(f, "{}", x),
             CmTypes::U16(x) => write!(f, "{}", x),
             CmTypes::U32(x) => write!(f, "{}", x),
             CmTypes::U64(x) => write!(f, "{}", x),
-            CmTypes::U128(x) => write!(f, "{}", x),
+            CmTypes::U128(x) => write!(f, "{}", **x),
             CmTypes::F32(x) => write!(f, "{}", x),
             CmTypes::F64(x) => write!(f, "{}", x),
             CmTypes::Char(x) => write!(f, "{}", x),
             CmTypes::Usize(x) => write!(f, "{}", x),
             CmTypes::Isize(x) => write!(f, "{}", x),
-            CmTypes::String(x) => write!(f, "{}", x),
+            CmTypes::String(x) => write!(f, "{}", &**x),
             CmTypes::Ref(x) => write!(f, "{}", x),
             CmTypes::Res(x) => write!(f, "{}", x),
-            CmTypes::Barrier(x) => write!(f, "{}", x),
+            CmTypes::Barrier(x) => write!(f, "{}", &**x),
             CmTypes::Complex32(x) => {
                 if x.0.im >= 0.0 {
                     write!(f, "{}+{}i", x.0.re, x.0.im)
@@ -1144,23 +1309,23 @@ lazy_static! {
         add!("i16",     |s| s.parse::<i16>().map(CmTypes::I16).map_err(|_| CustomError::new(&format!("invalid i16: '{}'", s))));
         add!("i32",     |s| s.parse::<i32>().map(CmTypes::I32).map_err(|_| CustomError::new(&format!("invalid i32: '{}'", s))));
         add!("i64",     |s| s.parse::<i64>().map(CmTypes::I64).map_err(|_| CustomError::new(&format!("invalid i64: '{}'", s))));
-        add!("i128",    |s| s.parse::<i128>().map(CmTypes::I128).map_err(|_| CustomError::new(&format!("invalid i128: '{}'", s))));
+        add!("i128",    |s| s.parse::<i128>().map(|v| CmTypes::I128(Arc::new(v))).map_err(|_| CustomError::new(&format!("invalid i128: '{}'", s))));
         add!("u8",      |s| s.parse::<u8>().map(CmTypes::U8).map_err(|_| CustomError::new(&format!("invalid u8: '{}'", s))));
         add!("u16",     |s| s.parse::<u16>().map(CmTypes::U16).map_err(|_| CustomError::new(&format!("invalid u16: '{}'", s))));
         add!("u32",     |s| s.parse::<u32>().map(CmTypes::U32).map_err(|_| CustomError::new(&format!("invalid u32: '{}'", s))));
         add!("u64",     |s| s.parse::<u64>().map(CmTypes::U64).map_err(|_| CustomError::new(&format!("invalid u64: '{}'", s))));
-        add!("u128",    |s| s.parse::<u128>().map(CmTypes::U128).map_err(|_| CustomError::new(&format!("invalid u128: '{}'", s))));
+        add!("u128",    |s| s.parse::<u128>().map(|v| CmTypes::U128(Arc::new(v))).map_err(|_| CustomError::new(&format!("invalid u128: '{}'", s))));
         add!("f32",     |s| s.parse::<f32>().map(CmTypes::F32).map_err(|_| CustomError::new(&format!("invalid f32: '{}'", s))));
         add!("f64",     |s| s.parse::<f64>().map(CmTypes::F64).map_err(|_| CustomError::new(&format!("invalid f64: '{}'", s))));
         add!("char",    |s| s.chars().next().map(CmTypes::Char).ok_or_else(|| CustomError::new(&format!("invalid char: '{}'", s))));
         add!("usize",   |s| s.parse::<usize>().map(CmTypes::Usize).map_err(|_| CustomError::new(&format!("invalid usize: '{}'", s))));
         add!("isize",   |s| s.parse::<isize>().map(CmTypes::Isize).map_err(|_| CustomError::new(&format!("invalid isize: '{}'", s))));
-        add!("String",  |s| Ok(CmTypes::String(s.to_string())));
-        add!("Complex32",  |s| parse_complex32(s).map(CmTypes::Complex32).map_err(|e| CustomError::new(&format!("Complex32 parse error for '{}': {}", s, e))));
-        add!("Complex64",  |s| parse_complex64(s).map(CmTypes::Complex64).map_err(|e| CustomError::new(&format!("Complex64 parse error for '{}': {}", s, e))));
+        add!("String",  |s| Ok(CmTypes::String(Arc::from(s))));
+        add!("Complex32",  |s| parse_complex32(s).map(|v| CmTypes::Complex32(Arc::new(v))).map_err(|e| CustomError::new(&format!("Complex32 parse error for '{}': {}", s, e))));
+        add!("Complex64",  |s| parse_complex64(s).map(|v| CmTypes::Complex64(Arc::new(v))).map_err(|e| CustomError::new(&format!("Complex64 parse error for '{}': {}", s, e))));
         add!("$ref",    |s| s.parse::<usize>().map(CmTypes::Ref).map_err(|_| CustomError::new(&format!("invalid ref: '{}'", s))));
         add!("$res",    |s| s.parse::<usize>().map(CmTypes::Res).map_err(|_| CustomError::new(&format!("invalid res: '{}'", s))));
-        add!("$barrier", |s| Ok(CmTypes::Barrier(s.to_string())));
+        add!("$barrier", |s| Ok(CmTypes::Barrier(Arc::from(s))));
         add!("None",    |_| Ok(CmTypes::None));
         add!("Init",    |_| Ok(CmTypes::Init));
         entry_map
@@ -1194,8 +1359,8 @@ pub fn string_to_cmtype(tp: String, arg: String) -> Result<CmTypes, CustomError>
                 return Err(CustomError::new(&format!("Unable to parse type '{}'", tp)));
             }
         }
-        // Return the vector of CmTypes
-        return Ok(CmTypes::VecCmt(v));
+        // Return the vector of CmTypes wrapped in Arc
+        return Ok(CmTypes::VecCmt(Arc::new(v)));
     } else {
         // Return error
         return Err(CustomError::new(&format!("Unable to parse type '{}'", tp)));
@@ -1475,8 +1640,8 @@ mod tests {
         assert_eq!(c64, deserialized);
 
         // Test in CmTypes enum
-        let cm_c32 = CmTypes::Complex32(C32(Complex32::new(1.0, 2.0)));
-        let cm_c64 = CmTypes::Complex64(C64(Complex64::new(3.0, 4.0)));
+        let cm_c32 = CmTypes::Complex32(Arc::new(C32(Complex32::new(1.0, 2.0))));
+        let cm_c64 = CmTypes::Complex64(Arc::new(C64(Complex64::new(3.0, 4.0))));
 
         println!("CmTypes::Complex32 display: {}", cm_c32);
         println!("CmTypes::Complex64 display: {}", cm_c64);

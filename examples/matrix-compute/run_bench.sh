@@ -21,12 +21,15 @@ DYN_LIB=$TARGET_DIR/target/release/libmatcomp.so
 APP_GRAPH=$(readlink -f "$SCRIPT_DIR/graph.json")
 
 # Configuration Parameters
-WORKERS=20
+WORKERS=2
 RUNTIME=10
 SLOTS=2
 EXP_STREAMS=1
 OUTPUT="$SCRIPT_DIR/out.txt"
 TIMING_FILE="$SCRIPT_DIR/timing.txt"
+SYSTEM_THREADS=3
+BATCHING_SIZE=1
+BATCHING_LIMIT=10
 DEBUG="" # Set to "--debug" to enable debug mode
 RECORD="--record" # Set to "--record-sched" to enable scheduler recording
 
@@ -69,6 +72,9 @@ else
         --dylib $DYN_LIB \
         --inits \
         --workers $WORKERS \
+        --system-threads $SYSTEM_THREADS \
+        --batching-size $BATCHING_SIZE \
+        --batching-limit $BATCHING_LIMIT \
         --output $OUTPUT \
         --max-runtime $RUNTIME \
         --slots $SLOTS \

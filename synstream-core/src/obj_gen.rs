@@ -23,7 +23,7 @@ pub fn init_objects(
     init_objects.push(vec![CmTypes::Usize(1)]);
 
     for init in initializations_json.iter() {
-        let name = init.name.clone();
+        let name = &init.name;
         print_debug(|| format!("Initializing object: {}", name));
         let factor = match &init.factor {
             Some(factor) => factor.search(&init_objects, &obj_id_map, workers),
@@ -33,11 +33,11 @@ pub fn init_objects(
 
         if init.function_name.is_none() {
             // direct variable initialization
-            let type_str = args_json[0].type_.clone();
-            let value_str = args_json[0].value.clone();
+            let type_str = &args_json[0].type_;
+            let value_str = &args_json[0].value;
 
             // Check if type_str is in PARSERS
-            let value_cmt_res = string_to_cmtype(type_str.clone(), value_str.clone());
+            let value_cmt_res = string_to_cmtype(type_str.to_string(), value_str.to_string());
             let value_cmt = match value_cmt_res {
                 Ok(cmt) => cmt,
                 Err(e) => {
@@ -59,15 +59,15 @@ pub fn init_objects(
             init_objects.push(value_vec);
         } else {
             // function call needed
-            let func_name = init.function_name.as_ref().unwrap().clone();
-            let func_ptr = get_func(&func_name).unwrap();
+            let func_name = init.function_name.as_ref().unwrap();
+            let func_ptr = get_func(func_name).unwrap();
 
             let mut value_vec: Vec<CmTypes> = Vec::new();
             for i in 0..factor {
                 let mut args: Vec<CmTypes> = Vec::new();
                 for arg_json in args_json.iter() {
-                    let type_str = arg_json.type_.clone();
-                    let value_str = arg_json.value.clone();
+                    let type_str = &arg_json.type_;
+                    let value_str = &arg_json.value;
 
                     if value_str == "$workers" {
                         // special case for workers
@@ -82,13 +82,13 @@ pub fn init_objects(
                     }
 
                     // check if value_str is in init_objects
-                    if let Some(obj_id) = obj_id_map.get(&value_str) {
+                    if let Some(obj_id) = obj_id_map.get(value_str.as_str()) {
                         let init_arg = &init_objects[*obj_id];
                         args.push(init_arg[0].clone());
                         continue;
                     }
 
-                    let arg_cmt_res = string_to_cmtype(type_str.clone(), value_str.clone());
+                    let arg_cmt_res = string_to_cmtype(type_str.to_string(), value_str.to_string());
                     let arg_cmt = match arg_cmt_res {
                         Ok(cmt) => cmt,
                         Err(e) => {

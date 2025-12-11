@@ -19,7 +19,7 @@ fn parse_arg(
     obj_id_map: &RapidHashMap<String, usize>,
     name_to_id: &RapidHashMap<String, IdType>,
 ) -> Arg {
-    let arg_value_opt = arg_json.value.clone();
+    let arg_value_opt = arg_json.value.as_deref();
 
     // Check if the argument has a condition
     let condition: Option<InitCondition> = {
@@ -45,16 +45,16 @@ fn parse_arg(
     };
 
     let arg_cmtype = {
-        let type_json = arg_json.type_.clone();
+        let type_json = &arg_json.type_;
         if predecessor.is_some() {
             let id = predecessor.as_ref().unwrap().id;
-            string_to_cmtype(type_json.clone(), id.to_string()).unwrap()
+            string_to_cmtype(type_json.to_string(), id.to_string()).unwrap()
         } else {
             if let Some(arg_value) = arg_value_opt {
-                if let Some(obj_id) = obj_id_map.get(&arg_value) {
-                    string_to_cmtype(type_json.clone(), obj_id.to_string()).unwrap()
+                if let Some(obj_id) = obj_id_map.get(arg_value) {
+                    string_to_cmtype(type_json.to_string(), obj_id.to_string()).unwrap()
                 } else {
-                    string_to_cmtype(type_json.clone(), arg_value).unwrap()
+                    string_to_cmtype(type_json.to_string(), arg_value.to_string()).unwrap()
                 }
             } else {
                 // This should not happen
@@ -77,11 +77,11 @@ fn parse_predecessor(
     obj_id_map: &RapidHashMap<String, usize>,
     name_to_id: &RapidHashMap<String, IdType>,
 ) -> Predecessor {
-    let pred_name = pred_json.name.clone();
-    let pred_id = name_to_id.get(&pred_name).unwrap().clone();
+    let pred_name = &pred_json.name;
+    let pred_id = *name_to_id.get(pred_name).unwrap();
 
     let mut index_vec = Vec::new();
-    let indexes = pred_json.indexes.clone();
+    let indexes = &pred_json.indexes;
 
     // 1st case: exact indexes ',' separated
     if indexes.contains(',') {
@@ -134,8 +134,8 @@ fn parse_condition(condition_json: &ConditionJson) -> InitCondition {
     };
 
     let eval_value = string_to_cmtype(
-        condition_json.value_type.clone(),
-        condition_json.value.clone(),
+        condition_json.value_type.to_string(),
+        condition_json.value.to_string(),
     )
     .unwrap();
 
