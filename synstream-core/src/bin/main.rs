@@ -1,5 +1,6 @@
 use clap::Parser;
 use std::fs::OpenOptions;
+use std::path::PathBuf;
 use synstream_core::debug::*;
 use synstream_core::graph::Graph;
 use synstream_core::graph_gen::from_json;
@@ -151,7 +152,10 @@ fn main() {
         if args.record {
             // remove  extension if present
             let time_name = time_name.split('.').next().unwrap_or_default();
-            synrt.write_record(&format!("{}_schedule.csv", time_name));
+            let path = PathBuf::from(&time_file);
+            let dir = path.parent().unwrap();
+            let csv_file = dir.join(format!("{}_schedule.csv", time_name));
+            synrt.write_record(csv_file.to_str().unwrap());
         }
     }
 }
@@ -170,7 +174,15 @@ pub fn run_graph(
     batching_size: usize,
     batching_limit: u64,
 ) -> SynRt {
-    let mut synrt = SynRt::new(graph, slots, max_streams, max_runtime, use_rdtsc, record, system_threads);
+    let mut synrt = SynRt::new(
+        graph,
+        slots,
+        max_streams,
+        max_runtime,
+        use_rdtsc,
+        record,
+        system_threads,
+    );
     let scheduler = create_scheduler(
         scheduler_type,
         core_offset,
