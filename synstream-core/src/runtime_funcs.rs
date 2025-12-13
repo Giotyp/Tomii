@@ -186,13 +186,53 @@ pub struct SharedData {
 
 #[inline(always)]
 fn execute_task(
+    shared: &Arc<SharedData>,
     func: CmPtr,
-    arg_vec: Vec<CmTypes>,
     node_info: &NodeInfo,
     time_buf: &Arc<TimeBufferManager>,
     node_name: &str,
     completed_tx: &Sender<(NodeInfo, CmTypes)>,
+    pre_built_args: Option<Vec<CmTypes>>,
 ) {
+    let worker_id = crate::scheduler::get_current_worker_id().unwrap_or(usize::MAX);
+
+    // Measure argument building time separately
+    let arg_build_start = if !node_info.post_node {
+        Some(time_buf.measure_time())
+    } else {
+        None
+    };
+
+    // Build arguments here in the worker thread
+    let arg_vec = if let Some(args) = pre_built_args {
+        // For post-nodes or special cases with pre-built args
+        args
+    } else {
+        // For regular nodes, build args from cache
+        let node_cache = &shared.node_cache[node_info.id as usize];
+        create_node_args(
+            shared,
+            node_cache,
+            node_info.id,
+            node_info.index,
+            node_info.slot,
+            node_info.pred_index,
+        )
+    };
+
+    if let Some(arg_start) = arg_build_start {
+        let arg_end = time_buf.measure_time();
+        let arg_duration = time_buf.measure_duration(arg_start, arg_end);
+        // Record argument building time as a separate metric
+        time_buf.add_task_time(
+            node_info.slot,
+            &format!("{}-argbuild", node_name),
+            worker_id,
+            arg_duration,
+        );
+    }
+
+    // Start timing for actual function execution
     let start_time = if !node_info.post_node {
         Some(time_buf.measure_time())
     } else {
@@ -204,11 +244,10 @@ fn execute_task(
     if let Some(start) = start_time {
         let end_time = time_buf.measure_time();
         let duration = time_buf.measure_duration(start, end_time);
-        let worker_id = crate::scheduler::get_current_worker_id().unwrap_or(usize::MAX);
         time_buf.add_task_time(node_info.slot, node_name, worker_id, duration);
     }
 
-    // Send result
+    // Send result immediately
     let _ = completed_tx.send((node_info.clone(), result));
 }
 
@@ -216,7 +255,7 @@ fn execute_task(
 pub fn send_to_scheduler(
     shared: &Arc<SharedData>,
     node_info: &NodeInfo,
-    arg_vec: Vec<CmTypes>,
+    pre_built_args: Option<Vec<CmTypes>>,
     custom_func: Option<CmPtr>,
 ) {
     let (func_ptr, node_name) = {
@@ -254,6 +293,7 @@ pub fn send_to_scheduler(
     };
 
     let time_buf = Arc::clone(&shared.time_buffer);
+    let shared_clone = Arc::clone(shared);
 
     // Get scheduler with proper error handling
     let scheduler_guard = match shared.scheduler.read() {
@@ -285,12 +325,13 @@ pub fn send_to_scheduler(
     let node_info = node_info.clone();
     scheduler.spawn_task_with_meta(Some(meta_data), move || {
         execute_task(
+            &shared_clone,
             func_ptr,
-            arg_vec,
             &node_info,
             &time_buf,
             &node_name,
             &completed_tx,
+            pre_built_args,
         )
     });
 }

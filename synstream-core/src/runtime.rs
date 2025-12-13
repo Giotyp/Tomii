@@ -264,21 +264,8 @@ impl SynRt {
             let start_ns = shared.base_instant.elapsed().as_nanos();
             print_debug(|| format!("Preparing {:?}", node_info));
 
-            let node = &shared.node_cache[node_info.id as usize];
-
-            let arg_vec = create_node_args(
-                &shared,
-                node,
-                node_info.id,
-                node_info.index,
-                node_info.slot,
-                node_info.pred_index,
-            );
-
-            if !arg_vec.is_empty() {
-                // Schedule Task
-                send_to_scheduler(&shared, node_info, arg_vec, None);
-            }
+            // Schedule Task - args will be built in the worker thread
+            send_to_scheduler(&shared, node_info, None, None);
 
             let end_time = shared.time_buffer.measure_time();
             let end_ns = shared.base_instant.elapsed().as_nanos();
@@ -528,6 +515,12 @@ impl SynRt {
                 // Batch process dependency decrements - acquire lock once
                 {
                     let mut dep_map = shared.dependency_map.write().unwrap();
+                    print_debug(|| {
+                        format!(
+                            "Dependency map before processing successors of {:?}: {:?}",
+                            node_info, *dep_map
+                        )
+                    });
                     let mut queue_lock = shared.nodes_sent_to_queue.lock().unwrap();
 
                     for (succ_info, has_cond, succ_id) in succ_updates {
@@ -578,6 +571,12 @@ impl SynRt {
                             }
                         }
                     }
+                    print_debug(|| {
+                        format!(
+                            "Dependency map after processing successors of {:?}: {:?}",
+                            node_info, *dep_map
+                        )
+                    });
                 }
                 // Schedule Nodes
                 Self::preparation(&shared, &nodes_to_schedule, thread_core, thread_slot);
@@ -698,7 +697,7 @@ impl SynRt {
 
                     let func = post_node.func_ptr;
 
-                    send_to_scheduler(&self.shared, &node_info, arg_vec, func);
+                    send_to_scheduler(&self.shared, &node_info, Some(arg_vec), func);
                 }
                 print_debug(|| format!("Added post node: {}", post_node.name));
                 // Wait until all are completed by checking node_results
