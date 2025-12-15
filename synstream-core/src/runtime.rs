@@ -1,9 +1,10 @@
 use core_affinity;
 use crossbeam_channel::Receiver;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread::{sleep, spawn};
 use std::time::{Duration, Instant};
 
@@ -33,7 +34,7 @@ impl SynRt {
     ) -> SynRt {
         // Initialize stream completion counters
         let stream_completion_counts = Arc::new(RwLock::new(Vec::new()));
-        let mut completion_counts = stream_completion_counts.write().unwrap();
+        let mut completion_counts = stream_completion_counts.write();
         completion_counts.clear();
 
         let slots = std::cmp::min(slots, max_streams);
@@ -43,7 +44,7 @@ impl SynRt {
         drop(completion_counts);
 
         let available_stream_slots = Arc::new(RwLock::new(Vec::new()));
-        let mut available_write = available_stream_slots.write().unwrap();
+        let mut available_write = available_stream_slots.write();
         for _ in 0..slots {
             available_write.push(std::usize::MAX); // real stream id
         }
@@ -53,7 +54,14 @@ impl SynRt {
         let node_cache: Vec<NodeCacheEntry> = app_graph
             .nodes
             .iter()
-            .map(|node| node_cache_entry(node, app_graph.init_objects.as_ref().unwrap()))
+            .map(|node| {
+                node_cache_entry(
+                    node,
+                    app_graph.init_objects.as_ref().unwrap(),
+                    &app_graph.initial_nodes,
+                    &app_graph.condition_nodes,
+                )
+            })
             .collect();
 
         // Allocate slots + system_threads for TimeBuffer (slots for worker streams, system_threads for system threads)
@@ -78,31 +86,52 @@ impl SynRt {
         let mut dependency_map = VecMap::new(0);
         dependency_map.init_map(&app_graph.nodes, slots, Some(dependency_count_vec.clone()));
 
+        // Compute max_factor for flat index computation
+        let max_factor = node_cache.iter().map(|n| n.factor).max().unwrap_or(1);
+        let num_nodes = app_graph.nodes.len();
+
         // Initialize remaining nodes trackers with AtomicUsize for thread-safe access
         let mut remaining_nodes = Vec::new();
         let mut remaining_cond_nodes = Vec::new();
+        let mut remaining_init = Vec::new(); // Store initial values for reinit
         let mut node_id_to_rem = vec![0; app_graph.nodes.len()];
-        let mut nodes_sent_to_queue = Vec::new();
+        let mut node_id_is_cond = vec![false; app_graph.nodes.len()]; // Track which nodes are condition nodes
+        
+        // Lock-free sent_to_queue: nodes_sent_to_queue[slot][node_id * max_factor + index]
+        let mut nodes_sent_to_queue: Vec<Vec<AtomicBool>> = Vec::new();
 
         for _slot in 0..slots {
             let mut slot_remaining = Vec::new();
             let mut slot_cond_remaining = Vec::new();
-            nodes_sent_to_queue.push(std::collections::HashSet::new());
+            let mut slot_remaining_init = Vec::new();
+            // Initialize flat AtomicBool array for lock-free sent_to_queue checks
+            let mut slot_sent: Vec<AtomicBool> = Vec::with_capacity(num_nodes * max_factor);
+            for _ in 0..(num_nodes * max_factor) {
+                slot_sent.push(AtomicBool::new(false));
+            }
+            nodes_sent_to_queue.push(slot_sent);
 
             for node_id in 0..app_graph.nodes.len() {
                 if app_graph.initial_nodes.contains(&(node_id as IdType)) {
                     slot_remaining.push(AtomicUsize::new(0));
+                    slot_remaining_init.push(0);
                     node_id_to_rem[node_id] = slot_remaining.len() - 1;
+                    node_id_is_cond[node_id] = false;
                 } else if !app_graph.condition_nodes.contains(&(node_id as IdType)) {
-                    slot_remaining.push(AtomicUsize::new(node_cache[node_id].factor));
+                    let factor = node_cache[node_id].factor;
+                    slot_remaining.push(AtomicUsize::new(factor));
+                    slot_remaining_init.push(factor);
                     node_id_to_rem[node_id] = slot_remaining.len() - 1;
+                    node_id_is_cond[node_id] = false;
                 } else {
                     slot_cond_remaining.push(AtomicUsize::new(node_cache[node_id].factor));
                     node_id_to_rem[node_id] = slot_cond_remaining.len() - 1;
+                    node_id_is_cond[node_id] = true;
                 }
             }
             remaining_nodes.push(slot_remaining);
             remaining_cond_nodes.push(slot_cond_remaining);
+            remaining_init.push(slot_remaining_init);
         }
 
         let shared = Arc::new(SharedData {
@@ -123,11 +152,14 @@ impl SynRt {
             job_counter,
             core_offset,
             dependency_map: Arc::new(RwLock::new(dependency_map)),
-            remaining_nodes: Arc::new(RwLock::new(remaining_nodes)),
-            remaining_cond_nodes: Arc::new(RwLock::new(remaining_cond_nodes)),
-            nodes_sent_to_queue: Arc::new(Mutex::new(nodes_sent_to_queue)),
+            remaining_nodes: Arc::new(remaining_nodes),
+            remaining_cond_nodes: Arc::new(remaining_cond_nodes),
+            nodes_sent_to_queue: Arc::new(nodes_sent_to_queue),
+            max_factor,
             completed_slots: Arc::new(Mutex::new(std::collections::HashSet::new())),
             node_id_to_rem: Arc::new(node_id_to_rem),
+            node_id_is_cond: Arc::new(node_id_is_cond),
+            remaining_init: Arc::new(remaining_init),
             initial_prep_done: Arc::new(AtomicUsize::new(0)),
             system_threads,
         });
@@ -154,13 +186,13 @@ impl SynRt {
         // create completed channel
         let (completed_tx, completed_rx) = crossbeam_channel::unbounded::<(NodeInfo, CmTypes)>();
         {
-            let mut tx_lock = self.shared.completed_tx.write().unwrap();
+            let mut tx_lock = self.shared.completed_tx.write();
             *tx_lock = Some(completed_tx);
         }
         // Store scheduler
         let core_offset: usize;
         {
-            let mut scheduler_lock = self.shared.scheduler.write().unwrap();
+            let mut scheduler_lock = self.shared.scheduler.write();
             core_offset = scheduler.core_offset().unwrap_or(0);
             *scheduler_lock = Some(Arc::new(scheduler));
         }
@@ -224,7 +256,7 @@ impl SynRt {
                     self.schedule_post_nodes();
                     // Close completed channel - send exit signal to all threads
                     {
-                        let tx_lock = self.shared.completed_tx.read().unwrap();
+                        let tx_lock = self.shared.completed_tx.read();
                         if let Some(ref tx) = *tx_lock {
                             for _ in 0..system_threads {
                                 tx.send((NodeInfo::new(IdType::MAX, 0, 0, 0), CmTypes::None))
@@ -279,7 +311,7 @@ impl SynRt {
 
             if let Some(rec) = &shared.recorder {
                 let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
-                let mut map = rec.lock().unwrap();
+                let mut map = rec.lock();
                 let vec = map.entry(thread_slot).or_insert_with(Vec::new);
                 vec.push(Record {
                     job_id,
@@ -381,9 +413,7 @@ impl SynRt {
 
                 if node_info.post_node {
                     // Store Result
-                    let mut res_lock = shared.node_results.write().unwrap();
-                    res_lock.set(&node_info, result);
-                    drop(res_lock);
+                    shared.node_results.write().set(&node_info, result);
                     continue;
                 }
 
@@ -403,32 +433,22 @@ impl SynRt {
                     continue;
                 }
 
-                // store result
-                let mut res_lock = shared.node_results.write().unwrap();
-                res_lock.set(&node_info, result);
-                drop(res_lock);
+                // store result - single lock acquisition
+                shared.node_results.write().set(&node_info, result);
 
                 // Decrement remaining_nodes counter now that this task is confirmed completed
+                // Using pre-computed node_id_is_cond flag for lock-free branch
                 let node_id_usize = node_info.id as usize;
                 let node_id_to_rem_idx = shared.node_id_to_rem[node_id_usize];
-                {
-                    if shared
-                        .graph
-                        .condition_nodes
-                        .contains(&(node_id_usize as IdType))
-                    {
-                        let cond_nodes_lock = shared.remaining_cond_nodes.read().unwrap();
-                        cond_nodes_lock[node_info.slot][node_id_to_rem_idx]
-                            .fetch_sub(1, Ordering::SeqCst);
-                    } else if !shared
-                        .graph
-                        .initial_nodes
-                        .contains(&(node_id_usize as IdType))
-                    {
-                        let nodes_lock = shared.remaining_nodes.read().unwrap();
-                        nodes_lock[node_info.slot][node_id_to_rem_idx]
-                            .fetch_sub(1, Ordering::SeqCst);
-                    }
+                let node_cache_entry = &shared.node_cache[node_id_usize];
+
+                // Lock-free access using pre-computed is_condition flag
+                if node_cache_entry.is_condition {
+                    shared.remaining_cond_nodes[node_info.slot][node_id_to_rem_idx]
+                        .fetch_sub(1, Ordering::Release);
+                } else if !node_cache_entry.is_initial {
+                    shared.remaining_nodes[node_info.slot][node_id_to_rem_idx]
+                        .fetch_sub(1, Ordering::Release);
                 }
 
                 // Get successors
@@ -445,22 +465,26 @@ impl SynRt {
                 let mut nodes_sent = 0;
                 let mut nodes_to_schedule: Vec<NodeInfo> = Vec::new();
 
-                // Collect all potential successors first with their succ_id
-                let mut succ_updates: Vec<(NodeInfo, bool, IdType)> = Vec::new();
+                // Collect all potential successors with their info
+                let mut succ_updates: Vec<(NodeInfo, bool, IdType, usize)> = Vec::new(); // Added flat_idx
+                let max_factor = shared.max_factor;
+                
                 for succ_id in successors {
                     let succ_id = *succ_id;
+                    let succ_cache = &shared.node_cache[succ_id as usize];
 
-                    let has_condition = shared.graph.condition_nodes.contains(&succ_id);
+                    // Use pre-computed flag for lock-free check
+                    let has_condition = succ_cache.is_condition;
 
+                    // Lock-free remaining count access
                     let remaining = {
                         let succ_id_to_rem_idx = shared.node_id_to_rem[succ_id as usize];
                         if has_condition {
-                            let cond_nodes_lock = shared.remaining_cond_nodes.read().unwrap();
-                            cond_nodes_lock[node_info.slot][succ_id_to_rem_idx]
-                                .load(Ordering::SeqCst)
+                            shared.remaining_cond_nodes[node_info.slot][succ_id_to_rem_idx]
+                                .load(Ordering::Acquire)
                         } else {
-                            let nodes_lock = shared.remaining_nodes.read().unwrap();
-                            nodes_lock[node_info.slot][succ_id_to_rem_idx].load(Ordering::SeqCst)
+                            shared.remaining_nodes[node_info.slot][succ_id_to_rem_idx]
+                                .load(Ordering::Acquire)
                         }
                     };
 
@@ -468,10 +492,10 @@ impl SynRt {
                         continue;
                     }
 
-                    let succ_factor = shared.node_cache[succ_id as usize].factor;
-                    let node_factor = shared.node_cache[node_info.id as usize].factor;
+                    let succ_factor = succ_cache.factor;
+                    let node_factor = node_cache_entry.factor;
 
-                    let pred_count = shared.node_cache[succ_id as usize]
+                    let pred_count = succ_cache
                         .pred_vec
                         .get(node_info.id as usize)
                         .cloned()
@@ -480,7 +504,7 @@ impl SynRt {
                     let succ_indexes = {
                         if succ_factor == node_factor && pred_count <= 1 {
                             vec![node_info.index]
-                        } else if !shared.graph.condition_nodes.contains(&succ_id) {
+                        } else if !has_condition {
                             let num_indexes = std::cmp::max(succ_factor, remaining);
                             (0..num_indexes).collect::<Vec<_>>()
                         } else {
@@ -496,69 +520,45 @@ impl SynRt {
                     });
 
                     for succ_index in succ_indexes {
+                        // Compute flat index for later atomic claim
+                        let flat_idx = (succ_id as usize) * max_factor + succ_index;
                         let succ_info =
                             NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.index);
-
-                        // Check if this node has already been sent to the queue (thread-safe)
-                        let already_sent = {
-                            let queue_lock = shared.nodes_sent_to_queue.lock().unwrap();
-                            queue_lock[node_info.slot].contains(&succ_info)
-                        };
-
-                        if !already_sent {
-                            let has_cond = shared.graph.condition_nodes.contains(&succ_id);
-                            succ_updates.push((succ_info, has_cond, succ_id));
-                        }
+                        succ_updates.push((succ_info, has_condition, succ_id, flat_idx));
                     }
                 }
 
-                // Batch process dependency decrements - acquire lock once
+                // Batch process dependency decrements
+                // Collect condition nodes to check OUTSIDE the lock to avoid nested locking
+                let mut cond_nodes_to_check: Vec<(NodeInfo, usize, usize)> = Vec::new(); // Added flat_idx
                 {
-                    let mut dep_map = shared.dependency_map.write().unwrap();
+                    let mut dep_map = shared.dependency_map.write();
                     print_debug(|| {
                         format!(
                             "Dependency map before processing successors of {:?}: {:?}",
                             node_info, *dep_map
                         )
                     });
-                    let mut queue_lock = shared.nodes_sent_to_queue.lock().unwrap();
 
-                    for (succ_info, has_cond, succ_id) in succ_updates {
+                    for (succ_info, has_cond, succ_id, flat_idx) in succ_updates {
                         if let Some(dep) = dep_map.decrease(&succ_info) {
                             if dep == 0 {
-                                if !has_cond {
-                                    print_debug(|| {
-                                        format!("Sent successor {:?} to ready channel", succ_info)
-                                    });
-                                    nodes_to_schedule.push(succ_info.clone());
-                                    queue_lock[node_info.slot].insert(succ_info);
-                                    nodes_sent += 1;
-                                    // DO NOT decrement remaining_nodes here - only when task completes
-                                } else {
-                                    let index = &shared
-                                        .graph
-                                        .condition_nodes
-                                        .iter()
-                                        .position(|&x| x == succ_id)
-                                        .unwrap();
-                                    if conditions_met(&shared, &succ_info, &cond_indexes[*index]) {
+                                // Only now try to atomically claim the slot
+                                // This ensures we only claim when dependencies are satisfied
+                                if shared.nodes_sent_to_queue[node_info.slot][flat_idx]
+                                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                                    .is_ok()
+                                {
+                                    if !has_cond {
                                         print_debug(|| {
-                                            format!(
-                                                "Sent successor {:?} to ready channel",
-                                                succ_info
-                                            )
+                                            format!("Sent successor {:?} to ready channel", succ_info)
                                         });
-                                        nodes_to_schedule.push(succ_info.clone());
-                                        queue_lock[node_info.slot].insert(succ_info);
+                                        nodes_to_schedule.push(succ_info);
                                         nodes_sent += 1;
-                                        // DO NOT decrement remaining_cond_nodes here - only when task completes
                                     } else {
-                                        print_debug(|| {
-                                            format!(
-                                                "Conditions not met for successor {:?}",
-                                                succ_info
-                                            )
-                                        });
+                                        // Collect condition nodes - will evaluate outside lock
+                                        let cond_idx = shared.node_cache[succ_id as usize].cond_index;
+                                        cond_nodes_to_check.push((succ_info, cond_idx, flat_idx));
                                     }
                                 }
                             } else {
@@ -571,13 +571,33 @@ impl SynRt {
                             }
                         }
                     }
+                    
                     print_debug(|| {
                         format!(
                             "Dependency map after processing successors of {:?}: {:?}",
                             node_info, *dep_map
                         )
                     });
+                } // dep_map released here
+                
+                // Evaluate conditions OUTSIDE the locks - conditions_met takes node_results.read()
+                for (succ_info, cond_idx, flat_idx) in cond_nodes_to_check {
+                    if conditions_met(&shared, &succ_info, &cond_indexes[cond_idx]) {
+                        print_debug(|| {
+                            format!("Sent successor {:?} to ready channel", succ_info)
+                        });
+                        nodes_to_schedule.push(succ_info);
+                        nodes_sent += 1;
+                    } else {
+                        print_debug(|| {
+                            format!("Conditions not met for successor {:?}", succ_info)
+                        });
+                        // Reset the atomic flag since condition not met
+                        shared.nodes_sent_to_queue[node_info.slot][flat_idx]
+                            .store(false, Ordering::Release);
+                    }
                 }
+
                 // Schedule Nodes
                 Self::preparation(&shared, &nodes_to_schedule, thread_core, thread_slot);
 
@@ -585,18 +605,15 @@ impl SynRt {
                 complete_iteration = false;
                 if nodes_sent == 0 {
                     let should_check_completion = {
-                        let completed_lock = shared.completed_slots.lock().unwrap();
+                        let completed_lock = shared.completed_slots.lock();
                         !completed_lock.contains(&node_info.slot)
                     };
 
                     if should_check_completion {
-                        // Check if all nodes in this slot have been processed
-                        let all_nodes_processed = {
-                            let nodes_lock = shared.remaining_nodes.read().unwrap();
-                            nodes_lock[node_info.slot]
-                                .iter()
-                                .all(|count| count.load(Ordering::SeqCst) == 0)
-                        };
+                        // Check if all nodes in this slot have been processed (lock-free)
+                        let all_nodes_processed = shared.remaining_nodes[node_info.slot]
+                            .iter()
+                            .all(|count| count.load(Ordering::Acquire) == 0);
 
                         if all_nodes_processed {
                             print_debug(|| {
@@ -605,31 +622,26 @@ impl SynRt {
 
                             // Mark this slot as completed (thread-safe)
                             {
-                                let mut completed_lock = shared.completed_slots.lock().unwrap();
+                                let mut completed_lock = shared.completed_slots.lock();
                                 completed_lock.insert(node_info.slot);
                             }
 
                             // Reset dependency_map for this slot
                             {
-                                let mut dep_map = shared.dependency_map.write().unwrap();
+                                let mut dep_map = shared.dependency_map.write();
                                 dep_map.reinit_slot(node_info.slot);
                             }
 
-                            // Reinit remaining_proc_nodes for this slot
-                            {
-                                let nodes_lock = shared.remaining_nodes.read().unwrap();
-                                for node_id in 0..nodes_lock[node_info.slot].len() {
-                                    nodes_lock[node_info.slot][node_id].store(
-                                        shared.graph.nodes[node_id].factor,
-                                        Ordering::SeqCst,
-                                    );
-                                }
+                            // Reinit remaining_nodes for this slot using pre-computed init values (lock-free)
+                            let slot_remaining = &shared.remaining_nodes[node_info.slot];
+                            let slot_init = &shared.remaining_init[node_info.slot];
+                            for (node_rem_idx, init_val) in slot_init.iter().enumerate() {
+                                slot_remaining[node_rem_idx].store(*init_val, Ordering::Release);
                             }
 
-                            // Clear nodes_sent_to_queue for this slot for new iteration
-                            {
-                                let mut queue_lock = shared.nodes_sent_to_queue.lock().unwrap();
-                                queue_lock[node_info.slot].clear();
+                            // Clear nodes_sent_to_queue for this slot (lock-free reset of all atomic flags)
+                            for flag in shared.nodes_sent_to_queue[node_info.slot].iter() {
+                                flag.store(false, Ordering::Release);
                             }
 
                             complete_iteration = true;
@@ -641,7 +653,7 @@ impl SynRt {
                 if let Some(rec) = &shared.recorder {
                     let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
                     let end_ns = shared.base_instant.elapsed().as_nanos();
-                    let mut map = rec.lock().unwrap();
+                    let mut map = rec.lock();
                     let vec = map.entry(thread_slot).or_insert_with(Vec::new);
                     vec.push(Record {
                         job_id,
@@ -665,7 +677,7 @@ impl SynRt {
                     if process_slot_completion(&shared, node_info.slot) {
                         // Remove from completed set since we're starting again (thread-safe)
                         {
-                            let mut completed_lock = shared.completed_slots.lock().unwrap();
+                            let mut completed_lock = shared.completed_slots.lock();
                             completed_lock.remove(&node_info.slot);
                         }
                         let init_nodes = initial_nodes(&shared, vec![node_info.slot]);
@@ -705,7 +717,7 @@ impl SynRt {
                 while completed_count < post_node.factor {
                     sleep(Duration::from_millis(10));
                     completed_count = 0;
-                    let results_read = self.shared.node_results.read().unwrap();
+                    let results_read = self.shared.node_results.read();
                     for i in 0..post_node.factor {
                         let node_info = NodeInfo::new(post_node.id, stream_use, i, 0);
                         if results_read.result_exists(&node_info) {
@@ -722,7 +734,7 @@ impl SynRt {
     fn init_results(&mut self, slots: usize) {
         // Initialize node_results with factor entries
         let nodes = &self.shared.graph.nodes;
-        let mut node_results_lock = self.shared.node_results.write().unwrap();
+        let mut node_results_lock = self.shared.node_results.write();
         node_results_lock.init_map(&nodes, slots, None);
 
         // Initialize post_nodes if any
@@ -738,13 +750,7 @@ impl SynRt {
 
     pub fn write_record(&self, path: &str) {
         // Get scheduler with proper error handling
-        let scheduler_guard = match self.shared.scheduler.read() {
-            Ok(guard) => guard,
-            Err(e) => {
-                eprintln!("Failed to acquire scheduler lock: {}", e);
-                return;
-            }
-        };
+        let scheduler_guard = self.shared.scheduler.read();
 
         let scheduler = match scheduler_guard.as_ref() {
             Some(s) => s,
@@ -760,24 +766,24 @@ impl SynRt {
 
     pub fn write_runtime_record(&self, path: &str) {
         if let Some(rec) = &self.shared.recorder {
-            if let Ok(map) = rec.lock() {
-                if map.is_empty() {
-                    println!("Runtime: no recorded events to write");
-                    return;
-                }
-                match std::fs::OpenOptions::new().append(true).open(path) {
-                    Ok(mut f) => {
-                        for (slot, vec) in map.iter() {
-                            for r in vec.iter() {
-                                let _ = writeln!(
-                                    f,
-                                    "{},{},{},{},{},{},{}",
-                                    slot,
-                                    r.job_id,
-                                    r.start_ns,
-                                    r.end_ns,
-                                    r.worker,
-                                    r.task_id,
+            let map = rec.lock();
+            if map.is_empty() {
+                println!("Runtime: no recorded events to write");
+                return;
+            }
+            match std::fs::OpenOptions::new().append(true).open(path) {
+                Ok(mut f) => {
+                    for (slot, vec) in map.iter() {
+                        for r in vec.iter() {
+                            let _ = writeln!(
+                                f,
+                                "{},{},{},{},{},{},{}",
+                                slot,
+                                r.job_id,
+                                r.start_ns,
+                                r.end_ns,
+                                r.worker,
+                                r.task_id,
                                     r.index
                                 );
                             }
@@ -788,7 +794,6 @@ impl SynRt {
                         eprintln!("Runtime: failed to open {} for append: {}", path, e);
                     }
                 }
-            }
         } else {
             println!("Runtime: recorder not enabled");
         }

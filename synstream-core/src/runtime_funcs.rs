@@ -2,9 +2,10 @@ use crate::debug::print_debug;
 use crate::time_buffer::TimeBufferManager;
 use crate::{buffers::*, graph::*, graph_struct::*, scheduler::*, IdType, Record};
 use crossbeam_channel::Sender;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use synstream_types::*;
 
@@ -16,6 +17,12 @@ pub struct NodeCacheEntry {
     pub name: String,
     pub func_ptr: CmPtr,
     pub arg_cache: ArgCacheEntry,
+    /// Pre-computed flag: true if this node is in initial_nodes
+    pub is_initial: bool,
+    /// Pre-computed flag: true if this node is in condition_nodes
+    pub is_condition: bool,
+    /// Pre-computed index into cond_indexes array (only valid if is_condition is true)
+    pub cond_index: usize,
 }
 
 #[derive(Clone)]
@@ -51,7 +58,12 @@ impl std::fmt::Debug for ArgCacheEntry {
 }
 
 #[inline]
-pub fn node_cache_entry(node: &Node, init_objects: &Vec<Vec<CmTypes>>) -> NodeCacheEntry {
+pub fn node_cache_entry(
+    node: &Node,
+    init_objects: &Vec<Vec<CmTypes>>,
+    initial_nodes: &Vec<crate::IdType>,
+    condition_nodes: &std::collections::HashSet<crate::IdType>,
+) -> NodeCacheEntry {
     let mut rt_idxs_indexes = Vec::new();
     let mut buffer_ref_indexes = Vec::new();
     let mut buffer_values = Vec::new();
@@ -138,12 +150,22 @@ pub fn node_cache_entry(node: &Node, init_objects: &Vec<Vec<CmTypes>>) -> NodeCa
         }
     }
 
+    // Pre-compute condition index for O(1) lookup
+    let cond_index = if condition_nodes.contains(&node.id) {
+        condition_nodes.iter().position(|&x| x == node.id).unwrap_or(0)
+    } else {
+        0
+    };
+
     NodeCacheEntry {
         factor: node.factor,
         pred_vec,
         name: node.name.clone(),
         func_ptr: node.func_ptr.expect("Node function pointer is None"),
         arg_cache,
+        is_initial: initial_nodes.contains(&node.id),
+        is_condition: condition_nodes.contains(&node.id),
+        cond_index,
     }
 }
 
@@ -175,11 +197,21 @@ pub struct SharedData {
 
     // Shared dependency tracking for multi-threaded resolution
     pub dependency_map: Arc<RwLock<VecMap<usize>>>,
-    pub remaining_nodes: Arc<RwLock<Vec<Vec<AtomicUsize>>>>,
-    pub remaining_cond_nodes: Arc<RwLock<Vec<Vec<AtomicUsize>>>>,
-    pub nodes_sent_to_queue: Arc<Mutex<Vec<std::collections::HashSet<NodeInfo>>>>,
+    /// remaining_nodes[slot][node_rem_idx] - AtomicUsize for lock-free access
+    /// The outer Vec is immutable after initialization, inner AtomicUsize provides thread-safety
+    pub remaining_nodes: Arc<Vec<Vec<AtomicUsize>>>,
+    /// remaining_cond_nodes[slot][cond_rem_idx] - AtomicUsize for lock-free access
+    pub remaining_cond_nodes: Arc<Vec<Vec<AtomicUsize>>>,
+    /// Lock-free sent_to_queue: nodes_sent_to_queue[slot][node_id * max_factor + index]
+    pub nodes_sent_to_queue: Arc<Vec<Vec<AtomicBool>>>,
+    /// Maximum factor across all nodes, used for flat index computation
+    pub max_factor: usize,
     pub completed_slots: Arc<Mutex<std::collections::HashSet<usize>>>,
     pub node_id_to_rem: Arc<Vec<usize>>,
+    /// Maps node_id to whether it's in remaining_nodes (false) or remaining_cond_nodes (true)
+    pub node_id_is_cond: Arc<Vec<bool>>,
+    /// Initial factors for remaining_nodes, used for reinit (remaining_init[slot][node_rem_idx])
+    pub remaining_init: Arc<Vec<Vec<usize>>>,
     pub initial_prep_done: Arc<AtomicUsize>,
     pub system_threads: usize,
 }
@@ -295,14 +327,8 @@ pub fn send_to_scheduler(
     let time_buf = Arc::clone(&shared.time_buffer);
     let shared_clone = Arc::clone(shared);
 
-    // Get scheduler with proper error handling
-    let scheduler_guard = match shared.scheduler.read() {
-        Ok(guard) => guard,
-        Err(e) => {
-            eprintln!("Failed to acquire scheduler lock: {}", e);
-            return;
-        }
-    };
+    // Get scheduler - parking_lot locks don't fail
+    let scheduler_guard = shared.scheduler.read();
 
     let scheduler = match scheduler_guard.as_ref() {
         Some(s) => s,
@@ -312,13 +338,8 @@ pub fn send_to_scheduler(
         }
     };
 
-    let completed_tx = match shared.completed_tx.read() {
-        Ok(guard) => guard.as_ref().unwrap().clone(),
-        Err(e) => {
-            eprintln!("Failed to acquire completed_tx lock: {}", e);
-            return;
-        }
-    };
+    let completed_tx_guard = shared.completed_tx.read();
+    let completed_tx = completed_tx_guard.as_ref().unwrap().clone();
 
     // Spawn task
     let meta_data = (node_info.id, node_info.slot, node_info.index);
@@ -391,7 +412,7 @@ pub fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
         release_slot(shared, slot);
 
         // Clear completed nodes for this stream to allow restart
-        let mut result_lock = shared.node_results.write().unwrap();
+        let mut result_lock = shared.node_results.write();
         result_lock.reinit_slot(slot);
         drop(result_lock);
     }
@@ -400,7 +421,7 @@ pub fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
 
 #[inline]
 pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) -> usize {
-    let mut available_slots = shared.available_stream_slots.write().unwrap();
+    let mut available_slots = shared.available_stream_slots.write();
 
     // Check if this streams is already mapped to a slot
     let mut av_slot_id: usize = usize::MAX;
@@ -442,7 +463,7 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
 }
 
 pub fn release_slot(shared: &Arc<SharedData>, slot: usize) {
-    let mut available_slots = shared.available_stream_slots.write().unwrap();
+    let mut available_slots = shared.available_stream_slots.write();
 
     let old_stream = available_slots[slot];
     available_slots[slot] = std::usize::MAX; // Mark as available
@@ -534,7 +555,7 @@ pub fn create_node_args(
 ) -> Vec<CmTypes> {
     let args_cache = {
         // check if node is in loop_nodes
-        // let loop_read = self.loop_nodes.read().unwrap();
+        // let loop_read = self.loop_nodes.read();
         // let mut looping = false;
         // if loop_read.contains(&node.name.clone()) {
         //     // node is in loop_nodes
@@ -724,10 +745,9 @@ pub fn collect_arg_result(
             // Special case for single index
             if predecessor.indexes.len() == 1 {
                 let node_info = NodeInfo::new(*res_node_id as IdType, slot, pred_index, 0);
-                if let Ok(res_read) = shared.node_results.read() {
-                    if let Some(result) = res_read.get(&node_info) {
-                        return Some(vec![result]);
-                    }
+                let res_read = shared.node_results.read();
+                if let Some(result) = res_read.get(&node_info) {
+                    return Some(vec![result]);
                 }
                 return None;
             }
@@ -742,22 +762,21 @@ pub fn collect_arg_result(
                 indices.push(find_pred_index(node_index, pred_idx, pred_factor));
             }
 
-            if let Ok(res_read) = shared.node_results.read() {
-                let mut result_vec = Vec::with_capacity(indices.len());
+            let res_read = shared.node_results.read();
+            let mut result_vec = Vec::with_capacity(indices.len());
 
-                // Batch collect all results
-                for dep_idx in indices.iter() {
-                    let node_info = NodeInfo::new(*res_node_id as IdType, slot, *dep_idx, 0);
-                    if let Some(result) = res_read.get(&node_info) {
-                        result_vec.push(result);
-                    } else {
-                        return None; // Early return if any result is missing
-                    }
+            // Batch collect all results
+            for dep_idx in indices.iter() {
+                let node_info = NodeInfo::new(*res_node_id as IdType, slot, *dep_idx, 0);
+                if let Some(result) = res_read.get(&node_info) {
+                    result_vec.push(result);
+                } else {
+                    return None; // Early return if any result is missing
                 }
+            }
 
-                if result_vec.len() == indices.len() {
-                    return Some(result_vec);
-                }
+            if result_vec.len() == indices.len() {
+                return Some(result_vec);
             }
             None
         }
