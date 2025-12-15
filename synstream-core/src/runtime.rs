@@ -96,7 +96,7 @@ impl SynRt {
         let mut remaining_init = Vec::new(); // Store initial values for reinit
         let mut node_id_to_rem = vec![0; app_graph.nodes.len()];
         let mut node_id_is_cond = vec![false; app_graph.nodes.len()]; // Track which nodes are condition nodes
-        
+
         // Lock-free sent_to_queue: nodes_sent_to_queue[slot][node_id * max_factor + index]
         let mut nodes_sent_to_queue: Vec<Vec<AtomicBool>> = Vec::new();
 
@@ -291,37 +291,34 @@ impl SynRt {
         thread_core: usize,
         thread_slot: usize,
     ) {
-        for node_info in nodes_to_schedule {
-            let start_time = shared.time_buffer.measure_time();
-            let start_ns = shared.base_instant.elapsed().as_nanos();
-            print_debug(|| format!("Preparing {:?}", node_info));
+        let start_time = shared.time_buffer.measure_time();
+        let start_ns = shared.base_instant.elapsed().as_nanos();
+        print_debug(|| format!("Preparing {:?} nodes", nodes_to_schedule.len()));
 
-            // Schedule Task - args will be built in the worker thread
-            send_to_scheduler(&shared, node_info, None, None);
+        // Schedule Task - args will be built in the worker thread
+        let pre_built_args_vec = vec![None; nodes_to_schedule.len()];
+        let custom_func_vec = vec![None; nodes_to_schedule.len()];
+        send_to_scheduler(&shared, nodes_to_schedule, &pre_built_args_vec, &custom_func_vec);
 
-            let end_time = shared.time_buffer.measure_time();
-            let end_ns = shared.base_instant.elapsed().as_nanos();
-            let duration = shared.time_buffer.measure_duration(start_time, end_time);
-            shared.time_buffer.add_task_time(
-                thread_slot,
-                "Preparation Thread",
-                usize::MAX,
-                duration,
-            );
+        let end_time = shared.time_buffer.measure_time();
+        let end_ns = shared.base_instant.elapsed().as_nanos();
+        let duration = shared.time_buffer.measure_duration(start_time, end_time);
+        shared
+            .time_buffer
+            .add_task_time(thread_slot, "Preparation Thread", usize::MAX, duration);
 
-            if let Some(rec) = &shared.recorder {
-                let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
-                let mut map = rec.lock();
-                let vec = map.entry(thread_slot).or_insert_with(Vec::new);
-                vec.push(Record {
-                    job_id,
-                    start_ns,
-                    end_ns,
-                    worker: thread_core,
-                    task_id: node_info.id,
-                    index: node_info.index,
-                });
-            }
+        if let Some(rec) = &shared.recorder {
+            let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
+            let mut map = rec.lock();
+            let vec = map.entry(thread_slot).or_insert_with(Vec::new);
+            vec.push(Record {
+                job_id,
+                start_ns,
+                end_ns,
+                worker: thread_core,
+                task_id: 0,
+                index: 0,
+            });
         }
     }
 
@@ -468,7 +465,7 @@ impl SynRt {
                 // Collect all potential successors with their info
                 let mut succ_updates: Vec<(NodeInfo, bool, IdType, usize)> = Vec::new(); // Added flat_idx
                 let max_factor = shared.max_factor;
-                
+
                 for succ_id in successors {
                     let succ_id = *succ_id;
                     let succ_cache = &shared.node_cache[succ_id as usize];
@@ -546,18 +543,27 @@ impl SynRt {
                                 // Only now try to atomically claim the slot
                                 // This ensures we only claim when dependencies are satisfied
                                 if shared.nodes_sent_to_queue[node_info.slot][flat_idx]
-                                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                                    .compare_exchange(
+                                        false,
+                                        true,
+                                        Ordering::AcqRel,
+                                        Ordering::Relaxed,
+                                    )
                                     .is_ok()
                                 {
                                     if !has_cond {
                                         print_debug(|| {
-                                            format!("Sent successor {:?} to ready channel", succ_info)
+                                            format!(
+                                                "Sent successor {:?} to ready channel",
+                                                succ_info
+                                            )
                                         });
                                         nodes_to_schedule.push(succ_info);
                                         nodes_sent += 1;
                                     } else {
                                         // Collect condition nodes - will evaluate outside lock
-                                        let cond_idx = shared.node_cache[succ_id as usize].cond_index;
+                                        let cond_idx =
+                                            shared.node_cache[succ_id as usize].cond_index;
                                         cond_nodes_to_check.push((succ_info, cond_idx, flat_idx));
                                     }
                                 }
@@ -571,7 +577,7 @@ impl SynRt {
                             }
                         }
                     }
-                    
+
                     print_debug(|| {
                         format!(
                             "Dependency map after processing successors of {:?}: {:?}",
@@ -579,19 +585,15 @@ impl SynRt {
                         )
                     });
                 } // dep_map released here
-                
+
                 // Evaluate conditions OUTSIDE the locks - conditions_met takes node_results.read()
                 for (succ_info, cond_idx, flat_idx) in cond_nodes_to_check {
                     if conditions_met(&shared, &succ_info, &cond_indexes[cond_idx]) {
-                        print_debug(|| {
-                            format!("Sent successor {:?} to ready channel", succ_info)
-                        });
+                        print_debug(|| format!("Sent successor {:?} to ready channel", succ_info));
                         nodes_to_schedule.push(succ_info);
                         nodes_sent += 1;
                     } else {
-                        print_debug(|| {
-                            format!("Conditions not met for successor {:?}", succ_info)
-                        });
+                        print_debug(|| format!("Conditions not met for successor {:?}", succ_info));
                         // Reset the atomic flag since condition not met
                         shared.nodes_sent_to_queue[node_info.slot][flat_idx]
                             .store(false, Ordering::Release);
@@ -700,6 +702,9 @@ impl SynRt {
         if let Some(post_nodes) = nodes {
             let stream_use = self.shared.slots + self.shared.system_threads; // Use last available slot for post-nodes
             for post_node in post_nodes {
+                let mut post_schedule: Vec<NodeInfo> = Vec::new();
+                let mut pre_build_args: Vec<Option<Vec<CmTypes>>> = Vec::new();
+                let mut functions: Vec<Option<CmPtr>> = Vec::new();
                 for index in 0..post_node.factor {
                     let mut node_info = NodeInfo::new(post_node.id, stream_use, index, 0);
                     node_info.set_post_node(true);
@@ -707,10 +712,17 @@ impl SynRt {
                     let arg_vec =
                         parse_args(&self.shared, &post_node.args, index, stream_use, 0, None);
 
-                    let func = post_node.func_ptr;
-
-                    send_to_scheduler(&self.shared, &node_info, Some(arg_vec), func);
+                    let func: Option<CmPtr> = post_node.func_ptr;
+                    pre_build_args.push(Some(arg_vec));
+                    functions.push(func);
+                    post_schedule.push(node_info);
                 }
+                send_to_scheduler(
+                    &self.shared,
+                    &post_schedule,
+                    &pre_build_args,
+                    &functions,
+                );
                 print_debug(|| format!("Added post node: {}", post_node.name));
                 // Wait until all are completed by checking node_results
                 let mut completed_count = 0;
@@ -778,22 +790,16 @@ impl SynRt {
                             let _ = writeln!(
                                 f,
                                 "{},{},{},{},{},{},{}",
-                                slot,
-                                r.job_id,
-                                r.start_ns,
-                                r.end_ns,
-                                r.worker,
-                                r.task_id,
-                                    r.index
-                                );
-                            }
+                                slot, r.job_id, r.start_ns, r.end_ns, r.worker, r.task_id, r.index
+                            );
                         }
-                        println!("Runtime: appended {} slots to {}", map.len(), path);
                     }
-                    Err(e) => {
-                        eprintln!("Runtime: failed to open {} for append: {}", path, e);
-                    }
+                    println!("Runtime: appended {} slots to {}", map.len(), path);
                 }
+                Err(e) => {
+                    eprintln!("Runtime: failed to open {} for append: {}", path, e);
+                }
+            }
         } else {
             println!("Runtime: recorder not enabled");
         }

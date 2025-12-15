@@ -152,7 +152,10 @@ pub fn node_cache_entry(
 
     // Pre-compute condition index for O(1) lookup
     let cond_index = if condition_nodes.contains(&node.id) {
-        condition_nodes.iter().position(|&x| x == node.id).unwrap_or(0)
+        condition_nodes
+            .iter()
+            .position(|&x| x == node.id)
+            .unwrap_or(0)
     } else {
         0
     };
@@ -286,75 +289,78 @@ fn execute_task(
 #[inline]
 pub fn send_to_scheduler(
     shared: &Arc<SharedData>,
-    node_info: &NodeInfo,
-    pre_built_args: Option<Vec<CmTypes>>,
-    custom_func: Option<CmPtr>,
+    nodes_to_schedule: &Vec<NodeInfo>,
+    pre_built_args_vec: &Vec<Option<Vec<CmTypes>>>,
+    custom_func_vec: &Vec<Option<CmPtr>>,
 ) {
-    let (func_ptr, node_name) = {
-        if node_info.post_node {
-            let nodes = &shared
-                .graph
-                .post_nodes
-                .as_ref()
-                .expect("Post nodes not initialized");
+    for (i, node_info) in nodes_to_schedule.iter().enumerate() {
+        let (func_ptr, node_name) = {
+            if node_info.post_node {
+                let nodes = &shared
+                    .graph
+                    .post_nodes
+                    .as_ref()
+                    .expect("Post nodes not initialized");
 
-            let node = &nodes[node_info.id as usize];
+                let node = &nodes[node_info.id as usize];
 
-            let func = {
-                if custom_func.is_some() {
-                    custom_func.unwrap()
-                } else {
-                    node.func_ptr.expect("Post node function pointer is None")
-                }
-            };
+                let func = {
+                    if custom_func_vec[i].is_some() {
+                        custom_func_vec[i].unwrap()
+                    } else {
+                        node.func_ptr.expect("Post node function pointer is None")
+                    }
+                };
 
-            let node_name = node.name.clone();
-            (func, node_name)
-        } else {
-            let cache_entry = &shared.node_cache[node_info.id as usize];
-            let func = {
-                if custom_func.is_some() {
-                    custom_func.unwrap()
-                } else {
-                    cache_entry.func_ptr
-                }
-            };
+                let node_name = node.name.clone();
+                (func, node_name)
+            } else {
+                let cache_entry = &shared.node_cache[node_info.id as usize];
+                let func = {
+                    if custom_func_vec[i].is_some() {
+                        custom_func_vec[i].unwrap()
+                    } else {
+                        cache_entry.func_ptr
+                    }
+                };
 
-            (func, cache_entry.name.clone())
-        }
-    };
+                (func, cache_entry.name.clone())
+            }
+        };
 
-    let time_buf = Arc::clone(&shared.time_buffer);
-    let shared_clone = Arc::clone(shared);
+        let time_buf = Arc::clone(&shared.time_buffer);
+        let shared_clone = Arc::clone(shared);
 
-    // Get scheduler - parking_lot locks don't fail
-    let scheduler_guard = shared.scheduler.read();
+        // Get scheduler - parking_lot locks don't fail
+        let scheduler_guard = shared.scheduler.read();
 
-    let scheduler = match scheduler_guard.as_ref() {
-        Some(s) => s,
-        None => {
-            eprintln!("Scheduler is not initialized");
-            return;
-        }
-    };
+        let scheduler = match scheduler_guard.as_ref() {
+            Some(s) => s,
+            None => {
+                eprintln!("Scheduler is not initialized");
+                return;
+            }
+        };
 
-    let completed_tx_guard = shared.completed_tx.read();
-    let completed_tx = completed_tx_guard.as_ref().unwrap().clone();
+        let completed_tx_guard = shared.completed_tx.read();
+        let completed_tx = completed_tx_guard.as_ref().unwrap().clone();
 
-    // Spawn task
-    let meta_data = (node_info.id, node_info.slot, node_info.index);
-    let node_info = node_info.clone();
-    scheduler.spawn_task_with_meta(Some(meta_data), move || {
-        execute_task(
-            &shared_clone,
-            func_ptr,
-            &node_info,
-            &time_buf,
-            &node_name,
-            &completed_tx,
-            pre_built_args,
-        )
-    });
+        // Spawn task
+        let meta_data = (node_info.id, node_info.slot, node_info.index);
+        let node_info = node_info.clone();
+        let pre_built_args = pre_built_args_vec[i].clone();
+        scheduler.spawn_task_with_meta(Some(meta_data), move || {
+            execute_task(
+                &shared_clone,
+                func_ptr,
+                &node_info,
+                &time_buf,
+                &node_name,
+                &completed_tx,
+                pre_built_args,
+            )
+        });
+    }
 }
 
 #[inline]
