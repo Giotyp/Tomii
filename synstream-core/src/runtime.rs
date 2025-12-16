@@ -1,7 +1,6 @@
 use core_affinity;
 use crossbeam_channel::Receiver;
 use deepsize::DeepSizeOf;
-use get_size::GetSize;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::io::Write;
@@ -86,7 +85,7 @@ impl SynRt {
         // Initialize shared dependency tracking structures
         let dependency_count_vec: Vec<usize> = app_graph.dependency_count_vec();
         let mut dependency_map = VecMap::new(0);
-        dependency_map.init_map(&app_graph.nodes, slots, Some(dependency_count_vec.clone()));
+        dependency_map.init_map(&app_graph.nodes, slots, Some(&dependency_count_vec));
 
         // Print allocated space for dependency_map
         print_debug(|| format!("Dependency Map DeepSize: {}", dependency_map.deep_size_of()));
@@ -156,6 +155,7 @@ impl SynRt {
             base_instant,
             job_counter,
             core_offset,
+            dependency_count_vec: Arc::new(dependency_count_vec),
             dependency_map: Arc::new(RwLock::new(dependency_map)),
             remaining_nodes: Arc::new(remaining_nodes),
             remaining_cond_nodes: Arc::new(remaining_cond_nodes),
@@ -641,7 +641,11 @@ impl SynRt {
                             // Reset dependency_map for this slot
                             {
                                 let mut dep_map = shared.dependency_map.write();
-                                dep_map.reinit_slot(node_info.slot);
+                                dep_map.reinit_slot(
+                                    &shared.graph.nodes,
+                                    node_info.slot,
+                                    Some(&shared.dependency_count_vec),
+                                );
                             }
 
                             // Reinit remaining_nodes for this slot using pre-computed init values (lock-free)

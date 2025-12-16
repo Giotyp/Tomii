@@ -197,6 +197,7 @@ pub struct SharedData {
     pub base_instant: Arc<Instant>,
     pub job_counter: Arc<AtomicUsize>,
     pub core_offset: Arc<AtomicUsize>,
+    pub dependency_count_vec: Arc<Vec<usize>>,
 
     // Shared dependency tracking for multi-threaded resolution
     pub dependency_map: Arc<RwLock<VecMap<usize>>>,
@@ -419,7 +420,7 @@ pub fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
 
         // Clear completed nodes for this stream to allow restart
         let mut result_lock = shared.node_results.write();
-        result_lock.reinit_slot(slot);
+        result_lock.reinit_slot(&shared.graph.nodes, slot, None);
         drop(result_lock);
     }
     new_iteration
