@@ -1,5 +1,7 @@
 use core_affinity;
 use crossbeam_channel::Receiver;
+use deepsize::DeepSizeOf;
+use get_size::GetSize;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::io::Write;
@@ -85,6 +87,9 @@ impl SynRt {
         let dependency_count_vec: Vec<usize> = app_graph.dependency_count_vec();
         let mut dependency_map = VecMap::new(0);
         dependency_map.init_map(&app_graph.nodes, slots, Some(dependency_count_vec.clone()));
+
+        // Print allocated space for dependency_map
+        print_debug(|| format!("Dependency Map DeepSize: {}", dependency_map.deep_size_of()));
 
         // Compute max_factor for flat index computation
         let max_factor = node_cache.iter().map(|n| n.factor).max().unwrap_or(1);
@@ -298,7 +303,12 @@ impl SynRt {
         // Schedule Task - args will be built in the worker thread
         let pre_built_args_vec = vec![None; nodes_to_schedule.len()];
         let custom_func_vec = vec![None; nodes_to_schedule.len()];
-        send_to_scheduler(&shared, nodes_to_schedule, &pre_built_args_vec, &custom_func_vec);
+        send_to_scheduler(
+            &shared,
+            nodes_to_schedule,
+            &pre_built_args_vec,
+            &custom_func_vec,
+        );
 
         let end_time = shared.time_buffer.measure_time();
         let end_ns = shared.base_instant.elapsed().as_nanos();
@@ -717,12 +727,7 @@ impl SynRt {
                     functions.push(func);
                     post_schedule.push(node_info);
                 }
-                send_to_scheduler(
-                    &self.shared,
-                    &post_schedule,
-                    &pre_build_args,
-                    &functions,
-                );
+                send_to_scheduler(&self.shared, &post_schedule, &pre_build_args, &functions);
                 print_debug(|| format!("Added post node: {}", post_node.name));
                 // Wait until all are completed by checking node_results
                 let mut completed_count = 0;

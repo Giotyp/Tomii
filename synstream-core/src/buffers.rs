@@ -1,3 +1,5 @@
+use deepsize::DeepSizeOf;
+
 use crate::graph_struct::Node;
 use crate::IdType;
 use std::cmp::PartialEq;
@@ -38,6 +40,8 @@ impl std::fmt::Debug for NodeInfo {
         )
     }
 }
+
+#[derive(DeepSizeOf)]
 pub struct VecMap<T> {
     buffer: Vec<Vec<Vec<T>>>,
     init_val: T,
