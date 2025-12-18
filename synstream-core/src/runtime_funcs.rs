@@ -1,15 +1,16 @@
 use crate::debug::print_debug;
+use crate::resolution_state::ResolutionState;
 use crate::time_buffer::TimeBufferManager;
 use crate::{buffers::*, graph::*, graph_struct::*, scheduler::*, IdType, Record};
 use crossbeam_channel::Sender;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use synstream_types::*;
 
-/// Cache entry for quick node access - stores commonly accessed node fields
+// Cache entry for quick node access - stores commonly accessed node fields
 #[derive(Clone)]
 pub struct NodeCacheEntry {
     pub factor: usize,
@@ -17,11 +18,11 @@ pub struct NodeCacheEntry {
     pub name: String,
     pub func_ptr: CmPtr,
     pub arg_cache: ArgCacheEntry,
-    /// Pre-computed flag: true if this node is in initial_nodes
+    // Pre-computed flag: true if this node is in initial_nodes
     pub is_initial: bool,
-    /// Pre-computed flag: true if this node is in condition_nodes
+    // Pre-computed flag: true if this node is in condition_nodes
     pub is_condition: bool,
-    /// Pre-computed index into cond_indexes array (only valid if is_condition is true)
+    // Pre-computed index into cond_indexes array (only valid if is_condition is true)
     pub cond_index: usize,
 }
 
@@ -172,7 +173,7 @@ pub fn node_cache_entry(
     }
 }
 
-/// Shared data across all SynStream threads - immutable or internally synchronized
+// Shared data across all SynStream threads - immutable or internally synchronized
 pub struct SharedData {
     // Immutable data
     pub graph: Graph,
@@ -197,24 +198,18 @@ pub struct SharedData {
     pub base_instant: Arc<Instant>,
     pub job_counter: Arc<AtomicUsize>,
     pub core_offset: Arc<AtomicUsize>,
-    pub dependency_count_vec: Arc<Vec<usize>>,
+
+    // Resolution state - abstracted for single vs multi-threaded
+    pub resolution_state: Arc<dyn ResolutionState>,
 
     // Shared dependency tracking for multi-threaded resolution
-    pub dependency_map: Arc<RwLock<VecMap<usize>>>,
-    /// remaining_nodes[slot][node_rem_idx] - AtomicUsize for lock-free access
-    /// The outer Vec is immutable after initialization, inner AtomicUsize provides thread-safety
     pub remaining_nodes: Arc<Vec<Vec<AtomicUsize>>>,
-    /// remaining_cond_nodes[slot][cond_rem_idx] - AtomicUsize for lock-free access
+    // remaining_cond_nodes[slot][cond_rem_idx] - AtomicUsize for lock-free access
     pub remaining_cond_nodes: Arc<Vec<Vec<AtomicUsize>>>,
-    /// Lock-free sent_to_queue: nodes_sent_to_queue[slot][node_id * max_factor + index]
-    pub nodes_sent_to_queue: Arc<Vec<Vec<AtomicBool>>>,
-    /// Maximum factor across all nodes, used for flat index computation
-    pub max_factor: usize,
-    pub completed_slots: Arc<Mutex<std::collections::HashSet<usize>>>,
     pub node_id_to_rem: Arc<Vec<usize>>,
-    /// Maps node_id to whether it's in remaining_nodes (false) or remaining_cond_nodes (true)
+    // Maps node_id to whether it's in remaining_nodes (false) or remaining_cond_nodes (true)
     pub node_id_is_cond: Arc<Vec<bool>>,
-    /// Initial factors for remaining_nodes, used for reinit (remaining_init[slot][node_rem_idx])
+    // Initial factors for remaining_nodes, used for reinit (remaining_init[slot][node_rem_idx])
     pub remaining_init: Arc<Vec<Vec<usize>>>,
     pub initial_prep_done: Arc<AtomicUsize>,
     pub system_threads: usize,
@@ -419,9 +414,10 @@ pub fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
         release_slot(shared, slot);
 
         // Clear completed nodes for this stream to allow restart
-        let mut result_lock = shared.node_results.write();
-        result_lock.reinit_slot(&shared.graph.nodes, slot, None);
-        drop(result_lock);
+        shared
+            .node_results
+            .write()
+            .reinit_slot(&shared.graph.nodes, slot, None);
     }
     new_iteration
 }

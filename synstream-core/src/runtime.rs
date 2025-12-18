@@ -1,10 +1,9 @@
 use core_affinity;
 use crossbeam_channel::Receiver;
-use deepsize::DeepSizeOf;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{sleep, spawn};
 use std::time::{Duration, Instant};
@@ -12,13 +11,14 @@ use std::time::{Duration, Instant};
 use crate::debug::print_debug;
 use crate::graph::*;
 use crate::graph_struct::*;
+use crate::resolution_state::{MultiThreadedState, ResolutionState, SingleThreadedState};
 use crate::runtime_funcs::*;
 use crate::scheduler::{Scheduler, SchedulerImpl};
 use crate::time_buffer::TimeBufferManager;
 use crate::{buffers::*, IdType, Record};
 use synstream_types::*;
 
-/// Main SynStream Runtime struct with shared context
+// Main SynStream Runtime struct with shared context
 pub struct SynRt {
     shared: Arc<SharedData>,
 }
@@ -84,15 +84,31 @@ impl SynRt {
 
         // Initialize shared dependency tracking structures
         let dependency_count_vec: Vec<usize> = app_graph.dependency_count_vec();
-        let mut dependency_map = VecMap::new(0);
-        dependency_map.init_map(&app_graph.nodes, slots, Some(&dependency_count_vec));
-
-        // Print allocated space for dependency_map
-        print_debug(|| format!("Dependency Map DeepSize: {}", dependency_map.deep_size_of()));
 
         // Compute max_factor for flat index computation
         let max_factor = node_cache.iter().map(|n| n.factor).max().unwrap_or(1);
         let num_nodes = app_graph.nodes.len();
+
+        // Choose resolution state implementation based on system_threads
+        let resolution_state: Arc<dyn ResolutionState> = if system_threads == 1 {
+            println!("Using single-threaded resolution state (no locks)");
+            Arc::new(SingleThreadedState::new(
+                num_nodes,
+                slots,
+                max_factor,
+                dependency_count_vec.clone(),
+                &app_graph.nodes,
+            ))
+        } else {
+            println!("Using multi-threaded resolution state (lock-free atomics)");
+            Arc::new(MultiThreadedState::new(
+                num_nodes,
+                slots,
+                max_factor,
+                dependency_count_vec.clone(),
+                &app_graph.nodes,
+            ))
+        };
 
         // Initialize remaining nodes trackers with AtomicUsize for thread-safe access
         let mut remaining_nodes = Vec::new();
@@ -101,19 +117,10 @@ impl SynRt {
         let mut node_id_to_rem = vec![0; app_graph.nodes.len()];
         let mut node_id_is_cond = vec![false; app_graph.nodes.len()]; // Track which nodes are condition nodes
 
-        // Lock-free sent_to_queue: nodes_sent_to_queue[slot][node_id * max_factor + index]
-        let mut nodes_sent_to_queue: Vec<Vec<AtomicBool>> = Vec::new();
-
         for _slot in 0..slots {
             let mut slot_remaining = Vec::new();
             let mut slot_cond_remaining = Vec::new();
             let mut slot_remaining_init = Vec::new();
-            // Initialize flat AtomicBool array for lock-free sent_to_queue checks
-            let mut slot_sent: Vec<AtomicBool> = Vec::with_capacity(num_nodes * max_factor);
-            for _ in 0..(num_nodes * max_factor) {
-                slot_sent.push(AtomicBool::new(false));
-            }
-            nodes_sent_to_queue.push(slot_sent);
 
             for node_id in 0..app_graph.nodes.len() {
                 if app_graph.initial_nodes.contains(&(node_id as IdType)) {
@@ -155,13 +162,9 @@ impl SynRt {
             base_instant,
             job_counter,
             core_offset,
-            dependency_count_vec: Arc::new(dependency_count_vec),
-            dependency_map: Arc::new(RwLock::new(dependency_map)),
+            resolution_state,
             remaining_nodes: Arc::new(remaining_nodes),
             remaining_cond_nodes: Arc::new(remaining_cond_nodes),
-            nodes_sent_to_queue: Arc::new(nodes_sent_to_queue),
-            max_factor,
-            completed_slots: Arc::new(Mutex::new(std::collections::HashSet::new())),
             node_id_to_rem: Arc::new(node_id_to_rem),
             node_id_is_cond: Arc::new(node_id_is_cond),
             remaining_init: Arc::new(remaining_init),
@@ -473,8 +476,7 @@ impl SynRt {
                 let mut nodes_to_schedule: Vec<NodeInfo> = Vec::new();
 
                 // Collect all potential successors with their info
-                let mut succ_updates: Vec<(NodeInfo, bool, IdType, usize)> = Vec::new(); // Added flat_idx
-                let max_factor = shared.max_factor;
+                let mut succ_updates: Vec<(NodeInfo, bool, IdType)> = Vec::new();
 
                 for succ_id in successors {
                     let succ_id = *succ_id;
@@ -527,86 +529,62 @@ impl SynRt {
                     });
 
                     for succ_index in succ_indexes {
-                        // Compute flat index for later atomic claim
-                        let flat_idx = (succ_id as usize) * max_factor + succ_index;
                         let succ_info =
                             NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.index);
-                        succ_updates.push((succ_info, has_condition, succ_id, flat_idx));
+                        succ_updates.push((succ_info, has_condition, succ_id));
                     }
                 }
 
-                // Batch process dependency decrements
+                // Batch process dependency decrements using resolution state
                 // Collect condition nodes to check OUTSIDE the lock to avoid nested locking
-                let mut cond_nodes_to_check: Vec<(NodeInfo, usize, usize)> = Vec::new(); // Added flat_idx
-                {
-                    let mut dep_map = shared.dependency_map.write();
-                    print_debug(|| {
-                        format!(
-                            "Dependency map before processing successors of {:?}: {:?}",
-                            node_info, *dep_map
-                        )
-                    });
+                let mut cond_nodes_to_check: Vec<(NodeInfo, usize)> = Vec::new();
 
-                    for (succ_info, has_cond, succ_id, flat_idx) in succ_updates {
-                        if let Some(dep) = dep_map.decrease(&succ_info) {
-                            if dep == 0 {
-                                // Only now try to atomically claim the slot
-                                // This ensures we only claim when dependencies are satisfied
-                                if shared.nodes_sent_to_queue[node_info.slot][flat_idx]
-                                    .compare_exchange(
-                                        false,
-                                        true,
-                                        Ordering::AcqRel,
-                                        Ordering::Relaxed,
-                                    )
-                                    .is_ok()
-                                {
-                                    if !has_cond {
-                                        print_debug(|| {
-                                            format!(
-                                                "Sent successor {:?} to ready channel",
-                                                succ_info
-                                            )
-                                        });
-                                        nodes_to_schedule.push(succ_info);
-                                        nodes_sent += 1;
-                                    } else {
-                                        // Collect condition nodes - will evaluate outside lock
-                                        let cond_idx =
-                                            shared.node_cache[succ_id as usize].cond_index;
-                                        cond_nodes_to_check.push((succ_info, cond_idx, flat_idx));
-                                    }
+                for (succ_info, has_cond, succ_id) in succ_updates {
+                    if let Some(dep) = shared.resolution_state.decrease_dependency(&succ_info) {
+                        if dep == 0 {
+                            // Try to atomically claim the slot via resolution state
+                            if shared.resolution_state.try_mark_sent(
+                                node_info.slot,
+                                succ_id as usize,
+                                succ_info.index,
+                            ) {
+                                if !has_cond {
+                                    print_debug(|| {
+                                        format!("Sent successor {:?} to ready channel", succ_info)
+                                    });
+                                    nodes_to_schedule.push(succ_info);
+                                    nodes_sent += 1;
+                                } else {
+                                    // Collect condition nodes - will evaluate outside lock
+                                    let cond_idx = shared.node_cache[succ_id as usize].cond_index;
+                                    cond_nodes_to_check.push((succ_info, cond_idx));
                                 }
-                            } else {
-                                print_debug(|| {
-                                    format!(
-                                        "Successor {:?} not ready, remaining dependencies: {}",
-                                        succ_info, dep
-                                    )
-                                });
                             }
+                        } else {
+                            print_debug(|| {
+                                format!(
+                                    "Successor {:?} not ready, remaining dependencies: {}",
+                                    succ_info, dep
+                                )
+                            });
                         }
                     }
-
-                    print_debug(|| {
-                        format!(
-                            "Dependency map after processing successors of {:?}: {:?}",
-                            node_info, *dep_map
-                        )
-                    });
-                } // dep_map released here
+                }
 
                 // Evaluate conditions OUTSIDE the locks - conditions_met takes node_results.read()
-                for (succ_info, cond_idx, flat_idx) in cond_nodes_to_check {
+                for (succ_info, cond_idx) in cond_nodes_to_check {
                     if conditions_met(&shared, &succ_info, &cond_indexes[cond_idx]) {
                         print_debug(|| format!("Sent successor {:?} to ready channel", succ_info));
-                        nodes_to_schedule.push(succ_info);
+                        nodes_to_schedule.push(succ_info.clone());
                         nodes_sent += 1;
                     } else {
                         print_debug(|| format!("Conditions not met for successor {:?}", succ_info));
-                        // Reset the atomic flag since condition not met
-                        shared.nodes_sent_to_queue[node_info.slot][flat_idx]
-                            .store(false, Ordering::Release);
+                        // Reset the flag via resolution state
+                        shared.resolution_state.reset_sent(
+                            node_info.slot,
+                            succ_info.id as usize,
+                            succ_info.index,
+                        );
                     }
                 }
 
@@ -616,12 +594,7 @@ impl SynRt {
                 // Check for stream completion - only process each slot once (thread-safe)
                 complete_iteration = false;
                 if nodes_sent == 0 {
-                    let should_check_completion = {
-                        let completed_lock = shared.completed_slots.lock();
-                        !completed_lock.contains(&node_info.slot)
-                    };
-
-                    if should_check_completion {
+                    if !shared.resolution_state.is_slot_completed(node_info.slot) {
                         // Check if all nodes in this slot have been processed (lock-free)
                         let all_nodes_processed = shared.remaining_nodes[node_info.slot]
                             .iter()
@@ -632,21 +605,13 @@ impl SynRt {
                                 format!("Completed iteration at slot {}", node_info.slot)
                             });
 
-                            // Mark this slot as completed (thread-safe)
-                            {
-                                let mut completed_lock = shared.completed_slots.lock();
-                                completed_lock.insert(node_info.slot);
-                            }
+                            // Mark this slot as completed
+                            shared.resolution_state.mark_slot_completed(node_info.slot);
 
-                            // Reset dependency_map for this slot
-                            {
-                                let mut dep_map = shared.dependency_map.write();
-                                dep_map.reinit_slot(
-                                    &shared.graph.nodes,
-                                    node_info.slot,
-                                    Some(&shared.dependency_count_vec),
-                                );
-                            }
+                            // Reset dependency_map for this slot via resolution state
+                            shared
+                                .resolution_state
+                                .reinit_dependencies(&shared.graph.nodes, node_info.slot);
 
                             // Reinit remaining_nodes for this slot using pre-computed init values (lock-free)
                             let slot_remaining = &shared.remaining_nodes[node_info.slot];
@@ -655,10 +620,10 @@ impl SynRt {
                                 slot_remaining[node_rem_idx].store(*init_val, Ordering::Release);
                             }
 
-                            // Clear nodes_sent_to_queue for this slot (lock-free reset of all atomic flags)
-                            for flag in shared.nodes_sent_to_queue[node_info.slot].iter() {
-                                flag.store(false, Ordering::Release);
-                            }
+                            // Clear nodes_sent_to_queue for this slot via resolution state
+                            shared
+                                .resolution_state
+                                .clear_slot_sent_flags(node_info.slot);
 
                             complete_iteration = true;
                         }
@@ -691,11 +656,11 @@ impl SynRt {
                 if complete_iteration {
                     // Add initial nodes for new iteration
                     if process_slot_completion(&shared, node_info.slot) {
-                        // Remove from completed set since we're starting again (thread-safe)
-                        {
-                            let mut completed_lock = shared.completed_slots.lock();
-                            completed_lock.remove(&node_info.slot);
-                        }
+                        // Remove from completed set since we're starting again
+                        shared
+                            .resolution_state
+                            .unmark_slot_completed(node_info.slot);
+
                         let init_nodes = initial_nodes(&shared, vec![node_info.slot]);
                         let mut nodes_to_schedule = Vec::new();
                         for node_info in init_nodes {

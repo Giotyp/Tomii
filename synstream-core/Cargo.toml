@@ -18,6 +18,9 @@ clap = { version = "4.5.39", features = ["derive"] }
 synstream-types = { path = "../synstream-types" }
 gag = "1.0.0"
 rapidhash = "4.1.0"
+parking_lot = "0.12"
+get-size = "0.1.4"
+deepsize = "0.2.0"
 
 [build-dependencies]
 build-print = "0.1.1"
