@@ -27,8 +27,11 @@ SLOTS=2
 EXP_STREAMS=1
 OUTPUT="$SCRIPT_DIR/out.txt"
 TIMING_FILE="$SCRIPT_DIR/timing.txt"
-DEBUG="--debug" # Set to "--debug" to enable debug mode
-RECORD_SCHED="" # Set to "--record-sched" to enable scheduler recording
+SYSTEM_THREADS=1
+BATCHING_SIZE=10
+BATCHING_LIMIT=10
+DEBUG="" # Set to "--debug" to enable debug mode
+RECORD="" # Set to "--record" to enable scheduler recording
 
 
 cargo clean --manifest-path "$SCRIPT_DIR/../../synstream-core/Cargo.toml"
@@ -69,11 +72,14 @@ else
         --dylib $DYN_LIB \
         --inits \
         --workers $WORKERS \
+        --system-threads $SYSTEM_THREADS \
+        --batching-size $BATCHING_SIZE \
+        --batching-limit $BATCHING_LIMIT \
         --output $OUTPUT \
         --max-runtime $RUNTIME \
         --slots $SLOTS \
         --max-streams $EXP_STREAMS \
         --timing $TIMING_FILE \
         $DEBUG \
-        $RECORD_SCHED
+        $RECORD
 fi

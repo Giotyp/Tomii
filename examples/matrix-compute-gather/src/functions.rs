@@ -39,7 +39,7 @@ pub fn vec_to_mat(vector: &Vec<Complex32>) -> DMatrix<Complex32> {
 }
 
 /// Performs matrix multiplication between multiple matrices
-pub fn mat_mul(vectors: &Vec<CmTypes>) -> DMatrix<Complex32> {
+pub fn mat_mul(vectors: Vec<CmTypes>) -> DMatrix<Complex32> {
     let c_res = RefCell::new(DMatrix::from_element(0, 0, Complex32::new(0.0, 0.0)));
     let n = vectors.len();
 

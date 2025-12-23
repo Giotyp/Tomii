@@ -31,7 +31,7 @@ SYSTEM_THREADS=3
 BATCHING_SIZE=1
 BATCHING_LIMIT=10
 DEBUG="" # Set to "--debug" to enable debug mode
-RECORD="--record" # Set to "--record-sched" to enable scheduler recording
+RECORD="--record" # Set to "--record" to enable scheduler recording
 
 
 cargo clean --manifest-path "$SCRIPT_DIR/../../synstream-core/Cargo.toml"

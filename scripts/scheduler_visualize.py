@@ -8,14 +8,14 @@ Usage:
 The CSV must have columns: slot,job_id,start_ns,end_ns,worker,task_id,index
 
 Creates one subplot per `slot` found in the CSV. Each bar is a task executed
-on a worker; Time is shown in microseconds by default (use `--units ns/ms/us`
+on a worker; Time is shown in microseconds by default (use `--units ns/ms/us/s`
 to change). The x-axis is time, and the y-axis is the worker number. The
 color of the bar is determined by the `task_id`.
 
 Args:
     csv: Path to CSV file.
     -o, --out: Output image path (default: schedule.png).
-    --units: Time units for x-axis (ns, us, ms). Default is us.
+    --units: Time units for x-axis (ns, us, ms, s). Default is us.
     --exclude: Comma-separated list of task_id values to exclude from plotting.
 """
 import argparse
@@ -165,6 +165,9 @@ def visualize(csv_path, out_path, title, units="us", exclude=None, task_names=No
     elif units == "ms":
         scale = 1e6
         xlabel = "Time (ms)"
+    elif units == "s":
+        scale = 1e9
+        xlabel = "Time (s)"
     else:
         scale = 1.0
         xlabel = "Time (ns)"
@@ -200,17 +203,12 @@ def visualize(csv_path, out_path, title, units="us", exclude=None, task_names=No
     print("=" * 80)
     
     # Print global minimum timestamp
-    if units == "us":
-        global_min_scaled = global_min / 1e3
-        unit_str = "µs"
-    elif units == "ms":
-        global_min_scaled = global_min / 1e6
-        unit_str = "ms"
-    else:
-        global_min_scaled = global_min
-        unit_str = "ns"
+    global_min_scaled = global_min / scale
+    global_max_scaled = global_max / scale
     
-    print(f"Global Minimum Timestamp: {global_min_scaled:.4f} {unit_str}\n")
+    print(f"Global Minimum Timestamp: {global_min_scaled:.4f} {units}\n")
+    print(f"Global Maximum Timestamp: {global_max_scaled:.4f} {units}\n")
+    print(f"Total Duration: {global_max_scaled - global_min_scaled:.4f} {units}\n")
 
     task_stats = defaultdict(
         lambda: {"count": 0, "total_duration": 0, "min": float("inf"), "max": 0, "min_start": float("inf")}
@@ -238,36 +236,20 @@ def visualize(csv_path, out_path, title, units="us", exclude=None, task_names=No
         max_duration = stats["max"]
         min_start_time = stats["min_start"]
 
-        if units == "us":
-            total_scaled = total_duration / 1e3
-            avg_scaled = avg_duration / 1e3
-            min_scaled = min_duration / 1e3
-            max_scaled = max_duration / 1e3
-            min_start_scaled = min_start_time / 1e3
-            unit_str = "µs"
-        elif units == "ms":
-            total_scaled = total_duration / 1e6
-            avg_scaled = avg_duration / 1e6
-            min_scaled = min_duration / 1e6
-            max_scaled = max_duration / 1e6
-            min_start_scaled = min_start_time / 1e6
-            unit_str = "ms"
-        else:
-            total_scaled = total_duration
-            avg_scaled = avg_duration
-            min_scaled = min_duration
-            max_scaled = max_duration
-            min_start_scaled = min_start_time
-            unit_str = "ns"
+        total_scaled = total_duration / scale
+        avg_scaled = avg_duration / scale
+        min_scaled = min_duration / scale
+        max_scaled = max_duration / scale
+        min_start_scaled = min_start_time / scale
 
         task_label = id_map.get(task_id, task_id)
         print(f"Task {task_label}:")
         print(f"  Executions: {count}")
-        print(f"  First Start: {min_start_scaled:.4f} {unit_str}")
-        print(f"  Total Time: {total_scaled:.4f} {unit_str}")
-        print(f"  Avg/Task: {avg_scaled:.4f} {unit_str}")
-        print(f"  Min: {min_scaled:.4f} {unit_str}")
-        print(f"  Max: {max_scaled:.4f} {unit_str}")
+        print(f"  First Start: {min_start_scaled:.4f} {units}")
+        print(f"  Total Time: {total_scaled:.4f} {units}")
+        print(f"  Avg/Task: {avg_scaled:.4f} {units}")
+        print(f"  Min: {min_scaled:.4f} {units}")
+        print(f"  Max: {max_scaled:.4f} {units}")
         print()
 
     print("=" * 80 + "\n")
@@ -484,7 +466,7 @@ def main():
     p.add_argument("--title", help="Title for the plot", default="Scheduler Visualization")
     p.add_argument(
         "--units",
-        choices=["ns", "us", "ms"],
+        choices=["ns", "us", "ms", "s"],
         default="us",
         help="Time units for x-axis",
     )
