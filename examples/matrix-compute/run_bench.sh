@@ -27,7 +27,7 @@ CLEANUP=1
 WORKERS=2
 RUNTIME=60
 SLOTS=2
-EXP_STREAMS=3
+EXP_STREAMS=1
 OUTPUT="$SCRIPT_DIR/out.txt"
 TIMING_FILE="$SCRIPT_DIR/timing.txt"
 SYSTEM_THREADS=3
@@ -38,7 +38,7 @@ INITS="--inits"
 # Set to "--slot-priority" to enable slot priority
 SLOT_PRIORITY=""
 # Set to "--debug" to enable debug mode
-DEBUG="--debug"
+DEBUG=""
 # Set to "--record" to enable scheduler recording
 RECORD="" 
 
