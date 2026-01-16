@@ -105,6 +105,8 @@ pub struct Node {
     pub func_ptr: Option<CmPtr>,
     // Optional node to loop after execution
     pub loop_: Option<Loop>,
+    // Network isolation flag
+    pub nx: bool,
 }
 
 impl Node {

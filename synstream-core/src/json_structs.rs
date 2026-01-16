@@ -48,6 +48,7 @@ pub struct NodeJson {
     pub loop_: Option<LoopJson>,
     pub loop_args: Option<Vec<ArgJson>>,
     pub args: Vec<ArgJson>,
+    pub nx: Option<bool>,
 }
 
 // Initializations

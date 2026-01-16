@@ -4,10 +4,6 @@ use std::process::Command;
 use std::{env, fs};
 
 fn main() {
-    let func_file = env::var("FUNC_PATH").expect("FUNC_PATH environment variable is not set");
-    // println!("cargo:rerun-if-changed={}", func_file);
-    let path = PathBuf::from(func_file.clone());
-
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     let name_funcs = "funcs.rs";
@@ -61,6 +57,10 @@ fn main() {
         info!("Bypassing transformer script as per environment variables.");
         return;
     }
+
+    let func_file = env::var("FUNC_PATH").expect("FUNC_PATH environment variable is not set");
+    // println!("cargo:rerun-if-changed={}", func_file);
+    let path = PathBuf::from(func_file.clone());
 
     // Extract the path to function file
     let func_path = path.parent().unwrap().to_str().unwrap_or("");

@@ -12,8 +12,8 @@ use synstream_core::scheduler::{create_scheduler, SchedulerType};
 struct Args {
     #[clap(long, value_name = "FILE", required = true)]
     json: String,
-    #[clap(long, value_name = "FILE", required = false)]
-    dylib: Option<String>,
+    #[clap(long, value_name = "FILE", required = true)]
+    dylib: String,
     #[clap(long, value_name = "CORES", required = false, default_value = "1")]
     workers: usize,
     #[clap(
@@ -33,9 +33,17 @@ struct Args {
     system_threads: usize,
     #[clap(
         long,
+        value_name = "NRX",
+        required = false,
+        default_value = "1",
+        help = "Number of isolated network threads"
+    )]
+    nrx: usize,
+    #[clap(
+        long,
         value_name = "MAX_RUNTIME",
         required = false,
-        default_value = "3"
+        default_value = "0"
     )]
     max_runtime: u64,
     #[clap(long, value_name = "FILE", required = false, default_value = "stdout")]
@@ -56,8 +64,8 @@ struct Args {
     )]
     max_streams: usize,
     #[clap(long, value_name = "FILE", required = false, help = "Enable timing")]
-    timing: String,
-    #[clap(long, help = "Enable scheduler recording")]
+    timing: Option<String>,
+    #[clap(long, help = "Enable scheduler recording", required = false)]
     record: bool,
     #[clap(long, help = "Use rdtsc for timing")]
     use_rdtsc: bool,
@@ -77,6 +85,11 @@ struct Args {
         help = "Maximum time to wait for batch in microseconds"
     )]
     batching_limit: u64,
+    #[clap(
+        long,
+        help = "Enable slot-priority processing (process slots sequentially with automatic round-robin for better cache locality)"
+    )]
+    slot_priority: bool,
 }
 
 fn main() {
@@ -99,9 +112,9 @@ fn main() {
         None
     };
 
-    if let Some(dylib) = &args.dylib {
+    {
         // set PLUGIN_LIB environment variable
-        unsafe { std::env::set_var("PLUGIN_LIB", dylib) };
+        unsafe { std::env::set_var("PLUGIN_LIB", args.dylib) };
         synstream_core::wrappers::init_wrappers();
     }
 
@@ -129,23 +142,28 @@ fn main() {
     }
     print_debug(|| "Objects Initialized".to_string());
 
+    let timing_enabled = args.timing.is_some();
+
     let synrt = run_graph(
         &graph,
         scheduler_type,
         args.workers,
         args.core_offset,
         args.system_threads,
+        args.nrx,
         args.slots,
         args.max_streams,
         runtime,
         args.record,
         args.use_rdtsc,
+        timing_enabled,
         args.batching_size,
         args.batching_limit,
+        args.slot_priority,
     );
 
     let time_file = args.timing;
-    if !time_file.is_empty() {
+    if let Some(time_file) = &time_file {
         let time_name = time_file.split('/').last().unwrap_or_default();
         synrt.print_statistics(&time_name, Some(&time_file));
 
@@ -154,7 +172,7 @@ fn main() {
             let time_name = time_name.split('.').next().unwrap_or_default();
             let path = PathBuf::from(&time_file);
             let dir = path.parent().unwrap();
-            let csv_file = dir.join(format!("{}_schedule.csv", time_name));
+            let csv_file = dir.join(format!("{}_sched.csv", time_name));
             synrt.write_record(csv_file.to_str().unwrap());
         }
     }
@@ -166,13 +184,16 @@ pub fn run_graph(
     workers: usize,
     core_offset: usize,
     system_threads: usize,
+    nrx: usize,
     slots: usize,
     max_streams: usize,
     max_runtime: Option<u64>,
     record: bool,
     use_rdtsc: bool,
+    timing_enabled: bool,
     batching_size: usize,
     batching_limit: u64,
+    slot_priority_enabled: bool,
 ) -> SynRt {
     let mut synrt = SynRt::new(
         graph,
@@ -181,7 +202,10 @@ pub fn run_graph(
         max_runtime,
         use_rdtsc,
         record,
+        timing_enabled,
         system_threads,
+        nrx,
+        slot_priority_enabled,
     );
     let scheduler = create_scheduler(
         scheduler_type,
@@ -190,7 +214,27 @@ pub fn run_graph(
         record,
         synrt.base_instant(),
         system_threads,
+        batching_size,
+        batching_limit,
     );
-    synrt.run(scheduler, system_threads, batching_size, batching_limit);
+
+    // Create network scheduler if nrx > 0
+    let network_scheduler = if nrx > 0 {
+        let network_core_offset = core_offset + system_threads + workers;
+        Some(create_scheduler(
+            scheduler_type,
+            network_core_offset,
+            nrx,
+            record,
+            synrt.base_instant(),
+            0, // No system threads for network scheduler
+            batching_size,
+            batching_limit,
+        ))
+    } else {
+        None
+    };
+
+    synrt.run(scheduler, system_threads, network_scheduler);
     synrt
 }

@@ -14,9 +14,11 @@ use crate::graph_struct::*;
 use crate::resolution_state::{MultiThreadedState, ResolutionState, SingleThreadedState};
 use crate::runtime_funcs::*;
 use crate::scheduler::{Scheduler, SchedulerImpl};
-use crate::time_buffer::TimeBufferManager;
+use crate::time_buffer::{TimeBufferManager, TimingMethod};
 use crate::{buffers::*, IdType, Record};
 use synstream_types::*;
+
+pub const RUN_SLEEP: Duration = Duration::from_secs(10);
 
 // Main SynStream Runtime struct with shared context
 pub struct SynRt {
@@ -31,7 +33,10 @@ impl SynRt {
         max_runtime: Option<u64>,
         use_rdtsc: bool,
         record: bool,
+        timing_enabled: bool,
         system_threads: usize,
+        _nrx: usize,
+        slot_priority_enabled: bool,
     ) -> SynRt {
         // Initialize stream completion counters
         let stream_completion_counts = Arc::new(RwLock::new(Vec::new()));
@@ -66,11 +71,15 @@ impl SynRt {
             .collect();
 
         // Allocate slots + system_threads for TimeBuffer (slots for worker streams, system_threads for system threads)
-        let time_buffer = Arc::new(TimeBufferManager::new_async(
-            slots + system_threads,
-            system_threads,
-            use_rdtsc,
-        ));
+        let time_buffer = if timing_enabled {
+            Some(Arc::new(TimeBufferManager::new_async(
+                slots + system_threads,
+                system_threads,
+                use_rdtsc,
+            )))
+        } else {
+            None
+        };
 
         let recorder = if record {
             Some(Arc::new(Mutex::new(HashMap::new())))
@@ -81,6 +90,11 @@ impl SynRt {
         let job_counter = Arc::new(AtomicUsize::new(0));
         // core_offset is updated in run()
         let core_offset = Arc::new(AtomicUsize::new(0));
+
+        // Initialize batch buffer for scheduler-side batching
+        let batch_buffer = Arc::new(Mutex::new(Vec::new()));
+        let batch_last_sent = Arc::new(Mutex::new(Instant::now()));
+        let flusher_shutdown = Arc::new(AtomicUsize::new(0));
 
         // Initialize shared dependency tracking structures
         let dependency_count_vec: Vec<usize> = app_graph.dependency_count_vec();
@@ -145,6 +159,27 @@ impl SynRt {
             remaining_init.push(slot_remaining_init);
         }
 
+        // Initialize slot states for priority processing
+        let slot_states = Arc::new(RwLock::new(Vec::new()));
+        {
+            let mut states = slot_states.write();
+            for slot_id in 0..slots {
+                if slot_priority_enabled && slot_id == 0 {
+                    // Only slot 0 is active initially
+                    states.push(SlotState::Active);
+                } else if slot_priority_enabled {
+                    // All other slots start buffering
+                    states.push(SlotState::Buffering);
+                } else {
+                    // When disabled, all slots are active
+                    states.push(SlotState::Active);
+                }
+            }
+        }
+
+        // Initialize per-slot buffering queues
+        let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
+
         let shared = Arc::new(SharedData {
             graph: app_graph.clone(),
             slots,
@@ -156,6 +191,7 @@ impl SynRt {
             available_stream_slots,
             time_buffer,
             scheduler: Arc::new(RwLock::new(None)),
+            network_scheduler: Arc::new(RwLock::new(None)),
             completed_tx: Arc::new(RwLock::new(None)),
             workers: Arc::new(AtomicUsize::new(1)), // Will be set in run()
             recorder,
@@ -170,6 +206,12 @@ impl SynRt {
             remaining_init: Arc::new(remaining_init),
             initial_prep_done: Arc::new(AtomicUsize::new(0)),
             system_threads,
+            batch_buffer,
+            batch_last_sent,
+            flusher_shutdown,
+            slot_states,
+            slot_priority_enabled,
+            slot_buffers,
         });
 
         SynRt { shared }
@@ -183,26 +225,42 @@ impl SynRt {
         &mut self,
         scheduler: SchedulerImpl,
         system_threads: usize,
-        batching_size: usize,
-        batching_limit: u64,
+        network_scheduler: Option<SchedulerImpl>,
     ) {
         // Overwrite workers
         self.shared
             .workers
             .store(scheduler.workers(), Ordering::SeqCst);
 
-        // create completed channel
-        let (completed_tx, completed_rx) = crossbeam_channel::unbounded::<(NodeInfo, CmTypes)>();
+        // create completed channel for batched results
+        let (completed_tx, completed_rx) =
+            crossbeam_channel::unbounded::<Vec<(NodeInfo, CmTypes)>>();
+
+        // Set completed_tx in SharedData
         {
             let mut tx_lock = self.shared.completed_tx.write();
-            *tx_lock = Some(completed_tx);
+            *tx_lock = Some(completed_tx.clone());
         }
+
+        // Set completed_tx in the scheduler and start the flusher thread
+        scheduler.set_completed_tx(completed_tx);
+
         // Store scheduler
         let core_offset: usize;
         {
             let mut scheduler_lock = self.shared.scheduler.write();
             core_offset = scheduler.core_offset().unwrap_or(0);
             *scheduler_lock = Some(Arc::new(scheduler));
+        }
+
+        // Store network scheduler if provided
+        if let Some(net_sched) = network_scheduler {
+            let mut network_scheduler_lock = self.shared.network_scheduler.write();
+            *network_scheduler_lock = Some(Arc::new(net_sched));
+            println!(
+                "Network scheduler initialized with {} workers",
+                network_scheduler_lock.as_ref().unwrap().workers()
+            );
         }
 
         self.shared.core_offset.store(core_offset, Ordering::SeqCst);
@@ -213,7 +271,9 @@ impl SynRt {
         // Initiate synstream-runtime timing for system thread slots only
         for thread_id in 0..system_threads {
             let system_slot = self.shared.slots + thread_id;
-            self.shared.time_buffer.start_slot_processing(system_slot);
+            if let Some(tb) = &self.shared.time_buffer {
+                tb.start_slot_processing(system_slot);
+            }
         }
 
         // Spawn multiple resolution threads
@@ -237,14 +297,13 @@ impl SynRt {
                         thread_id, thread_core
                     );
                 }
+
                 Self::resolution(
                     shared_for_resolution,
                     completed_rx_clone,
                     thread_core,
                     thread_id,
                     thread_slot,
-                    batching_size,
-                    batching_limit,
                 );
             });
             resolution_handles.push(resolution_handle);
@@ -255,30 +314,89 @@ impl SynRt {
         // Check for max_runtime
         print_debug(|| "Max runtime check started".to_string());
         if let Some(max_runtime) = self.shared.max_runtime {
+            let scheduler_guard = self.shared.scheduler.read();
+
+            let scheduler = match scheduler_guard.as_ref() {
+                Some(s) => s,
+                None => {
+                    eprintln!("Scheduler is not initialized");
+                    return;
+                }
+            };
+            let mut prev_completed_jobs = scheduler.total_jobs_completed();
+            let mut prev_spawned_jobs = scheduler.total_jobs_spawned();
+            drop(scheduler_guard);
+            sleep(RUN_SLEEP);
             loop {
-                if start_time.elapsed().as_secs() > max_runtime {
+                let scheduler_guard = self.shared.scheduler.read();
+
+                let scheduler = match scheduler_guard.as_ref() {
+                    Some(s) => s,
+                    None => {
+                        eprintln!("Scheduler is not initialized");
+                        return;
+                    }
+                };
+
+                let curr_completed_jobs = scheduler.total_jobs_completed();
+                let curr_spawned_jobs = scheduler.total_jobs_spawned();
+                let pending_jobs = scheduler.pending_jobs();
+
+                let completed = {
+                    if pending_jobs == 0
+                        && curr_completed_jobs > 0
+                        && curr_completed_jobs == prev_completed_jobs
+                        && curr_spawned_jobs == prev_spawned_jobs
+                    {
+                        true
+                    } else {
+                        false
+                    }
+                };
+
+                prev_completed_jobs = curr_completed_jobs;
+                prev_spawned_jobs = curr_spawned_jobs;
+
+                drop(scheduler_guard);
+
+                if start_time.elapsed().as_secs() > max_runtime || completed {
                     // set exit signal
-                    println!("Max runtime reached, exiting...");
+                    println!("Max runtime reached or graph completed, exiting...");
                     // Process post-nodes if any
                     println!("Processing possible post-nodes...");
                     self.schedule_post_nodes();
-                    // Close completed channel - send exit signal to all threads
-                    {
-                        let tx_lock = self.shared.completed_tx.read();
-                        if let Some(ref tx) = *tx_lock {
-                            for _ in 0..system_threads {
-                                tx.send((NodeInfo::new(IdType::MAX, 0, 0, 0), CmTypes::None))
-                                    .unwrap();
-                            }
-                        }
-                    }
+                    // Signal flusher thread to shut down (will be done after loop)
                     break;
                 }
-                sleep(Duration::from_secs(2));
+                sleep(RUN_SLEEP);
+                //
             }
         }
 
-        // Wait for all threads to finish
+        // Shutdown and flush the flusher thread in the scheduler
+        {
+            let scheduler_guard = self.shared.scheduler.read();
+            if let Some(scheduler) = scheduler_guard.as_ref() {
+                scheduler.shutdown_flusher();
+            }
+        }
+
+        // Drop all senders to signal resolution threads to exit
+        // This will close the channel and unblock the resolution threads
+        {
+            let mut tx_lock = self.shared.completed_tx.write();
+            *tx_lock = None; // Drop the sender in SharedData
+        }
+        {
+            let scheduler_guard = self.shared.scheduler.read();
+            if let Some(scheduler) = scheduler_guard.as_ref() {
+                let tx_ref = scheduler.get_completed_tx_ref();
+                let mut tx_lock = tx_ref.lock();
+                *tx_lock = None; // Drop the sender in scheduler
+            }
+        }
+
+        // Wait for all resolution threads to finish (they will unblock when channel closes)
         for handle in resolution_handles {
             handle.join().unwrap();
         }
@@ -286,7 +404,9 @@ impl SynRt {
         // Finish timing for system thread slots only
         for thread_id in 0..system_threads {
             let system_slot = self.shared.slots + thread_id;
-            let _ = self.shared.time_buffer.finish_slot_processing(system_slot);
+            if let Some(tb) = &self.shared.time_buffer {
+                let _ = tb.finish_slot_processing(system_slot);
+            }
         }
     }
 }
@@ -298,8 +418,13 @@ impl SynRt {
         nodes_to_schedule: &Vec<NodeInfo>,
         thread_core: usize,
         thread_slot: usize,
+        use_network_scheduler: bool,
     ) {
-        let start_time = shared.time_buffer.measure_time();
+        let start_time = if let Some(tb) = &shared.time_buffer {
+            tb.measure_time()
+        } else {
+            TimingMethod::Instant(Instant::now())
+        };
         let start_ns = shared.base_instant.elapsed().as_nanos();
         print_debug(|| format!("Preparing {:?} nodes", nodes_to_schedule.len()));
 
@@ -311,16 +436,17 @@ impl SynRt {
             nodes_to_schedule,
             &pre_built_args_vec,
             &custom_func_vec,
+            use_network_scheduler,
         );
 
-        let end_time = shared.time_buffer.measure_time();
-        let end_ns = shared.base_instant.elapsed().as_nanos();
-        let duration = shared.time_buffer.measure_duration(start_time, end_time);
-        shared
-            .time_buffer
-            .add_task_time(thread_slot, "Preparation Thread", usize::MAX, duration);
+        if let Some(tb) = &shared.time_buffer {
+            let end_time = tb.measure_time();
+            let duration = tb.measure_duration(start_time, end_time);
+            tb.add_task_time(thread_slot, "Preparation Thread", usize::MAX, duration);
+        }
 
         if let Some(rec) = &shared.recorder {
+            let end_ns = shared.base_instant.elapsed().as_nanos();
             let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
             let mut map = rec.lock();
             let vec = map.entry(thread_slot).or_insert_with(Vec::new);
@@ -329,7 +455,7 @@ impl SynRt {
                 start_ns,
                 end_ns,
                 worker: thread_core,
-                task_id: 0,
+                task_id: IdType::MAX - 1,
                 index: 0,
             });
         }
@@ -337,13 +463,13 @@ impl SynRt {
 
     fn resolution(
         shared: Arc<SharedData>,
-        completed_rx: Receiver<(NodeInfo, CmTypes)>,
+        completed_rx: Receiver<Vec<(NodeInfo, CmTypes)>>,
         thread_core: usize,
         thread_id: usize,
         thread_slot: usize,
-        batching_size: usize,
-        batching_limit: u64,
     ) {
+        let all_slots: Vec<usize> = (0..shared.slots).collect();
+        let network_init_nodes = initial_nodes(&shared, all_slots.clone());
         if thread_id == 0 {
             // Ensure only one thread does initial preparation
             if shared
@@ -362,64 +488,107 @@ impl SynRt {
                     thread_id, thread_core
                 );
 
-                // Find and send initial nodes to ready channel
-                let slot_vec: Vec<usize> = (0..shared.slots).collect();
-                let init_nodes = initial_nodes(&shared, slot_vec);
-                let mut nodes_to_schedule = Vec::new();
-                for node_info in init_nodes {
-                    nodes_to_schedule.push(node_info);
+                // Network nodes (nx=true) run for ALL slots to receive and buffer packets
+                let mut network_nodes = Vec::new();
+                for node_info in &network_init_nodes {
+                    let node = &shared.graph.nodes[node_info.id as usize];
+                    if node.nx {
+                        network_nodes.push(node_info.clone());
+                    }
                 }
-                Self::preparation(&shared, &nodes_to_schedule, thread_core, thread_slot);
+
+                // Send network nodes to network scheduler (all slots)
+                if !network_nodes.is_empty() {
+                    if shared.slot_priority_enabled {
+                        print_debug(|| {
+                            format!(
+                            "Slot-Priority: Starting {:?} network nodes for all slots to buffer packets: {:?}",
+                            network_nodes.len(), all_slots
+                        )
+                        });
+                    }
+                    Self::preparation(&shared, &network_nodes, thread_core, thread_slot, true);
+                }
+
+                // Compute nodes (nx=false) follow slot-priority - only active slots
+                let active_slots: Vec<usize> = (0..shared.slots)
+                    .filter(|&slot| is_slot_active(&shared, slot))
+                    .collect();
+
+                if shared.slot_priority_enabled {
+                    print_debug(|| {
+                        format!(
+                            "Slot-Priority: Starting compute nodes for active slots: {:?}",
+                            active_slots
+                        )
+                    });
+                }
+
+                let compute_init_nodes = initial_nodes(&shared, active_slots);
+                let mut regular_nodes = Vec::new();
+                for node_info in compute_init_nodes {
+                    let node = &shared.graph.nodes[node_info.id as usize];
+                    if !node.nx {
+                        regular_nodes.push(node_info);
+                    }
+                }
+
+                // Send compute nodes to regular scheduler (only active slots)
+                if !regular_nodes.is_empty() {
+                    Self::preparation(&shared, &regular_nodes, thread_core, thread_slot, false);
+                }
+            }
+        }
+
+        // denote slots for which network nodes have been initially spawned
+        let mut network_init_slots = Vec::new();
+        for node_info in &network_init_nodes {
+            let node = &shared.graph.nodes[node_info.id as usize];
+            if node.nx {
+                network_init_slots.push(node_info.slot);
             }
         }
 
         // prefetch cond indexes for efficiency
         let cond_indexes = shared.graph.get_condition_indexes();
 
-        let mut complete_iteration: bool;
+        // Persistent completion tracking across all batches for this stream
+        let mut stream_slot_activity: HashMap<usize, bool> = HashMap::new();
 
-        // Process completed nodes with dynamic batching
-        let batch_timeout = Duration::from_micros(batching_limit);
+        // Process completed nodes with dynamic batching from scheduler
         loop {
-            let mut batch: Vec<(NodeInfo, CmTypes)> = Vec::with_capacity(batching_size);
-
-            // Collect first item (blocking)
-            match completed_rx.recv() {
-                Ok(first_item) => {
-                    if first_item.0.id == IdType::MAX {
-                        // Exit signal received, stopping thread
-                        return;
-                    }
-                    batch.push(first_item);
-                }
+            // Receive batch from scheduler (blocking)
+            let batch = match completed_rx.recv() {
+                Ok(batch_from_scheduler) => batch_from_scheduler,
                 Err(_) => return, // Channel closed
-            }
+            };
 
-            // Try to collect more items up to batching_size or until timeout
-            let batch_start = Instant::now();
-            while batch.len() < batching_size {
-                let remaining_time = batch_timeout.saturating_sub(batch_start.elapsed());
+            print_debug(|| {
+                format!(
+                    "Thread {:?} -- Processing batch of {} nodes",
+                    thread_id,
+                    batch.len()
+                )
+            });
 
-                match completed_rx.recv_timeout(remaining_time) {
-                    Ok(item) => {
-                        if item.0.id == IdType::MAX {
-                            // Exit signal received, process current batch then stop
-                            break;
-                        }
-                        batch.push(item);
-                    }
-                    Err(_) => break, // Timeout or channel closed
-                }
-            }
+            // Local tracking for THIS batch only
+            let mut nodes_sent_in_slot: HashMap<usize, usize> = HashMap::new();
 
-            print_debug(|| format!("Processing batch of {} nodes", batch.len()));
+            let start_ns = shared.base_instant.elapsed().as_nanos();
+            let start_time = if let Some(tb) = &shared.time_buffer {
+                tb.measure_time()
+            } else {
+                TimingMethod::Instant(Instant::now())
+            };
 
             // Process the entire batch
             for (mut node_info, result) in batch {
-                let start_ns = shared.base_instant.elapsed().as_nanos();
-                let start_time = shared.time_buffer.measure_time();
-
-                print_debug(|| format!("Processing Completed {:?}", node_info));
+                print_debug(|| {
+                    format!(
+                        "Thread {:?} -- Processing Completed {:?}",
+                        thread_id, node_info
+                    )
+                });
 
                 if node_info.post_node {
                     // Store Result
@@ -436,8 +605,8 @@ impl SynRt {
                     // ID function failed, skip processing this node
                     print_debug(|| {
                         format!(
-                            "Skipping further processing of node {:?} due to ID function failure",
-                            node_info
+                            "Thread {:?} -- Skipping further processing of node {:?} due to ID function failure",
+                            thread_id, node_info
                         )
                     });
                     continue;
@@ -445,6 +614,9 @@ impl SynRt {
 
                 // store result - single lock acquisition
                 shared.node_results.write().set(&node_info, result);
+
+                // Mark this slot as having activity (for persistent completion tracking)
+                stream_slot_activity.insert(node_info.slot, true);
 
                 // Decrement remaining_nodes counter now that this task is confirmed completed
                 // Using pre-computed node_id_is_cond flag for lock-free branch
@@ -470,9 +642,13 @@ impl SynRt {
                     }
                 };
 
-                print_debug(|| format!("Successors of node {:?}: {:?}", node_info, successors));
+                print_debug(|| {
+                    format!(
+                        "Thread {:?} -- Successors of node {:?}: {:?}",
+                        thread_id, node_info, successors
+                    )
+                });
 
-                let mut nodes_sent = 0;
                 let mut nodes_to_schedule: Vec<NodeInfo> = Vec::new();
 
                 // Collect all potential successors with their info
@@ -523,8 +699,8 @@ impl SynRt {
 
                     print_debug(|| {
                         format!(
-                            "Processing successor id {} - {:?} of node {:?}",
-                            succ_id, succ_indexes, node_info
+                            "Thread {:?} -- Processing successor id {} - {:?} of node {:?}",
+                            thread_id, succ_id, succ_indexes, node_info
                         )
                     });
 
@@ -539,6 +715,9 @@ impl SynRt {
                 // Collect condition nodes to check OUTSIDE the lock to avoid nested locking
                 let mut cond_nodes_to_check: Vec<(NodeInfo, usize)> = Vec::new();
 
+                // if not exist, init nodes_sent for slot to 0
+                let nodes_sent: &mut usize = nodes_sent_in_slot.entry(node_info.slot).or_insert(0);
+
                 for (succ_info, has_cond, succ_id) in succ_updates {
                     if let Some(dep) = shared.resolution_state.decrease_dependency(&succ_info) {
                         if dep == 0 {
@@ -549,24 +728,14 @@ impl SynRt {
                                 succ_info.index,
                             ) {
                                 if !has_cond {
-                                    print_debug(|| {
-                                        format!("Sent successor {:?} to ready channel", succ_info)
-                                    });
                                     nodes_to_schedule.push(succ_info);
-                                    nodes_sent += 1;
+                                    *nodes_sent += 1;
                                 } else {
                                     // Collect condition nodes - will evaluate outside lock
                                     let cond_idx = shared.node_cache[succ_id as usize].cond_index;
                                     cond_nodes_to_check.push((succ_info, cond_idx));
                                 }
                             }
-                        } else {
-                            print_debug(|| {
-                                format!(
-                                    "Successor {:?} not ready, remaining dependencies: {}",
-                                    succ_info, dep
-                                )
-                            });
                         }
                     }
                 }
@@ -574,11 +743,9 @@ impl SynRt {
                 // Evaluate conditions OUTSIDE the locks - conditions_met takes node_results.read()
                 for (succ_info, cond_idx) in cond_nodes_to_check {
                     if conditions_met(&shared, &succ_info, &cond_indexes[cond_idx]) {
-                        print_debug(|| format!("Sent successor {:?} to ready channel", succ_info));
                         nodes_to_schedule.push(succ_info.clone());
-                        nodes_sent += 1;
+                        *nodes_sent += 1;
                     } else {
-                        print_debug(|| format!("Conditions not met for successor {:?}", succ_info));
                         // Reset the flag via resolution state
                         shared.resolution_state.reset_sent(
                             node_info.slot,
@@ -588,89 +755,278 @@ impl SynRt {
                     }
                 }
 
-                // Schedule Nodes
-                Self::preparation(&shared, &nodes_to_schedule, thread_core, thread_slot);
+                // Separate nodes by slot state: active slots → scheduler, buffering slots → buffer
+                let mut active_nodes = Vec::new();
+                let mut buffered_by_slot: Vec<Vec<NodeInfo>> = vec![Vec::new(); shared.slots];
 
-                // Check for stream completion - only process each slot once (thread-safe)
-                complete_iteration = false;
-                if nodes_sent == 0 {
-                    if !shared.resolution_state.is_slot_completed(node_info.slot) {
-                        // Check if all nodes in this slot have been processed (lock-free)
-                        let all_nodes_processed = shared.remaining_nodes[node_info.slot]
-                            .iter()
-                            .all(|count| count.load(Ordering::Acquire) == 0);
+                for node_info in nodes_to_schedule {
+                    if is_slot_active(&shared, node_info.slot) {
+                        active_nodes.push(node_info);
+                    } else {
+                        buffered_by_slot[node_info.slot].push(node_info);
+                    }
+                }
 
-                        if all_nodes_processed {
-                            print_debug(|| {
-                                format!("Completed iteration at slot {}", node_info.slot)
-                            });
+                if !active_nodes.is_empty() {
+                    // Increment nodes_sent for each active slot
+                    for node_info in &active_nodes {
+                        *nodes_sent_in_slot.entry(node_info.slot).or_insert(0) += 1;
+                    }
+                    Self::preparation(&shared, &active_nodes, thread_core, thread_slot, false);
+                }
 
-                            // Mark this slot as completed
-                            shared.resolution_state.mark_slot_completed(node_info.slot);
+                // Buffer nodes from inactive slots
+                if !buffered_by_slot.is_empty() {
+                    let mut slot_buffers = shared.slot_buffers.write();
+                    for (slot, nodes) in buffered_by_slot.iter().enumerate() {
+                        if nodes.is_empty() {
+                            continue;
+                        }
+                        slot_buffers[slot].extend(nodes.clone());
+                        // Mark that this slot had activity (for completion check) - both persistent and per-batch
+                        nodes_sent_in_slot.entry(slot).or_insert(0);
+                        stream_slot_activity.insert(slot, true);
 
-                            // Reset dependency_map for this slot via resolution state
-                            shared
-                                .resolution_state
-                                .reinit_dependencies(&shared.graph.nodes, node_info.slot);
+                        print_debug(|| {
+                            format!(
+                                "Thread {:?} -- Buffered {:?} nodes for slot {:?} ",
+                                thread_id,
+                                nodes.len(),
+                                slot
+                            )
+                        });
+                    }
+                }
+            } // End of batch processing loop
 
-                            // Reinit remaining_nodes for this slot using pre-computed init values (lock-free)
-                            let slot_remaining = &shared.remaining_nodes[node_info.slot];
-                            let slot_init = &shared.remaining_init[node_info.slot];
-                            for (node_rem_idx, init_val) in slot_init.iter().enumerate() {
-                                slot_remaining[node_rem_idx].store(*init_val, Ordering::Release);
+            // Check for stream completion - iterate over ALL slots with activity, not just current batch
+            // Collect slots first to avoid borrow issues when mutating the map
+            let slots_to_check: Vec<usize> = stream_slot_activity.keys().copied().collect();
+
+            print_debug(|| {
+                format!(
+                    "Stream_slot_activity has {} slots to check: {:?}",
+                    slots_to_check.len(),
+                    slots_to_check
+                )
+            });
+
+            for proc_slot in slots_to_check {
+                print_debug(|| {
+                    format!(
+                        "Checking slot {} for completion (completed={}, active={})",
+                        proc_slot,
+                        shared.resolution_state.is_slot_completed(proc_slot),
+                        if shared.slot_priority_enabled {
+                            is_slot_active(&shared, proc_slot).to_string()
+                        } else {
+                            "N/A".to_string()
+                        }
+                    )
+                });
+
+                // Skip slots already marked as completed
+                if shared.resolution_state.is_slot_completed(proc_slot) {
+                    continue;
+                }
+
+                // Skip buffering slots - they cannot complete until activated
+                if shared.slot_priority_enabled && !is_slot_active(&shared, proc_slot) {
+                    continue;
+                }
+
+                // Check if all nodes in this slot have been processed (lock-free)
+                // This works across batch boundaries now because stream_slot_activity is persistent
+                let all_nodes_processed = shared.remaining_nodes[proc_slot]
+                    .iter()
+                    .all(|count| count.load(Ordering::Acquire) == 0);
+
+                print_debug(|| {
+                    let counts: Vec<usize> = shared.remaining_nodes[proc_slot]
+                        .iter()
+                        .map(|c| c.load(Ordering::Acquire))
+                        .collect();
+                    format!(
+                        "Slot {} remaining_nodes: {:?}, all_processed={}",
+                        proc_slot, counts, all_nodes_processed
+                    )
+                });
+
+                if all_nodes_processed {
+                    print_debug(|| {
+                        format!(
+                            "Thread {:?} -- Completed iteration at slot {}",
+                            thread_id, proc_slot
+                        )
+                    });
+
+                    // Mark this slot as completed
+                    shared.resolution_state.mark_slot_completed(proc_slot);
+
+                    // CRITICAL: Reset ALL state BEFORE checking process_slot_completion
+                    // This prevents race conditions where new nodes complete before state is clean
+                    print_debug(|| {
+                        format!(
+                            "Resetting all state for slot {} before starting new iteration",
+                            proc_slot
+                        )
+                    });
+
+                    // Reset dependency_map for this slot via resolution state
+                    shared
+                        .resolution_state
+                        .reinit_dependencies(&shared.graph.nodes, proc_slot);
+
+                    // Reinit remaining_nodes for this slot using pre-computed init values (lock-free)
+                    let slot_remaining = &shared.remaining_nodes[proc_slot];
+                    let slot_init = &shared.remaining_init[proc_slot];
+                    for (node_rem_idx, init_val) in slot_init.iter().enumerate() {
+                        slot_remaining[node_rem_idx].store(*init_val, Ordering::Release);
+                    }
+
+                    // Reinit remaining_cond_nodes for this slot (reset to factor values)
+                    let slot_cond_remaining = &shared.remaining_cond_nodes[proc_slot];
+                    for node_id in 0..shared.graph.nodes.len() {
+                        if shared.node_id_is_cond[node_id] {
+                            let node_id_to_rem_idx = shared.node_id_to_rem[node_id];
+                            let factor = shared.node_cache[node_id].factor;
+                            slot_cond_remaining[node_id_to_rem_idx]
+                                .store(factor, Ordering::Release);
+                        }
+                    }
+
+                    // Clear nodes_sent_to_queue for this slot - MUST happen before new nodes spawn
+                    shared.resolution_state.clear_slot_sent_flags(proc_slot);
+                    print_debug(|| {
+                        format!(
+                            "Cleared all state for slot {} before spawning new stream",
+                            proc_slot
+                        )
+                    });
+
+                    // Check if we should start a new iteration
+                    if process_slot_completion(&shared, proc_slot) {
+                        print_debug(|| {
+                            format!(
+                                "Starting new iteration for slot {} - spawning initial nodes",
+                                proc_slot
+                            )
+                        });
+
+                        // Remove from completed set since we're starting again
+                        shared.resolution_state.unmark_slot_completed(proc_slot);
+
+                        // Reset network node tracking for new stream iteration
+                        network_init_slots.clear();
+                        print_debug(|| "Resetting network_init_slots for new stream".to_string());
+
+                        // Clear activity tracking for this slot's new stream iteration
+                        stream_slot_activity.remove(&proc_slot);
+                        print_debug(|| {
+                            format!(
+                                "Cleared stream_slot_activity for slot {} to start new stream iteration",
+                                proc_slot
+                            )
+                        });
+
+                        // Slot-priority mode: Activate next buffering slot (round-robin)
+                        let buffered_nodes = if shared.slot_priority_enabled {
+                            // Activate next slot in round-robin order
+                            activate_next_slot(&shared, Some(proc_slot))
+                        } else {
+                            None
+                        };
+
+                        // Spawn initial nodes for the restarting slot
+                        let init_nodes = initial_nodes(&shared, vec![proc_slot]);
+
+                        // Separate nodes by nx flag
+                        let mut network_nodes = Vec::new();
+                        let mut regular_nodes = Vec::new();
+
+                        for node_info in init_nodes {
+                            let node = &shared.graph.nodes[node_info.id as usize];
+                            if node.nx {
+                                if !network_init_slots.contains(&node_info.slot) {
+                                    network_nodes.push(node_info);
+                                } else {
+                                    // remove from network_init_slots to avoid re-sending
+                                    network_init_slots.retain(|&s| s != node_info.slot);
+                                }
+                            } else {
+                                regular_nodes.push(node_info);
                             }
+                        }
 
-                            // Clear nodes_sent_to_queue for this slot via resolution state
-                            shared
-                                .resolution_state
-                                .clear_slot_sent_flags(node_info.slot);
+                        // Send network nodes to network scheduler
+                        if !network_nodes.is_empty() {
+                            Self::preparation(
+                                &shared,
+                                &network_nodes,
+                                thread_core,
+                                thread_slot,
+                                true,
+                            );
+                        }
 
-                            complete_iteration = true;
+                        // Send regular nodes to regular scheduler
+                        if !regular_nodes.is_empty() {
+                            Self::preparation(
+                                &shared,
+                                &regular_nodes,
+                                thread_core,
+                                thread_slot,
+                                false,
+                            );
+                        }
+
+                        // Flush buffered nodes from newly activated slot
+                        if let Some(nodes) = buffered_nodes {
+                            if !nodes.is_empty() {
+                                print_debug(|| {
+                                    format!(
+                                        "Slot-Priority: Flushing {} buffered nodes from activated slot",
+                                        nodes.len()
+                                    )
+                                });
+                                Self::preparation(&shared, &nodes, thread_core, thread_slot, false);
+                            }
                         }
                     }
                 }
-                let end_time = shared.time_buffer.measure_time();
+            }
 
-                if let Some(rec) = &shared.recorder {
-                    let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
-                    let end_ns = shared.base_instant.elapsed().as_nanos();
-                    let mut map = rec.lock();
-                    let vec = map.entry(thread_slot).or_insert_with(Vec::new);
-                    vec.push(Record {
-                        job_id,
-                        start_ns,
-                        end_ns,
-                        worker: thread_core,
-                        task_id: IdType::MAX,
-                        index: node_info.index,
-                    });
-                }
-
-                let duration = shared.time_buffer.measure_duration(start_time, end_time);
-                shared.time_buffer.add_task_time(
+            if let Some(tb) = &shared.time_buffer {
+                let end_time = if let Some(tb) = &shared.time_buffer {
+                    tb.measure_time()
+                } else {
+                    TimingMethod::Instant(Instant::now())
+                };
+                let duration = tb.measure_duration(start_time, end_time);
+                tb.add_task_time(
                     thread_slot,
                     &format!("Resolution Thread {}", thread_id),
                     usize::MAX,
                     duration,
                 );
-                if complete_iteration {
-                    // Add initial nodes for new iteration
-                    if process_slot_completion(&shared, node_info.slot) {
-                        // Remove from completed set since we're starting again
-                        shared
-                            .resolution_state
-                            .unmark_slot_completed(node_info.slot);
+            }
 
-                        let init_nodes = initial_nodes(&shared, vec![node_info.slot]);
-                        let mut nodes_to_schedule = Vec::new();
-                        for node_info in init_nodes {
-                            nodes_to_schedule.push(node_info);
-                        }
-                        Self::preparation(&shared, &nodes_to_schedule, thread_core, thread_slot);
-                    }
-                }
-            } // End of batch processing for loop
-        } // End of batching loop
+            if let Some(rec) = &shared.recorder {
+                let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
+                let end_ns = shared.base_instant.elapsed().as_nanos();
+                let mut map = rec.lock();
+                let vec = map.entry(thread_slot).or_insert_with(Vec::new);
+                vec.push(Record {
+                    job_id,
+                    start_ns,
+                    end_ns,
+                    worker: thread_core,
+                    task_id: IdType::MAX,
+                    // arbitrary index value
+                    index: 0,
+                });
+            }
+        } // End of resolution processing loop
     }
 }
 
@@ -696,7 +1052,13 @@ impl SynRt {
                     functions.push(func);
                     post_schedule.push(node_info);
                 }
-                send_to_scheduler(&self.shared, &post_schedule, &pre_build_args, &functions);
+                send_to_scheduler(
+                    &self.shared,
+                    &post_schedule,
+                    &pre_build_args,
+                    &functions,
+                    false,
+                );
                 print_debug(|| format!("Added post node: {}", post_node.name));
                 // Wait until all are completed by checking node_results
                 let mut completed_count = 0;
@@ -731,7 +1093,9 @@ impl SynRt {
     }
 
     pub fn print_statistics(&self, bench_name: &str, out_file: Option<&str>) {
-        self.shared.time_buffer.print_stats(bench_name, out_file);
+        if let Some(tb) = &self.shared.time_buffer {
+            tb.print_stats(bench_name, out_file);
+        }
     }
 
     pub fn write_record(&self, path: &str) {

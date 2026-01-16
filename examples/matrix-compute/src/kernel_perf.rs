@@ -73,14 +73,14 @@ pub fn measure_performance(buf_size: usize, repeat: usize, warmup: usize) {
 
     // Time vec_to_mat
     timings.insert("vec_to_mat", vec![]);
-    let mut orig_vector = generate_vector(buf_size);
-    compute_fft(fft_planner.clone(), &mut orig_vector);
     for _ in 0..warmup {
-        let v = orig_vector.clone();
+        let mut v = generate_vector(buf_size);
+        compute_fft(fft_planner.clone(), &mut v);
         let _ = vec_to_mat(&v);
     }
     for _ in 0..repeat {
-        let v = orig_vector.clone();
+        let mut v = generate_vector(buf_size);
+        compute_fft(fft_planner.clone(), &mut v);
         let start = Instant::now();
         let _ = vec_to_mat(&v);
         let duration = start.elapsed();

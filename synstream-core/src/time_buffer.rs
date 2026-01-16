@@ -98,6 +98,7 @@ pub enum TimingRequest {
     PrintStats {
         bench_name: String,
         out_file: Option<String>,
+        response_tx: mpsc::Sender<()>,
     },
     Shutdown,
 }
@@ -106,15 +107,22 @@ pub enum TimingRequest {
 pub struct AsyncTimeBuffer {
     request_tx: Sender<TimingRequest>,
     controller_handle: Option<JoinHandle<()>>,
+    time_buffer: Arc<Mutex<TimeBuffer>>, // Direct access for print_stats
 }
 
 impl AsyncTimeBuffer {
     /// Create a new AsyncTimeBuffer with a background controller
     pub fn new(slots: usize, system_threads: usize, use_rdtsc: bool) -> Self {
         let (request_tx, request_rx) = mpsc::channel();
+        let time_buffer = Arc::new(Mutex::new(TimeBuffer::new(
+            slots,
+            system_threads,
+            use_rdtsc,
+        )));
+        let time_buffer_clone = Arc::clone(&time_buffer);
 
         let controller_handle = thread::spawn(move || {
-            let mut time_buffer = TimeBuffer::new(slots, system_threads, use_rdtsc);
+            let time_buffer = time_buffer_clone;
 
             while let Ok(request) = request_rx.recv() {
                 match request {
@@ -124,7 +132,9 @@ impl AsyncTimeBuffer {
                         worker_id,
                         duration,
                     } => {
-                        time_buffer.add_task_time(slot_id, &task_name, worker_id, duration);
+                        if let Ok(mut buf) = time_buffer.lock() {
+                            buf.add_task_time(slot_id, &task_name, worker_id, duration);
+                        }
                     }
                     TimingRequest::AddTaskTimeCycles {
                         slot_id,
@@ -132,7 +142,9 @@ impl AsyncTimeBuffer {
                         worker_id,
                         cycles,
                     } => {
-                        time_buffer.add_task_time_cycles(slot_id, &task_name, worker_id, cycles);
+                        if let Ok(mut buf) = time_buffer.lock() {
+                            buf.add_task_time_cycles(slot_id, &task_name, worker_id, cycles);
+                        }
                     }
                     TimingRequest::AddTaskTimeInstant {
                         slot_id,
@@ -141,8 +153,9 @@ impl AsyncTimeBuffer {
                         start,
                         end,
                     } => {
-                        time_buffer
-                            .add_task_time_instant(slot_id, &task_name, worker_id, start, end);
+                        if let Ok(mut buf) = time_buffer.lock() {
+                            buf.add_task_time_instant(slot_id, &task_name, worker_id, start, end);
+                        }
                     }
                     TimingRequest::AddTaskTimeRdtsc {
                         slot_id,
@@ -151,36 +164,48 @@ impl AsyncTimeBuffer {
                         start_cycles,
                         end_cycles,
                     } => {
-                        time_buffer.add_task_time_rdtsc(
-                            slot_id,
-                            &task_name,
-                            worker_id,
-                            start_cycles,
-                            end_cycles,
-                        );
+                        if let Ok(mut buf) = time_buffer.lock() {
+                            buf.add_task_time_rdtsc(
+                                slot_id,
+                                &task_name,
+                                worker_id,
+                                start_cycles,
+                                end_cycles,
+                            );
+                        }
                     }
                     TimingRequest::StartSlotProcessing { slot_id } => {
-                        time_buffer.start_slot_processing(slot_id);
+                        if let Ok(mut buf) = time_buffer.lock() {
+                            buf.start_slot_processing(slot_id);
+                        }
                     }
                     TimingRequest::FinishSlotProcessing {
                         slot_id,
                         response_tx,
                     } => {
-                        let stats = time_buffer.finish_slot_processing(slot_id);
-                        let _ = response_tx.send(stats); // Ignore send errors if receiver dropped
+                        if let Ok(mut buf) = time_buffer.lock() {
+                            let stats = buf.finish_slot_processing(slot_id);
+                            let _ = response_tx.send(stats);
+                        }
                     }
                     TimingRequest::GetSlotStatistics {
                         slot_id,
                         response_tx,
                     } => {
-                        let stats = time_buffer.get_slot_statistics(slot_id).clone();
-                        let _ = response_tx.send(stats);
+                        if let Ok(buf) = time_buffer.lock() {
+                            let stats = buf.get_slot_statistics(slot_id).clone();
+                            let _ = response_tx.send(stats);
+                        }
                     }
                     TimingRequest::PrintStats {
                         bench_name,
                         out_file,
+                        response_tx,
                     } => {
-                        time_buffer.print_stats(&bench_name, out_file.as_deref());
+                        if let Ok(buf) = time_buffer.lock() {
+                            buf.print_stats(&bench_name, out_file.as_deref());
+                            let _ = response_tx.send(());
+                        }
                     }
                     TimingRequest::Shutdown => {
                         break;
@@ -192,6 +217,7 @@ impl AsyncTimeBuffer {
         Self {
             request_tx,
             controller_handle: Some(controller_handle),
+            time_buffer,
         }
     }
 
@@ -318,14 +344,18 @@ impl AsyncTimeBuffer {
             .map_err(|_| "Failed to receive response from controller")
     }
 
-    /// Print statistics asynchronously
-    pub fn print_stats_async(&self, bench_name: &str, out_file: Option<&str>) {
-        let request = TimingRequest::PrintStats {
-            bench_name: bench_name.to_string(),
-            out_file: out_file.map(|s| s.to_string()),
-        };
-        if let Err(_) = self.request_tx.send(request) {
-            eprintln!("Warning: Failed to send timing request - controller may have shut down");
+    /// Print statistics directly (synchronous, bypasses async channel)
+    pub fn print_stats(
+        &self,
+        bench_name: &str,
+        out_file: Option<&str>,
+    ) -> Result<(), &'static str> {
+        // Direct access to TimeBuffer - no channel needed
+        if let Ok(buf) = self.time_buffer.lock() {
+            buf.print_stats(bench_name, out_file);
+            Ok(())
+        } else {
+            Err("Failed to acquire lock on time buffer")
         }
     }
 
@@ -944,11 +974,13 @@ impl TimeBufferManager {
         }
     }
 
-    /// Print stats with worker accounting - async if possible, sync otherwise
+    /// Print stats with worker accounting - blocking in both async and sync modes
     pub fn print_stats(&self, bench_name: &str, out_file: Option<&str>) {
         if self.is_async {
             if let Some(ref async_buf) = self.async_buffer {
-                async_buf.print_stats_async(bench_name, out_file);
+                if let Err(e) = async_buf.print_stats(bench_name, out_file) {
+                    eprintln!("Failed to print stats: {}", e);
+                }
             }
         } else {
             if let Some(ref sync_buf) = self.sync_buffer {
@@ -969,10 +1001,16 @@ impl TimeBufferManager {
 
 impl Drop for TimeBufferManager {
     fn drop(&mut self) {
-        // If we have an async buffer, we need to shut it down
-        // We can't call shutdown() here because it consumes self, but we need to clean up
-        if let Some(ref async_buf) = self.async_buffer {
+        // If we have an async buffer, shut it down explicitly and wait
+        if let Some(async_buf) = self.async_buffer.take() {
+            // Send shutdown and immediately wait for thread to finish
             let _ = async_buf.request_tx.send(TimingRequest::Shutdown);
+
+            // Join the controller thread to ensure clean shutdown
+            if let Some(handle) = async_buf.controller_handle {
+                let _ = handle.join();
+            }
+            // time_buffer (Arc<Mutex>) will be dropped automatically
         }
     }
 }

@@ -219,6 +219,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             factor: factor,
             func_ptr,
             loop_,
+            nx: node_json.nx.unwrap_or(false),
         };
 
         graph.add_node(node.clone());
@@ -249,6 +250,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             factor,
             func_ptr,
             loop_: None,
+            nx: false,
         };
 
         graph.add_post_node(node);

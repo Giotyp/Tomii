@@ -1,6 +1,7 @@
 #![allow(unused_imports)]
 #![allow(dead_code)]
 use core_affinity;
+use crossbeam_channel::Sender;
 use rayon::{prelude::*, vec};
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::cell::Cell;
@@ -8,11 +9,15 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
+
+use crate::buffers::NodeInfo;
 use crate::{IdType, Record};
+use synstream_types::CmTypes;
 
 thread_local! {
     // Worker id assigned to each thread in the pool. usize::MAX means unassigned.
@@ -184,6 +189,14 @@ struct SchedulerBase {
     total_completed: Arc<AtomicUsize>,
     recorder: Option<Recorder>,
     base_instant: Arc<Instant>,
+    // Batching fields
+    batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
+    batch_last_sent: Arc<Mutex<Instant>>,
+    batching_size: usize,
+    batching_limit: u64,
+    completed_tx: Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>>,
+    flusher_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    flusher_shutdown: Arc<AtomicUsize>,
 }
 
 impl SchedulerBase {
@@ -193,6 +206,8 @@ impl SchedulerBase {
         record: bool,
         base_instant: Instant,
         system_threads: usize,
+        batching_size: usize,
+        batching_limit: u64,
     ) -> Self {
         let recorder = if record {
             Some(Arc::new(Mutex::new(HashMap::new())))
@@ -203,6 +218,10 @@ impl SchedulerBase {
         let (threadpool, system_core_offset, worker_core_offset) =
             create_threadpool(core_offset, workers, system_threads);
 
+        let batch_buffer = Arc::new(Mutex::new(Vec::with_capacity(batching_size)));
+        let batch_last_sent = Arc::new(Mutex::new(Instant::now()));
+        let completed_tx = Arc::new(Mutex::new(None));
+
         Self {
             threadpool: threadpool,
             system_core_offset,
@@ -212,39 +231,45 @@ impl SchedulerBase {
             total_completed: Arc::new(AtomicUsize::new(0)),
             recorder,
             base_instant: Arc::new(base_instant),
+            batch_buffer,
+            batch_last_sent,
+            batching_size,
+            batching_limit,
+            completed_tx,
+            flusher_handle: Arc::new(Mutex::new(None)),
+            flusher_shutdown: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     fn write_records_to_csv(&self, path: &str) {
         if let Some(rec) = &self.recorder {
-            if let Ok(map) = rec.lock() {
-                if map.is_empty() {
-                    println!("SchedulerBase: no recorded events to write");
-                    return;
-                }
-                match File::create(path) {
-                    Ok(mut f) => {
-                        let _ = writeln!(f, "slot,job_id,start_ns,end_ns,worker,task_id,index");
-                        for (slot, vec) in map.iter() {
-                            for r in vec.iter() {
-                                let _ = writeln!(
-                                    f,
-                                    "{},{},{},{},{},{},{}",
-                                    slot,
-                                    r.job_id,
-                                    r.start_ns,
-                                    r.end_ns,
-                                    r.worker + self.worker_core_offset,
-                                    r.task_id,
-                                    r.index
-                                );
-                            }
+            let map = rec.lock();
+            if map.is_empty() {
+                println!("SchedulerBase: no recorded events to write");
+                return;
+            }
+            match File::create(path) {
+                Ok(mut f) => {
+                    let _ = writeln!(f, "slot,job_id,start_ns,end_ns,worker,task_id,index");
+                    for (slot, vec) in map.iter() {
+                        for r in vec.iter() {
+                            let _ = writeln!(
+                                f,
+                                "{},{},{},{},{},{},{}",
+                                slot,
+                                r.job_id,
+                                r.start_ns,
+                                r.end_ns,
+                                r.worker + self.worker_core_offset,
+                                r.task_id,
+                                r.index
+                            );
                         }
-                        println!("SchedulerBase: wrote {} slots to {}", map.len(), path);
                     }
-                    Err(e) => {
-                        eprintln!("SchedulerBase: failed to create {}: {}", path, e);
-                    }
+                    println!("SchedulerBase: wrote {} slots to {}", map.len(), path);
+                }
+                Err(e) => {
+                    eprintln!("SchedulerBase: failed to create {}: {}", path, e);
                 }
             }
         } else {
@@ -272,6 +297,87 @@ impl SchedulerBase {
         self.total_completed.load(Ordering::SeqCst)
     }
 
+    fn set_completed_tx(&self, tx: Sender<Vec<(NodeInfo, CmTypes)>>) {
+        let mut completed_tx_lock = self.completed_tx.lock();
+        *completed_tx_lock = Some(tx);
+    }
+
+    fn start_flusher_thread(&self) {
+        let batch_buffer = Arc::clone(&self.batch_buffer);
+        let batch_last_sent = Arc::clone(&self.batch_last_sent);
+        let completed_tx = Arc::clone(&self.completed_tx);
+        let shutdown = Arc::clone(&self.flusher_shutdown);
+        let batching_size = self.batching_size;
+        let batching_limit = self.batching_limit;
+        let batch_timeout = Duration::from_micros(batching_limit);
+
+        let handle = std::thread::spawn(move || loop {
+            // Check for shutdown signal
+            if shutdown.load(Ordering::SeqCst) == 1 {
+                // Final flush before exit
+                let mut batch = batch_buffer.lock();
+                if !batch.is_empty() {
+                    let batch_to_send = std::mem::take(&mut *batch);
+                    drop(batch);
+                    if let Some(tx) = completed_tx.lock().as_ref() {
+                        let _ = tx.send(batch_to_send);
+                    }
+                }
+                break;
+            }
+
+            std::thread::sleep(Duration::from_micros(batching_limit / 2));
+
+            let should_flush = {
+                let last_sent = batch_last_sent.lock();
+                last_sent.elapsed() >= batch_timeout
+            };
+
+            if should_flush {
+                let mut batch = batch_buffer.lock();
+                if !batch.is_empty() {
+                    let batch_to_send =
+                        std::mem::replace(&mut *batch, Vec::with_capacity(batching_size));
+                    drop(batch);
+                    *batch_last_sent.lock() = Instant::now();
+
+                    if let Some(tx) = completed_tx.lock().as_ref() {
+                        let _ = tx.send(batch_to_send);
+                    }
+                }
+            }
+        });
+
+        let mut flusher_lock = self.flusher_handle.lock();
+        *flusher_lock = Some(handle);
+    }
+
+    fn flush_batch(&self) {
+        let mut batch = self.batch_buffer.lock();
+        if !batch.is_empty() {
+            let batch_to_send =
+                std::mem::replace(&mut *batch, Vec::with_capacity(self.batching_size));
+            drop(batch);
+            *self.batch_last_sent.lock() = Instant::now();
+
+            if let Some(tx) = self.completed_tx.lock().as_ref() {
+                let _ = tx.send(batch_to_send);
+            }
+        }
+    }
+
+    fn shutdown_flusher(&self) {
+        // Signal shutdown
+        self.flusher_shutdown.store(1, Ordering::SeqCst);
+
+        // Wait for flusher thread to finish
+        let mut handle_lock = self.flusher_handle.lock();
+        if let Some(handle) = handle_lock.take() {
+            drop(handle_lock); // Release lock before joining
+            let _ = handle.join();
+        }
+    }
+
     /// Common task spawning logic. `spawn_fn` handles the specific spawning (e.g., FIFO or work-stealing).
     fn spawn_task_common<F, S>(&self, meta: Option<(IdType, usize, usize)>, task: F, spawn_fn: S)
     where
@@ -295,17 +401,16 @@ impl SchedulerBase {
             let end = (*base).elapsed().as_nanos();
 
             if let Some(rec) = recorder_opt.as_ref() {
-                if let Ok(mut map) = rec.lock() {
-                    let vec = map.entry(slot).or_insert_with(Vec::new);
-                    vec.push(Record {
-                        job_id,
-                        start_ns: start,
-                        end_ns: end,
-                        worker,
-                        task_id,
-                        index,
-                    });
-                }
+                let mut map = rec.lock();
+                let vec = map.entry(slot).or_insert_with(Vec::new);
+                vec.push(Record {
+                    job_id,
+                    start_ns: start,
+                    end_ns: end,
+                    worker,
+                    task_id,
+                    index,
+                });
             }
 
             pending.fetch_sub(1, Ordering::SeqCst);
@@ -313,6 +418,22 @@ impl SchedulerBase {
         };
 
         spawn_fn(Box::new(wrapped_task));
+    }
+
+    fn get_batch_buffer(&self) -> Arc<Mutex<Vec<(NodeInfo, CmTypes)>>> {
+        Arc::clone(&self.batch_buffer)
+    }
+
+    fn get_batch_last_sent(&self) -> Arc<Mutex<Instant>> {
+        Arc::clone(&self.batch_last_sent)
+    }
+
+    fn get_batching_size(&self) -> usize {
+        self.batching_size
+    }
+
+    fn get_completed_tx_ref(&self) -> Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>> {
+        Arc::clone(&self.completed_tx)
     }
 }
 
@@ -328,12 +449,49 @@ impl FifoScheduler {
         record: bool,
         base_instant: Instant,
         system_threads: usize,
+        batching_size: usize,
+        batching_limit: u64,
     ) -> Self {
         Self {
-            base: SchedulerBase::new(core_offset, workers, record, base_instant, system_threads),
+            base: SchedulerBase::new(
+                core_offset,
+                workers,
+                record,
+                base_instant,
+                system_threads,
+                batching_size,
+                batching_limit,
+            ),
         }
     }
 
+    fn set_completed_tx(&self, tx: Sender<Vec<(NodeInfo, CmTypes)>>) {
+        self.base.set_completed_tx(tx);
+        self.base.start_flusher_thread();
+    }
+
+    fn flush_batch(&self) {
+        self.base.flush_batch();
+    }
+
+    fn get_batch_buffer(&self) -> Arc<Mutex<Vec<(NodeInfo, CmTypes)>>> {
+        self.base.get_batch_buffer()
+    }
+
+    fn get_batch_last_sent(&self) -> Arc<Mutex<Instant>> {
+        self.base.get_batch_last_sent()
+    }
+
+    fn get_batching_size(&self) -> usize {
+        self.base.get_batching_size()
+    }
+
+    fn get_completed_tx_ref(&self) -> Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>> {
+        self.base.get_completed_tx_ref()
+    }
+    fn shutdown_flusher(&self) {
+        self.base.shutdown_flusher();
+    }
     fn write_records_to_csv(&self, path: &str) {
         self.base.write_records_to_csv(path);
     }
@@ -388,10 +546,49 @@ impl WorkStealScheduler {
         record: bool,
         base_instant: Instant,
         system_threads: usize,
+        batching_size: usize,
+        batching_limit: u64,
     ) -> Self {
         Self {
-            base: SchedulerBase::new(core_offset, workers, record, base_instant, system_threads),
+            base: SchedulerBase::new(
+                core_offset,
+                workers,
+                record,
+                base_instant,
+                system_threads,
+                batching_size,
+                batching_limit,
+            ),
         }
+    }
+
+    fn set_completed_tx(&self, tx: Sender<Vec<(NodeInfo, CmTypes)>>) {
+        self.base.set_completed_tx(tx);
+        self.base.start_flusher_thread();
+    }
+
+    fn flush_batch(&self) {
+        self.base.flush_batch();
+    }
+
+    fn get_batch_buffer(&self) -> Arc<Mutex<Vec<(NodeInfo, CmTypes)>>> {
+        self.base.get_batch_buffer()
+    }
+
+    fn get_batch_last_sent(&self) -> Arc<Mutex<Instant>> {
+        self.base.get_batch_last_sent()
+    }
+
+    fn get_batching_size(&self) -> usize {
+        self.base.get_batching_size()
+    }
+
+    fn get_completed_tx_ref(&self) -> Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>> {
+        self.base.get_completed_tx_ref()
+    }
+
+    fn shutdown_flusher(&self) {
+        self.base.shutdown_flusher();
     }
 
     fn write_records_to_csv(&self, path: &str) {
@@ -506,8 +703,58 @@ impl SchedulerImpl {
             SchedulerImpl::WorkStealing(s) => s.write_records_to_csv(path),
         }
     }
+
+    pub fn set_completed_tx(&self, tx: Sender<Vec<(NodeInfo, CmTypes)>>) {
+        match self {
+            SchedulerImpl::Fifo(s) => s.set_completed_tx(tx),
+            SchedulerImpl::WorkStealing(s) => s.set_completed_tx(tx),
+        }
+    }
+
+    pub fn flush_batch(&self) {
+        match self {
+            SchedulerImpl::Fifo(s) => s.flush_batch(),
+            SchedulerImpl::WorkStealing(s) => s.flush_batch(),
+        }
+    }
+
+    pub fn get_batch_buffer(&self) -> Arc<Mutex<Vec<(NodeInfo, CmTypes)>>> {
+        match self {
+            SchedulerImpl::Fifo(s) => s.get_batch_buffer(),
+            SchedulerImpl::WorkStealing(s) => s.get_batch_buffer(),
+        }
+    }
+
+    pub fn get_batch_last_sent(&self) -> Arc<Mutex<Instant>> {
+        match self {
+            SchedulerImpl::Fifo(s) => s.get_batch_last_sent(),
+            SchedulerImpl::WorkStealing(s) => s.get_batch_last_sent(),
+        }
+    }
+
+    pub fn get_batching_size(&self) -> usize {
+        match self {
+            SchedulerImpl::Fifo(s) => s.get_batching_size(),
+            SchedulerImpl::WorkStealing(s) => s.get_batching_size(),
+        }
+    }
+
+    pub fn get_completed_tx_ref(&self) -> Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>> {
+        match self {
+            SchedulerImpl::Fifo(s) => s.get_completed_tx_ref(),
+            SchedulerImpl::WorkStealing(s) => s.get_completed_tx_ref(),
+        }
+    }
+
+    pub fn shutdown_flusher(&self) {
+        match self {
+            SchedulerImpl::Fifo(s) => s.shutdown_flusher(),
+            SchedulerImpl::WorkStealing(s) => s.shutdown_flusher(),
+        }
+    }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub enum SchedulerType {
     Fifo,
     WorkStealing,
@@ -520,6 +767,8 @@ pub fn create_scheduler(
     record: bool,
     base_instant: Instant,
     system_threads: usize,
+    batching_size: usize,
+    batching_limit: u64,
 ) -> SchedulerImpl {
     match scheduler_type {
         SchedulerType::Fifo => SchedulerImpl::Fifo(FifoScheduler::new(
@@ -528,6 +777,8 @@ pub fn create_scheduler(
             record,
             base_instant,
             system_threads,
+            batching_size,
+            batching_limit,
         )),
         SchedulerType::WorkStealing => SchedulerImpl::WorkStealing(WorkStealScheduler::new(
             core_offset,
@@ -535,6 +786,8 @@ pub fn create_scheduler(
             record,
             base_instant,
             system_threads,
+            batching_size,
+            batching_limit,
         )),
     }
 }

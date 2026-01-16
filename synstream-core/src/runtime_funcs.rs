@@ -1,7 +1,8 @@
 use crate::debug::print_debug;
 use crate::resolution_state::ResolutionState;
-use crate::time_buffer::TimeBufferManager;
+use crate::time_buffer::{TimeBufferManager, TimingMethod};
 use crate::{buffers::*, graph::*, graph_struct::*, scheduler::*, IdType, Record};
+use core::panic;
 use crossbeam_channel::Sender;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
@@ -9,6 +10,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use synstream_types::*;
+
+/// Slot state for priority-based processing
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotState {
+    Active,    // Slot is actively processing and sending tasks to scheduler
+    Buffering, // Slot is buffering but not sending tasks to workers
+}
 
 // Cache entry for quick node access - stores commonly accessed node fields
 #[derive(Clone)]
@@ -188,16 +196,22 @@ pub struct SharedData {
     pub node_results: Arc<RwLock<VecMap<CmTypes>>>,
     pub stream_complete_counter: Arc<AtomicUsize>,
     pub available_stream_slots: Arc<RwLock<Vec<usize>>>,
-    pub time_buffer: Arc<TimeBufferManager>,
+    pub time_buffer: Option<Arc<TimeBufferManager>>,
 
     // Shared between threads
     pub scheduler: Arc<RwLock<Option<Arc<SchedulerImpl>>>>,
-    pub completed_tx: Arc<RwLock<Option<Sender<(NodeInfo, CmTypes)>>>>,
+    pub network_scheduler: Arc<RwLock<Option<Arc<SchedulerImpl>>>>,
+    pub completed_tx: Arc<RwLock<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>>,
     pub workers: Arc<AtomicUsize>,
     pub recorder: Option<Arc<Mutex<HashMap<usize, Vec<Record>>>>>,
     pub base_instant: Arc<Instant>,
     pub job_counter: Arc<AtomicUsize>,
     pub core_offset: Arc<AtomicUsize>,
+
+    // Scheduler-side batching structures
+    pub batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
+    pub batch_last_sent: Arc<Mutex<Instant>>,
+    pub flusher_shutdown: Arc<AtomicUsize>,
 
     // Resolution state - abstracted for single vs multi-threaded
     pub resolution_state: Arc<dyn ResolutionState>,
@@ -213,6 +227,12 @@ pub struct SharedData {
     pub remaining_init: Arc<Vec<Vec<usize>>>,
     pub initial_prep_done: Arc<AtomicUsize>,
     pub system_threads: usize,
+
+    // Slot priority processing state
+    pub slot_states: Arc<RwLock<Vec<SlotState>>>,
+    pub slot_priority_enabled: bool,
+    // Per-slot buffering: holds ready nodes waiting for slot activation
+    pub slot_buffers: Arc<RwLock<Vec<Vec<NodeInfo>>>>,
 }
 
 #[inline(always)]
@@ -220,16 +240,19 @@ fn execute_task(
     shared: &Arc<SharedData>,
     func: CmPtr,
     node_info: &NodeInfo,
-    time_buf: &Arc<TimeBufferManager>,
+    time_buf: &Option<Arc<TimeBufferManager>>,
     node_name: &str,
-    completed_tx: &Sender<(NodeInfo, CmTypes)>,
     pre_built_args: Option<Vec<CmTypes>>,
 ) {
     let worker_id = crate::scheduler::get_current_worker_id().unwrap_or(usize::MAX);
 
     // Measure argument building time separately
     let arg_build_start = if !node_info.post_node {
-        Some(time_buf.measure_time())
+        Some(if let Some(tb) = time_buf {
+            tb.measure_time()
+        } else {
+            TimingMethod::Instant(Instant::now())
+        })
     } else {
         None
     };
@@ -252,20 +275,25 @@ fn execute_task(
     };
 
     if let Some(arg_start) = arg_build_start {
-        let arg_end = time_buf.measure_time();
-        let arg_duration = time_buf.measure_duration(arg_start, arg_end);
-        // Record argument building time as a separate metric
-        time_buf.add_task_time(
-            node_info.slot,
-            &format!("{}-argbuild", node_name),
-            worker_id,
-            arg_duration,
-        );
+        if let Some(tb) = time_buf {
+            let arg_end = tb.measure_time();
+            let arg_duration = tb.measure_duration(arg_start, arg_end);
+            tb.add_task_time(
+                node_info.slot,
+                &format!("{}-argbuild", node_name),
+                worker_id,
+                arg_duration,
+            );
+        }
     }
 
     // Start timing for actual function execution
     let start_time = if !node_info.post_node {
-        Some(time_buf.measure_time())
+        Some(if let Some(tb) = time_buf {
+            tb.measure_time()
+        } else {
+            TimingMethod::Instant(Instant::now())
+        })
     } else {
         None
     };
@@ -273,13 +301,41 @@ fn execute_task(
     let result = func(arg_vec);
 
     if let Some(start) = start_time {
-        let end_time = time_buf.measure_time();
-        let duration = time_buf.measure_duration(start, end_time);
-        time_buf.add_task_time(node_info.slot, node_name, worker_id, duration);
+        if let Some(tb) = time_buf {
+            let end_time = tb.measure_time();
+            let duration = tb.measure_duration(start, end_time);
+            tb.add_task_time(node_info.slot, node_name, worker_id, duration);
+        }
     }
 
-    // Send result immediately
-    let _ = completed_tx.send((node_info.clone(), result));
+    // Add result to batch buffer and flush if full
+    let scheduler_guard = shared.scheduler.read();
+    if let Some(scheduler) = scheduler_guard.as_ref() {
+        let batch_buffer = scheduler.get_batch_buffer();
+        let batching_size = scheduler.get_batching_size();
+        let batch_last_sent = scheduler.get_batch_last_sent();
+        let completed_tx_ref = scheduler.get_completed_tx_ref();
+
+        let should_flush = {
+            let mut batch = batch_buffer.lock();
+            batch.push((node_info.clone(), result));
+            batch.len() >= batching_size
+        };
+
+        if should_flush {
+            let mut batch = batch_buffer.lock();
+            if batch.len() >= batching_size {
+                let batch_to_send =
+                    std::mem::replace(&mut *batch, Vec::with_capacity(batching_size));
+                drop(batch);
+                *batch_last_sent.lock() = std::time::Instant::now();
+
+                if let Some(tx) = completed_tx_ref.lock().as_ref() {
+                    let _ = tx.send(batch_to_send);
+                }
+            }
+        }
+    }
 }
 
 #[inline]
@@ -288,6 +344,7 @@ pub fn send_to_scheduler(
     nodes_to_schedule: &Vec<NodeInfo>,
     pre_built_args_vec: &Vec<Option<Vec<CmTypes>>>,
     custom_func_vec: &Vec<Option<CmPtr>>,
+    use_network_scheduler: bool,
 ) {
     for (i, node_info) in nodes_to_schedule.iter().enumerate() {
         let (func_ptr, node_name) = {
@@ -324,22 +381,36 @@ pub fn send_to_scheduler(
             }
         };
 
-        let time_buf = Arc::clone(&shared.time_buffer);
+        let time_buf = shared.time_buffer.clone();
         let shared_clone = Arc::clone(shared);
 
-        // Get scheduler - parking_lot locks don't fail
-        let scheduler_guard = shared.scheduler.read();
-
-        let scheduler = match scheduler_guard.as_ref() {
-            Some(s) => s,
-            None => {
-                eprintln!("Scheduler is not initialized");
-                return;
+        // Select scheduler based on use_network_scheduler flag
+        let scheduler = if use_network_scheduler {
+            let network_scheduler_guard = shared.network_scheduler.read();
+            match network_scheduler_guard.as_ref() {
+                Some(s) => Arc::clone(s),
+                None => {
+                    // Fallback to main scheduler if network scheduler not initialized
+                    let scheduler_guard = shared.scheduler.read();
+                    match scheduler_guard.as_ref() {
+                        Some(s) => Arc::clone(s),
+                        None => {
+                            eprintln!("No scheduler is initialized");
+                            return;
+                        }
+                    }
+                }
+            }
+        } else {
+            let scheduler_guard = shared.scheduler.read();
+            match scheduler_guard.as_ref() {
+                Some(s) => Arc::clone(s),
+                None => {
+                    eprintln!("Scheduler is not initialized");
+                    return;
+                }
             }
         };
-
-        let completed_tx_guard = shared.completed_tx.read();
-        let completed_tx = completed_tx_guard.as_ref().unwrap().clone();
 
         // Spawn task
         let meta_data = (node_info.id, node_info.slot, node_info.index);
@@ -352,7 +423,6 @@ pub fn send_to_scheduler(
                 &node_info,
                 &time_buf,
                 &node_name,
-                &completed_tx,
                 pre_built_args,
             )
         });
@@ -394,39 +464,78 @@ pub fn conditions_met(
 #[inline]
 pub fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
     // Complete timing - use unwrap_or to handle errors gracefully
-    if let Err(e) = shared.time_buffer.finish_slot_processing(slot) {
-        eprintln!("Warning: Failed to finish slot {} timing: {}", slot, e);
+    if let Some(tb) = &shared.time_buffer {
+        if let Err(e) = tb.finish_slot_processing(slot) {
+            eprintln!("Warning: Failed to finish slot {} timing: {}", slot, e);
+        }
     }
 
-    let mut new_iteration = false;
+    // Count currently active/processing streams (excluding this completing slot)
+    let currently_active_streams = {
+        let available_slots = shared.available_stream_slots.read();
+        available_slots
+            .iter()
+            .enumerate()
+            .filter(|(s_id, &stream)| *s_id != slot && stream != usize::MAX)
+            .count()
+    };
+
     // Increment global completion counter
-    let new_counter = shared
+    let completed_streams = shared
         .stream_complete_counter
         .fetch_add(1, Ordering::SeqCst)
-        + shared.slots;
+        + 1;
 
-    // Check if we should start a new iteration
-    if new_counter < shared.max_streams {
-        print_debug(|| format!("Starting new iteration {}", new_counter));
-        new_iteration = true;
+    // Total streams in-flight or completed
+    let total_streams_processed = completed_streams + currently_active_streams;
+
+    // Decide whether to start a new stream on this slot
+    let can_restart = total_streams_processed < shared.max_streams;
+
+    if can_restart {
+        print_debug(|| {
+            format!(
+                "Slot {} completed stream. Starting new: completed={}, active={}, total={}, max={}",
+                slot,
+                completed_streams,
+                currently_active_streams,
+                total_streams_processed,
+                shared.max_streams
+            )
+        });
 
         // Release the slot
         release_slot(shared, slot);
 
-        // Clear completed nodes for this stream to allow restart
+        // Clear completed nodes for this slot to allow restart
         shared
             .node_results
             .write()
             .reinit_slot(&shared.graph.nodes, slot, None);
+
+        // In slot-priority mode: Keep slot Active if it's currently active (immediate restart)
+        // This allows the completing slot to immediately start processing the next stream
+        // without being buffered. Round-robin activation will happen when multiple slots
+        // are waiting, not when a slot is actively restarting.
+
+        true // Signal to caller: slot should restart
+    } else {
+        print_debug(|| {
+            format!(
+                "Slot {} completed. Max streams ({}) reached: completed={}, active={}",
+                slot, shared.max_streams, completed_streams, currently_active_streams
+            )
+        });
+
+        false // Signal to caller: no restart needed
     }
-    new_iteration
 }
 
 #[inline]
 pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) -> usize {
     let mut available_slots = shared.available_stream_slots.write();
 
-    // Check if this streams is already mapped to a slot
+    // Check if this stream is already mapped to a slot
     let mut av_slot_id: usize = usize::MAX;
     for (slot_id, &real_stream) in available_slots.iter().enumerate() {
         if real_stream == stream {
@@ -437,8 +546,7 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
         }
     }
 
-    // Assign this stream to the available slot
-
+    // If no available slot found, try again (in case of race condition)
     if av_slot_id == std::usize::MAX {
         // Find first available slot
         for (slot_id, &real_stream) in available_slots.iter().enumerate() {
@@ -453,6 +561,19 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
         panic!("No available stream slots for stream: {}", stream);
     }
 
+    // For slot-priority: assign stream N to slot N when possible
+    // This ensures streams map to specific slots in slot-priority mode
+    let preferred_slot = stream % shared.slots;
+    if shared.slot_priority_enabled && available_slots[preferred_slot] == std::usize::MAX {
+        av_slot_id = preferred_slot;
+        print_debug(|| {
+            format!(
+                "Slot-priority: Assigning stream {} to preferred slot {}",
+                stream, preferred_slot
+            )
+        });
+    }
+
     available_slots[av_slot_id] = stream; // Mark as busy
     print_debug(|| {
         format!(
@@ -461,7 +582,9 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
         )
     });
     // Start Slot Timing
-    shared.time_buffer.start_slot_processing(av_slot_id);
+    if let Some(tb) = &shared.time_buffer {
+        tb.start_slot_processing(av_slot_id);
+    }
     return av_slot_id;
 }
 
@@ -497,7 +620,6 @@ pub fn process_id_function(
             );
 
             // Call the id function
-            print_debug(|| format!("Calling ID function for {:?}", node_info));
             let id_result = func_ptr(arg_vec);
 
             // Extract stream from the result
@@ -513,38 +635,29 @@ pub fn process_id_function(
                             );
                     return None;
                 }
+                print_debug(|| {
+                    format!(
+                        "ID function determined stream {} for {:?}",
+                        new_stream, node_info
+                    )
+                });
                 return Some(new_stream);
             } else {
                 panic!("ID function did not return a valid number for stream");
             }
         }
     }
-    return Some(node_info.slot);
-}
-
-pub fn create_task(
-    func: CmPtr,
-    arg_vec: Vec<CmTypes>,
-    node_info: NodeInfo,
-    node_name: String,
-    completed_tx: Sender<(NodeInfo, CmTypes)>,
-    time_buf: Arc<TimeBufferManager>,
-) -> impl FnOnce() {
-    let task = move || {
-        let start_time = time_buf.measure_time();
-
-        let result = func(arg_vec);
-
-        if !node_info.post_node {
-            let end_time = time_buf.measure_time();
-            let duration = time_buf.measure_duration(start_time, end_time);
-            let worker_id = crate::scheduler::get_current_worker_id().unwrap_or(usize::MAX);
-            time_buf.add_task_time(node_info.slot, &node_name, worker_id, duration);
+    // find real stream belonging to this slot
+    let available_slots = shared.available_stream_slots.read();
+    for (slot_id, &real_stream) in available_slots.iter().enumerate() {
+        if slot_id == node_info.slot {
+            if real_stream == usize::MAX {
+                return Some(node_info.slot);
+            }
+            return Some(real_stream);
         }
-        // Send result through channel
-        completed_tx.send((node_info, result)).unwrap();
-    };
-    task
+    }
+    panic!("Could not find stream for node");
 }
 
 #[inline]
@@ -747,12 +860,19 @@ pub fn collect_arg_result(
 
             // Special case for single index
             if predecessor.indexes.len() == 1 {
-                let node_info = NodeInfo::new(*res_node_id as IdType, slot, pred_index, 0);
+                let res_node = &shared.graph.nodes[*res_node_id as usize];
+                let res_factor = res_node.factor;
+                let node_info =
+                    NodeInfo::new(*res_node_id as IdType, slot, pred_index % res_factor, 0);
                 let res_read = shared.node_results.read();
                 if let Some(result) = res_read.get(&node_info) {
                     return Some(vec![result]);
+                } else {
+                    panic!(
+                        "Missing result for node_info: {:?} when collecting argument",
+                        node_info
+                    );
                 }
-                return None;
             }
 
             // Batch process multiple indices
@@ -774,7 +894,10 @@ pub fn collect_arg_result(
                 if let Some(result) = res_read.get(&node_info) {
                     result_vec.push(result);
                 } else {
-                    return None; // Early return if any result is missing
+                    panic!(
+                        "Missing result for node_info: {:?} when collecting argument",
+                        node_info
+                    );
                 }
             }
 
@@ -786,6 +909,84 @@ pub fn collect_arg_result(
         CmTypes::Barrier(_) => None,
         _ => Some(vec![arg.type_.clone()]),
     }
+}
+
+/// Check if a slot is active (ready to send tasks to scheduler)
+#[inline]
+pub fn is_slot_active(shared: &Arc<SharedData>, slot: usize) -> bool {
+    if !shared.slot_priority_enabled {
+        return true; // All slots active when feature disabled
+    }
+    let states = shared.slot_states.read();
+    states[slot] == SlotState::Active
+}
+
+/// Activate the next buffering slot (if any) and return its buffered nodes
+/// Transition a slot from Active to Buffering state (for round-robin rotation)
+pub fn transition_slot_to_buffering(shared: &Arc<SharedData>, slot: usize) {
+    let mut states = shared.slot_states.write();
+    if states[slot] == SlotState::Active {
+        states[slot] = SlotState::Buffering;
+        print_debug(|| format!("Round-Robin: Slot {} transitioned to Buffering state", slot));
+    }
+}
+
+/// Activate the next buffering slot in round-robin order
+/// Returns the slot ID that was activated and its buffered nodes
+/// When slot-priority is enabled, automatically uses round-robin activation
+pub fn activate_next_slot(
+    shared: &Arc<SharedData>,
+    completing_slot: Option<usize>,
+) -> Option<Vec<NodeInfo>> {
+    if !shared.slot_priority_enabled {
+        return None;
+    }
+
+    // Find and activate next buffering slot in round-robin order
+    let activated_slot = {
+        let mut states = shared.slot_states.write();
+
+        // Round-robin: find next buffering slot in circular order after completing_slot
+        if let Some(completed) = completing_slot {
+            let num_slots = states.len();
+            // Search for next Buffering slot starting from (completed + 1)
+            let mut found_slot = None;
+            for offset in 1..=num_slots {
+                let candidate = (completed + offset) % num_slots;
+                if states[candidate] == SlotState::Buffering {
+                    states[candidate] = SlotState::Active;
+                    print_debug(|| {
+                        format!(
+                            "Slot-Priority: Activated slot {} for processing (after slot {})",
+                            candidate, completed
+                        )
+                    });
+                    found_slot = Some(candidate);
+                    break;
+                }
+            }
+            found_slot
+        } else {
+            // Fallback: find first buffering slot
+            states
+                .iter_mut()
+                .enumerate()
+                .find(|(_, state)| **state == SlotState::Buffering)
+                .map(|(slot_id, state)| {
+                    *state = SlotState::Active;
+                    print_debug(|| {
+                        format!("Slot-Priority: Activated slot {} for processing", slot_id)
+                    });
+                    slot_id
+                })
+        }
+    };
+
+    // Retrieve and clear buffered nodes for this slot
+    activated_slot.map(|slot_id| {
+        let mut slot_buffers = shared.slot_buffers.write();
+        std::mem::take(&mut slot_buffers[slot_id])
+    })
 }
 
 pub fn initial_nodes(shared: &Arc<SharedData>, slots: Vec<usize>) -> Vec<NodeInfo> {
