@@ -221,12 +221,7 @@ impl SynRt {
         *self.shared.base_instant
     }
 
-    pub fn run(
-        &mut self,
-        scheduler: SchedulerImpl,
-        system_threads: usize,
-        network_scheduler: Option<SchedulerImpl>,
-    ) {
+    pub fn run(&mut self, scheduler: SchedulerImpl, system_threads: usize) {
         // Overwrite workers
         self.shared
             .workers
@@ -251,16 +246,6 @@ impl SynRt {
             let mut scheduler_lock = self.shared.scheduler.write();
             core_offset = scheduler.core_offset().unwrap_or(0);
             *scheduler_lock = Some(Arc::new(scheduler));
-        }
-
-        // Store network scheduler if provided
-        if let Some(net_sched) = network_scheduler {
-            let mut network_scheduler_lock = self.shared.network_scheduler.write();
-            *network_scheduler_lock = Some(Arc::new(net_sched));
-            println!(
-                "Network scheduler initialized with {} workers",
-                network_scheduler_lock.as_ref().unwrap().workers()
-            );
         }
 
         self.shared.core_offset.store(core_offset, Ordering::SeqCst);

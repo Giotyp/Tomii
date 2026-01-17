@@ -5,7 +5,7 @@ use synstream_core::debug::*;
 use synstream_core::graph::Graph;
 use synstream_core::graph_gen::from_json;
 use synstream_core::runtime::SynRt;
-use synstream_core::scheduler::{create_scheduler, SchedulerType};
+use synstream_core::scheduler::{create_unified_scheduler, SchedulerType};
 
 #[derive(Parser)]
 #[clap(author = "George Typaldos", version, about)]
@@ -207,10 +207,11 @@ pub fn run_graph(
         nrx,
         slot_priority_enabled,
     );
-    let scheduler = create_scheduler(
+    let scheduler = create_unified_scheduler(
         scheduler_type,
         core_offset,
         workers,
+        nrx, // Network workers
         record,
         synrt.base_instant(),
         system_threads,
@@ -218,23 +219,6 @@ pub fn run_graph(
         batching_limit,
     );
 
-    // Create network scheduler if nrx > 0
-    let network_scheduler = if nrx > 0 {
-        let network_core_offset = core_offset + system_threads + workers;
-        Some(create_scheduler(
-            scheduler_type,
-            network_core_offset,
-            nrx,
-            record,
-            synrt.base_instant(),
-            0, // No system threads for network scheduler
-            batching_size,
-            batching_limit,
-        ))
-    } else {
-        None
-    };
-
-    synrt.run(scheduler, system_threads, network_scheduler);
+    synrt.run(scheduler, system_threads);
     synrt
 }
