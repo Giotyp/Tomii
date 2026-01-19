@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
+use crate::async_recorder::{set_worker_recorder, submit_record, AsyncRecorder};
 use crate::buffers::NodeInfo;
 use crate::{IdType, Record};
 use synstream_types::CmTypes;
@@ -39,6 +40,7 @@ pub fn create_threadpool(
     core_offset: usize,
     workers: usize,
     system_threads: usize,
+    async_recorder: Option<Arc<AsyncRecorder>>,
 ) -> (ThreadPool, usize, usize) {
     // Create threadpool and pin workers to cores
     let mut core_ids = core_affinity::get_core_ids().unwrap();
@@ -130,11 +132,20 @@ pub fn create_threadpool(
     }
     println!("======================================");
 
+    let recorder_clone = async_recorder.clone();
     let threadpool = ThreadPoolBuilder::new()
         .num_threads(actual_workers)
         .start_handler(move |thread_index| {
             // Assign a worker id to this thread for timing attribution
             WORKER_ID.with(|c| c.set(thread_index));
+
+            // Initialize per-worker recording channel
+            if let Some(ref recorder) = recorder_clone {
+                if let Some(tx) = recorder.get_worker_sender(thread_index) {
+                    set_worker_recorder(tx);
+                }
+            }
+
             // Pin each thread to a specific core
             let core_id = cores_to_use[thread_index];
             core_affinity::set_for_current(core_id);
@@ -252,9 +263,6 @@ pub trait Scheduler {
     }
 }
 
-/// Recorder type: maps "slot" -> Vec<Record>
-type Recorder = Arc<Mutex<HashMap<usize, Vec<Record>>>>;
-
 /// Shared base for schedulers with common state and logic.
 #[derive(Debug)]
 struct SchedulerBase {
@@ -264,7 +272,7 @@ struct SchedulerBase {
     pending_jobs: Arc<AtomicUsize>,
     total_spawned: Arc<AtomicUsize>,
     total_completed: Arc<AtomicUsize>,
-    recorder: Option<Recorder>,
+    async_recorder: Option<Arc<AsyncRecorder>>,
     base_instant: Arc<Instant>,
     // Batching fields
     batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
@@ -280,20 +288,26 @@ impl SchedulerBase {
     fn new(
         core_offset: usize,
         workers: usize,
+        network_workers: usize,
         record: bool,
+        external_recorder: Option<Arc<AsyncRecorder>>,
         base_instant: Instant,
         system_threads: usize,
         batching_size: usize,
         batching_limit: u64,
     ) -> Self {
-        let recorder = if record {
-            Some(Arc::new(Mutex::new(HashMap::new())))
+        let total_recorders = workers + network_workers + system_threads;
+        let async_recorder = if record {
+            match external_recorder {
+                Some(r) => Some(r),
+                None => Some(Arc::new(AsyncRecorder::new(total_recorders, 100))),
+            }
         } else {
             None
         };
 
         let (threadpool, system_core_offset, worker_core_offset) =
-            create_threadpool(core_offset, workers, system_threads);
+            create_threadpool(core_offset, workers, system_threads, async_recorder.clone());
 
         let batch_buffer = Arc::new(Mutex::new(Vec::with_capacity(batching_size)));
         let batch_last_sent = Arc::new(Mutex::new(Instant::now()));
@@ -306,7 +320,7 @@ impl SchedulerBase {
             pending_jobs: Arc::new(AtomicUsize::new(0)),
             total_spawned: Arc::new(AtomicUsize::new(0)),
             total_completed: Arc::new(AtomicUsize::new(0)),
-            recorder,
+            async_recorder,
             base_instant: Arc::new(base_instant),
             batch_buffer,
             batch_last_sent,
@@ -319,35 +333,10 @@ impl SchedulerBase {
     }
 
     fn write_records_to_csv(&self, path: &str) {
-        if let Some(rec) = &self.recorder {
-            let map = rec.lock();
-            if map.is_empty() {
-                println!("SchedulerBase: no recorded events to write");
-                return;
-            }
-            match File::create(path) {
-                Ok(mut f) => {
-                    let _ = writeln!(f, "slot,job_id,start_ns,end_ns,worker,task_id,index");
-                    for (slot, vec) in map.iter() {
-                        for r in vec.iter() {
-                            let _ = writeln!(
-                                f,
-                                "{},{},{},{},{},{},{}",
-                                slot,
-                                r.job_id,
-                                r.start_ns,
-                                r.end_ns,
-                                r.worker + self.worker_core_offset,
-                                r.task_id,
-                                r.index
-                            );
-                        }
-                    }
-                    println!("SchedulerBase: wrote {} slots to {}", map.len(), path);
-                }
-                Err(e) => {
-                    eprintln!("SchedulerBase: failed to create {}: {}", path, e);
-                }
+        if let Some(recorder) = &self.async_recorder {
+            match recorder.write_to_csv(path) {
+                Ok(()) => {}
+                Err(e) => eprintln!("Failed to write records: {}", e),
             }
         } else {
             println!("SchedulerBase: recorder not enabled");
@@ -467,7 +456,7 @@ impl SchedulerBase {
         let pending = Arc::clone(&self.pending_jobs);
         let completed = Arc::clone(&self.total_completed);
         let base = Arc::clone(&self.base_instant);
-        let recorder_opt = self.recorder.as_ref().map(Arc::clone);
+        let recorder_enabled = self.async_recorder.is_some();
 
         let (task_id, slot, index) = meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN));
 
@@ -477,10 +466,10 @@ impl SchedulerBase {
             task();
             let end = (*base).elapsed().as_nanos();
 
-            if let Some(rec) = recorder_opt.as_ref() {
-                let mut map = rec.lock();
-                let vec = map.entry(slot).or_insert_with(Vec::new);
-                vec.push(Record {
+            // Lock-free recording via per-worker channel
+            if recorder_enabled {
+                submit_record(Record {
+                    slot,
                     job_id,
                     start_ns: start,
                     end_ns: end,
@@ -512,6 +501,10 @@ impl SchedulerBase {
     fn get_completed_tx_ref(&self) -> Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>> {
         Arc::clone(&self.completed_tx)
     }
+
+    fn get_async_recorder(&self) -> Option<Arc<AsyncRecorder>> {
+        self.async_recorder.clone()
+    }
 }
 
 #[derive(Debug)]
@@ -524,6 +517,7 @@ impl FifoScheduler {
         core_offset: usize,
         workers: usize,
         record: bool,
+        external_recorder: Option<Arc<AsyncRecorder>>,
         base_instant: Instant,
         system_threads: usize,
         batching_size: usize,
@@ -533,7 +527,9 @@ impl FifoScheduler {
             base: SchedulerBase::new(
                 core_offset,
                 workers,
+                0,
                 record,
+                external_recorder,
                 base_instant,
                 system_threads,
                 batching_size,
@@ -621,6 +617,7 @@ impl WorkStealScheduler {
         core_offset: usize,
         workers: usize,
         record: bool,
+        external_recorder: Option<Arc<AsyncRecorder>>,
         base_instant: Instant,
         system_threads: usize,
         batching_size: usize,
@@ -630,7 +627,9 @@ impl WorkStealScheduler {
             base: SchedulerBase::new(
                 core_offset,
                 workers,
+                0,
                 record,
+                external_recorder,
                 base_instant,
                 system_threads,
                 batching_size,
@@ -845,6 +844,14 @@ impl SchedulerImpl {
             SchedulerImpl::Unified(s) => s.shutdown_flusher(),
         }
     }
+
+    pub fn get_async_recorder(&self) -> Option<Arc<AsyncRecorder>> {
+        match self {
+            SchedulerImpl::Fifo(s) => s.base.get_async_recorder(),
+            SchedulerImpl::WorkStealing(s) => s.base.get_async_recorder(),
+            SchedulerImpl::Unified(s) => s.get_async_recorder(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -858,6 +865,7 @@ pub fn create_scheduler(
     core_offset: usize,
     num_workers: usize,
     record: bool,
+    external_recorder: Option<Arc<AsyncRecorder>>,
     base_instant: Instant,
     system_threads: usize,
     batching_size: usize,
@@ -868,6 +876,7 @@ pub fn create_scheduler(
             core_offset,
             num_workers,
             record,
+            external_recorder,
             base_instant,
             system_threads,
             batching_size,
@@ -877,6 +886,7 @@ pub fn create_scheduler(
             core_offset,
             num_workers,
             record,
+            external_recorder,
             base_instant,
             system_threads,
             batching_size,
@@ -898,7 +908,7 @@ pub struct UnifiedScheduler {
     pending_jobs: Arc<AtomicUsize>,
     total_spawned: Arc<AtomicUsize>,
     total_completed: Arc<AtomicUsize>,
-    recorder: Option<Recorder>,
+    async_recorder: Option<Arc<AsyncRecorder>>,
     base_instant: Arc<Instant>,
     batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
     batch_last_sent: Arc<Mutex<Instant>>,
@@ -915,20 +925,29 @@ impl UnifiedScheduler {
         main_workers: usize,
         network_workers: usize,
         record: bool,
+        external_recorder: Option<Arc<AsyncRecorder>>,
         base_instant: Instant,
         system_threads: usize,
         batching_size: usize,
         batching_limit: u64,
     ) -> Self {
-        let recorder = if record {
-            Some(Arc::new(Mutex::new(HashMap::new())))
+        let total_workers = main_workers + network_workers + system_threads;
+        let async_recorder = if record {
+            match external_recorder {
+                Some(r) => Some(r),
+                None => Some(Arc::new(AsyncRecorder::new(total_workers, 100))),
+            }
         } else {
             None
         };
 
         // Create main threadpool
-        let (main_pool, system_core_offset, worker_core_offset) =
-            create_threadpool(core_offset, main_workers, system_threads);
+        let (main_pool, system_core_offset, worker_core_offset) = create_threadpool(
+            core_offset,
+            main_workers,
+            system_threads,
+            async_recorder.clone(),
+        );
 
         // Create network threadpool with sequential worker IDs starting after main workers
         let main_worker_end_core = worker_core_offset + main_workers;
@@ -952,7 +971,7 @@ impl UnifiedScheduler {
             pending_jobs: Arc::new(AtomicUsize::new(0)),
             total_spawned: Arc::new(AtomicUsize::new(0)),
             total_completed: Arc::new(AtomicUsize::new(0)),
-            recorder,
+            async_recorder,
             base_instant: Arc::new(base_instant),
             batch_buffer,
             batch_last_sent,
@@ -981,7 +1000,7 @@ impl UnifiedScheduler {
         let pending = Arc::clone(&self.pending_jobs);
         let completed = Arc::clone(&self.total_completed);
         let base = Arc::clone(&self.base_instant);
-        let recorder_opt = self.recorder.as_ref().map(Arc::clone);
+        let recorder_enabled = self.async_recorder.is_some();
         let worker_core_offset = self.worker_core_offset;
 
         let (task_id, slot, index) = meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN));
@@ -992,10 +1011,10 @@ impl UnifiedScheduler {
             task();
             let end = (*base).elapsed().as_nanos();
 
-            if let Some(rec) = recorder_opt.as_ref() {
-                let mut map = rec.lock();
-                let vec = map.entry(slot).or_insert_with(Vec::new);
-                vec.push(Record {
+            // Lock-free recording via per-worker channel
+            if recorder_enabled {
+                submit_record(Record {
+                    slot,
                     job_id,
                     start_ns: start,
                     end_ns: end,
@@ -1013,29 +1032,10 @@ impl UnifiedScheduler {
     }
 
     fn write_records_to_csv(&self, path: &str) {
-        if let Some(rec) = &self.recorder {
-            let map = rec.lock();
-            if map.is_empty() {
-                println!("UnifiedScheduler: no recorded events to write");
-                return;
-            }
-            match File::create(path) {
-                Ok(mut f) => {
-                    let _ = writeln!(f, "slot,job_id,start_ns,end_ns,worker,task_id,index");
-                    for (slot, vec) in map.iter() {
-                        for r in vec.iter() {
-                            let _ = writeln!(
-                                f,
-                                "{},{},{},{},{},{},{}",
-                                slot, r.job_id, r.start_ns, r.end_ns, r.worker, r.task_id, r.index
-                            );
-                        }
-                    }
-                    println!("UnifiedScheduler: wrote {} slots to {}", map.len(), path);
-                }
-                Err(e) => {
-                    eprintln!("UnifiedScheduler: failed to create {}: {}", path, e);
-                }
+        if let Some(recorder) = &self.async_recorder {
+            match recorder.write_to_csv(path) {
+                Ok(()) => {}
+                Err(e) => eprintln!("Failed to write records: {}", e),
             }
         } else {
             println!("UnifiedScheduler: recorder not enabled");
@@ -1136,6 +1136,10 @@ impl UnifiedScheduler {
         Arc::clone(&self.completed_tx)
     }
 
+    pub fn get_async_recorder(&self) -> Option<Arc<AsyncRecorder>> {
+        self.async_recorder.clone()
+    }
+
     pub fn write_record(&self, path: &str) {
         self.write_records_to_csv(path);
     }
@@ -1196,6 +1200,7 @@ pub fn create_unified_scheduler(
     main_workers: usize,
     network_workers: usize,
     record: bool,
+    external_recorder: Option<Arc<AsyncRecorder>>,
     base_instant: Instant,
     system_threads: usize,
     batching_size: usize,
@@ -1208,6 +1213,7 @@ pub fn create_unified_scheduler(
         main_workers,
         network_workers,
         record,
+        external_recorder,
         base_instant,
         system_threads,
         batching_size,

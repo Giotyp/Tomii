@@ -1,3 +1,4 @@
+pub mod async_recorder;
 pub mod buffers;
 pub mod debug;
 pub mod graph;
@@ -25,12 +26,13 @@ lazy_static! {
 // Record for thread executions
 #[derive(Debug, Clone)]
 pub struct Record {
-    job_id: usize,
-    start_ns: u128,
-    end_ns: u128,
-    worker: usize,
-    task_id: IdType,
-    index: usize,
+    pub slot: usize,
+    pub job_id: usize,
+    pub start_ns: u128,
+    pub end_ns: u128,
+    pub worker: usize,
+    pub task_id: IdType,
+    pub index: usize,
 }
 
 pub mod prelude {
@@ -40,6 +42,9 @@ pub mod prelude {
 pub mod wrappers {
     include!(concat!(env!("OUT_DIR"), "/wrappers.rs"));
 }
+
+// Re-exports
+pub use crate::async_recorder::AsyncRecorder;
 pub mod func_reg {
     include!(concat!(env!("OUT_DIR"), "/func_reg.rs"));
 }

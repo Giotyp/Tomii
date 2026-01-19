@@ -203,7 +203,7 @@ pub struct SharedData {
     pub network_scheduler: Arc<RwLock<Option<Arc<SchedulerImpl>>>>,
     pub completed_tx: Arc<RwLock<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>>,
     pub workers: Arc<AtomicUsize>,
-    pub recorder: Option<Arc<Mutex<HashMap<usize, Vec<Record>>>>>,
+    pub async_recorder: Option<Arc<crate::async_recorder::AsyncRecorder>>,
     pub base_instant: Arc<Instant>,
     pub job_counter: Arc<AtomicUsize>,
     pub core_offset: Arc<AtomicUsize>,

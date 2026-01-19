@@ -195,6 +195,16 @@ pub fn run_graph(
     batching_limit: u64,
     slot_priority_enabled: bool,
 ) -> SynRt {
+    // Create a single AsyncRecorder sized for all threads: workers + network + system
+    let total_recorders = workers + nrx + system_threads;
+    let shared_recorder = if record {
+        Some(std::sync::Arc::new(
+            synstream_core::async_recorder::AsyncRecorder::new(total_recorders, 100),
+        ))
+    } else {
+        None
+    };
+
     let mut synrt = SynRt::new(
         graph,
         slots,
@@ -206,6 +216,7 @@ pub fn run_graph(
         system_threads,
         nrx,
         slot_priority_enabled,
+        shared_recorder.clone(),
     );
     let scheduler = create_unified_scheduler(
         scheduler_type,
@@ -213,6 +224,7 @@ pub fn run_graph(
         workers,
         nrx, // Network workers
         record,
+        shared_recorder,
         synrt.base_instant(),
         system_threads,
         batching_size,

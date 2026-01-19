@@ -2,12 +2,12 @@ use core_affinity;
 use crossbeam_channel::Receiver;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{sleep, spawn};
 use std::time::{Duration, Instant};
 
+use crate::async_recorder::{set_worker_recorder, submit_record, AsyncRecorder};
 use crate::debug::print_debug;
 use crate::graph::*;
 use crate::graph_struct::*;
@@ -37,6 +37,7 @@ impl SynRt {
         system_threads: usize,
         _nrx: usize,
         slot_priority_enabled: bool,
+        async_recorder: Option<Arc<AsyncRecorder>>, // Optional shared recorder from caller
     ) -> SynRt {
         // Initialize stream completion counters
         let stream_completion_counts = Arc::new(RwLock::new(Vec::new()));
@@ -81,8 +82,14 @@ impl SynRt {
             None
         };
 
-        let recorder = if record {
-            Some(Arc::new(Mutex::new(HashMap::new())))
+        // Use shared recorder when provided, otherwise create one; disable when recording is off
+        let async_recorder = if record {
+            async_recorder.or_else(|| {
+                Some(Arc::new(AsyncRecorder::new(
+                    slots + system_threads + _nrx,
+                    100,
+                )))
+            })
         } else {
             None
         };
@@ -194,7 +201,7 @@ impl SynRt {
             network_scheduler: Arc::new(RwLock::new(None)),
             completed_tx: Arc::new(RwLock::new(None)),
             workers: Arc::new(AtomicUsize::new(1)), // Will be set in run()
-            recorder,
+            async_recorder,
             base_instant,
             job_counter,
             core_offset,
@@ -271,6 +278,13 @@ impl SynRt {
             let thread_slot = self.shared.slots + thread_id;
 
             let resolution_handle = spawn(move || {
+                // Initialize per-worker recording channel for this system thread
+                if let Some(ref recorder) = shared_for_resolution.async_recorder {
+                    if let Some(tx) = recorder.get_worker_sender(thread_slot) {
+                        set_worker_recorder(tx);
+                    }
+                }
+
                 if core_affinity::set_for_current(core_affinity::CoreId { id: thread_core }) {
                     println!(
                         "Resolution thread {} pinned to core {:?} with slot {}",
@@ -430,12 +444,12 @@ impl SynRt {
             tb.add_task_time(thread_slot, "Preparation Thread", usize::MAX, duration);
         }
 
-        if let Some(rec) = &shared.recorder {
+        // Lock-free recording via per-worker channel
+        if shared.async_recorder.is_some() {
             let end_ns = shared.base_instant.elapsed().as_nanos();
             let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
-            let mut map = rec.lock();
-            let vec = map.entry(thread_slot).or_insert_with(Vec::new);
-            vec.push(Record {
+            submit_record(Record {
+                slot: thread_slot,
                 job_id,
                 start_ns,
                 end_ns,
@@ -1009,12 +1023,12 @@ impl SynRt {
                 );
             }
 
-            if let Some(rec) = &shared.recorder {
+            // Lock-free recording via per-worker channel
+            if shared.async_recorder.is_some() {
                 let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
                 let end_ns = shared.base_instant.elapsed().as_nanos();
-                let mut map = rec.lock();
-                let vec = map.entry(thread_slot).or_insert_with(Vec::new);
-                vec.push(Record {
+                submit_record(Record {
+                    slot: thread_slot,
                     job_id,
                     start_ns,
                     end_ns,
@@ -1112,30 +1126,11 @@ impl SynRt {
         self.write_runtime_record(path);
     }
 
-    pub fn write_runtime_record(&self, path: &str) {
-        if let Some(rec) = &self.shared.recorder {
-            let map = rec.lock();
-            if map.is_empty() {
-                println!("Runtime: no recorded events to write");
-                return;
-            }
-            match std::fs::OpenOptions::new().append(true).open(path) {
-                Ok(mut f) => {
-                    for (slot, vec) in map.iter() {
-                        for r in vec.iter() {
-                            let _ = writeln!(
-                                f,
-                                "{},{},{},{},{},{},{}",
-                                slot, r.job_id, r.start_ns, r.end_ns, r.worker, r.task_id, r.index
-                            );
-                        }
-                    }
-                    println!("Runtime: appended {} slots to {}", map.len(), path);
-                }
-                Err(e) => {
-                    eprintln!("Runtime: failed to open {} for append: {}", path, e);
-                }
-            }
+    pub fn write_runtime_record(&self, _path: &str) {
+        if let Some(_rec) = &self.shared.async_recorder {
+            // The AsyncRecorder handles all record writing via write_to_csv
+            // This method is a no-op since AsyncRecorder already exported everything
+            println!("Runtime: async_recorder records already written via scheduler");
         } else {
             println!("Runtime: recorder not enabled");
         }
