@@ -889,6 +889,28 @@ impl SynRt {
                         )
                     });
 
+                    // In slot-priority mode: rotate active slot and activate next buffered slot
+                    let buffered_nodes = if shared.slot_priority_enabled {
+                        transition_slot_to_buffering(&shared, proc_slot);
+                        print_debug(|| format!("Calling activate_next_slot()"));
+                        activate_next_slot(&shared, Some(proc_slot))
+                    } else {
+                        None
+                    };
+
+                    // Flush buffered nodes from newly activated slot (if any)
+                    if let Some(nodes) = buffered_nodes {
+                        if !nodes.is_empty() {
+                            print_debug(|| {
+                                format!(
+                                    "Slot-Priority: Flushing {} buffered nodes from activated slot",
+                                    nodes.len()
+                                )
+                            });
+                            Self::preparation(&shared, &nodes, thread_core, thread_slot, false);
+                        }
+                    }
+
                     // Check if we should start a new iteration
                     if process_slot_completion(&shared, proc_slot) {
                         print_debug(|| {
@@ -913,14 +935,6 @@ impl SynRt {
                                 proc_slot
                             )
                         });
-
-                        // Slot-priority mode: Activate next buffering slot (round-robin)
-                        let buffered_nodes = if shared.slot_priority_enabled {
-                            // Activate next slot in round-robin order
-                            activate_next_slot(&shared, Some(proc_slot))
-                        } else {
-                            None
-                        };
 
                         // Spawn initial nodes for the restarting slot
                         let init_nodes = initial_nodes(&shared, vec![proc_slot]);
@@ -954,27 +968,26 @@ impl SynRt {
                             );
                         }
 
-                        // Send regular nodes to regular scheduler
+                        // Send regular nodes to scheduler only if slot is active; otherwise buffer
                         if !regular_nodes.is_empty() {
-                            Self::preparation(
-                                &shared,
-                                &regular_nodes,
-                                thread_core,
-                                thread_slot,
-                                false,
-                            );
-                        }
-
-                        // Flush buffered nodes from newly activated slot
-                        if let Some(nodes) = buffered_nodes {
-                            if !nodes.is_empty() {
+                            if shared.slot_priority_enabled && !is_slot_active(&shared, proc_slot) {
+                                let mut slot_buffers = shared.slot_buffers.write();
+                                slot_buffers[proc_slot].extend(regular_nodes);
                                 print_debug(|| {
                                     format!(
-                                        "Slot-Priority: Flushing {} buffered nodes from activated slot",
-                                        nodes.len()
+                                        "Slot-Priority: Buffered {} init nodes for slot {}",
+                                        slot_buffers[proc_slot].len(),
+                                        proc_slot
                                     )
                                 });
-                                Self::preparation(&shared, &nodes, thread_core, thread_slot, false);
+                            } else {
+                                Self::preparation(
+                                    &shared,
+                                    &regular_nodes,
+                                    thread_core,
+                                    thread_slot,
+                                    false,
+                                );
                             }
                         }
                     }

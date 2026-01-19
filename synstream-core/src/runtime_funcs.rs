@@ -941,6 +941,7 @@ pub fn activate_next_slot(
     if !shared.slot_priority_enabled {
         return None;
     }
+    print_debug(|| format!("Activating next slot"));
 
     // Find and activate next buffering slot in round-robin order
     let activated_slot = {
