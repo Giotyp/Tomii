@@ -470,6 +470,15 @@ impl SynRt {
         thread_id: usize,
         thread_slot: usize,
     ) {
+        // Initialize async recorder for system thread using universal indexing
+        if let Some(ref recorder) = shared.async_recorder {
+            let system_core_offset = shared.core_offset.load(Ordering::SeqCst);
+            let channel_index = thread_core - system_core_offset;
+            if let Some(tx) = recorder.get_worker_sender(channel_index) {
+                set_worker_recorder(tx);
+            }
+        }
+
         let all_slots: Vec<usize> = (0..shared.slots).collect();
         let network_init_nodes = initial_nodes(&shared, all_slots.clone());
         if thread_id == 0 {
@@ -485,10 +494,6 @@ impl SynRt {
                         thread_id, thread_core
                     )
                 });
-                println!(
-                    "Thread {} in Core {} performing initial preparation",
-                    thread_id, thread_core
-                );
 
                 // Network nodes (nx=true) run for ALL slots to receive and buffer packets
                 let mut network_nodes = Vec::new();

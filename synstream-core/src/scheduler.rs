@@ -17,6 +17,7 @@ use parking_lot::Mutex;
 
 use crate::async_recorder::{set_worker_recorder, submit_record, AsyncRecorder};
 use crate::buffers::NodeInfo;
+use crate::debug::print_debug;
 use crate::{IdType, Record};
 use synstream_types::CmTypes;
 
@@ -182,17 +183,17 @@ pub fn create_threadpool(
     let worker_threadpool = ThreadPoolBuilder::new()
         .num_threads(actual_workers)
         .start_handler(move |thread_index| {
-            // Pin to core and store core ID for CSV recording
+            // Pin to core
             let core_id = worker_cores_to_use[thread_index];
-            WORKER_ID.with(|c| c.set(core_id.id));
-
             core_affinity::set_for_current(core_id);
 
-            // Initialize per-worker recording channel
+            // Set WORKER_ID to physical core ID (for CSV recording)
+            WORKER_ID.with(|c| c.set(core_id.id));
+
+            // Universal channel indexing: channel_index = physical_core_id - system_core_offset
+            let channel_index = core_id.id - system_core_offset;
             if let Some(ref recorder) = recorder_clone {
-                if let Some(tx) =
-                    recorder.get_worker_sender(thread_index + worker_offset - system_core_offset)
-                {
+                if let Some(tx) = recorder.get_worker_sender(channel_index) {
                     set_worker_recorder(tx);
                 }
             }
@@ -202,25 +203,30 @@ pub fn create_threadpool(
 
     let recorder_clone = async_recorder.clone();
     let network_threadpool: Option<ThreadPool> = if network_workers > 0 {
+        println!(
+            "Creating network threadpool with {} workers on cores {:?}",
+            actual_network_workers, network_cores_to_use
+        );
         ThreadPoolBuilder::new()
             .num_threads(actual_network_workers)
             .start_handler(move |thread_index| {
-                // Pin to core and store core ID for CSV recording
+                // Pin to core
                 let core_id = network_cores_to_use[thread_index];
-                WORKER_ID.with(|c| c.set(core_id.id));
-
                 core_affinity::set_for_current(core_id);
 
-                // Initialize per-worker recording channel
+                // Set WORKER_ID to physical core ID (for CSV recording)
+                WORKER_ID.with(|c| c.set(core_id.id));
+
+                // Universal channel indexing: channel_index = physical_core_id - system_core_offset
+                let channel_index = core_id.id - system_core_offset;
                 if let Some(ref recorder) = recorder_clone {
-                    if let Some(tx) = recorder
-                        .get_worker_sender(thread_index + network_offset - system_core_offset)
-                    {
+                    if let Some(tx) = recorder.get_worker_sender(channel_index) {
                         set_worker_recorder(tx);
                     }
                 }
             })
             .build()
+            .map_err(|e| eprintln!("Failed to create network threadpool: {}", e))
             .ok()
     } else {
         None
@@ -759,6 +765,19 @@ impl Scheduler for SchedulerImpl {
             SchedulerImpl::Fifo(scheduler) => scheduler.spawn_task_with_meta(meta, task),
             SchedulerImpl::WorkStealing(scheduler) => scheduler.spawn_task_with_meta(meta, task),
             SchedulerImpl::Unified(scheduler) => scheduler.spawn_task_with_meta(meta, task),
+        }
+    }
+
+    fn spawn_task_with_meta_network<F>(&self, meta: Option<(IdType, usize, usize)>, task: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        match self {
+            SchedulerImpl::Fifo(scheduler) => scheduler.spawn_task_with_meta_network(meta, task),
+            SchedulerImpl::WorkStealing(scheduler) => {
+                scheduler.spawn_task_with_meta_network(meta, task)
+            }
+            SchedulerImpl::Unified(scheduler) => scheduler.spawn_task_with_meta_network(meta, task),
         }
     }
 
