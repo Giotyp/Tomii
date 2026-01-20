@@ -314,15 +314,18 @@ fn execute_task(
         let batching_size = scheduler.get_batching_size();
         let batch_last_sent = scheduler.get_batch_last_sent();
         let completed_tx_ref = scheduler.get_completed_tx_ref();
+        let flush_notify = scheduler.get_flush_notify();
 
-        let should_flush = {
+        // Fast path: batching_size=1 means send immediately without buffering
+        if batching_size == 1 {
+            if let Some(tx) = completed_tx_ref.lock().as_ref() {
+                let _ = tx.send(vec![(node_info.clone(), result)]);
+            }
+        } else {
+            // Single lock operation - check and flush atomically
             let mut batch = batch_buffer.lock();
             batch.push((node_info.clone(), result));
-            batch.len() >= batching_size
-        };
 
-        if should_flush {
-            let mut batch = batch_buffer.lock();
             if batch.len() >= batching_size {
                 let batch_to_send =
                     std::mem::replace(&mut *batch, Vec::with_capacity(batching_size));
@@ -332,6 +335,9 @@ fn execute_task(
                 if let Some(tx) = completed_tx_ref.lock().as_ref() {
                     let _ = tx.send(batch_to_send);
                 }
+            } else {
+                // Notify flusher thread that there's pending data
+                let _ = flush_notify.try_send(());
             }
         }
     }

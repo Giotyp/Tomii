@@ -306,6 +306,9 @@ struct SchedulerBase {
     completed_tx: Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>>,
     flusher_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     flusher_shutdown: Arc<AtomicUsize>,
+    // Flush notification channel to eliminate polling sleep
+    flush_notify_tx: crossbeam_channel::Sender<()>,
+    flush_notify_rx: Arc<Mutex<crossbeam_channel::Receiver<()>>>,
 }
 
 impl SchedulerBase {
@@ -342,6 +345,7 @@ impl SchedulerBase {
         let batch_buffer = Arc::new(Mutex::new(Vec::with_capacity(batching_size)));
         let batch_last_sent = Arc::new(Mutex::new(Instant::now()));
         let completed_tx = Arc::new(Mutex::new(None));
+        let (flush_notify_tx, flush_notify_rx) = crossbeam_channel::unbounded();
 
         Self {
             threadpool: worker_threadpool,
@@ -359,6 +363,8 @@ impl SchedulerBase {
             completed_tx,
             flusher_handle: Arc::new(Mutex::new(None)),
             flusher_shutdown: Arc::new(AtomicUsize::new(0)),
+            flush_notify_tx,
+            flush_notify_rx: Arc::new(Mutex::new(flush_notify_rx)),
         }
     }
 
@@ -406,39 +412,44 @@ impl SchedulerBase {
         let batching_size = self.batching_size;
         let batching_limit = self.batching_limit;
         let batch_timeout = Duration::from_micros(batching_limit);
+        let flush_notify_rx = Arc::clone(&self.flush_notify_rx);
 
-        let handle = std::thread::spawn(move || loop {
-            // Check for shutdown signal
-            if shutdown.load(Ordering::SeqCst) == 1 {
-                // Final flush before exit
-                let mut batch = batch_buffer.lock();
-                if !batch.is_empty() {
-                    let batch_to_send = std::mem::take(&mut *batch);
-                    drop(batch);
-                    if let Some(tx) = completed_tx.lock().as_ref() {
-                        let _ = tx.send(batch_to_send);
+        let handle = std::thread::spawn(move || {
+            let rx = flush_notify_rx.lock();
+            loop {
+                // Check for shutdown signal
+                if shutdown.load(Ordering::SeqCst) == 1 {
+                    // Final flush before exit
+                    let mut batch = batch_buffer.lock();
+                    if !batch.is_empty() {
+                        let batch_to_send = std::mem::take(&mut *batch);
+                        drop(batch);
+                        if let Some(tx) = completed_tx.lock().as_ref() {
+                            let _ = tx.send(batch_to_send);
+                        }
                     }
+                    break;
                 }
-                break;
-            }
 
-            std::thread::sleep(Duration::from_micros(batching_limit / 2));
+                // Wait for notification or timeout - NO POLLING SLEEP
+                let _ = rx.recv_timeout(batch_timeout);
 
-            let should_flush = {
-                let last_sent = batch_last_sent.lock();
-                last_sent.elapsed() >= batch_timeout
-            };
+                let should_flush = {
+                    let last_sent = batch_last_sent.lock();
+                    last_sent.elapsed() >= batch_timeout
+                };
 
-            if should_flush {
-                let mut batch = batch_buffer.lock();
-                if !batch.is_empty() {
-                    let batch_to_send =
-                        std::mem::replace(&mut *batch, Vec::with_capacity(batching_size));
-                    drop(batch);
-                    *batch_last_sent.lock() = Instant::now();
+                if should_flush {
+                    let mut batch = batch_buffer.lock();
+                    if !batch.is_empty() {
+                        let batch_to_send =
+                            std::mem::replace(&mut *batch, Vec::with_capacity(batching_size));
+                        drop(batch);
+                        *batch_last_sent.lock() = Instant::now();
 
-                    if let Some(tx) = completed_tx.lock().as_ref() {
-                        let _ = tx.send(batch_to_send);
+                        if let Some(tx) = completed_tx.lock().as_ref() {
+                            let _ = tx.send(batch_to_send);
+                        }
                     }
                 }
             }
@@ -528,6 +539,10 @@ impl SchedulerBase {
         self.batching_size
     }
 
+    fn get_flush_notify(&self) -> crossbeam_channel::Sender<()> {
+        self.flush_notify_tx.clone()
+    }
+
     fn get_completed_tx_ref(&self) -> Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>> {
         Arc::clone(&self.completed_tx)
     }
@@ -587,6 +602,10 @@ impl FifoScheduler {
 
     fn get_batching_size(&self) -> usize {
         self.base.get_batching_size()
+    }
+
+    fn get_flush_notify(&self) -> crossbeam_channel::Sender<()> {
+        self.base.get_flush_notify()
     }
 
     fn get_completed_tx_ref(&self) -> Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>> {
@@ -687,6 +706,10 @@ impl WorkStealScheduler {
 
     fn get_batching_size(&self) -> usize {
         self.base.get_batching_size()
+    }
+
+    fn get_flush_notify(&self) -> crossbeam_channel::Sender<()> {
+        self.base.get_flush_notify()
     }
 
     fn get_completed_tx_ref(&self) -> Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>> {
@@ -872,6 +895,14 @@ impl SchedulerImpl {
         }
     }
 
+    pub fn get_flush_notify(&self) -> crossbeam_channel::Sender<()> {
+        match self {
+            SchedulerImpl::Fifo(s) => s.get_flush_notify(),
+            SchedulerImpl::WorkStealing(s) => s.get_flush_notify(),
+            SchedulerImpl::Unified(s) => s.get_flush_notify(),
+        }
+    }
+
     pub fn get_completed_tx_ref(&self) -> Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>> {
         match self {
             SchedulerImpl::Fifo(s) => s.get_completed_tx_ref(),
@@ -960,6 +991,8 @@ pub struct UnifiedScheduler {
     completed_tx: Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>>,
     flusher_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     flusher_shutdown: Arc<AtomicUsize>,
+    flush_notify_tx: crossbeam_channel::Sender<()>,
+    flush_notify_rx: Arc<Mutex<crossbeam_channel::Receiver<()>>>,
 }
 
 impl UnifiedScheduler {
@@ -996,6 +1029,7 @@ impl UnifiedScheduler {
         let batch_buffer = Arc::new(Mutex::new(Vec::with_capacity(batching_size)));
         let batch_last_sent = Arc::new(Mutex::new(Instant::now()));
         let completed_tx = Arc::new(Mutex::new(None));
+        let (flush_notify_tx, flush_notify_rx) = crossbeam_channel::unbounded();
 
         Self {
             worker_pool,
@@ -1016,6 +1050,8 @@ impl UnifiedScheduler {
             completed_tx,
             flusher_handle: Arc::new(Mutex::new(None)),
             flusher_shutdown: Arc::new(AtomicUsize::new(0)),
+            flush_notify_tx,
+            flush_notify_rx: Arc::new(Mutex::new(flush_notify_rx)),
         }
     }
 
@@ -1092,37 +1128,42 @@ impl UnifiedScheduler {
         let batching_size = self.batching_size;
         let batching_limit = self.batching_limit;
         let batch_timeout = Duration::from_micros(batching_limit);
+        let flush_notify_rx = Arc::clone(&self.flush_notify_rx);
 
-        let handle = std::thread::spawn(move || loop {
-            if shutdown.load(Ordering::SeqCst) == 1 {
-                let mut batch = batch_buffer.lock();
-                if !batch.is_empty() {
-                    let batch_to_send = std::mem::take(&mut *batch);
-                    drop(batch);
-                    if let Some(tx) = completed_tx.lock().as_ref() {
-                        let _ = tx.send(batch_to_send);
+        let handle = std::thread::spawn(move || {
+            let rx = flush_notify_rx.lock();
+            loop {
+                if shutdown.load(Ordering::SeqCst) == 1 {
+                    let mut batch = batch_buffer.lock();
+                    if !batch.is_empty() {
+                        let batch_to_send = std::mem::take(&mut *batch);
+                        drop(batch);
+                        if let Some(tx) = completed_tx.lock().as_ref() {
+                            let _ = tx.send(batch_to_send);
+                        }
                     }
+                    break;
                 }
-                break;
-            }
 
-            std::thread::sleep(Duration::from_micros(batching_limit / 2));
+                // Wait for notification or timeout - NO POLLING SLEEP
+                let _ = rx.recv_timeout(batch_timeout);
 
-            let should_flush = {
-                let last_sent = batch_last_sent.lock();
-                last_sent.elapsed() >= batch_timeout
-            };
+                let should_flush = {
+                    let last_sent = batch_last_sent.lock();
+                    last_sent.elapsed() >= batch_timeout
+                };
 
-            if should_flush {
-                let mut batch = batch_buffer.lock();
-                if !batch.is_empty() {
-                    let batch_to_send =
-                        std::mem::replace(&mut *batch, Vec::with_capacity(batching_size));
-                    drop(batch);
-                    *batch_last_sent.lock() = Instant::now();
+                if should_flush {
+                    let mut batch = batch_buffer.lock();
+                    if !batch.is_empty() {
+                        let batch_to_send =
+                            std::mem::replace(&mut *batch, Vec::with_capacity(batching_size));
+                        drop(batch);
+                        *batch_last_sent.lock() = Instant::now();
 
-                    if let Some(tx) = completed_tx.lock().as_ref() {
-                        let _ = tx.send(batch_to_send);
+                        if let Some(tx) = completed_tx.lock().as_ref() {
+                            let _ = tx.send(batch_to_send);
+                        }
                     }
                 }
             }
@@ -1165,6 +1206,10 @@ impl UnifiedScheduler {
 
     pub fn get_batching_size(&self) -> usize {
         self.batching_size
+    }
+
+    pub fn get_flush_notify(&self) -> crossbeam_channel::Sender<()> {
+        self.flush_notify_tx.clone()
     }
 
     pub fn get_completed_tx_ref(&self) -> Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>> {

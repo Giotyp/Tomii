@@ -81,7 +81,7 @@ struct Args {
         long,
         value_name = "BATCHING_LIMIT",
         required = false,
-        default_value = "100",
+        default_value = "10",
         help = "Maximum time to wait for batch in microseconds"
     )]
     batching_limit: u64,
@@ -199,7 +199,7 @@ pub fn run_graph(
     let total_recorders = workers + nrx + system_threads;
     let shared_recorder = if record {
         Some(std::sync::Arc::new(
-            synstream_core::async_recorder::AsyncRecorder::new(total_recorders, 100),
+            synstream_core::async_recorder::AsyncRecorder::new(total_recorders, 1000),
         ))
     } else {
         None
