@@ -21,11 +21,11 @@ use crate::{IdType, Record};
 use synstream_types::CmTypes;
 
 thread_local! {
-    // Worker id assigned to each thread in the pool. usize::MAX means unassigned.
+    // Physical core ID where this thread is pinned. usize::MAX means unassigned.
     static WORKER_ID: Cell<usize> = Cell::new(usize::MAX);
 }
 
-/// Get the current thread's worker id if assigned by the scheduler
+/// Get the current thread's physical core ID
 pub fn get_current_worker_id() -> Option<usize> {
     let id = WORKER_ID.with(|c| c.get());
     if id == usize::MAX {
@@ -35,81 +35,121 @@ pub fn get_current_worker_id() -> Option<usize> {
     }
 }
 
+/// Set the current thread's physical core ID
+pub fn set_current_worker_id(core_id: usize) {
+    WORKER_ID.with(|c| c.set(core_id));
+}
+
 /// Create Threadpool with Rayon
+/// Returns: (ThreadPool, system_core_offset, worker_core_offset, network_core_offset)
 pub fn create_threadpool(
     core_offset: usize,
     workers: usize,
+    network_workers: usize,
     system_threads: usize,
     async_recorder: Option<Arc<AsyncRecorder>>,
-) -> (ThreadPool, usize, usize) {
+) -> (ThreadPool, Option<ThreadPool>, usize, usize) {
     // Create threadpool and pin workers to cores
     let mut core_ids = core_affinity::get_core_ids().unwrap();
     core_ids.sort();
 
     let available_cores = core_ids.len();
 
-    // CRITICAL FIX: Ensure system and worker cores NEVER overlap
-    // Allocation priority: Workers > System > Offset
-    // Minimum requirement: 1 system + 1 worker on DIFFERENT cores
+    // CRITICAL: Allocate cores in sequential order: [system][network][workers]
+    // With core_offset=1, system=1, network=2, workers=10:
+    //   System: core 1
+    //   Network: cores 2-3
+    //   Workers: cores 4-13
 
-    let total_needed = system_threads + workers;
+    let total_needed = system_threads + network_workers + workers;
 
-    let (system_core_offset, worker_offset, actual_workers, actual_system_threads) =
-        if available_cores < 2 {
-            panic!(
-                "Insufficient cores: need minimum 2 cores (1 system + 1 worker), found {}",
-                available_cores
+    let (
+        system_core_offset,
+        network_offset,
+        worker_offset,
+        actual_workers,
+        actual_network_workers,
+        actual_system_threads,
+    ) = if available_cores < 2 {
+        panic!(
+            "Insufficient cores: need minimum 2 cores (1 system + 1 worker), found {}",
+            available_cores
+        );
+    } else if core_offset + total_needed <= available_cores {
+        // Ideal case: can honor offset and allocate all threads
+        let sys_start = core_offset;
+        let net_start = core_offset + system_threads;
+        let worker_start = core_offset + system_threads + network_workers;
+        (
+            sys_start,
+            net_start,
+            worker_start,
+            workers,
+            network_workers,
+            system_threads,
+        )
+    } else if total_needed <= available_cores {
+        // Can fit all threads but not with requested offset
+        eprintln!(
+            "Warning: Cannot honor core_offset {}. Using offset 0 instead.",
+            core_offset
+        );
+        let sys_start = 0;
+        let net_start = system_threads;
+        let worker_start = system_threads + network_workers;
+        (
+            sys_start,
+            net_start,
+            worker_start,
+            workers,
+            network_workers,
+            system_threads,
+        )
+    } else {
+        // Not enough cores for all threads - reduce proportionally
+        let max_system = 1; // Always need at least 1 system thread
+        let remaining = available_cores.saturating_sub(max_system);
+        let max_network = network_workers.min(remaining / 2).max(0);
+        let max_workers = remaining.saturating_sub(max_network).max(1);
+        eprintln!(
+                "Warning: Requested {} system + {} network + {} workers = {} total exceeds {} available cores.\n\
+                Using {} system at core 0, {} network starting at core {}, {} workers starting at core {}.",
+                system_threads, network_workers, workers, total_needed, available_cores,
+                max_system, max_network, max_system, max_workers, max_system + max_network
             );
-        } else if core_offset + total_needed <= available_cores {
-            // Ideal case: can honor offset and allocate all
-            let sys_start = core_offset;
-            let worker_start = core_offset + system_threads;
-            (sys_start, worker_start, workers, system_threads)
-        } else if total_needed <= available_cores {
-            // Can fit all threads but not with requested offset
-            eprintln!(
-                "Warning: Cannot honor core_offset {}. Using offset 0 instead.",
-                core_offset
-            );
-            let sys_start = 0;
-            let worker_start = system_threads;
-            (sys_start, worker_start, workers, system_threads)
-        } else {
-            // Not enough cores for all threads - need to reduce
-            // Priority: ensure 1 system + as many workers as possible
-            let max_workers = available_cores.saturating_sub(1).max(1);
-            eprintln!(
-                "Warning: Requested {} system threads + {} workers = {} total exceeds {} available cores.\n\
-                Using 1 system thread at core 0, {} workers starting at core 1.",
-                system_threads, workers, total_needed, available_cores, max_workers
-            );
-            (0, 1, max_workers, 1)
-        };
+        (
+            0,
+            max_system,
+            max_system + max_network,
+            max_workers,
+            max_network,
+            max_system,
+        )
+    };
 
-    let actual_offset = worker_offset;
-
-    // VERIFICATION: Ensure no overlap between system and worker cores
+    // VERIFICATION: Ensure proper sequential allocation with no overlaps
     assert!(
-        system_core_offset + actual_system_threads <= worker_offset,
-        "Core allocation bug: system cores [{}..{}) overlap with worker cores [{}..{})",
+        system_core_offset + actual_system_threads <= network_offset,
+        "Core allocation bug: system cores [{}..{}) overlap with network cores [{}..{})",
         system_core_offset,
         system_core_offset + actual_system_threads,
+        network_offset,
+        network_offset + actual_network_workers
+    );
+    assert!(
+        network_offset + actual_network_workers <= worker_offset,
+        "Core allocation bug: network cores [{}..{}) overlap with worker cores [{}..{})",
+        network_offset,
+        network_offset + actual_network_workers,
         worker_offset,
         worker_offset + actual_workers
     );
 
-    // VERIFICATION: Ensure no overlap between system and worker cores
-    assert!(
-        system_core_offset + actual_system_threads <= worker_offset,
-        "Core allocation bug: system cores [{}..{}) overlap with worker cores [{}..{})",
-        system_core_offset,
-        system_core_offset + actual_system_threads,
-        worker_offset,
-        worker_offset + actual_workers
-    );
+    let worker_cores_to_use: Vec<core_affinity::CoreId> =
+        core_ids[worker_offset..worker_offset + actual_workers].to_vec();
 
-    let cores_to_use: Vec<core_affinity::CoreId> =
-        core_ids[actual_offset..actual_offset + actual_workers].to_vec();
+    let network_cores_to_use: Vec<core_affinity::CoreId> =
+        core_ids[network_offset..network_offset + actual_network_workers].to_vec();
 
     // Print core allocation
     println!("========== Core Allocation ==========");
@@ -118,102 +158,80 @@ pub fn create_threadpool(
         "System threads: {} at cores {}..{}",
         actual_system_threads,
         system_core_offset,
-        system_core_offset + actual_system_threads
+        system_core_offset + actual_system_threads - 1
+    );
+    println!(
+        "Network threads: {} at cores {}..{}",
+        actual_network_workers,
+        network_offset,
+        network_offset + actual_network_workers - 1
     );
     println!(
         "Worker threads: {} at cores {}..{}",
         actual_workers,
         worker_offset,
-        worker_offset + actual_workers
+        worker_offset + actual_workers - 1
     );
-    println!("WorkStealScheduler: Worker -> Core Mapping:");
-    for (idx, core_id) in cores_to_use.iter().enumerate() {
+    println!("Main Worker -> Core Mapping:");
+    for (idx, core_id) in worker_cores_to_use.iter().enumerate() {
         println!("  Worker {}: Core {:?}", idx, core_id);
     }
     println!("======================================");
 
     let recorder_clone = async_recorder.clone();
-    let threadpool = ThreadPoolBuilder::new()
+    let worker_threadpool = ThreadPoolBuilder::new()
         .num_threads(actual_workers)
         .start_handler(move |thread_index| {
-            // Assign a worker id to this thread for timing attribution
-            WORKER_ID.with(|c| c.set(thread_index));
+            // Pin to core and store core ID for CSV recording
+            let core_id = worker_cores_to_use[thread_index];
+            WORKER_ID.with(|c| c.set(core_id.id));
+
+            core_affinity::set_for_current(core_id);
 
             // Initialize per-worker recording channel
             if let Some(ref recorder) = recorder_clone {
-                if let Some(tx) = recorder.get_worker_sender(thread_index) {
+                if let Some(tx) =
+                    recorder.get_worker_sender(thread_index + worker_offset - system_core_offset)
+                {
                     set_worker_recorder(tx);
                 }
             }
-
-            // Pin each thread to a specific core
-            let core_id = cores_to_use[thread_index];
-            core_affinity::set_for_current(core_id);
         })
         .build()
         .unwrap();
 
-    (threadpool, system_core_offset, actual_offset)
-}
+    let recorder_clone = async_recorder.clone();
+    let network_threadpool: Option<ThreadPool> = if network_workers > 0 {
+        ThreadPoolBuilder::new()
+            .num_threads(actual_network_workers)
+            .start_handler(move |thread_index| {
+                // Pin to core and store core ID for CSV recording
+                let core_id = network_cores_to_use[thread_index];
+                WORKER_ID.with(|c| c.set(core_id.id));
 
-/// Create network threadpool with worker IDs offset by main_workers
-/// Network threads start after main worker cores
-pub fn create_network_threadpool(
-    main_worker_end_core: usize,
-    network_workers: usize,
-    worker_id_offset: usize,
-) -> Option<ThreadPool> {
-    if network_workers == 0 {
-        return None;
-    }
+                core_affinity::set_for_current(core_id);
 
-    let mut core_ids = core_affinity::get_core_ids().unwrap();
-    core_ids.sort();
+                // Initialize per-worker recording channel
+                if let Some(ref recorder) = recorder_clone {
+                    if let Some(tx) = recorder
+                        .get_worker_sender(thread_index + network_offset - system_core_offset)
+                    {
+                        set_worker_recorder(tx);
+                    }
+                }
+            })
+            .build()
+            .ok()
+    } else {
+        None
+    };
 
-    let available_cores = core_ids.len();
-    let network_core_start = main_worker_end_core;
-
-    // Check if we have enough cores for network workers
-    if network_core_start + network_workers > available_cores {
-        eprintln!(
-            "Warning: Insufficient cores for {} network workers starting at core {}. \n\
-            Available cores: {}. Network threadpool disabled.",
-            network_workers, network_core_start, available_cores
-        );
-        return None;
-    }
-
-    let cores_to_use: Vec<core_affinity::CoreId> =
-        core_ids[network_core_start..network_core_start + network_workers].to_vec();
-
-    println!(
-        "Network ThreadPool: {} workers at cores {}..{}",
-        network_workers,
-        network_core_start,
-        network_core_start + network_workers
-    );
-    for (idx, core_id) in cores_to_use.iter().enumerate() {
-        println!(
-            "  Network Worker {}: Core {:?} (Global ID: {})",
-            idx,
-            core_id,
-            worker_id_offset + idx
-        );
-    }
-
-    let threadpool = ThreadPoolBuilder::new()
-        .num_threads(network_workers)
-        .start_handler(move |thread_index| {
-            // Assign sequential worker ID after main workers
-            WORKER_ID.with(|c| c.set(worker_id_offset + thread_index));
-            // Pin each thread to a specific core
-            let core_id = cores_to_use[thread_index];
-            core_affinity::set_for_current(core_id);
-        })
-        .build()
-        .ok();
-
-    threadpool
+    (
+        worker_threadpool,
+        network_threadpool,
+        system_core_offset,
+        worker_offset,
+    )
 }
 
 pub trait Scheduler {
@@ -306,15 +324,21 @@ impl SchedulerBase {
             None
         };
 
-        let (threadpool, system_core_offset, worker_core_offset) =
-            create_threadpool(core_offset, workers, system_threads, async_recorder.clone());
+        let (worker_threadpool, _network_threadpool_opt, system_core_offset, worker_core_offset) =
+            create_threadpool(
+                core_offset,
+                workers,
+                network_workers,
+                system_threads,
+                async_recorder.clone(),
+            );
 
         let batch_buffer = Arc::new(Mutex::new(Vec::with_capacity(batching_size)));
         let batch_last_sent = Arc::new(Mutex::new(Instant::now()));
         let completed_tx = Arc::new(Mutex::new(None));
 
         Self {
-            threadpool: threadpool,
+            threadpool: worker_threadpool,
             system_core_offset,
             worker_core_offset,
             pending_jobs: Arc::new(AtomicUsize::new(0)),
@@ -899,7 +923,7 @@ pub fn create_scheduler(
 /// Maintains sequential worker IDs: main workers 0..N, network workers N..(N+M)
 #[derive(Debug)]
 pub struct UnifiedScheduler {
-    main_pool: ThreadPool,
+    worker_pool: ThreadPool,
     network_pool: Option<ThreadPool>,
     main_workers: usize,
     network_workers: usize,
@@ -941,20 +965,13 @@ impl UnifiedScheduler {
             None
         };
 
-        // Create main threadpool
-        let (main_pool, system_core_offset, worker_core_offset) = create_threadpool(
+        // Create main threadpool - returns offsets for system, workers, and network
+        let (worker_pool, network_pool, system_core_offset, worker_core_offset) = create_threadpool(
             core_offset,
             main_workers,
+            network_workers,
             system_threads,
             async_recorder.clone(),
-        );
-
-        // Create network threadpool with sequential worker IDs starting after main workers
-        let main_worker_end_core = worker_core_offset + main_workers;
-        let network_pool = create_network_threadpool(
-            main_worker_end_core,
-            network_workers,
-            main_workers, // Worker ID offset
         );
 
         let batch_buffer = Arc::new(Mutex::new(Vec::with_capacity(batching_size)));
@@ -962,7 +979,7 @@ impl UnifiedScheduler {
         let completed_tx = Arc::new(Mutex::new(None));
 
         Self {
-            main_pool,
+            worker_pool,
             network_pool,
             main_workers,
             network_workers,
@@ -1001,7 +1018,6 @@ impl UnifiedScheduler {
         let completed = Arc::clone(&self.total_completed);
         let base = Arc::clone(&self.base_instant);
         let recorder_enabled = self.async_recorder.is_some();
-        let worker_core_offset = self.worker_core_offset;
 
         let (task_id, slot, index) = meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN));
 
@@ -1018,7 +1034,7 @@ impl UnifiedScheduler {
                     job_id,
                     start_ns: start,
                     end_ns: end,
-                    worker: worker + worker_core_offset,
+                    worker,
                     task_id,
                     index,
                 });
@@ -1157,7 +1173,7 @@ impl Scheduler for UnifiedScheduler {
     where
         F: FnOnce() + Send + 'static,
     {
-        self.spawn_task_common(meta, task, |t| self.main_pool.spawn(t), false);
+        self.spawn_task_common(meta, task, |t| self.worker_pool.spawn(t), false);
     }
 
     fn spawn_task_with_meta_network<F>(&self, meta: Option<(IdType, usize, usize)>, task: F)

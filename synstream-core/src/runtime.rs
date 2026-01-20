@@ -278,6 +278,9 @@ impl SynRt {
             let thread_slot = self.shared.slots + thread_id;
 
             let resolution_handle = spawn(move || {
+                // Set worker ID for this system thread (slots + thread_id)
+                crate::scheduler::set_current_worker_id(thread_slot);
+
                 // Initialize per-worker recording channel for this system thread
                 if let Some(ref recorder) = shared_for_resolution.async_recorder {
                     if let Some(tx) = recorder.get_worker_sender(thread_slot) {

@@ -1,11 +1,10 @@
 use crate::debug::print_debug;
 use crate::resolution_state::ResolutionState;
 use crate::time_buffer::{TimeBufferManager, TimingMethod};
-use crate::{buffers::*, graph::*, graph_struct::*, scheduler::*, IdType, Record};
+use crate::{buffers::*, graph::*, graph_struct::*, scheduler::*, IdType};
 use core::panic;
 use crossbeam_channel::Sender;
 use parking_lot::{Mutex, RwLock};
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -384,48 +383,44 @@ pub fn send_to_scheduler(
         let time_buf = shared.time_buffer.clone();
         let shared_clone = Arc::clone(shared);
 
-        // Select scheduler based on use_network_scheduler flag
-        let scheduler = if use_network_scheduler {
-            let network_scheduler_guard = shared.network_scheduler.read();
-            match network_scheduler_guard.as_ref() {
-                Some(s) => Arc::clone(s),
-                None => {
-                    // Fallback to main scheduler if network scheduler not initialized
-                    let scheduler_guard = shared.scheduler.read();
-                    match scheduler_guard.as_ref() {
-                        Some(s) => Arc::clone(s),
-                        None => {
-                            eprintln!("No scheduler is initialized");
-                            return;
-                        }
-                    }
-                }
-            }
-        } else {
-            let scheduler_guard = shared.scheduler.read();
-            match scheduler_guard.as_ref() {
-                Some(s) => Arc::clone(s),
-                None => {
-                    eprintln!("Scheduler is not initialized");
-                    return;
-                }
+        // Get the unified scheduler - it handles routing to network pool internally
+        let scheduler_guard = shared.scheduler.read();
+        let scheduler = match scheduler_guard.as_ref() {
+            Some(s) => Arc::clone(s),
+            None => {
+                eprintln!("Scheduler is not initialized");
+                return;
             }
         };
 
-        // Spawn task
+        // Spawn task - route to network pool if requested
         let meta_data = (node_info.id, node_info.slot, node_info.index);
         let node_info = node_info.clone();
         let pre_built_args = pre_built_args_vec[i].clone();
-        scheduler.spawn_task_with_meta(Some(meta_data), move || {
-            execute_task(
-                &shared_clone,
-                func_ptr,
-                &node_info,
-                &time_buf,
-                &node_name,
-                pre_built_args,
-            )
-        });
+
+        if use_network_scheduler {
+            scheduler.spawn_task_with_meta_network(Some(meta_data), move || {
+                execute_task(
+                    &shared_clone,
+                    func_ptr,
+                    &node_info,
+                    &time_buf,
+                    &node_name,
+                    pre_built_args,
+                )
+            });
+        } else {
+            scheduler.spawn_task_with_meta(Some(meta_data), move || {
+                execute_task(
+                    &shared_clone,
+                    func_ptr,
+                    &node_info,
+                    &time_buf,
+                    &node_name,
+                    pre_built_args,
+                )
+            });
+        }
     }
 }
 
