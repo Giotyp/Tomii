@@ -1,7 +1,10 @@
 use core::panic;
+use rapidhash::RapidHashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::graph_struct::*;
+use crate::network::NetworkConfig;
 use crate::{debug::print_debug, IdType};
 use synstream_types::*;
 
@@ -15,6 +18,8 @@ pub struct Graph {
     pub id_function: Option<IdFunction>,
     pub post_nodes: Option<Vec<Node>>,
     pub init_objects: Option<Vec<Vec<CmTypes>>>,
+    pub obj_id_map: RapidHashMap<String, usize>,
+    pub network_config: Option<Arc<NetworkConfig>>,
 }
 
 impl GraphStruct for Graph {
@@ -43,13 +48,27 @@ impl GraphStruct for Graph {
             }
         }
         if !has_preds {
-            print_debug(|| {
-                format!(
-                    "Adding initial node: {} with id {} and factor {}",
-                    node.name, node.id, node.factor
-                )
+            // Check if this node has $network arguments (waits for network injection)
+            let has_network_arg = node.args.iter().any(|arg| {
+                matches!(arg.type_, CmTypes::Ref(2)) // $network uses Ref(2)
             });
-            self.initial_nodes.push(node.id);
+
+            if !has_network_arg {
+                print_debug(|| {
+                    format!(
+                        "Adding initial node: {} with id {} and factor {}",
+                        node.name, node.id, node.factor
+                    )
+                });
+                self.initial_nodes.push(node.id);
+            } else {
+                print_debug(|| {
+                    format!(
+                        "Skipping initial node (has $network arg): {} with id {} and factor {}",
+                        node.name, node.id, node.factor
+                    )
+                });
+            }
         }
         if Self::has_condition(&node.args) {
             self.condition_nodes.insert(node.id);
@@ -125,6 +144,8 @@ impl Graph {
             id_function: None,
             post_nodes: None,
             init_objects: None,
+            obj_id_map: RapidHashMap::default(),
+            network_config: None,
         }
     }
 

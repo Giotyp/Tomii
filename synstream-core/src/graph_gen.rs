@@ -1,11 +1,13 @@
 use core::panic;
 use std::fs::File;
 use std::io::Read;
+use std::sync::Arc;
 
 use crate::func_reg::*;
 use crate::graph::*;
 use crate::graph_struct::*;
 use crate::json_structs::*;
+use crate::network::{NetworkConfig, SocketType};
 use crate::obj_gen::init_objects;
 use crate::prelude::*;
 use rapidhash::{HashMapExt, RapidHashMap};
@@ -219,7 +221,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             factor: factor,
             func_ptr,
             loop_,
-            nx: node_json.nx.unwrap_or(false),
+            nx: false,
         };
 
         graph.add_node(node.clone());
@@ -282,6 +284,77 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
 
     // Set the initialized objects in the graph
     graph.set_init_objects(&init_vec);
+    graph.obj_id_map = obj_id_map.clone();
+
+    // Parse network configuration if present
+    if let Some(network_config_json) = &graph_parsed.network_config {
+        // Resolve factors for num_sockets and packet_length
+        let num_sockets = network_config_json
+            .num_sockets
+            .resolve(&init_vec, &obj_id_map, workers);
+        let packet_length =
+            network_config_json
+                .packet_length
+                .resolve(&init_vec, &obj_id_map, workers);
+
+        // Validate first_processing_node exists
+        if !name_to_id.contains_key(&network_config_json.first_processing_node) {
+            panic!(
+                "Network config error: first_processing_node '{}' not found in graph nodes",
+                network_config_json.first_processing_node
+            );
+        }
+
+        // Parse socket type
+        let socket_type = match network_config_json.socket_type.to_lowercase().as_str() {
+            "udp" => SocketType::Udp,
+            other => panic!(
+                "Unsupported socket type '{}'. Only 'udp' is currently supported.",
+                other
+            ),
+        };
+
+        // Create NetworkConfig (sockets will be initialized in runtime)
+        #[allow(deprecated)]
+        let network_config = NetworkConfig {
+            socket_type,
+            num_sockets,
+            packet_length,
+            buffer_depth: network_config_json.buffer_depth,
+            socket_refs: network_config_json.socket_refs.clone(),
+            socket_range_ref: network_config_json.socket_range_ref.clone(),
+            frame_id_offset: network_config_json.frame_id_offset,
+            frame_id_length: network_config_json.frame_id_length,
+            extract_packet: network_config_json.extract_packet.clone(),
+            first_processing_node: network_config_json.first_processing_node.clone(),
+            socket_initializer: network_config_json.socket_initializer.clone(),
+        };
+
+        println!("Network configuration parsed:");
+        println!("  Socket type: {:?}", network_config.socket_type);
+        println!("  Number of sockets: {}", network_config.num_sockets);
+        println!("  Packet length: {} bytes", network_config.packet_length);
+        println!("  Buffer depth: {} packets", network_config.buffer_depth);
+        if let Some(ref refs) = network_config.socket_refs {
+            println!("  Socket refs: {:?}", refs);
+        } else if let Some(ref range_ref) = network_config.socket_range_ref {
+            println!("  Socket range ref: {}", range_ref);
+        } else if let Some(ref init) = network_config.socket_initializer {
+            println!("  Socket initializer (DEPRECATED): {}", init);
+        }
+        if let (Some(offset), Some(length)) = (network_config.frame_id_offset, network_config.frame_id_length) {
+            println!("  Frame ID: offset={}, length={} bytes", offset, length);
+        }
+        println!("  Extract packet function: {}", network_config.extract_packet);
+        println!(
+            "  First processing node: {}",
+            network_config.first_processing_node
+        );
+
+        graph.network_config = Some(Arc::new(network_config));
+    } else {
+        println!("No network_config found - skipping network receiver setup");
+    }
 
     Ok(graph)
 }

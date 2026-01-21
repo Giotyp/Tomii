@@ -1,11 +1,12 @@
 use crate::debug::print_debug;
+use crate::network::{NetworkConfig, NetworkSocket, PacketMessage};
 use crate::resolution_state::ResolutionState;
 use crate::time_buffer::{TimeBufferManager, TimingMethod};
 use crate::{buffers::*, graph::*, graph_struct::*, scheduler::*, IdType};
 use core::panic;
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Receiver, Sender};
 use parking_lot::{Mutex, RwLock};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use synstream_types::*;
@@ -45,6 +46,8 @@ pub struct ArgCacheEntry {
     pub rt_idxs_indexes: Vec<usize>,
     // indexes of $ref::worker in args
     pub rt_workers_indexes: Vec<usize>,
+    // indexes of $network in args
+    pub rt_network_indexes: Vec<usize>,
     // indexes of $res in args
     pub res_indexes: Vec<usize>,
     // real indexes of $res
@@ -59,6 +62,7 @@ impl std::fmt::Debug for ArgCacheEntry {
             .field("buffer_values", &self.buffer_values)
             .field("rt_idxs_indexes", &self.rt_idxs_indexes)
             .field("rt_workers_indexes", &self.rt_workers_indexes)
+            .field("rt_network_indexes", &self.rt_network_indexes)
             .field("res_indexes", &self.res_indexes)
             .field("real_res_indexes", &self.real_res_indexes)
             .finish()
@@ -76,6 +80,7 @@ pub fn node_cache_entry(
     let mut buffer_ref_indexes = Vec::new();
     let mut buffer_values = Vec::new();
     let mut rt_workers_indexes = Vec::new();
+    let mut rt_network_indexes = Vec::new();
     let mut real_res_indexes = Vec::new();
     let mut res_indexes = Vec::new();
     let mut args = vec![CmTypes::None; node.args.len()];
@@ -96,6 +101,9 @@ pub fn node_cache_entry(
                 } else if *obj_id == 1 {
                     // Reserved for $workers
                     rt_workers_indexes.push(idx_count);
+                } else if *obj_id == 2 {
+                    // Reserved for $network
+                    rt_network_indexes.push(idx_count);
                 } else {
                     // For init_object values
                     let obj_vec = &init_objects[*obj_id];
@@ -140,6 +148,7 @@ pub fn node_cache_entry(
         buffer_values,
         rt_idxs_indexes,
         rt_workers_indexes,
+        rt_network_indexes,
         res_indexes,
         real_res_indexes,
     };
@@ -232,6 +241,108 @@ pub struct SharedData {
     pub slot_priority_enabled: bool,
     // Per-slot buffering: holds ready nodes waiting for slot activation
     pub slot_buffers: Arc<RwLock<Vec<Vec<NodeInfo>>>>,
+
+    // Network receiver infrastructure (optional - only present if network_config exists)
+    pub packet_senders: Vec<Sender<PacketMessage>>,
+    pub packet_receivers: Vec<Receiver<PacketMessage>>,
+    pub receiver_sockets: Vec<NetworkSocket>,
+    pub packet_drop_counters: Vec<AtomicUsize>,
+    pub network_config: Option<Arc<NetworkConfig>>,
+    pub shutdown_flag: Arc<AtomicBool>,
+}
+
+/// Inject a network packet directly into the resolution system
+///
+/// This function is called by resolution threads when polling SPSC channels.
+/// It parses raw bytes using the user-defined extract_packet function,
+/// stores the parsed packet, and triggers the first processing node's dependencies.
+pub fn inject_network_packet(shared: &Arc<SharedData>, packet_msg: PacketMessage) {
+    let network_config = shared
+        .network_config
+        .as_ref()
+        .expect("Network config must be present when injecting packets");
+    let first_node_name = &network_config.first_processing_node;
+
+    // Find first processing node
+    let first_node = shared
+        .graph
+        .nodes
+        .iter()
+        .find(|n| n.name == *first_node_name)
+        .unwrap_or_else(|| {
+            panic!(
+                "First processing node '{}' not found in graph",
+                first_node_name
+            )
+        });
+
+    let node_id = first_node.id;
+    let slot = packet_msg.slot;
+    let index = packet_msg.antenna_id; // Maps to factor index
+
+    // Parse raw packet bytes using user-defined extract_packet function
+    let extract_fn_name = &network_config.extract_packet;
+    let extract_fn = crate::func_reg::get_func(extract_fn_name).unwrap_or_else(|| {
+        panic!(
+            "extract_packet function '{}' not found in registry",
+            extract_fn_name
+        )
+    });
+
+    // Call parsing function with raw bytes
+    // Clone packet bytes to avoid lifetime issues with borrowed data
+    let packet_bytes_vec = packet_msg.packet_bytes.clone();
+    let bytes_arg = CmTypes::from_any(packet_bytes_vec);
+    let parsed_packet = extract_fn(vec![bytes_arg]);
+
+    // Debug validation: verify receiver's frame_id matches parsed packet's id_function result
+    #[cfg(debug_assertions)]
+    {
+        if let Some(ref id_fn_node) = shared.graph.id_function {
+            if let Some(id_fn_ptr) = id_fn_node.func_ptr {
+                let runtime_frame_id = id_fn_ptr(vec![parsed_packet.clone()]);
+                if let CmTypes::Usize(extracted_id) = runtime_frame_id {
+                    let expected_slot = extracted_id % shared.slots;
+                    if expected_slot != slot {
+                        eprintln!(
+                            "WARNING: Frame ID mismatch - receiver slot={}, id_function slot={}",
+                            slot, expected_slot
+                        );
+                    }
+                } else {
+                    eprintln!("WARNING: id_function returned non-usize type");
+                }
+            }
+        }
+    }
+
+    // Create NodeInfo for the first processing node
+    let node_info = NodeInfo {
+        id: node_id,
+        slot,
+        index,
+        pred_index: index, // Packet comes directly from receiver
+        post_node: false,
+    };
+
+    // Store parsed packet (not raw bytes) in node_results
+    {
+        let mut results = shared.node_results.write();
+        results.set(&node_info, parsed_packet.clone());
+    }
+
+    // Send to completed channel for normal successor processing
+    // The resolution thread will pick this up and process successors
+    if let Some(ref tx_lock) = *shared.completed_tx.read() {
+        let _ = tx_lock.send(vec![(node_info, parsed_packet)]);
+    }
+
+    print_debug(|| {
+        format!(
+            "Injected parsed packet: node={}, slot={}, antenna={}, timestamp={}",
+            first_node_name, slot, index, packet_msg.timestamp
+        )
+    });
 }
 
 #[inline(always)]
@@ -689,9 +800,41 @@ pub fn create_node_args(
         &node.arg_cache
     };
 
-    parse_cached_args(
+    // Check if this is the first_processing_node for network reception
+    // If so, prepend the parsed packet as the first argument
+    let parsed_packet_opt =
+        if let Some(ref network_config) = shared.network_config {
+            if node.name == network_config.first_processing_node {
+                // Retrieve the parsed packet stored by inject_network_packet()
+                let node_info = NodeInfo {
+                    id: node_id,
+                    slot,
+                    index: node_index,
+                    pred_index,
+                    post_node: false,
+                };
+                Some(
+                    shared.node_results.read().get(&node_info).expect(
+                        "Parsed packet must be stored in node_results before creating args",
+                    ),
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+    let mut args = parse_cached_args(
         shared, args_cache, node_id, node_index, slot, pred_index, None,
-    )
+    );
+
+    // Prepend parsed packet if this is the network entry node
+    if let Some(packet) = parsed_packet_opt {
+        args.insert(0, packet);
+    }
+
+    args
 }
 
 #[inline(always)]
@@ -758,6 +901,27 @@ pub fn parse_cached_args(
 
     process_buffer_refs(&mut arg_vec, args_cache, node_index);
     process_runtime_refs(&mut arg_vec, args_cache, node_index, workers);
+
+    // Inject network packets for $network arguments
+    if !args_cache.rt_network_indexes.is_empty() {
+        if let Some(ref network_config) = shared.network_config {
+            let node_info = NodeInfo {
+                id: node_id,
+                slot,
+                index: node_index,
+                pred_index,
+                post_node: false,
+            };
+            let parsed_packet =
+                shared.node_results.read().get(&node_info).expect(
+                    "Network packet must be injected before spawning first_processing_node",
+                );
+
+            for &idx in &args_cache.rt_network_indexes {
+                arg_vec[idx] = parsed_packet.clone();
+            }
+        }
+    }
 
     for (res_idx, real_idx) in args_cache
         .res_indexes

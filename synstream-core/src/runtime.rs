@@ -2,15 +2,17 @@ use core_affinity;
 use crossbeam_channel::Receiver;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::thread::{sleep, spawn};
+use std::thread::{sleep, spawn, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::async_recorder::{set_worker_recorder, submit_record, AsyncRecorder};
 use crate::debug::print_debug;
+use crate::func_reg::get_func;
 use crate::graph::*;
 use crate::graph_struct::*;
+use crate::network::{multi_socket_receiver_loop, single_socket_receiver_loop, NetworkSocket};
 use crate::resolution_state::{MultiThreadedState, ResolutionState, SingleThreadedState};
 use crate::runtime_funcs::*;
 use crate::scheduler::{Scheduler, SchedulerImpl};
@@ -219,6 +221,13 @@ impl SynRt {
             slot_states,
             slot_priority_enabled,
             slot_buffers,
+            // Network fields (empty - will be initialized in run() if network_config present)
+            packet_senders: Vec::new(),
+            packet_receivers: Vec::new(),
+            receiver_sockets: Vec::new(),
+            packet_drop_counters: Vec::new(),
+            network_config: app_graph.network_config.clone(),
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
         });
 
         SynRt { shared }
@@ -247,6 +256,9 @@ impl SynRt {
         // Set completed_tx in the scheduler and start the flusher thread
         scheduler.set_completed_tx(completed_tx);
 
+        // Get network workers count before moving scheduler
+        let nrx = scheduler.network_workers();
+
         // Store scheduler
         let core_offset: usize;
         {
@@ -267,6 +279,227 @@ impl SynRt {
                 tb.start_slot_processing(system_slot);
             }
         }
+
+        // Initialize network receiver infrastructure if network_config present
+        let receiver_handles: Vec<JoinHandle<()>> = if let Some(ref network_config) =
+            self.shared.network_config
+        {
+            let num_sockets = network_config.num_sockets;
+            let buffer_depth = network_config.buffer_depth;
+
+            println!("\n=== Initializing Network Receiver Infrastructure ===");
+            println!("Number of sockets: {}", num_sockets);
+            println!("Buffer depth: {} packets per socket", buffer_depth);
+
+            // Initialize sockets using new or legacy method
+            let mut sockets = Vec::with_capacity(num_sockets);
+
+            // Get init_objects and obj_id_map for socket reference resolution
+            let init_objects = self.shared.graph.init_objects.as_ref().unwrap();
+            let obj_id_map = &self.shared.graph.obj_id_map;
+
+            #[allow(deprecated)]
+            if let Some(ref socket_refs) = network_config.socket_refs {
+                // Method 1: Individual socket references
+                println!("Using individual socket references");
+                for socket_ref_name in socket_refs {
+                    let obj_id = obj_id_map.get(socket_ref_name).unwrap_or_else(|| {
+                        panic!(
+                            "Socket reference '{}' not found in initializations",
+                            socket_ref_name
+                        )
+                    });
+
+                    let socket_result = &init_objects[*obj_id][0];
+                    let socket = extract_single_socket(socket_result, socket_ref_name);
+                    sockets.push(socket);
+                }
+            } else if let Some(ref range_ref) = network_config.socket_range_ref {
+                // Method 2: Socket range reference
+                println!("Using socket range reference: {}", range_ref);
+                let obj_id = obj_id_map.get(range_ref).unwrap_or_else(|| {
+                    panic!(
+                        "Socket range reference '{}' not found in initializations",
+                        range_ref
+                    )
+                });
+
+                let sockets_result = &init_objects[*obj_id][0];
+                sockets = extract_socket_vector(sockets_result, range_ref, num_sockets);
+            } else if let Some(ref socket_init_func_name) = network_config.socket_initializer {
+                // LEGACY METHOD (DEPRECATED): Use user-provided initialization function
+                eprintln!("⚠️  WARNING: Using deprecated 'socket_initializer' field");
+                eprintln!("    Please migrate to 'socket_refs' or 'socket_range_ref'");
+                println!("Socket initializer (DEPRECATED): {}", socket_init_func_name);
+
+                // Get socket initializer function pointer
+                let init_func_ptr = get_func(socket_init_func_name).unwrap_or_else(|| {
+                    panic!(
+                        "Socket initializer function '{}' not found in user library",
+                        socket_init_func_name
+                    )
+                });
+
+                // Initialize sockets by calling user-provided function
+                for socket_id in 0..num_sockets {
+                    let socket_id_cmtype = CmTypes::from_any(socket_id);
+                    let args = vec![socket_id_cmtype];
+
+                    // SAFETY: Calling user-provided FFI function
+                    let result = init_func_ptr(args);
+
+                    // Extract socket from result (wrapped in CmTypes::Any)
+                    let socket = match result {
+                        CmTypes::Any(any_arc) => {
+                            let any_lock = any_arc.read().unwrap();
+                            // Try to downcast to UdpSocket
+                            if let Some(udp_socket) = any_lock.downcast_ref::<std::net::UdpSocket>() {
+                                // Clone the socket by trying to duplicate it
+                                match udp_socket.try_clone() {
+                                    Ok(cloned) => NetworkSocket::Udp(cloned),
+                                    Err(e) => panic!(
+                                        "Failed to clone UdpSocket from '{}': {}",
+                                        socket_init_func_name, e
+                                    ),
+                                }
+                            } else {
+                                panic!(
+                                    "Socket initializer '{}' must return UdpSocket wrapped in CmTypes::Any",
+                                    socket_init_func_name
+                                );
+                            }
+                        }
+                        other => panic!(
+                            "Socket initializer '{}' must return socket wrapped in CmTypes::Any, got {:?}",
+                            socket_init_func_name, other
+                        ),
+                    };
+
+                    sockets.push(socket);
+                    println!("  Socket {} initialized successfully", socket_id);
+                }
+            } else {
+                panic!("network_config must specify either 'socket_refs', 'socket_range_ref', or 'socket_initializer'");
+            }
+
+            assert_eq!(
+                sockets.len(),
+                num_sockets,
+                "Initialized {} sockets but network_config.num_sockets={}",
+                sockets.len(),
+                num_sockets
+            );
+
+            println!("SynRt-Net {} network sockets initialized", num_sockets);
+
+            // Create SPSC channels (one per socket)
+            let mut packet_senders = Vec::with_capacity(num_sockets);
+            let mut packet_receivers = Vec::with_capacity(num_sockets);
+            for _socket_id in 0..num_sockets {
+                let (tx, rx) = crossbeam_channel::bounded(buffer_depth);
+                packet_senders.push(tx);
+                packet_receivers.push(rx);
+            }
+            println!(
+                "Created {} SPSC channels with {} capacity each",
+                num_sockets, buffer_depth
+            );
+
+            // Create packet drop counters
+            let packet_drop_counters: Vec<AtomicUsize> =
+                (0..num_sockets).map(|_| AtomicUsize::new(0)).collect();
+
+            // Store in SharedData (requires mutable access - we're in run())
+            // We need to use unsafe pointer casting since SharedData is already in Arc
+            // Actually, we can't modify SharedData after Arc::new(). Need different approach.
+            // Solution: Initialize these fields BEFORE creating SharedData, or use interior mutability.
+            // For now, let's use a workaround: directly access mutable self.shared before it's truly shared
+
+            // WORKAROUND: Since we're still in run() and resolution threads haven't started,
+            // we can use Arc::get_mut() to get mutable access
+            let shared_mut = Arc::get_mut(&mut self.shared)
+                .expect("SharedData should be exclusively owned at this point");
+
+            shared_mut.receiver_sockets = sockets;
+            shared_mut.packet_senders = packet_senders;
+            shared_mut.packet_receivers = packet_receivers;
+            shared_mut.packet_drop_counters = packet_drop_counters;
+
+            // Determine receiver thread allocation
+            // CRITICAL: Receiver threads allocated AFTER system threads
+            // nrx was already retrieved before moving scheduler
+            let receiver_offset = core_offset + system_threads; // Receivers after system threads
+
+            // Get dylib path for frame ID extraction (from environment or default)
+            let dylib_path =
+                std::env::var("DYLIB_PATH").unwrap_or_else(|_| "./libmimolib.so".to_string());
+
+            println!(
+                "\nSpawning {} receiver threads starting at core {}",
+                nrx, receiver_offset
+            );
+            println!("Using dylib: {} for frame ID extraction", dylib_path);
+
+            let mut handles = Vec::with_capacity(nrx);
+
+            if nrx >= num_sockets {
+                // Optimal case: 1:1 thread-to-socket mapping
+                println!("Using 1:1 thread-to-socket mapping (optimal)");
+                for socket_id in 0..num_sockets {
+                    let shared_clone = Arc::clone(&self.shared);
+                    let core_id = receiver_offset + socket_id;
+                    let dylib_clone = dylib_path.clone();
+
+                    let handle = spawn(move || {
+                        single_socket_receiver_loop(shared_clone, socket_id, core_id, dylib_clone);
+                    });
+                    handles.push(handle);
+                    println!(
+                        "  Receiver thread {} (socket {}) spawned on core {}",
+                        socket_id, socket_id, core_id
+                    );
+                }
+            } else {
+                // Round-robin polling: fewer threads than sockets
+                println!(
+                    "WARNING: nrx ({}) < num_sockets ({}). Using round-robin polling.",
+                    nrx, num_sockets
+                );
+                let sockets_per_thread = (num_sockets + nrx - 1) / nrx; // Ceiling division
+
+                for thread_id in 0..nrx {
+                    let start_socket = thread_id * sockets_per_thread;
+                    let end_socket = std::cmp::min(start_socket + sockets_per_thread, num_sockets);
+                    let socket_range = start_socket..end_socket;
+                    let socket_range_display = socket_range.clone(); // For display
+
+                    let shared_clone = Arc::clone(&self.shared);
+                    let core_id = receiver_offset + thread_id;
+                    let dylib_clone = dylib_path.clone();
+
+                    let handle = spawn(move || {
+                        multi_socket_receiver_loop(
+                            shared_clone,
+                            thread_id,
+                            socket_range,
+                            core_id,
+                            dylib_clone,
+                        );
+                    });
+                    handles.push(handle);
+                    println!(
+                        "  Multi-socket receiver {} polling sockets {:?} on core {}",
+                        thread_id, socket_range_display, core_id
+                    );
+                }
+            }
+
+            println!("=== Network Receiver Infrastructure Ready ===\n");
+            handles
+        } else {
+            println!("No network_config present - skipping network receiver setup");
+            Vec::new()
+        };
 
         // Spawn multiple resolution threads
         let mut resolution_handles = Vec::new();
@@ -401,6 +634,45 @@ impl SynRt {
         // Wait for all resolution threads to finish (they will unblock when channel closes)
         for handle in resolution_handles {
             handle.join().unwrap();
+        }
+
+        // Gracefully shutdown receiver threads if they were spawned
+        if !receiver_handles.is_empty() {
+            println!(
+                "Shutting down {} receiver threads...",
+                receiver_handles.len()
+            );
+
+            // Signal shutdown
+            self.shared.shutdown_flag.store(true, Ordering::SeqCst);
+
+            // Wait for all receiver threads to exit
+            for (idx, handle) in receiver_handles.into_iter().enumerate() {
+                handle.join().unwrap();
+                println!("  Receiver thread {} shut down successfully", idx);
+            }
+
+            // Report packet drop statistics
+            if let Some(ref network_config) = self.shared.network_config {
+                let num_sockets = network_config.num_sockets;
+                let mut total_drops = 0;
+                println!("\nPacket Drop Statistics:");
+                for socket_id in 0..num_sockets {
+                    let drops = self.shared.packet_drop_counters[socket_id].load(Ordering::Relaxed);
+                    total_drops += drops;
+                    if drops > 0 {
+                        println!("  Socket {}: {} packets dropped", socket_id, drops);
+                    }
+                }
+                if total_drops == 0 {
+                    println!("  No packets dropped - excellent!");
+                } else {
+                    println!(
+                        "  TOTAL: {} packets dropped across all sockets",
+                        total_drops
+                    );
+                }
+            }
         }
 
         // Finish timing for system thread slots only
@@ -564,7 +836,19 @@ impl SynRt {
 
         // Process completed nodes with dynamic batching from scheduler
         loop {
-            // Receive batch from scheduler (blocking)
+            // PRIORITY 1: Poll network packets (low-latency path)
+            // Only poll if network_config is present and receivers were spawned
+            if !shared.packet_receivers.is_empty() {
+                for antenna_id in 0..shared.packet_receivers.len() {
+                    // Non-blocking poll - process all available packets
+                    while let Ok(packet_msg) = shared.packet_receivers[antenna_id].try_recv() {
+                        // Inject packet directly into resolution system
+                        inject_network_packet(&shared, packet_msg);
+                    }
+                }
+            }
+
+            // PRIORITY 2: Receive batch from scheduler (blocking)
             let batch = match completed_rx.recv() {
                 Ok(batch_from_scheduler) => batch_from_scheduler,
                 Err(_) => return, // Channel closed
@@ -1142,5 +1426,70 @@ impl SynRt {
         } else {
             println!("Runtime: recorder not enabled");
         }
+    }
+}
+
+/// Helper function to extract a single socket from CmTypes::Any
+fn extract_single_socket(result: &CmTypes, name: &str) -> NetworkSocket {
+    match result {
+        CmTypes::Any(any_arc) => {
+            let any_lock = any_arc.read().unwrap();
+            if let Some(udp_socket) = any_lock.downcast_ref::<std::net::UdpSocket>() {
+                match udp_socket.try_clone() {
+                    Ok(cloned) => NetworkSocket::Udp(cloned),
+                    Err(e) => panic!("Failed to clone UdpSocket from '{}': {}", name, e),
+                }
+            } else {
+                panic!(
+                    "Socket reference '{}' must contain UdpSocket wrapped in CmTypes::Any",
+                    name
+                );
+            }
+        }
+        other => panic!(
+            "Socket reference '{}' must be CmTypes::Any, got {:?}",
+            name, other
+        ),
+    }
+}
+
+/// Helper function to extract a vector of sockets from CmTypes::VecAny
+fn extract_socket_vector(
+    result: &CmTypes,
+    name: &str,
+    expected_count: usize,
+) -> Vec<NetworkSocket> {
+    match result {
+        CmTypes::VecAny(lock) => {
+            let guard = lock.read().unwrap();
+
+            if guard.len() != expected_count {
+                panic!(
+                    "Socket range '{}' contains {} sockets but expected {}",
+                    name,
+                    guard.len(),
+                    expected_count
+                );
+            }
+
+            let mut sockets = Vec::with_capacity(expected_count);
+            for (idx, boxed) in guard.iter().enumerate() {
+                if let Some(udp_socket) = boxed.downcast_ref::<std::net::UdpSocket>() {
+                    match udp_socket.try_clone() {
+                        Ok(cloned) => sockets.push(NetworkSocket::Udp(cloned)),
+                        Err(e) => {
+                            panic!("Failed to clone UdpSocket[{}] from '{}': {}", idx, name, e)
+                        }
+                    }
+                } else {
+                    panic!("Socket range '{}' element {} is not UdpSocket", name, idx);
+                }
+            }
+            sockets
+        }
+        other => panic!(
+            "Socket range reference '{}' must be CmTypes::VecAny, got {:?}",
+            name, other
+        ),
     }
 }

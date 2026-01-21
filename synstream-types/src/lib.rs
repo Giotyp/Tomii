@@ -46,6 +46,8 @@ pub enum CmTypes {
     // Note: Any and AnySliced are not deserialized via the custom Deserialize impl
     Any(Arc<RwLock<Box<dyn Any + Send + Sync>>>),
     AnySliced(Arc<dyn SlicedAccess>),
+    /// Vector of Any types (for multi-socket initialization)
+    VecAny(Arc<RwLock<Vec<Box<dyn Any + Send + Sync>>>>),
 }
 
 // Custom Deserialize implementation for CmTypes to handle Arc-wrapped types
@@ -302,6 +304,60 @@ impl CmTypes {
 
     pub fn from_any<T: Any + Send + Sync>(value: T) -> CmTypes {
         CmTypes::Any(Arc::new(RwLock::new(Box::new(value))))
+    }
+
+    /// Create from vector of Any types (for multi-socket initialization)
+    pub fn from_any_vec<T: Any + Send + Sync>(vec: Vec<T>) -> CmTypes {
+        let boxed_vec: Vec<Box<dyn Any + Send + Sync>> = vec
+            .into_iter()
+            .map(|item| Box::new(item) as Box<dyn Any + Send + Sync>)
+            .collect();
+        CmTypes::VecAny(Arc::new(RwLock::new(boxed_vec)))
+    }
+
+    /// Extract vector and downcast to specific type
+    /// Returns None if types don't match or lock is poisoned
+    pub fn as_vec_any<T: Any + Clone>(&self) -> Option<Vec<T>> {
+        if let CmTypes::VecAny(lock) = self {
+            match lock.read() {
+                Ok(guard) => {
+                    let mut result = Vec::with_capacity(guard.len());
+                    for boxed in guard.iter() {
+                        match boxed.downcast_ref::<T>() {
+                            Some(value) => result.push(value.clone()),
+                            None => {
+                                println!(
+                                    "VecAny downcast failed: Expected type '{}', but got type '{:?}'",
+                                    std::any::type_name::<T>(),
+                                    std::any::type_name_of_val(boxed.as_ref())
+                                );
+                                return None;
+                            }
+                        }
+                    }
+                    Some(result)
+                }
+                Err(poison) => {
+                    let guard = poison.into_inner();
+                    eprintln!(
+                        "RwLock poisoned while reading VecAny: {} elements",
+                        guard.len()
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Get length of VecAny without extracting elements
+    pub fn vec_any_len(&self) -> Option<usize> {
+        if let CmTypes::VecAny(lock) = self {
+            lock.read().ok().map(|guard| guard.len())
+        } else {
+            None
+        }
     }
 
     /// Read-only borrow
@@ -1102,6 +1158,13 @@ impl std::fmt::Debug for CmTypes {
             CmTypes::Init => write!(f, "Init"),
             CmTypes::Any(_) => write!(f, "CustomType"),
             CmTypes::AnySliced(_) => write!(f, "SlicedType"),
+            CmTypes::VecAny(lock) => {
+                if let Ok(guard) = lock.read() {
+                    write!(f, "VecAny[{}]", guard.len())
+                } else {
+                    write!(f, "VecAny[poisoned]")
+                }
+            }
         }
     }
 }
@@ -1158,6 +1221,13 @@ impl fmt::Display for CmTypes {
             }
             CmTypes::Any(_) => write!(f, "{}", "CustomType"),
             CmTypes::AnySliced(_) => write!(f, "{}", "CustomSlicedType"),
+            CmTypes::VecAny(lock) => {
+                if let Ok(guard) = lock.read() {
+                    write!(f, "VecAny[{}]", guard.len())
+                } else {
+                    write!(f, "VecAny[poisoned]")
+                }
+            }
         }
     }
 }
@@ -1325,6 +1395,9 @@ lazy_static! {
         add!("Complex64",  |s| parse_complex64(s).map(|v| CmTypes::Complex64(Arc::new(v))).map_err(|e| CustomError::new(&format!("Complex64 parse error for '{}': {}", s, e))));
         add!("$ref",    |s| s.parse::<usize>().map(CmTypes::Ref).map_err(|_| CustomError::new(&format!("invalid ref: '{}'", s))));
         add!("$res",    |s| s.parse::<usize>().map(CmTypes::Res).map_err(|_| CustomError::new(&format!("invalid res: '{}'", s))));
+        add!("$factor", |_| Ok(CmTypes::Ref(0)));  // Runtime node index
+        add!("$worker", |_| Ok(CmTypes::Ref(1)));  // Runtime worker count
+        add!("$network", |_| Ok(CmTypes::Ref(2))); // Network packet injection
         add!("$barrier", |s| Ok(CmTypes::Barrier(Arc::from(s))));
         add!("None",    |_| Ok(CmTypes::None));
         add!("Init",    |_| Ok(CmTypes::Init));

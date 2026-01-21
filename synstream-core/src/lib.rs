@@ -5,6 +5,8 @@ pub mod graph;
 pub mod graph_gen;
 pub mod graph_struct;
 pub mod json_structs;
+pub mod network;
+pub mod network_funcs;
 pub mod obj_gen;
 pub mod resolution_state;
 pub mod runtime;

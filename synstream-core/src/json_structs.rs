@@ -1,6 +1,7 @@
 use rapidhash::RapidHashMap;
 use serde::Deserialize;
 use synstream_types::*;
+
 // Graph File Structure
 #[derive(Debug, Deserialize)]
 pub struct GraphFile {
@@ -8,6 +9,42 @@ pub struct GraphFile {
     pub nodes: Vec<NodeJson>,
     pub post_nodes: Option<Vec<NodeJson>>,
     pub id_function: Option<IdFunctionJson>,
+    pub network_config: Option<NetworkConfigJson>,
+}
+
+// Network Configuration
+#[derive(Debug, Deserialize)]
+pub struct NetworkConfigJson {
+    pub socket_type: String,
+    pub num_sockets: Factor,
+    pub packet_length: Factor,
+    #[serde(default = "default_buffer_depth")]
+    pub buffer_depth: usize,
+
+    // NEW: Socket reference methods (mutually exclusive)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub socket_refs: Option<Vec<String>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub socket_range_ref: Option<String>,
+
+    // NEW: Fixed-offset frame ID extraction
+    pub frame_id_offset: Option<usize>,
+    pub frame_id_length: Option<usize>,
+
+    // NEW: User-defined function to parse raw packet bytes into structured data
+    pub extract_packet: String,
+
+    pub first_processing_node: String,
+
+    // DEPRECATED: Backward compatibility with legacy user functions
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[deprecated(note = "Use socket_refs or socket_range_ref instead")]
+    pub socket_initializer: Option<String>,
+}
+
+fn default_buffer_depth() -> usize {
+    128
 }
 
 // Node structures
@@ -48,7 +85,6 @@ pub struct NodeJson {
     pub loop_: Option<LoopJson>,
     pub loop_args: Option<Vec<ArgJson>>,
     pub args: Vec<ArgJson>,
-    pub nx: Option<bool>,
 }
 
 // Initializations

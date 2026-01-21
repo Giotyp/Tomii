@@ -42,34 +42,37 @@ pub fn set_current_worker_id(core_id: usize) {
 }
 
 /// Create Threadpool with Rayon
-/// Returns: (ThreadPool, system_core_offset, worker_core_offset, network_core_offset)
+/// Returns: (ThreadPool, system_core_offset, worker_core_offset)
+/// 
+/// NOTE: network_workers parameter is kept for backward compatibility but is now used
+/// for receiver thread allocation in runtime.rs, not for creating a network Rayon pool.
 pub fn create_threadpool(
     core_offset: usize,
     workers: usize,
-    network_workers: usize,
+    network_workers: usize,  // Now used for receiver threads, not Rayon pool
     system_threads: usize,
     async_recorder: Option<Arc<AsyncRecorder>>,
-) -> (ThreadPool, Option<ThreadPool>, usize, usize) {
+) -> (ThreadPool, usize, usize) {
     // Create threadpool and pin workers to cores
     let mut core_ids = core_affinity::get_core_ids().unwrap();
     core_ids.sort();
 
     let available_cores = core_ids.len();
 
-    // CRITICAL: Allocate cores in sequential order: [system][network][workers]
-    // With core_offset=1, system=1, network=2, workers=10:
+    // CRITICAL: Allocate cores in sequential order: [system][receivers][workers]
+    // With core_offset=1, system=1, receivers=2, workers=10:
     //   System: core 1
-    //   Network: cores 2-3
+    //   Receivers: cores 2-3 (allocated in runtime.rs, not here)
     //   Workers: cores 4-13
 
     let total_needed = system_threads + network_workers + workers;
 
     let (
         system_core_offset,
-        network_offset,
+        receiver_offset,  // Renamed from network_offset for clarity
         worker_offset,
         actual_workers,
-        actual_network_workers,
+        actual_receivers,  // Renamed from actual_network_workers
         actual_system_threads,
     ) = if available_cores < 2 {
         panic!(
@@ -79,11 +82,11 @@ pub fn create_threadpool(
     } else if core_offset + total_needed <= available_cores {
         // Ideal case: can honor offset and allocate all threads
         let sys_start = core_offset;
-        let net_start = core_offset + system_threads;
+        let recv_start = core_offset + system_threads;
         let worker_start = core_offset + system_threads + network_workers;
         (
             sys_start,
-            net_start,
+            recv_start,
             worker_start,
             workers,
             network_workers,
@@ -96,11 +99,11 @@ pub fn create_threadpool(
             core_offset
         );
         let sys_start = 0;
-        let net_start = system_threads;
+        let recv_start = system_threads;
         let worker_start = system_threads + network_workers;
         (
             sys_start,
-            net_start,
+            recv_start,
             worker_start,
             workers,
             network_workers,
@@ -110,47 +113,44 @@ pub fn create_threadpool(
         // Not enough cores for all threads - reduce proportionally
         let max_system = 1; // Always need at least 1 system thread
         let remaining = available_cores.saturating_sub(max_system);
-        let max_network = network_workers.min(remaining / 2).max(0);
-        let max_workers = remaining.saturating_sub(max_network).max(1);
+        let max_receivers = network_workers.min(remaining / 2).max(0);
+        let max_workers = remaining.saturating_sub(max_receivers).max(1);
         eprintln!(
-                "Warning: Requested {} system + {} network + {} workers = {} total exceeds {} available cores.\n\
-                Using {} system at core 0, {} network starting at core {}, {} workers starting at core {}.",
+                "Warning: Requested {} system + {} receivers + {} workers = {} total exceeds {} available cores.\n\
+                Using {} system at core 0, {} receivers starting at core {}, {} workers starting at core {}.",
                 system_threads, network_workers, workers, total_needed, available_cores,
-                max_system, max_network, max_system, max_workers, max_system + max_network
+                max_system, max_receivers, max_system, max_workers, max_system + max_receivers
             );
         (
             0,
             max_system,
-            max_system + max_network,
+            max_system + max_receivers,
             max_workers,
-            max_network,
+            max_receivers,
             max_system,
         )
     };
 
     // VERIFICATION: Ensure proper sequential allocation with no overlaps
     assert!(
-        system_core_offset + actual_system_threads <= network_offset,
-        "Core allocation bug: system cores [{}..{}) overlap with network cores [{}..{})",
+        system_core_offset + actual_system_threads <= receiver_offset,
+        "Core allocation bug: system cores [{}..{}) overlap with receiver cores [{}..{})",
         system_core_offset,
         system_core_offset + actual_system_threads,
-        network_offset,
-        network_offset + actual_network_workers
+        receiver_offset,
+        receiver_offset + actual_receivers
     );
     assert!(
-        network_offset + actual_network_workers <= worker_offset,
-        "Core allocation bug: network cores [{}..{}) overlap with worker cores [{}..{})",
-        network_offset,
-        network_offset + actual_network_workers,
+        receiver_offset + actual_receivers <= worker_offset,
+        "Core allocation bug: receiver cores [{}..{}) overlap with worker cores [{}..{})",
+        receiver_offset,
+        receiver_offset + actual_receivers,
         worker_offset,
         worker_offset + actual_workers
     );
 
     let worker_cores_to_use: Vec<core_affinity::CoreId> =
         core_ids[worker_offset..worker_offset + actual_workers].to_vec();
-
-    let network_cores_to_use: Vec<core_affinity::CoreId> =
-        core_ids[network_offset..network_offset + actual_network_workers].to_vec();
 
     // Print core allocation
     println!("========== Core Allocation ==========");
@@ -162,10 +162,10 @@ pub fn create_threadpool(
         system_core_offset + actual_system_threads - 1
     );
     println!(
-        "Network threads: {} at cores {}..{}",
-        actual_network_workers,
-        network_offset,
-        network_offset + actual_network_workers - 1
+        "Receiver threads: {} at cores {}..{} (managed by runtime, not Rayon)",
+        actual_receivers,
+        receiver_offset,
+        receiver_offset + actual_receivers - 1
     );
     println!(
         "Worker threads: {} at cores {}..{}",
@@ -173,7 +173,7 @@ pub fn create_threadpool(
         worker_offset,
         worker_offset + actual_workers - 1
     );
-    println!("Main Worker -> Core Mapping:");
+    println!("Worker -> Core Mapping:");
     for (idx, core_id) in worker_cores_to_use.iter().enumerate() {
         println!("  Worker {}: Core {:?}", idx, core_id);
     }
@@ -201,40 +201,11 @@ pub fn create_threadpool(
         .build()
         .unwrap();
 
-    let recorder_clone = async_recorder.clone();
-    let network_threadpool: Option<ThreadPool> = if network_workers > 0 {
-        println!(
-            "Creating network threadpool with {} workers on cores {:?}",
-            actual_network_workers, network_cores_to_use
-        );
-        ThreadPoolBuilder::new()
-            .num_threads(actual_network_workers)
-            .start_handler(move |thread_index| {
-                // Pin to core
-                let core_id = network_cores_to_use[thread_index];
-                core_affinity::set_for_current(core_id);
-
-                // Set WORKER_ID to physical core ID (for CSV recording)
-                WORKER_ID.with(|c| c.set(core_id.id));
-
-                // Universal channel indexing: channel_index = physical_core_id - system_core_offset
-                let channel_index = core_id.id - system_core_offset;
-                if let Some(ref recorder) = recorder_clone {
-                    if let Some(tx) = recorder.get_worker_sender(channel_index) {
-                        set_worker_recorder(tx);
-                    }
-                }
-            })
-            .build()
-            .map_err(|e| eprintln!("Failed to create network threadpool: {}", e))
-            .ok()
-    } else {
-        None
-    };
+    // NOTE: Network threadpool removed - network reception now handled by
+    // dedicated receiver threads in runtime.rs (not Rayon-based)
 
     (
         worker_threadpool,
-        network_threadpool,
         system_core_offset,
         worker_offset,
     )
@@ -285,6 +256,11 @@ pub trait Scheduler {
     fn core_offset(&self) -> Option<usize> {
         None // Default implementation
     }
+
+    /// Get the number of network worker threads (used for receiver threads)
+    fn network_workers(&self) -> usize {
+        0 // Default implementation
+    }
 }
 
 /// Shared base for schedulers with common state and logic.
@@ -333,7 +309,7 @@ impl SchedulerBase {
             None
         };
 
-        let (worker_threadpool, _network_threadpool_opt, system_core_offset, worker_core_offset) =
+        let (worker_threadpool, system_core_offset, worker_core_offset) =
             create_threadpool(
                 core_offset,
                 workers,
@@ -843,6 +819,14 @@ impl Scheduler for SchedulerImpl {
             SchedulerImpl::Unified(scheduler) => scheduler.core_offset(),
         }
     }
+
+    fn network_workers(&self) -> usize {
+        match self {
+            SchedulerImpl::Fifo(_) => 0,
+            SchedulerImpl::WorkStealing(_) => 0,
+            SchedulerImpl::Unified(scheduler) => scheduler.network_workers,
+        }
+    }
 }
 
 impl SchedulerImpl {
@@ -969,14 +953,13 @@ pub fn create_scheduler(
     }
 }
 
-/// Unified Scheduler with separate main and network threadpools
-/// Maintains sequential worker IDs: main workers 0..N, network workers N..(N+M)
+/// Unified Scheduler with Rayon threadpool for compute workers
+/// Network reception is now handled by dedicated receiver threads (not Rayon-based)
 #[derive(Debug)]
 pub struct UnifiedScheduler {
     worker_pool: ThreadPool,
-    network_pool: Option<ThreadPool>,
     main_workers: usize,
-    network_workers: usize,
+    network_workers: usize,  // Kept for compatibility, used for receiver thread allocation
     system_core_offset: usize,
     worker_core_offset: usize,
     pending_jobs: Arc<AtomicUsize>,
@@ -1017,8 +1000,9 @@ impl UnifiedScheduler {
             None
         };
 
-        // Create main threadpool - returns offsets for system, workers, and network
-        let (worker_pool, network_pool, system_core_offset, worker_core_offset) = create_threadpool(
+        // Create main threadpool - returns offsets for system and workers
+        // Network receivers are allocated separately in runtime.rs
+        let (worker_pool, system_core_offset, worker_core_offset) = create_threadpool(
             core_offset,
             main_workers,
             network_workers,
@@ -1033,7 +1017,6 @@ impl UnifiedScheduler {
 
         Self {
             worker_pool,
-            network_pool,
             main_workers,
             network_workers,
             system_core_offset,
@@ -1240,17 +1223,8 @@ impl Scheduler for UnifiedScheduler {
         self.spawn_task_common(meta, task, |t| self.worker_pool.spawn(t), false);
     }
 
-    fn spawn_task_with_meta_network<F>(&self, meta: Option<(IdType, usize, usize)>, task: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        if let Some(ref net_pool) = self.network_pool {
-            self.spawn_task_common(meta, task, |t| net_pool.spawn(t), true);
-        } else {
-            // Fallback to main pool if network pool not available
-            self.spawn_task_with_meta(meta, task);
-        }
-    }
+    // NOTE: spawn_task_with_meta_network removed - network reception now handled
+    // by dedicated receiver threads in runtime.rs, not Rayon tasks
 
     fn workers(&self) -> usize {
         self.main_workers + self.network_workers
