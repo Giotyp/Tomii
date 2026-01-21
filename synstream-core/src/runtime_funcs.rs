@@ -904,7 +904,7 @@ pub fn parse_cached_args(
 
     // Inject network packets for $network arguments
     if !args_cache.rt_network_indexes.is_empty() {
-        if let Some(ref network_config) = shared.network_config {
+        if let Some(ref _network_config) = shared.network_config {
             let node_info = NodeInfo {
                 id: node_id,
                 slot,
@@ -1155,6 +1155,21 @@ pub fn activate_next_slot(
     })
 }
 
+/// Get initial compute nodes for given slots (task scheduling path)
+///
+/// Returns nodes that are candidates for immediate execution or buffering,
+/// depending on slot state and slot-priority configuration.
+///
+/// IMPORTANT: Network nodes are excluded from this path!
+/// - At graph build time, nodes with $network args are NOT added to initial_nodes
+///   (see graph.rs:45-50)
+/// - Network nodes are triggered by packet injection from receiver threads,
+///   not via this task-scheduling path
+/// - This function returns ONLY compute nodes (nx=false)
+///
+/// Usage:
+/// - Immediately schedule if slot is active (or slot-priority disabled)
+/// - Buffer for later if slot is inactive (when slot-priority enabled)
 pub fn initial_nodes(shared: &Arc<SharedData>, slots: Vec<usize>) -> Vec<NodeInfo> {
     let mut node_infos = Vec::new();
     for slot in slots {

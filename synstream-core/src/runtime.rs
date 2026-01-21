@@ -735,6 +735,18 @@ impl SynRt {
         }
     }
 
+    /// Resolution Thread: Processes completed compute tasks and manages stream lifecycle
+    ///
+    /// ARCHITECTURE NOTE:
+    /// This thread has two independent responsibilities:
+    /// 1. PACKET RECEPTION (independent): Polls packet_receivers from network receivers
+    ///    and injects parsed packets into node_results via inject_network_packet()
+    /// 2. TASK SCHEDULING (via scheduler): Spawns compute node tasks (nx=false) respecting
+    ///    slot-priority buffering when enabled
+    ///
+    /// Network nodes (nx=true) are NOT spawned by this thread. They are triggered by
+    /// external packet arrival, not by task scheduling. Receiver threads handle packets
+    /// on independent cores (2-3), while this thread coordinates on system cores.
     fn resolution(
         shared: Arc<SharedData>,
         completed_rx: Receiver<Vec<(NodeInfo, CmTypes)>>,
@@ -752,7 +764,6 @@ impl SynRt {
         }
 
         let all_slots: Vec<usize> = (0..shared.slots).collect();
-        let network_init_nodes = initial_nodes(&shared, all_slots.clone());
         if thread_id == 0 {
             // Ensure only one thread does initial preparation
             if shared
@@ -767,29 +778,8 @@ impl SynRt {
                     )
                 });
 
-                // Network nodes (nx=true) run for ALL slots to receive and buffer packets
-                let mut network_nodes = Vec::new();
-                for node_info in &network_init_nodes {
-                    let node = &shared.graph.nodes[node_info.id as usize];
-                    if node.nx {
-                        network_nodes.push(node_info.clone());
-                    }
-                }
-
-                // Send network nodes to network scheduler (all slots)
-                if !network_nodes.is_empty() {
-                    if shared.slot_priority_enabled {
-                        print_debug(|| {
-                            format!(
-                            "Slot-Priority: Starting {:?} network nodes for all slots to buffer packets: {:?}",
-                            network_nodes.len(), all_slots
-                        )
-                        });
-                    }
-                    Self::preparation(&shared, &network_nodes, thread_core, thread_slot, true);
-                }
-
                 // Compute nodes (nx=false) follow slot-priority - only active slots
+                // Network nodes are handled by dedicated receiver threads (see inject_network_packet)
                 let active_slots: Vec<usize> = (0..shared.slots)
                     .filter(|&slot| is_slot_active(&shared, slot))
                     .collect();
@@ -803,30 +793,17 @@ impl SynRt {
                     });
                 }
 
-                let compute_init_nodes = initial_nodes(&shared, active_slots);
-                let mut regular_nodes = Vec::new();
-                for node_info in compute_init_nodes {
-                    let node = &shared.graph.nodes[node_info.id as usize];
-                    if !node.nx {
-                        regular_nodes.push(node_info);
-                    }
-                }
+                let compute_nodes = initial_nodes(&shared, active_slots);
 
                 // Send compute nodes to regular scheduler (only active slots)
-                if !regular_nodes.is_empty() {
-                    Self::preparation(&shared, &regular_nodes, thread_core, thread_slot, false);
+                if !compute_nodes.is_empty() {
+                    Self::preparation(&shared, &compute_nodes, thread_core, thread_slot, false);
                 }
             }
         }
 
-        // denote slots for which network nodes have been initially spawned
-        let mut network_init_slots = Vec::new();
-        for node_info in &network_init_nodes {
-            let node = &shared.graph.nodes[node_info.id as usize];
-            if node.nx {
-                network_init_slots.push(node_info.slot);
-            }
-        }
+        // Network nodes are handled by dedicated receiver threads, not scheduled
+        // (see inject_network_packet implementation)
 
         // prefetch cond indexes for efficiency
         let cond_indexes = shared.graph.get_condition_indexes();
@@ -1229,9 +1206,7 @@ impl SynRt {
                         // Remove from completed set since we're starting again
                         shared.resolution_state.unmark_slot_completed(proc_slot);
 
-                        // Reset network node tracking for new stream iteration
-                        network_init_slots.clear();
-                        print_debug(|| "Resetting network_init_slots for new stream".to_string());
+                        // Network nodes are managed by receiver threads; no per-slot network tracking here
 
                         // Clear activity tracking for this slot's new stream iteration
                         stream_slot_activity.remove(&proc_slot);
@@ -1242,43 +1217,15 @@ impl SynRt {
                             )
                         });
 
-                        // Spawn initial nodes for the restarting slot
-                        let init_nodes = initial_nodes(&shared, vec![proc_slot]);
+                        // Spawn initial compute nodes for the restarting slot
+                        // (network nodes are handled by receivers, not scheduled)
+                        let compute_nodes = initial_nodes(&shared, vec![proc_slot]);
 
-                        // Separate nodes by nx flag
-                        let mut network_nodes = Vec::new();
-                        let mut regular_nodes = Vec::new();
-
-                        for node_info in init_nodes {
-                            let node = &shared.graph.nodes[node_info.id as usize];
-                            if node.nx {
-                                if !network_init_slots.contains(&node_info.slot) {
-                                    network_nodes.push(node_info);
-                                } else {
-                                    // remove from network_init_slots to avoid re-sending
-                                    network_init_slots.retain(|&s| s != node_info.slot);
-                                }
-                            } else {
-                                regular_nodes.push(node_info);
-                            }
-                        }
-
-                        // Send network nodes to network scheduler
-                        if !network_nodes.is_empty() {
-                            Self::preparation(
-                                &shared,
-                                &network_nodes,
-                                thread_core,
-                                thread_slot,
-                                true,
-                            );
-                        }
-
-                        // Send regular nodes to scheduler only if slot is active; otherwise buffer
-                        if !regular_nodes.is_empty() {
+                        // Apply slot-priority buffering for compute nodes
+                        if !compute_nodes.is_empty() {
                             if shared.slot_priority_enabled && !is_slot_active(&shared, proc_slot) {
                                 let mut slot_buffers = shared.slot_buffers.write();
-                                slot_buffers[proc_slot].extend(regular_nodes);
+                                slot_buffers[proc_slot].extend(compute_nodes);
                                 print_debug(|| {
                                     format!(
                                         "Slot-Priority: Buffered {} init nodes for slot {}",
@@ -1289,7 +1236,7 @@ impl SynRt {
                             } else {
                                 Self::preparation(
                                     &shared,
-                                    &regular_nodes,
+                                    &compute_nodes,
                                     thread_core,
                                     thread_slot,
                                     false,
