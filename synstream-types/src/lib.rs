@@ -1436,7 +1436,10 @@ pub fn string_to_cmtype(tp: String, arg: String) -> Result<CmTypes, CustomError>
         return Ok(CmTypes::VecCmt(Arc::new(v)));
     } else {
         // Return error
-        return Err(CustomError::new(&format!("Unable to parse type '{}'", tp)));
+        return Err(CustomError::new(&format!(
+            "Unable to parse type '{}' with value '{}'",
+            tp, arg
+        )));
     }
 }
 

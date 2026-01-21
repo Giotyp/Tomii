@@ -29,7 +29,7 @@ pub fn synstream_bind_udp(args: Vec<CmTypes>) -> CmTypes {
         .set_nonblocking(false)
         .expect("Failed to set blocking mode");
 
-    println!("Synrt-Net: Bound UDP socket: {}", bind_addr);
+    println!("Syn-Net: Bound UDP socket: {}", bind_addr);
     CmTypes::from_any(socket)
 }
 
@@ -71,7 +71,7 @@ pub fn synstream_bind_udp_range(args: Vec<CmTypes>) -> CmTypes {
     }
 
     println!(
-        "✓ Bound {} UDP sockets: {}:{}-{}",
+        "SynRt - Bound {} UDP sockets: {}:{}-{}",
         count,
         address,
         start_port,
@@ -102,7 +102,7 @@ pub fn synstream_bind_tcp(args: Vec<CmTypes>) -> CmTypes {
     let listener = TcpListener::bind(&bind_addr)
         .unwrap_or_else(|e| panic!("Failed to bind TCP listener {}: {}", bind_addr, e));
 
-    println!("Synrt-Net: Bound TCP listener: {}", bind_addr);
+    println!("Syn-Net: Bound TCP listener: {}", bind_addr);
     CmTypes::from_any(listener)
 }
 

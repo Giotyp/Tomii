@@ -249,13 +249,20 @@ pub struct SharedData {
     pub packet_drop_counters: Vec<AtomicUsize>,
     pub network_config: Option<Arc<NetworkConfig>>,
     pub shutdown_flag: Arc<AtomicBool>,
+
+    // Slot-level network packet storage: slot_network_packets[slot][antenna_id] = parsed_packet
+    // Used for $network argument resolution - packets stored here before node execution
+    pub slot_network_packets: Arc<RwLock<Vec<Vec<CmTypes>>>>,
 }
 
 /// Inject a network packet directly into the resolution system
 ///
-/// This function is called by resolution threads when polling SPSC channels.
-/// It parses raw bytes using the user-defined extract_packet function,
-/// stores the parsed packet, and triggers the first processing node's dependencies.
+/// New flow (refactored):
+/// 1. Parse raw bytes via extract_packet → parsed_packet
+/// 2. Call id_function(parsed_packet) → stream_id (BEFORE first_processing_node)
+/// 3. Assign slot via assign_stream_to_available_slot(stream_id)
+/// 4. Store parsed_packet in slot_network_packets[slot][antenna_id]
+/// 5. Schedule first_processing_node as a NEW task (not a completed one)
 pub fn inject_network_packet(shared: &Arc<SharedData>, packet_msg: PacketMessage) {
     let network_config = shared
         .network_config
@@ -277,10 +284,9 @@ pub fn inject_network_packet(shared: &Arc<SharedData>, packet_msg: PacketMessage
         });
 
     let node_id = first_node.id;
-    let slot = packet_msg.slot;
-    let index = packet_msg.antenna_id; // Maps to factor index
+    let antenna_id = packet_msg.antenna_id; // Maps to factor index
 
-    // Parse raw packet bytes using user-defined extract_packet function
+    // Step 1: Parse raw packet bytes using user-defined extract_packet function
     let extract_fn_name = &network_config.extract_packet;
     let extract_fn = crate::func_reg::get_func(extract_fn_name).unwrap_or_else(|| {
         panic!(
@@ -289,58 +295,70 @@ pub fn inject_network_packet(shared: &Arc<SharedData>, packet_msg: PacketMessage
         )
     });
 
-    // Call parsing function with raw bytes
-    // Clone packet bytes to avoid lifetime issues with borrowed data
     let packet_bytes_vec = packet_msg.packet_bytes.clone();
     let bytes_arg = CmTypes::from_any(packet_bytes_vec);
     let parsed_packet = extract_fn(vec![bytes_arg]);
 
-    // Debug validation: verify receiver's frame_id matches parsed packet's id_function result
-    #[cfg(debug_assertions)]
-    {
-        if let Some(ref id_fn_node) = shared.graph.id_function {
-            if let Some(id_fn_ptr) = id_fn_node.func_ptr {
-                let runtime_frame_id = id_fn_ptr(vec![parsed_packet.clone()]);
-                if let CmTypes::Usize(extracted_id) = runtime_frame_id {
-                    let expected_slot = extracted_id % shared.slots;
-                    if expected_slot != slot {
-                        eprintln!(
-                            "WARNING: Frame ID mismatch - receiver slot={}, id_function slot={}",
-                            slot, expected_slot
-                        );
-                    }
-                } else {
-                    eprintln!("WARNING: id_function returned non-usize type");
-                }
-            }
+    // Step 2: Call id_function to determine stream (runs BEFORE first_processing_node)
+    let stream_id = if let Some(ref id_function) = shared.graph.id_function {
+        if let Some(func_ptr) = id_function.func_ptr {
+            // Build args for id_function using parsed_packet as the result
+            // The id_function.predecessor field is ignored for network injection -
+            // we pass the parsed packet directly via custom_res
+            let arg_vec = parse_args(
+                shared,
+                &id_function.args,
+                antenna_id,           // node_index = antenna_id for network packets
+                packet_msg.slot,      // temporary slot from receiver (used for arg resolution)
+                0,                    // pred_index
+                Some(&parsed_packet), // custom_res = the parsed packet
+            );
+            let id_result = func_ptr(arg_vec);
+            id_result.valid_number_to_usize().unwrap_or_else(|| {
+                panic!("id_function must return a valid usize, got: {:?}", id_result)
+            })
+        } else {
+            // No function pointer - use receiver's slot assignment
+            packet_msg.slot
         }
-    }
-
-    // Create NodeInfo for the first processing node
-    let node_info = NodeInfo {
-        id: node_id,
-        slot,
-        index,
-        pred_index: index, // Packet comes directly from receiver
-        post_node: false,
+    } else {
+        // No id_function configured - use receiver's frame_id-based slot
+        packet_msg.slot
     };
 
-    // Store parsed packet (not raw bytes) in node_results
+    // Step 3: Assign slot via assign_stream_to_available_slot
+    let slot = assign_stream_to_available_slot(shared, stream_id);
+
+    // Step 4: Store parsed packet in slot_network_packets (NOT node_results)
     {
-        let mut results = shared.node_results.write();
-        results.set(&node_info, parsed_packet.clone());
+        let mut packets = shared.slot_network_packets.write();
+        // Ensure slot has enough capacity for antenna_id
+        if packets[slot].len() <= antenna_id {
+            packets[slot].resize(antenna_id + 1, CmTypes::Init);
+        }
+        packets[slot][antenna_id] = parsed_packet.clone();
     }
 
-    // Send to completed channel for normal successor processing
-    // The resolution thread will pick this up and process successors
-    if let Some(ref tx_lock) = *shared.completed_tx.read() {
-        let _ = tx_lock.send(vec![(node_info, parsed_packet)]);
-    }
+    // Step 5: Schedule first_processing_node as a NEW task
+    // Create NodeInfo with the assigned slot (not the receiver's temporary slot)
+    let node_info = NodeInfo::new(node_id, slot, antenna_id, antenna_id);
+
+    // Schedule the node - it will fetch $network arg from slot_network_packets when executed
+    let nodes_to_schedule = vec![node_info];
+    let pre_built_args = vec![None];
+    let custom_funcs = vec![None];
+    send_to_scheduler(
+        shared,
+        &nodes_to_schedule,
+        &pre_built_args,
+        &custom_funcs,
+        true, // use_network_scheduler for network-triggered tasks
+    );
 
     print_debug(|| {
         format!(
-            "Injected parsed packet: node={}, slot={}, antenna={}, timestamp={}",
-            first_node_name, slot, index, packet_msg.timestamp
+            "Injected packet: stream={}, slot={}, antenna={}, node={}, timestamp={}",
+            stream_id, slot, antenna_id, first_node_name, packet_msg.timestamp
         )
     });
 }
@@ -781,60 +799,13 @@ pub fn create_node_args(
     slot: usize,
     pred_index: usize,
 ) -> Vec<CmTypes> {
-    let args_cache = {
-        // check if node is in loop_nodes
-        // let loop_read = self.loop_nodes.read();
-        // let mut looping = false;
-        // if loop_read.contains(&node.name.clone()) {
-        //     // node is in loop_nodes
-        //     looping = true;
-        // }
+    let args_cache = &node.arg_cache;
 
-        // let loop_opt = node.loop_args.as_ref();
-
-        // if looping && loop_opt.is_some() {
-        //     loop_opt.unwrap()
-        // } else {
-        //     &node.args
-        // }
-        &node.arg_cache
-    };
-
-    // Check if this is the first_processing_node for network reception
-    // If so, prepend the parsed packet as the first argument
-    let parsed_packet_opt =
-        if let Some(ref network_config) = shared.network_config {
-            if node.name == network_config.first_processing_node {
-                // Retrieve the parsed packet stored by inject_network_packet()
-                let node_info = NodeInfo {
-                    id: node_id,
-                    slot,
-                    index: node_index,
-                    pred_index,
-                    post_node: false,
-                };
-                Some(
-                    shared.node_results.read().get(&node_info).expect(
-                        "Parsed packet must be stored in node_results before creating args",
-                    ),
-                )
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-    let mut args = parse_cached_args(
+    // All argument resolution (including $network from slot_network_packets)
+    // is handled uniformly in parse_cached_args
+    parse_cached_args(
         shared, args_cache, node_id, node_index, slot, pred_index, None,
-    );
-
-    // Prepend parsed packet if this is the network entry node
-    if let Some(packet) = parsed_packet_opt {
-        args.insert(0, packet);
-    }
-
-    args
+    )
 }
 
 #[inline(always)]
@@ -903,19 +874,15 @@ pub fn parse_cached_args(
     process_runtime_refs(&mut arg_vec, args_cache, node_index, workers);
 
     // Inject network packets for $network arguments
+    // Fetch from slot_network_packets (populated by inject_network_packet)
     if !args_cache.rt_network_indexes.is_empty() {
-        if let Some(ref _network_config) = shared.network_config {
-            let node_info = NodeInfo {
-                id: node_id,
-                slot,
-                index: node_index,
-                pred_index,
-                post_node: false,
-            };
-            let parsed_packet =
-                shared.node_results.read().get(&node_info).expect(
-                    "Network packet must be injected before spawning first_processing_node",
-                );
+        if shared.network_config.is_some() {
+            let packets = shared.slot_network_packets.read();
+            let parsed_packet = packets
+                .get(slot)
+                .and_then(|slot_packets| slot_packets.get(node_index))
+                .cloned()
+                .expect("Network packet must be stored in slot_network_packets before node execution");
 
             for &idx in &args_cache.rt_network_indexes {
                 arg_vec[idx] = parsed_packet.clone();

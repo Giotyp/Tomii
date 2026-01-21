@@ -228,6 +228,10 @@ impl SynRt {
             packet_drop_counters: Vec::new(),
             network_config: app_graph.network_config.clone(),
             shutdown_flag: Arc::new(AtomicBool::new(false)),
+            // Slot-level network packet storage: initialized with empty vecs per slot
+            slot_network_packets: Arc::new(RwLock::new(
+                (0..slots).map(|_| Vec::new()).collect(),
+            )),
         });
 
         SynRt { shared }
@@ -1165,6 +1169,17 @@ impl SynRt {
 
                     // Clear nodes_sent_to_queue for this slot - MUST happen before new nodes spawn
                     shared.resolution_state.clear_slot_sent_flags(proc_slot);
+
+                    // Clear slot_network_packets for this slot to prepare for new stream
+                    {
+                        let mut packets = shared.slot_network_packets.write();
+                        if proc_slot < packets.len() {
+                            packets[proc_slot]
+                                .iter_mut()
+                                .for_each(|p| *p = CmTypes::Init);
+                        }
+                    }
+
                     print_debug(|| {
                         format!(
                             "Cleared all state for slot {} before spawning new stream",
