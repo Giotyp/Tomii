@@ -33,14 +33,6 @@ struct Args {
     system_threads: usize,
     #[clap(
         long,
-        value_name = "NRX",
-        required = false,
-        default_value = "1",
-        help = "Number of isolated network threads"
-    )]
-    nrx: usize,
-    #[clap(
-        long,
         value_name = "MAX_RUNTIME",
         required = false,
         default_value = "0"
@@ -150,7 +142,6 @@ fn main() {
         args.workers,
         args.core_offset,
         args.system_threads,
-        args.nrx,
         args.slots,
         args.max_streams,
         runtime,
@@ -184,7 +175,6 @@ pub fn run_graph(
     workers: usize,
     core_offset: usize,
     system_threads: usize,
-    nrx: usize,
     slots: usize,
     max_streams: usize,
     max_runtime: Option<u64>,
@@ -196,7 +186,7 @@ pub fn run_graph(
     slot_priority_enabled: bool,
 ) -> SynRt {
     // Create a single AsyncRecorder sized for all threads: workers + network + system
-    let total_recorders = workers + nrx + system_threads;
+    let total_recorders = workers + system_threads;
     let shared_recorder = if record {
         Some(std::sync::Arc::new(
             synstream_core::async_recorder::AsyncRecorder::new(total_recorders, 1000),
@@ -204,6 +194,20 @@ pub fn run_graph(
     } else {
         None
     };
+
+    let base_instant = Arc::new(Instant::now());
+
+    let scheduler = create_scheduler(
+        scheduler_type,
+        core_offset,
+        workers,
+        record,
+        shared_recorder,
+        base_instant,
+        system_threads,
+        batching_size,
+        batching_limit,
+    );
 
     let mut synrt = SynRt::new(
         graph,
@@ -213,24 +217,12 @@ pub fn run_graph(
         use_rdtsc,
         record,
         timing_enabled,
-        system_threads,
-        nrx,
+        scheduler,
+        base_instant,
         slot_priority_enabled,
         shared_recorder.clone(),
     );
-    let scheduler = create_unified_scheduler(
-        scheduler_type,
-        core_offset,
-        workers,
-        nrx, // Network workers
-        record,
-        shared_recorder,
-        synrt.base_instant(),
-        system_threads,
-        batching_size,
-        batching_limit,
-    );
 
-    synrt.run(scheduler, system_threads);
+    synrt.run();
     synrt
 }

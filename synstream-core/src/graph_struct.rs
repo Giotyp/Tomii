@@ -1,3 +1,4 @@
+use crate::network::SocketType;
 use crate::prelude::*;
 use synstream_types::*;
 
@@ -126,4 +127,16 @@ pub struct IdFunction {
     pub func_ptr: Option<CmPtr>,
     pub predecessor: IdType,
     pub args: Vec<Arg>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GraphNetworkConfig {
+    pub socket_type: SocketType,
+    pub num_sockets: usize,
+    pub packet_length: usize,
+    pub buffer_depth: usize,
+    pub address: String,
+    pub start_port: usize,
+    pub extract_packet_func: Option<CmPtr>,
+    pub id_function: Option<CmPtr>
 }

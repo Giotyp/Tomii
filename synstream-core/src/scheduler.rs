@@ -43,16 +43,13 @@ pub fn set_current_worker_id(core_id: usize) {
 
 /// Create Threadpool with Rayon
 /// Returns: (ThreadPool, system_core_offset, worker_core_offset)
-/// 
-/// NOTE: network_workers parameter is kept for backward compatibility but is now used
-/// for receiver thread allocation in runtime.rs, not for creating a network Rayon pool.
 pub fn create_threadpool(
     core_offset: usize,
     workers: usize,
-    network_workers: usize,  // Now used for receiver threads, not Rayon pool
+    receiver_threads: usize,
     system_threads: usize,
     async_recorder: Option<Arc<AsyncRecorder>>,
-) -> (ThreadPool, usize, usize) {
+) -> (ThreadPool, usize, usize, usize, usize, usize) {
     // Create threadpool and pin workers to cores
     let mut core_ids = core_affinity::get_core_ids().unwrap();
     core_ids.sort();
@@ -65,14 +62,14 @@ pub fn create_threadpool(
     //   Receivers: cores 2-3 (allocated in runtime.rs, not here)
     //   Workers: cores 4-13
 
-    let total_needed = system_threads + network_workers + workers;
+    let total_needed = system_threads + receiver_threads + workers;
 
     let (
         system_core_offset,
-        receiver_offset,  // Renamed from network_offset for clarity
+        receiver_offset,
         worker_offset,
         actual_workers,
-        actual_receivers,  // Renamed from actual_network_workers
+        actual_receivers,
         actual_system_threads,
     ) = if available_cores < 2 {
         panic!(
@@ -83,13 +80,13 @@ pub fn create_threadpool(
         // Ideal case: can honor offset and allocate all threads
         let sys_start = core_offset;
         let recv_start = core_offset + system_threads;
-        let worker_start = core_offset + system_threads + network_workers;
+        let worker_start = core_offset + system_threads + receiver_threads;
         (
             sys_start,
             recv_start,
             worker_start,
             workers,
-            network_workers,
+            receiver_threads,
             system_threads,
         )
     } else if total_needed <= available_cores {
@@ -100,25 +97,25 @@ pub fn create_threadpool(
         );
         let sys_start = 0;
         let recv_start = system_threads;
-        let worker_start = system_threads + network_workers;
+        let worker_start = system_threads + receiver_threads;
         (
             sys_start,
             recv_start,
             worker_start,
             workers,
-            network_workers,
+            receiver_threads,
             system_threads,
         )
     } else {
         // Not enough cores for all threads - reduce proportionally
         let max_system = 1; // Always need at least 1 system thread
         let remaining = available_cores.saturating_sub(max_system);
-        let max_receivers = network_workers.min(remaining / 2).max(0);
+        let max_receivers = receiver_threads.min(remaining / 2).max(0);
         let max_workers = remaining.saturating_sub(max_receivers).max(1);
         eprintln!(
                 "Warning: Requested {} system + {} receivers + {} workers = {} total exceeds {} available cores.\n\
                 Using {} system at core 0, {} receivers starting at core {}, {} workers starting at core {}.",
-                system_threads, network_workers, workers, total_needed, available_cores,
+                system_threads, receiver_threads, workers, total_needed, available_cores,
                 max_system, max_receivers, max_system, max_workers, max_system + max_receivers
             );
         (
@@ -201,66 +198,14 @@ pub fn create_threadpool(
         .build()
         .unwrap();
 
-    // NOTE: Network threadpool removed - network reception now handled by
-    // dedicated receiver threads in runtime.rs (not Rayon-based)
-
     (
         worker_threadpool,
         system_core_offset,
+        actual_system_threads,
+        receiver_offset,
+        actual_receivers,
         worker_offset,
     )
-}
-
-pub trait Scheduler {
-    fn spawn_task<F>(&self, task: F)
-    where
-        F: FnOnce() + Send + 'static;
-
-    /// Optional: spawn task with metadata tuple (task_id, slot, index). Default delegates to `spawn_task`.
-    fn spawn_task_with_meta<F>(&self, _meta: Option<(IdType, usize, usize)>, task: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        self.spawn_task(task)
-    }
-
-    /// Spawn task on network pool if available, otherwise falls back to main pool
-    fn spawn_task_with_meta_network<F>(&self, _meta: Option<(IdType, usize, usize)>, task: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        // Default implementation: delegate to main pool
-        self.spawn_task_with_meta(_meta, task)
-    }
-
-    fn workers(&self) -> usize {
-        // Default implementation returns 1 worker
-        1
-    }
-
-    /// Get the number of jobs currently pending/executing in the pool
-    fn pending_jobs(&self) -> usize {
-        0 // Default implementation
-    }
-
-    /// Get the total number of jobs spawned since creation
-    fn total_jobs_spawned(&self) -> usize {
-        0 // Default implementation
-    }
-
-    /// Get the total number of jobs completed since creation
-    fn total_jobs_completed(&self) -> usize {
-        0 // Default implementation
-    }
-
-    fn core_offset(&self) -> Option<usize> {
-        None // Default implementation
-    }
-
-    /// Get the number of network worker threads (used for receiver threads)
-    fn network_workers(&self) -> usize {
-        0 // Default implementation
-    }
 }
 
 /// Shared base for schedulers with common state and logic.
@@ -268,6 +213,9 @@ pub trait Scheduler {
 struct SchedulerBase {
     threadpool: ThreadPool,
     system_core_offset: usize,
+    system_threads: usize,
+    receiver_core_offset: usize,
+    receiver_threads: usize,
     worker_core_offset: usize,
     pending_jobs: Arc<AtomicUsize>,
     total_spawned: Arc<AtomicUsize>,
@@ -291,15 +239,15 @@ impl SchedulerBase {
     fn new(
         core_offset: usize,
         workers: usize,
-        network_workers: usize,
         record: bool,
         external_recorder: Option<Arc<AsyncRecorder>>,
         base_instant: Instant,
         system_threads: usize,
+        receiver_threads: usize,
         batching_size: usize,
         batching_limit: u64,
     ) -> Self {
-        let total_recorders = workers + network_workers + system_threads;
+        let total_recorders = workers + receiver_threads + system_threads;
         let async_recorder = if record {
             match external_recorder {
                 Some(r) => Some(r),
@@ -309,14 +257,20 @@ impl SchedulerBase {
             None
         };
 
-        let (worker_threadpool, system_core_offset, worker_core_offset) =
-            create_threadpool(
-                core_offset,
-                workers,
-                network_workers,
-                system_threads,
-                async_recorder.clone(),
-            );
+        let (
+            worker_threadpool,
+            system_core_offset,
+            system_threads,
+            receiver_core_offset,
+            receiver_threads,
+            worker_core_offset,
+        ) = create_threadpool(
+            core_offset,
+            workers,
+            receiver_threads,
+            system_threads,
+            async_recorder.clone(),
+        );
 
         let batch_buffer = Arc::new(Mutex::new(Vec::with_capacity(batching_size)));
         let batch_last_sent = Arc::new(Mutex::new(Instant::now()));
@@ -326,6 +280,9 @@ impl SchedulerBase {
         Self {
             threadpool: worker_threadpool,
             system_core_offset,
+            system_threads,
+            receiver_core_offset,
+            receiver_threads,
             worker_core_offset,
             pending_jobs: Arc::new(AtomicUsize::new(0)),
             total_spawned: Arc::new(AtomicUsize::new(0)),
@@ -359,8 +316,20 @@ impl SchedulerBase {
         self.threadpool.current_num_threads()
     }
 
-    fn core_offset(&self) -> Option<usize> {
-        Some(self.system_core_offset)
+    fn core_offset(&self) -> usize {
+        self.system_core_offset
+    }
+
+    fn system_threads(&self) -> usize {
+        self.system_threads
+    }
+
+    fn receiver_core_offset(&self) -> usize {
+        self.receiver_core_offset
+    }
+
+    fn receiver_threads(&self) -> usize {
+        self.receiver_threads
     }
 
     fn pending_jobs(&self) -> usize {
@@ -541,6 +510,7 @@ impl FifoScheduler {
         external_recorder: Option<Arc<AsyncRecorder>>,
         base_instant: Instant,
         system_threads: usize,
+        receiver_threads: usize,
         batching_size: usize,
         batching_limit: u64,
     ) -> Self {
@@ -548,58 +518,17 @@ impl FifoScheduler {
             base: SchedulerBase::new(
                 core_offset,
                 workers,
-                0,
                 record,
                 external_recorder,
                 base_instant,
                 system_threads,
+                receiver_threads,
                 batching_size,
                 batching_limit,
             ),
         }
     }
 
-    fn set_completed_tx(&self, tx: Sender<Vec<(NodeInfo, CmTypes)>>) {
-        self.base.set_completed_tx(tx);
-        self.base.start_flusher_thread();
-    }
-
-    fn flush_batch(&self) {
-        self.base.flush_batch();
-    }
-
-    fn get_batch_buffer(&self) -> Arc<Mutex<Vec<(NodeInfo, CmTypes)>>> {
-        self.base.get_batch_buffer()
-    }
-
-    fn get_batch_last_sent(&self) -> Arc<Mutex<Instant>> {
-        self.base.get_batch_last_sent()
-    }
-
-    fn get_batching_size(&self) -> usize {
-        self.base.get_batching_size()
-    }
-
-    fn get_flush_notify(&self) -> crossbeam_channel::Sender<()> {
-        self.base.get_flush_notify()
-    }
-
-    fn get_completed_tx_ref(&self) -> Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>> {
-        self.base.get_completed_tx_ref()
-    }
-    fn shutdown_flusher(&self) {
-        self.base.shutdown_flusher();
-    }
-    fn write_records_to_csv(&self, path: &str) {
-        self.base.write_records_to_csv(path);
-    }
-
-    fn core_offset(&self) -> Option<usize> {
-        self.base.core_offset()
-    }
-}
-
-impl Scheduler for FifoScheduler {
     fn spawn_task<F>(&self, task: F)
     where
         F: FnOnce() + Send + 'static,
@@ -613,22 +542,6 @@ impl Scheduler for FifoScheduler {
     {
         self.base
             .spawn_task_common(meta, task, |t| self.base.threadpool.spawn_fifo(t));
-    }
-
-    fn workers(&self) -> usize {
-        self.base.workers()
-    }
-
-    fn pending_jobs(&self) -> usize {
-        self.base.pending_jobs()
-    }
-
-    fn total_jobs_spawned(&self) -> usize {
-        self.base.total_jobs_spawned()
-    }
-
-    fn total_jobs_completed(&self) -> usize {
-        self.base.total_jobs_completed()
     }
 }
 
@@ -645,6 +558,7 @@ impl WorkStealScheduler {
         external_recorder: Option<Arc<AsyncRecorder>>,
         base_instant: Instant,
         system_threads: usize,
+        receiver_threads: usize,
         batching_size: usize,
         batching_limit: u64,
     ) -> Self {
@@ -652,60 +566,17 @@ impl WorkStealScheduler {
             base: SchedulerBase::new(
                 core_offset,
                 workers,
-                0,
                 record,
                 external_recorder,
                 base_instant,
                 system_threads,
+                receiver_threads,
                 batching_size,
                 batching_limit,
             ),
         }
     }
 
-    fn set_completed_tx(&self, tx: Sender<Vec<(NodeInfo, CmTypes)>>) {
-        self.base.set_completed_tx(tx);
-        self.base.start_flusher_thread();
-    }
-
-    fn flush_batch(&self) {
-        self.base.flush_batch();
-    }
-
-    fn get_batch_buffer(&self) -> Arc<Mutex<Vec<(NodeInfo, CmTypes)>>> {
-        self.base.get_batch_buffer()
-    }
-
-    fn get_batch_last_sent(&self) -> Arc<Mutex<Instant>> {
-        self.base.get_batch_last_sent()
-    }
-
-    fn get_batching_size(&self) -> usize {
-        self.base.get_batching_size()
-    }
-
-    fn get_flush_notify(&self) -> crossbeam_channel::Sender<()> {
-        self.base.get_flush_notify()
-    }
-
-    fn get_completed_tx_ref(&self) -> Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>> {
-        self.base.get_completed_tx_ref()
-    }
-
-    fn shutdown_flusher(&self) {
-        self.base.shutdown_flusher();
-    }
-
-    fn write_records_to_csv(&self, path: &str) {
-        self.base.write_records_to_csv(path);
-    }
-
-    fn core_offset(&self) -> Option<usize> {
-        self.base.core_offset()
-    }
-}
-
-impl Scheduler for WorkStealScheduler {
     fn spawn_task<F>(&self, task: F)
     where
         F: FnOnce() + Send + 'static,
@@ -720,186 +591,151 @@ impl Scheduler for WorkStealScheduler {
         self.base
             .spawn_task_common(meta, task, |t| self.base.threadpool.spawn(t));
     }
-
-    fn workers(&self) -> usize {
-        self.base.workers()
-    }
-
-    fn pending_jobs(&self) -> usize {
-        self.base.pending_jobs()
-    }
-
-    fn total_jobs_spawned(&self) -> usize {
-        self.base.total_jobs_spawned()
-    }
-
-    fn total_jobs_completed(&self) -> usize {
-        self.base.total_jobs_completed()
-    }
 }
 
 pub enum SchedulerImpl {
     Fifo(FifoScheduler),
     WorkStealing(WorkStealScheduler),
-    Unified(UnifiedScheduler),
 }
 
-impl Scheduler for SchedulerImpl {
-    fn spawn_task<F>(&self, task: F)
+impl SchedulerImpl {
+    pub fn spawn_task<F>(&self, task: F)
     where
         F: FnOnce() + Send + 'static,
     {
         match self {
             SchedulerImpl::Fifo(scheduler) => scheduler.spawn_task(task),
             SchedulerImpl::WorkStealing(scheduler) => scheduler.spawn_task(task),
-            SchedulerImpl::Unified(scheduler) => scheduler.spawn_task(task),
         }
     }
 
-    fn spawn_task_with_meta<F>(&self, meta: Option<(IdType, usize, usize)>, task: F)
+    pub fn spawn_task_with_meta<F>(&self, meta: Option<(IdType, usize, usize)>, task: F)
     where
         F: FnOnce() + Send + 'static,
     {
         match self {
             SchedulerImpl::Fifo(scheduler) => scheduler.spawn_task_with_meta(meta, task),
             SchedulerImpl::WorkStealing(scheduler) => scheduler.spawn_task_with_meta(meta, task),
-            SchedulerImpl::Unified(scheduler) => scheduler.spawn_task_with_meta(meta, task),
         }
     }
 
-    fn spawn_task_with_meta_network<F>(&self, meta: Option<(IdType, usize, usize)>, task: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
+    pub fn workers(&self) -> usize {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.spawn_task_with_meta_network(meta, task),
-            SchedulerImpl::WorkStealing(scheduler) => {
-                scheduler.spawn_task_with_meta_network(meta, task)
-            }
-            SchedulerImpl::Unified(scheduler) => scheduler.spawn_task_with_meta_network(meta, task),
+            SchedulerImpl::Fifo(scheduler) => scheduler.base.workers(),
+            SchedulerImpl::WorkStealing(scheduler) => scheduler.base.workers(),
         }
     }
 
-    fn workers(&self) -> usize {
+    pub fn pending_jobs(&self) -> usize {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.workers(),
-            SchedulerImpl::WorkStealing(scheduler) => scheduler.workers(),
-            SchedulerImpl::Unified(scheduler) => scheduler.workers(),
+            SchedulerImpl::Fifo(scheduler) => scheduler.base.pending_jobs(),
+            SchedulerImpl::WorkStealing(scheduler) => scheduler.base.pending_jobs(),
         }
     }
 
-    fn pending_jobs(&self) -> usize {
+    pub fn total_jobs_spawned(&self) -> usize {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.pending_jobs(),
-            SchedulerImpl::WorkStealing(scheduler) => scheduler.pending_jobs(),
-            SchedulerImpl::Unified(scheduler) => scheduler.pending_jobs(),
+            SchedulerImpl::Fifo(scheduler) => scheduler.base.total_jobs_spawned(),
+            SchedulerImpl::WorkStealing(scheduler) => scheduler.base.total_jobs_spawned(),
         }
     }
 
-    fn total_jobs_spawned(&self) -> usize {
+    pub fn total_jobs_completed(&self) -> usize {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.total_jobs_spawned(),
-            SchedulerImpl::WorkStealing(scheduler) => scheduler.total_jobs_spawned(),
-            SchedulerImpl::Unified(scheduler) => scheduler.total_jobs_spawned(),
+            SchedulerImpl::Fifo(scheduler) => scheduler.base.total_jobs_completed(),
+            SchedulerImpl::WorkStealing(scheduler) => scheduler.base.total_jobs_completed(),
         }
     }
 
-    fn total_jobs_completed(&self) -> usize {
+    pub fn core_offset(&self) -> usize {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.total_jobs_completed(),
-            SchedulerImpl::WorkStealing(scheduler) => scheduler.total_jobs_completed(),
-            SchedulerImpl::Unified(scheduler) => scheduler.total_jobs_completed(),
+            SchedulerImpl::Fifo(scheduler) => scheduler.base.core_offset(),
+            SchedulerImpl::WorkStealing(scheduler) => scheduler.base.core_offset(),
         }
     }
 
-    fn core_offset(&self) -> Option<usize> {
+    pub fn system_threads(&self) -> usize {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.core_offset(),
-            SchedulerImpl::WorkStealing(scheduler) => scheduler.core_offset(),
-            SchedulerImpl::Unified(scheduler) => scheduler.core_offset(),
+            SchedulerImpl::Fifo(scheduler) => scheduler.base.system_threads(),
+            SchedulerImpl::WorkStealing(scheduler) => scheduler.base.system_threads(),
         }
     }
 
-    fn network_workers(&self) -> usize {
+    pub fn receiver_core_offset(&self) -> usize {
         match self {
-            SchedulerImpl::Fifo(_) => 0,
-            SchedulerImpl::WorkStealing(_) => 0,
-            SchedulerImpl::Unified(scheduler) => scheduler.network_workers,
+            SchedulerImpl::Fifo(scheduler) => scheduler.base.receiver_core_offset(),
+            SchedulerImpl::WorkStealing(scheduler) => scheduler.base.receiver_core_offset(),
         }
     }
-}
 
-impl SchedulerImpl {
+    pub fn receiver_threads(&self) -> usize {
+        match self {
+            SchedulerImpl::Fifo(scheduler) => scheduler.base.receiver_threads(),
+            SchedulerImpl::WorkStealing(scheduler) => scheduler.base.receiver_threads(),
+        }
+    }
+
     /// Dump recorded schedule to CSV at `path` (slot,job_id,start_ns,end_ns,worker,task_name)
     pub fn write_record(&self, path: &str) {
         match self {
-            SchedulerImpl::Fifo(s) => s.write_records_to_csv(path),
-            SchedulerImpl::WorkStealing(s) => s.write_records_to_csv(path),
-            SchedulerImpl::Unified(s) => s.write_record(path),
+            SchedulerImpl::Fifo(s) => s.base.write_records_to_csv(path),
+            SchedulerImpl::WorkStealing(s) => s.base.write_records_to_csv(path),
         }
     }
 
     pub fn set_completed_tx(&self, tx: Sender<Vec<(NodeInfo, CmTypes)>>) {
         match self {
-            SchedulerImpl::Fifo(s) => s.set_completed_tx(tx),
-            SchedulerImpl::WorkStealing(s) => s.set_completed_tx(tx),
-            SchedulerImpl::Unified(s) => s.set_completed_tx(tx),
+            SchedulerImpl::Fifo(s) => s.base.set_completed_tx(tx),
+            SchedulerImpl::WorkStealing(s) => s.base.set_completed_tx(tx),
         }
     }
 
     pub fn flush_batch(&self) {
         match self {
-            SchedulerImpl::Fifo(s) => s.flush_batch(),
-            SchedulerImpl::WorkStealing(s) => s.flush_batch(),
-            SchedulerImpl::Unified(s) => s.flush_batch(),
+            SchedulerImpl::Fifo(s) => s.base.flush_batch(),
+            SchedulerImpl::WorkStealing(s) => s.base.flush_batch(),
         }
     }
 
     pub fn get_batch_buffer(&self) -> Arc<Mutex<Vec<(NodeInfo, CmTypes)>>> {
         match self {
-            SchedulerImpl::Fifo(s) => s.get_batch_buffer(),
-            SchedulerImpl::WorkStealing(s) => s.get_batch_buffer(),
-            SchedulerImpl::Unified(s) => s.get_batch_buffer(),
+            SchedulerImpl::Fifo(s) => s.base.get_batch_buffer(),
+            SchedulerImpl::WorkStealing(s) => s.base.get_batch_buffer(),
         }
     }
 
     pub fn get_batch_last_sent(&self) -> Arc<Mutex<Instant>> {
         match self {
-            SchedulerImpl::Fifo(s) => s.get_batch_last_sent(),
-            SchedulerImpl::WorkStealing(s) => s.get_batch_last_sent(),
-            SchedulerImpl::Unified(s) => s.get_batch_last_sent(),
+            SchedulerImpl::Fifo(s) => s.base.get_batch_last_sent(),
+            SchedulerImpl::WorkStealing(s) => s.base.get_batch_last_sent(),
         }
     }
 
     pub fn get_batching_size(&self) -> usize {
         match self {
-            SchedulerImpl::Fifo(s) => s.get_batching_size(),
-            SchedulerImpl::WorkStealing(s) => s.get_batching_size(),
-            SchedulerImpl::Unified(s) => s.get_batching_size(),
+            SchedulerImpl::Fifo(s) => s.base.get_batching_size(),
+            SchedulerImpl::WorkStealing(s) => s.base.get_batching_size(),
         }
     }
 
     pub fn get_flush_notify(&self) -> crossbeam_channel::Sender<()> {
         match self {
-            SchedulerImpl::Fifo(s) => s.get_flush_notify(),
-            SchedulerImpl::WorkStealing(s) => s.get_flush_notify(),
-            SchedulerImpl::Unified(s) => s.get_flush_notify(),
+            SchedulerImpl::Fifo(s) => s.base.get_flush_notify(),
+            SchedulerImpl::WorkStealing(s) => s.base.get_flush_notify(),
         }
     }
 
     pub fn get_completed_tx_ref(&self) -> Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>> {
         match self {
-            SchedulerImpl::Fifo(s) => s.get_completed_tx_ref(),
-            SchedulerImpl::WorkStealing(s) => s.get_completed_tx_ref(),
-            SchedulerImpl::Unified(s) => s.get_completed_tx_ref(),
+            SchedulerImpl::Fifo(s) => s.base.get_completed_tx_ref(),
+            SchedulerImpl::WorkStealing(s) => s.base.get_completed_tx_ref(),
         }
     }
 
     pub fn shutdown_flusher(&self) {
         match self {
-            SchedulerImpl::Fifo(s) => s.shutdown_flusher(),
-            SchedulerImpl::WorkStealing(s) => s.shutdown_flusher(),
-            SchedulerImpl::Unified(s) => s.shutdown_flusher(),
+            SchedulerImpl::Fifo(s) => s.base.shutdown_flusher(),
+            SchedulerImpl::WorkStealing(s) => s.base.shutdown_flusher(),
         }
     }
 
@@ -907,7 +743,6 @@ impl SchedulerImpl {
         match self {
             SchedulerImpl::Fifo(s) => s.base.get_async_recorder(),
             SchedulerImpl::WorkStealing(s) => s.base.get_async_recorder(),
-            SchedulerImpl::Unified(s) => s.get_async_recorder(),
         }
     }
 }
@@ -926,6 +761,7 @@ pub fn create_scheduler(
     external_recorder: Option<Arc<AsyncRecorder>>,
     base_instant: Instant,
     system_threads: usize,
+    receiver_threads: usize,
     batching_size: usize,
     batching_limit: u64,
 ) -> SchedulerImpl {
@@ -937,6 +773,7 @@ pub fn create_scheduler(
             external_recorder,
             base_instant,
             system_threads,
+            receiver_threads,
             batching_size,
             batching_limit,
         )),
@@ -947,330 +784,9 @@ pub fn create_scheduler(
             external_recorder,
             base_instant,
             system_threads,
+            receiver_threads,
             batching_size,
             batching_limit,
         )),
     }
-}
-
-/// Unified Scheduler with Rayon threadpool for compute workers
-/// Network reception is now handled by dedicated receiver threads (not Rayon-based)
-#[derive(Debug)]
-pub struct UnifiedScheduler {
-    worker_pool: ThreadPool,
-    main_workers: usize,
-    network_workers: usize,  // Kept for compatibility, used for receiver thread allocation
-    system_core_offset: usize,
-    worker_core_offset: usize,
-    pending_jobs: Arc<AtomicUsize>,
-    total_spawned: Arc<AtomicUsize>,
-    total_completed: Arc<AtomicUsize>,
-    async_recorder: Option<Arc<AsyncRecorder>>,
-    base_instant: Arc<Instant>,
-    batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
-    batch_last_sent: Arc<Mutex<Instant>>,
-    batching_size: usize,
-    batching_limit: u64,
-    completed_tx: Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>>,
-    flusher_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
-    flusher_shutdown: Arc<AtomicUsize>,
-    flush_notify_tx: crossbeam_channel::Sender<()>,
-    flush_notify_rx: Arc<Mutex<crossbeam_channel::Receiver<()>>>,
-}
-
-impl UnifiedScheduler {
-    pub fn new(
-        core_offset: usize,
-        main_workers: usize,
-        network_workers: usize,
-        record: bool,
-        external_recorder: Option<Arc<AsyncRecorder>>,
-        base_instant: Instant,
-        system_threads: usize,
-        batching_size: usize,
-        batching_limit: u64,
-    ) -> Self {
-        let total_workers = main_workers + network_workers + system_threads;
-        let async_recorder = if record {
-            match external_recorder {
-                Some(r) => Some(r),
-                None => Some(Arc::new(AsyncRecorder::new(total_workers, 100))),
-            }
-        } else {
-            None
-        };
-
-        // Create main threadpool - returns offsets for system and workers
-        // Network receivers are allocated separately in runtime.rs
-        let (worker_pool, system_core_offset, worker_core_offset) = create_threadpool(
-            core_offset,
-            main_workers,
-            network_workers,
-            system_threads,
-            async_recorder.clone(),
-        );
-
-        let batch_buffer = Arc::new(Mutex::new(Vec::with_capacity(batching_size)));
-        let batch_last_sent = Arc::new(Mutex::new(Instant::now()));
-        let completed_tx = Arc::new(Mutex::new(None));
-        let (flush_notify_tx, flush_notify_rx) = crossbeam_channel::unbounded();
-
-        Self {
-            worker_pool,
-            main_workers,
-            network_workers,
-            system_core_offset,
-            worker_core_offset,
-            pending_jobs: Arc::new(AtomicUsize::new(0)),
-            total_spawned: Arc::new(AtomicUsize::new(0)),
-            total_completed: Arc::new(AtomicUsize::new(0)),
-            async_recorder,
-            base_instant: Arc::new(base_instant),
-            batch_buffer,
-            batch_last_sent,
-            batching_size,
-            batching_limit,
-            completed_tx,
-            flusher_handle: Arc::new(Mutex::new(None)),
-            flusher_shutdown: Arc::new(AtomicUsize::new(0)),
-            flush_notify_tx,
-            flush_notify_rx: Arc::new(Mutex::new(flush_notify_rx)),
-        }
-    }
-
-    /// Common task spawning logic for unified scheduler
-    fn spawn_task_common<F, S>(
-        &self,
-        meta: Option<(IdType, usize, usize)>,
-        task: F,
-        spawn_fn: S,
-        _is_network: bool,
-    ) where
-        F: FnOnce() + Send + 'static,
-        S: FnOnce(Box<dyn FnOnce() + Send + 'static>),
-    {
-        let job_id = self.total_spawned.fetch_add(1, Ordering::SeqCst);
-        self.pending_jobs.fetch_add(1, Ordering::SeqCst);
-
-        let pending = Arc::clone(&self.pending_jobs);
-        let completed = Arc::clone(&self.total_completed);
-        let base = Arc::clone(&self.base_instant);
-        let recorder_enabled = self.async_recorder.is_some();
-
-        let (task_id, slot, index) = meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN));
-
-        let wrapped_task = move || {
-            let worker = get_current_worker_id().unwrap_or(usize::MAX);
-            let start = (*base).elapsed().as_nanos();
-            task();
-            let end = (*base).elapsed().as_nanos();
-
-            // Lock-free recording via per-worker channel
-            if recorder_enabled {
-                submit_record(Record {
-                    slot,
-                    job_id,
-                    start_ns: start,
-                    end_ns: end,
-                    worker,
-                    task_id,
-                    index,
-                });
-            }
-
-            pending.fetch_sub(1, Ordering::SeqCst);
-            completed.fetch_add(1, Ordering::SeqCst);
-        };
-
-        spawn_fn(Box::new(wrapped_task));
-    }
-
-    fn write_records_to_csv(&self, path: &str) {
-        if let Some(recorder) = &self.async_recorder {
-            match recorder.write_to_csv(path) {
-                Ok(()) => {}
-                Err(e) => eprintln!("Failed to write records: {}", e),
-            }
-        } else {
-            println!("UnifiedScheduler: recorder not enabled");
-        }
-    }
-
-    pub fn set_completed_tx(&self, tx: Sender<Vec<(NodeInfo, CmTypes)>>) {
-        let mut completed_tx_lock = self.completed_tx.lock();
-        *completed_tx_lock = Some(tx);
-        drop(completed_tx_lock);
-        self.start_flusher_thread();
-    }
-
-    pub fn start_flusher_thread(&self) {
-        let batch_buffer = Arc::clone(&self.batch_buffer);
-        let batch_last_sent = Arc::clone(&self.batch_last_sent);
-        let completed_tx = Arc::clone(&self.completed_tx);
-        let shutdown = Arc::clone(&self.flusher_shutdown);
-        let batching_size = self.batching_size;
-        let batching_limit = self.batching_limit;
-        let batch_timeout = Duration::from_micros(batching_limit);
-        let flush_notify_rx = Arc::clone(&self.flush_notify_rx);
-
-        let handle = std::thread::spawn(move || {
-            let rx = flush_notify_rx.lock();
-            loop {
-                if shutdown.load(Ordering::SeqCst) == 1 {
-                    let mut batch = batch_buffer.lock();
-                    if !batch.is_empty() {
-                        let batch_to_send = std::mem::take(&mut *batch);
-                        drop(batch);
-                        if let Some(tx) = completed_tx.lock().as_ref() {
-                            let _ = tx.send(batch_to_send);
-                        }
-                    }
-                    break;
-                }
-
-                // Wait for notification or timeout - NO POLLING SLEEP
-                let _ = rx.recv_timeout(batch_timeout);
-
-                let should_flush = {
-                    let last_sent = batch_last_sent.lock();
-                    last_sent.elapsed() >= batch_timeout
-                };
-
-                if should_flush {
-                    let mut batch = batch_buffer.lock();
-                    if !batch.is_empty() {
-                        let batch_to_send =
-                            std::mem::replace(&mut *batch, Vec::with_capacity(batching_size));
-                        drop(batch);
-                        *batch_last_sent.lock() = Instant::now();
-
-                        if let Some(tx) = completed_tx.lock().as_ref() {
-                            let _ = tx.send(batch_to_send);
-                        }
-                    }
-                }
-            }
-        });
-
-        let mut flusher_lock = self.flusher_handle.lock();
-        *flusher_lock = Some(handle);
-    }
-
-    pub fn flush_batch(&self) {
-        let mut batch = self.batch_buffer.lock();
-        if !batch.is_empty() {
-            let batch_to_send =
-                std::mem::replace(&mut *batch, Vec::with_capacity(self.batching_size));
-            drop(batch);
-            *self.batch_last_sent.lock() = Instant::now();
-
-            if let Some(tx) = self.completed_tx.lock().as_ref() {
-                let _ = tx.send(batch_to_send);
-            }
-        }
-    }
-
-    pub fn shutdown_flusher(&self) {
-        self.flusher_shutdown.store(1, Ordering::SeqCst);
-        let mut handle_lock = self.flusher_handle.lock();
-        if let Some(handle) = handle_lock.take() {
-            drop(handle_lock);
-            let _ = handle.join();
-        }
-    }
-
-    pub fn get_batch_buffer(&self) -> Arc<Mutex<Vec<(NodeInfo, CmTypes)>>> {
-        Arc::clone(&self.batch_buffer)
-    }
-
-    pub fn get_batch_last_sent(&self) -> Arc<Mutex<Instant>> {
-        Arc::clone(&self.batch_last_sent)
-    }
-
-    pub fn get_batching_size(&self) -> usize {
-        self.batching_size
-    }
-
-    pub fn get_flush_notify(&self) -> crossbeam_channel::Sender<()> {
-        self.flush_notify_tx.clone()
-    }
-
-    pub fn get_completed_tx_ref(&self) -> Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>> {
-        Arc::clone(&self.completed_tx)
-    }
-
-    pub fn get_async_recorder(&self) -> Option<Arc<AsyncRecorder>> {
-        self.async_recorder.clone()
-    }
-
-    pub fn write_record(&self, path: &str) {
-        self.write_records_to_csv(path);
-    }
-}
-
-impl Scheduler for UnifiedScheduler {
-    fn spawn_task<F>(&self, task: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        self.spawn_task_with_meta(None, task)
-    }
-
-    fn spawn_task_with_meta<F>(&self, meta: Option<(IdType, usize, usize)>, task: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        self.spawn_task_common(meta, task, |t| self.worker_pool.spawn(t), false);
-    }
-
-    // NOTE: spawn_task_with_meta_network removed - network reception now handled
-    // by dedicated receiver threads in runtime.rs, not Rayon tasks
-
-    fn workers(&self) -> usize {
-        self.main_workers + self.network_workers
-    }
-
-    fn pending_jobs(&self) -> usize {
-        self.pending_jobs.load(Ordering::SeqCst)
-    }
-
-    fn total_jobs_spawned(&self) -> usize {
-        self.total_spawned.load(Ordering::SeqCst)
-    }
-
-    fn total_jobs_completed(&self) -> usize {
-        self.total_completed.load(Ordering::SeqCst)
-    }
-
-    fn core_offset(&self) -> Option<usize> {
-        Some(self.system_core_offset)
-    }
-}
-
-/// Factory function to create UnifiedScheduler wrapped in SchedulerImpl
-pub fn create_unified_scheduler(
-    _scheduler_type: SchedulerType,
-    core_offset: usize,
-    main_workers: usize,
-    network_workers: usize,
-    record: bool,
-    external_recorder: Option<Arc<AsyncRecorder>>,
-    base_instant: Instant,
-    system_threads: usize,
-    batching_size: usize,
-    batching_limit: u64,
-) -> SchedulerImpl {
-    // Note: scheduler_type is currently ignored for UnifiedScheduler
-    // Could be extended to use different strategies for main/network pools
-    SchedulerImpl::Unified(UnifiedScheduler::new(
-        core_offset,
-        main_workers,
-        network_workers,
-        record,
-        external_recorder,
-        base_instant,
-        system_threads,
-        batching_size,
-        batching_limit,
-    ))
 }

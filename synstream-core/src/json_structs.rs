@@ -8,7 +8,6 @@ pub struct GraphFile {
     pub initializations: Vec<InitJson>,
     pub nodes: Vec<NodeJson>,
     pub post_nodes: Option<Vec<NodeJson>>,
-    pub id_function: Option<IdFunctionJson>,
     pub network_config: Option<NetworkConfigJson>,
 }
 
@@ -20,27 +19,10 @@ pub struct NetworkConfigJson {
     pub packet_length: Factor,
     #[serde(default = "default_buffer_depth")]
     pub buffer_depth: usize,
-
-    // NEW: Socket reference methods (mutually exclusive)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub socket_refs: Option<Vec<String>>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub socket_range_ref: Option<String>,
-
-    // NEW: Fixed-offset frame ID extraction
-    pub frame_id_offset: Option<usize>,
-    pub frame_id_length: Option<usize>,
-
-    // NEW: User-defined function to parse raw packet bytes into structured data
-    pub extract_packet: String,
-
-    pub first_processing_node: String,
-
-    // DEPRECATED: Backward compatibility with legacy user functions
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[deprecated(note = "Use socket_refs or socket_range_ref instead")]
-    pub socket_initializer: Option<String>,
+    pub address: String,
+    pub start_port: Factor,
+    pub extract_packet_func: String,
+    pub id_function: String
 }
 
 fn default_buffer_depth() -> usize {
@@ -101,14 +83,6 @@ pub struct InitJson {
     pub factor: Option<Factor>,
     pub args: Vec<ArgInit>,
     pub function_name: Option<String>,
-}
-
-// ID Function for streaming support
-#[derive(Debug, Deserialize)]
-pub struct IdFunctionJson {
-    pub function_name: String,
-    pub predecessor: String,
-    pub args: Vec<ArgJson>,
 }
 
 // Factor struct

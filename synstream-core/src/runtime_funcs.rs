@@ -1,5 +1,5 @@
 use crate::debug::print_debug;
-use crate::network::{NetworkConfig, NetworkSocket, PacketMessage};
+use crate::network::{NetworkSocket, PacketMessage};
 use crate::resolution_state::ResolutionState;
 use crate::time_buffer::{TimeBufferManager, TimingMethod};
 use crate::{buffers::*, graph::*, graph_struct::*, scheduler::*, IdType};
@@ -196,6 +196,11 @@ pub struct SharedData {
     pub slots: usize,
     pub max_streams: usize,
     pub max_runtime: Option<u64>,
+    pub system_threads: usize,
+    pub receiver_threads: usize,
+    pub workers: usize,
+    pub core_offset: usize,
+    pub receiver_core_offset: usize,
 
     // Node cache for fast repeated access
     pub node_cache: Vec<NodeCacheEntry>,
@@ -207,14 +212,11 @@ pub struct SharedData {
     pub time_buffer: Option<Arc<TimeBufferManager>>,
 
     // Shared between threads
-    pub scheduler: Arc<RwLock<Option<Arc<SchedulerImpl>>>>,
-    pub network_scheduler: Arc<RwLock<Option<Arc<SchedulerImpl>>>>,
+    pub scheduler: Arc<RwLock<SchedulerImpl>>,
     pub completed_tx: Arc<RwLock<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>>,
-    pub workers: Arc<AtomicUsize>,
     pub async_recorder: Option<Arc<crate::async_recorder::AsyncRecorder>>,
     pub base_instant: Arc<Instant>,
     pub job_counter: Arc<AtomicUsize>,
-    pub core_offset: Arc<AtomicUsize>,
 
     // Scheduler-side batching structures
     pub batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
@@ -234,7 +236,6 @@ pub struct SharedData {
     // Initial factors for remaining_nodes, used for reinit (remaining_init[slot][node_rem_idx])
     pub remaining_init: Arc<Vec<Vec<usize>>>,
     pub initial_prep_done: Arc<AtomicUsize>,
-    pub system_threads: usize,
 
     // Slot priority processing state
     pub slot_states: Arc<RwLock<Vec<SlotState>>>,
@@ -247,120 +248,9 @@ pub struct SharedData {
     pub packet_receivers: Vec<Receiver<PacketMessage>>,
     pub receiver_sockets: Vec<NetworkSocket>,
     pub packet_drop_counters: Vec<AtomicUsize>,
-    pub network_config: Option<Arc<NetworkConfig>>,
     pub shutdown_flag: Arc<AtomicBool>,
 
-    // Slot-level network packet storage: slot_network_packets[slot][antenna_id] = parsed_packet
-    // Used for $network argument resolution - packets stored here before node execution
-    pub slot_network_packets: Arc<RwLock<Vec<Vec<CmTypes>>>>,
-}
-
-/// Inject a network packet directly into the resolution system
-///
-/// New flow (refactored):
-/// 1. Parse raw bytes via extract_packet → parsed_packet
-/// 2. Call id_function(parsed_packet) → stream_id (BEFORE first_processing_node)
-/// 3. Assign slot via assign_stream_to_available_slot(stream_id)
-/// 4. Store parsed_packet in slot_network_packets[slot][antenna_id]
-/// 5. Schedule first_processing_node as a NEW task (not a completed one)
-pub fn inject_network_packet(shared: &Arc<SharedData>, packet_msg: PacketMessage) {
-    let network_config = shared
-        .network_config
-        .as_ref()
-        .expect("Network config must be present when injecting packets");
-    let first_node_name = &network_config.first_processing_node;
-
-    // Find first processing node
-    let first_node = shared
-        .graph
-        .nodes
-        .iter()
-        .find(|n| n.name == *first_node_name)
-        .unwrap_or_else(|| {
-            panic!(
-                "First processing node '{}' not found in graph",
-                first_node_name
-            )
-        });
-
-    let node_id = first_node.id;
-    let antenna_id = packet_msg.antenna_id; // Maps to factor index
-
-    // Step 1: Parse raw packet bytes using user-defined extract_packet function
-    let extract_fn_name = &network_config.extract_packet;
-    let extract_fn = crate::func_reg::get_func(extract_fn_name).unwrap_or_else(|| {
-        panic!(
-            "extract_packet function '{}' not found in registry",
-            extract_fn_name
-        )
-    });
-
-    let packet_bytes_vec = packet_msg.packet_bytes.clone();
-    let bytes_arg = CmTypes::from_any(packet_bytes_vec);
-    let parsed_packet = extract_fn(vec![bytes_arg]);
-
-    // Step 2: Call id_function to determine stream (runs BEFORE first_processing_node)
-    let stream_id = if let Some(ref id_function) = shared.graph.id_function {
-        if let Some(func_ptr) = id_function.func_ptr {
-            // Build args for id_function using parsed_packet as the result
-            // The id_function.predecessor field is ignored for network injection -
-            // we pass the parsed packet directly via custom_res
-            let arg_vec = parse_args(
-                shared,
-                &id_function.args,
-                antenna_id,           // node_index = antenna_id for network packets
-                packet_msg.slot,      // temporary slot from receiver (used for arg resolution)
-                0,                    // pred_index
-                Some(&parsed_packet), // custom_res = the parsed packet
-            );
-            let id_result = func_ptr(arg_vec);
-            id_result.valid_number_to_usize().unwrap_or_else(|| {
-                panic!("id_function must return a valid usize, got: {:?}", id_result)
-            })
-        } else {
-            // No function pointer - use receiver's slot assignment
-            packet_msg.slot
-        }
-    } else {
-        // No id_function configured - use receiver's frame_id-based slot
-        packet_msg.slot
-    };
-
-    // Step 3: Assign slot via assign_stream_to_available_slot
-    let slot = assign_stream_to_available_slot(shared, stream_id);
-
-    // Step 4: Store parsed packet in slot_network_packets (NOT node_results)
-    {
-        let mut packets = shared.slot_network_packets.write();
-        // Ensure slot has enough capacity for antenna_id
-        if packets[slot].len() <= antenna_id {
-            packets[slot].resize(antenna_id + 1, CmTypes::Init);
-        }
-        packets[slot][antenna_id] = parsed_packet.clone();
-    }
-
-    // Step 5: Schedule first_processing_node as a NEW task
-    // Create NodeInfo with the assigned slot (not the receiver's temporary slot)
-    let node_info = NodeInfo::new(node_id, slot, antenna_id, antenna_id);
-
-    // Schedule the node - it will fetch $network arg from slot_network_packets when executed
-    let nodes_to_schedule = vec![node_info];
-    let pre_built_args = vec![None];
-    let custom_funcs = vec![None];
-    send_to_scheduler(
-        shared,
-        &nodes_to_schedule,
-        &pre_built_args,
-        &custom_funcs,
-        true, // use_network_scheduler for network-triggered tasks
-    );
-
-    print_debug(|| {
-        format!(
-            "Injected packet: stream={}, slot={}, antenna={}, node={}, timestamp={}",
-            stream_id, slot, antenna_id, first_node_name, packet_msg.timestamp
-        )
-    });
+    pub socket_packet_counter: Arc<Vec<AtomicUsize>>,
 }
 
 #[inline(always)]
@@ -732,25 +622,15 @@ pub fn process_id_function(
     node_info: &NodeInfo,
     result: &CmTypes,
 ) -> Option<usize> {
-    let id_function_opt = shared.graph.id_function.clone();
+    let network_config_opt = shared.graph.network_config();
 
-    if let Some(id_function) = id_function_opt {
+    if let Some(network_config) = network_config_opt {
         let msg = "ID function is not set".to_string();
-        let func_ptr = id_function.func_ptr.expect(&msg);
-        let predecessor = id_function.predecessor;
-        // Check if completed node is the predecessor
-        if predecessor == node_info.id {
-            let arg_vec = parse_args(
-                shared,
-                &id_function.args,
-                node_info.index,
-                node_info.slot,
-                node_info.pred_index,
-                Some(result),
-            );
-
+        
+        if node_info.id == 0 {
+            let id_function = network_config.id_function.unwrap();
             // Call the id function
-            let id_result = func_ptr(arg_vec);
+            let id_result = id_function(result);
 
             // Extract stream from the result
             if let Some(new_stream) = id_result.valid_number_to_usize() {
@@ -801,8 +681,7 @@ pub fn create_node_args(
 ) -> Vec<CmTypes> {
     let args_cache = &node.arg_cache;
 
-    // All argument resolution (including $network from slot_network_packets)
-    // is handled uniformly in parse_cached_args
+    // All argument resolution is handled uniformly in parse_cached_args
     parse_cached_args(
         shared, args_cache, node_id, node_index, slot, pred_index, None,
     )
@@ -873,23 +752,6 @@ pub fn parse_cached_args(
     process_buffer_refs(&mut arg_vec, args_cache, node_index);
     process_runtime_refs(&mut arg_vec, args_cache, node_index, workers);
 
-    // Inject network packets for $network arguments
-    // Fetch from slot_network_packets (populated by inject_network_packet)
-    if !args_cache.rt_network_indexes.is_empty() {
-        if shared.network_config.is_some() {
-            let packets = shared.slot_network_packets.read();
-            let parsed_packet = packets
-                .get(slot)
-                .and_then(|slot_packets| slot_packets.get(node_index))
-                .cloned()
-                .expect("Network packet must be stored in slot_network_packets before node execution");
-
-            for &idx in &args_cache.rt_network_indexes {
-                arg_vec[idx] = parsed_packet.clone();
-            }
-        }
-    }
-
     for (res_idx, real_idx) in args_cache
         .res_indexes
         .iter()
@@ -939,11 +801,7 @@ pub fn parse_args(
 }
 
 #[inline(always)]
-fn handle_special_ref(
-    obj_id: usize,
-    node_index: usize,
-    workers: &Arc<AtomicUsize>,
-) -> Option<Vec<CmTypes>> {
+fn handle_special_ref(obj_id: usize, node_index: usize, workers: usize) -> Option<Vec<CmTypes>> {
     match obj_id {
         0 => Some(vec![CmTypes::Usize(node_index)]),
         1 => Some(vec![CmTypes::Usize(workers.load(Ordering::Relaxed))]),
@@ -972,7 +830,7 @@ pub fn collect_arg_result(
     match &arg.type_ {
         CmTypes::Ref(obj_id) => {
             let obj_id = *obj_id;
-            if let Some(result) = handle_special_ref(obj_id, node_index, &shared.workers) {
+            if let Some(result) = handle_special_ref(obj_id, node_index, shared.workers) {
                 return Some(result);
             }
 

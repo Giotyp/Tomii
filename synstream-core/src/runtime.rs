@@ -1,5 +1,5 @@
 use core_affinity;
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -9,13 +9,15 @@ use std::time::{Duration, Instant};
 
 use crate::async_recorder::{set_worker_recorder, submit_record, AsyncRecorder};
 use crate::debug::print_debug;
-use crate::func_reg::get_func;
 use crate::graph::*;
 use crate::graph_struct::*;
-use crate::network::{multi_socket_receiver_loop, single_socket_receiver_loop, NetworkSocket};
+use crate::network::{
+    bind_udp_socket_range, multi_socket_receiver_loop, single_socket_receiver_loop,
+    NetworkSocket, PacketMessage,
+};
 use crate::resolution_state::{MultiThreadedState, ResolutionState, SingleThreadedState};
 use crate::runtime_funcs::*;
-use crate::scheduler::{Scheduler, SchedulerImpl};
+use crate::scheduler::SchedulerImpl;
 use crate::time_buffer::{TimeBufferManager, TimingMethod};
 use crate::{buffers::*, IdType, Record};
 use synstream_types::*;
@@ -36,8 +38,8 @@ impl SynRt {
         use_rdtsc: bool,
         record: bool,
         timing_enabled: bool,
-        system_threads: usize,
-        _nrx: usize,
+        scheduler: SchedulerImpl,
+        base_instant: Instant,
         slot_priority_enabled: bool,
         async_recorder: Option<Arc<AsyncRecorder>>, // Optional shared recorder from caller
     ) -> SynRt {
@@ -73,6 +75,13 @@ impl SynRt {
             })
             .collect();
 
+        // Core configuration
+        let system_threads = scheduler.system_threads();
+        let core_offset = scheduler.core_offset();
+        let receiver_threads = scheduler.receiver_threads();
+        let receiver_core_offset = scheduler.receiver_core_offset();
+        let workers = scheduler.workers();
+
         // Allocate slots + system_threads for TimeBuffer (slots for worker streams, system_threads for system threads)
         let time_buffer = if timing_enabled {
             Some(Arc::new(TimeBufferManager::new_async(
@@ -88,17 +97,15 @@ impl SynRt {
         let async_recorder = if record {
             async_recorder.or_else(|| {
                 Some(Arc::new(AsyncRecorder::new(
-                    slots + system_threads + _nrx,
+                    slots + system_threads + receiver_threads,
                     100,
                 )))
             })
         } else {
             None
         };
-        let base_instant = Arc::new(Instant::now());
+
         let job_counter = Arc::new(AtomicUsize::new(0));
-        // core_offset is updated in run()
-        let core_offset = Arc::new(AtomicUsize::new(0));
 
         // Initialize batch buffer for scheduler-side batching
         let batch_buffer = Arc::new(Mutex::new(Vec::new()));
@@ -189,6 +196,9 @@ impl SynRt {
         // Initialize per-slot buffering queues
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
+        let (receiver_sockets, packet_senders, packet_receivers, packet_drop_counters) =
+            prepare_network_infrastructure(app_graph, workers);
+
         let shared = Arc::new(SharedData {
             graph: app_graph.clone(),
             slots,
@@ -199,14 +209,16 @@ impl SynRt {
             stream_complete_counter: Arc::new(AtomicUsize::new(0)),
             available_stream_slots,
             time_buffer,
-            scheduler: Arc::new(RwLock::new(None)),
-            network_scheduler: Arc::new(RwLock::new(None)),
+            scheduler: Arc::new(RwLock::new(scheduler)),
             completed_tx: Arc::new(RwLock::new(None)),
-            workers: Arc::new(AtomicUsize::new(1)), // Will be set in run()
-            async_recorder,
-            base_instant,
-            job_counter,
+            system_threads,
+            receiver_threads,
+            workers,
             core_offset,
+            receiver_core_offset,
+            async_recorder,
+            base_instant: Arc::new(base_instant),
+            job_counter,
             resolution_state,
             remaining_nodes: Arc::new(remaining_nodes),
             remaining_cond_nodes: Arc::new(remaining_cond_nodes),
@@ -214,7 +226,6 @@ impl SynRt {
             node_id_is_cond: Arc::new(node_id_is_cond),
             remaining_init: Arc::new(remaining_init),
             initial_prep_done: Arc::new(AtomicUsize::new(0)),
-            system_threads,
             batch_buffer,
             batch_last_sent,
             flusher_shutdown,
@@ -222,16 +233,13 @@ impl SynRt {
             slot_priority_enabled,
             slot_buffers,
             // Network fields (empty - will be initialized in run() if network_config present)
-            packet_senders: Vec::new(),
-            packet_receivers: Vec::new(),
-            receiver_sockets: Vec::new(),
-            packet_drop_counters: Vec::new(),
-            network_config: app_graph.network_config.clone(),
+            packet_senders,
+            packet_receivers,
+            receiver_sockets,
+            packet_drop_counters,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             // Slot-level network packet storage: initialized with empty vecs per slot
-            slot_network_packets: Arc::new(RwLock::new(
-                (0..slots).map(|_| Vec::new()).collect(),
-            )),
+            socket_packet_counter: Arc::new(vec![AtomicUsize::new(0); slots]),
         });
 
         SynRt { shared }
@@ -241,12 +249,7 @@ impl SynRt {
         *self.shared.base_instant
     }
 
-    pub fn run(&mut self, scheduler: SchedulerImpl, system_threads: usize) {
-        // Overwrite workers
-        self.shared
-            .workers
-            .store(scheduler.workers(), Ordering::SeqCst);
-
+    pub fn run(&mut self) {
         // create completed channel for batched results
         let (completed_tx, completed_rx) =
             crossbeam_channel::unbounded::<Vec<(NodeInfo, CmTypes)>>();
@@ -258,35 +261,21 @@ impl SynRt {
         }
 
         // Set completed_tx in the scheduler and start the flusher thread
-        scheduler.set_completed_tx(completed_tx);
-
-        // Get network workers count before moving scheduler
-        let nrx = scheduler.network_workers();
-
-        // Store scheduler
-        let core_offset: usize;
-        {
-            let mut scheduler_lock = self.shared.scheduler.write();
-            core_offset = scheduler.core_offset().unwrap_or(0);
-            *scheduler_lock = Some(Arc::new(scheduler));
-        }
-
-        self.shared.core_offset.store(core_offset, Ordering::SeqCst);
+        self.shared.scheduler.read().set_completed_tx(completed_tx);
 
         // Initialize node_results
         self.init_results(self.shared.slots);
 
         // Initiate synstream-runtime timing for system thread slots only
-        for thread_id in 0..system_threads {
+        for thread_id in 0..self.shared.system_threads {
             let system_slot = self.shared.slots + thread_id;
             if let Some(tb) = &self.shared.time_buffer {
                 tb.start_slot_processing(system_slot);
             }
         }
 
-        // Initialize network receiver infrastructure if network_config present
         let receiver_handles: Vec<JoinHandle<()>> = if let Some(ref network_config) =
-            self.shared.network_config
+            self.shared.graph.network_config()
         {
             let num_sockets = network_config.num_sockets;
             let buffer_depth = network_config.buffer_depth;
@@ -295,159 +284,28 @@ impl SynRt {
             println!("Number of sockets: {}", num_sockets);
             println!("Buffer depth: {} packets per socket", buffer_depth);
 
-            // Initialize sockets using new or legacy method
-            let mut sockets = Vec::with_capacity(num_sockets);
-
-            // Get init_objects and obj_id_map for socket reference resolution
-            let init_objects = self.shared.graph.init_objects.as_ref().unwrap();
-            let obj_id_map = &self.shared.graph.obj_id_map;
-
-            #[allow(deprecated)]
-            if let Some(ref socket_refs) = network_config.socket_refs {
-                // Method 1: Individual socket references
-                println!("Using individual socket references");
-                for socket_ref_name in socket_refs {
-                    let obj_id = obj_id_map.get(socket_ref_name).unwrap_or_else(|| {
-                        panic!(
-                            "Socket reference '{}' not found in initializations",
-                            socket_ref_name
-                        )
-                    });
-
-                    let socket_result = &init_objects[*obj_id][0];
-                    let socket = extract_single_socket(socket_result, socket_ref_name);
-                    sockets.push(socket);
-                }
-            } else if let Some(ref range_ref) = network_config.socket_range_ref {
-                // Method 2: Socket range reference
-                println!("Using socket range reference: {}", range_ref);
-                let obj_id = obj_id_map.get(range_ref).unwrap_or_else(|| {
-                    panic!(
-                        "Socket range reference '{}' not found in initializations",
-                        range_ref
-                    )
-                });
-
-                let sockets_result = &init_objects[*obj_id][0];
-                sockets = extract_socket_vector(sockets_result, range_ref, num_sockets);
-            } else if let Some(ref socket_init_func_name) = network_config.socket_initializer {
-                // LEGACY METHOD (DEPRECATED): Use user-provided initialization function
-                eprintln!("⚠️  WARNING: Using deprecated 'socket_initializer' field");
-                eprintln!("    Please migrate to 'socket_refs' or 'socket_range_ref'");
-                println!("Socket initializer (DEPRECATED): {}", socket_init_func_name);
-
-                // Get socket initializer function pointer
-                let init_func_ptr = get_func(socket_init_func_name).unwrap_or_else(|| {
-                    panic!(
-                        "Socket initializer function '{}' not found in user library",
-                        socket_init_func_name
-                    )
-                });
-
-                // Initialize sockets by calling user-provided function
-                for socket_id in 0..num_sockets {
-                    let socket_id_cmtype = CmTypes::from_any(socket_id);
-                    let args = vec![socket_id_cmtype];
-
-                    // SAFETY: Calling user-provided FFI function
-                    let result = init_func_ptr(args);
-
-                    // Extract socket from result (wrapped in CmTypes::Any)
-                    let socket = match result {
-                        CmTypes::Any(any_arc) => {
-                            let any_lock = any_arc.read().unwrap();
-                            // Try to downcast to UdpSocket
-                            if let Some(udp_socket) = any_lock.downcast_ref::<std::net::UdpSocket>() {
-                                // Clone the socket by trying to duplicate it
-                                match udp_socket.try_clone() {
-                                    Ok(cloned) => NetworkSocket::Udp(cloned),
-                                    Err(e) => panic!(
-                                        "Failed to clone UdpSocket from '{}': {}",
-                                        socket_init_func_name, e
-                                    ),
-                                }
-                            } else {
-                                panic!(
-                                    "Socket initializer '{}' must return UdpSocket wrapped in CmTypes::Any",
-                                    socket_init_func_name
-                                );
-                            }
-                        }
-                        other => panic!(
-                            "Socket initializer '{}' must return socket wrapped in CmTypes::Any, got {:?}",
-                            socket_init_func_name, other
-                        ),
-                    };
-
-                    sockets.push(socket);
-                    println!("  Socket {} initialized successfully", socket_id);
-                }
-            } else {
-                panic!("network_config must specify either 'socket_refs', 'socket_range_ref', or 'socket_initializer'");
-            }
-
             assert_eq!(
-                sockets.len(),
+                self.shared.receiver_sockets.len(),
                 num_sockets,
-                "Initialized {} sockets but network_config.num_sockets={}",
-                sockets.len(),
-                num_sockets
+                "Network config expected {} sockets but {} were allocated",
+                num_sockets,
+                self.shared.receiver_sockets.len()
             );
 
-            println!("SynRt-Net {} network sockets initialized", num_sockets);
-
-            // Create SPSC channels (one per socket)
-            let mut packet_senders = Vec::with_capacity(num_sockets);
-            let mut packet_receivers = Vec::with_capacity(num_sockets);
-            for _socket_id in 0..num_sockets {
-                let (tx, rx) = crossbeam_channel::bounded(buffer_depth);
-                packet_senders.push(tx);
-                packet_receivers.push(rx);
-            }
-            println!(
-                "Created {} SPSC channels with {} capacity each",
-                num_sockets, buffer_depth
-            );
-
-            // Create packet drop counters
-            let packet_drop_counters: Vec<AtomicUsize> =
-                (0..num_sockets).map(|_| AtomicUsize::new(0)).collect();
-
-            // Store in SharedData (requires mutable access - we're in run())
-            // We need to use unsafe pointer casting since SharedData is already in Arc
-            // Actually, we can't modify SharedData after Arc::new(). Need different approach.
-            // Solution: Initialize these fields BEFORE creating SharedData, or use interior mutability.
-            // For now, let's use a workaround: directly access mutable self.shared before it's truly shared
-
-            // WORKAROUND: Since we're still in run() and resolution threads haven't started,
-            // we can use Arc::get_mut() to get mutable access
-            let shared_mut = Arc::get_mut(&mut self.shared)
-                .expect("SharedData should be exclusively owned at this point");
-
-            shared_mut.receiver_sockets = sockets;
-            shared_mut.packet_senders = packet_senders;
-            shared_mut.packet_receivers = packet_receivers;
-            shared_mut.packet_drop_counters = packet_drop_counters;
-
-            // Determine receiver thread allocation
-            // CRITICAL: Receiver threads allocated AFTER system threads
-            // nrx was already retrieved before moving scheduler
-            let receiver_offset = core_offset + system_threads; // Receivers after system threads
-
-            // Get dylib path for frame ID extraction (from environment or default)
+            let receiver_threads = self.shared.receiver_threads;
+            let receiver_offset = self.shared.receiver_core_offset;
             let dylib_path =
                 std::env::var("DYLIB_PATH").unwrap_or_else(|_| "./libmimolib.so".to_string());
 
             println!(
                 "\nSpawning {} receiver threads starting at core {}",
-                nrx, receiver_offset
+                receiver_threads, receiver_offset
             );
             println!("Using dylib: {} for frame ID extraction", dylib_path);
 
-            let mut handles = Vec::with_capacity(nrx);
+            let mut handles = Vec::with_capacity(receiver_threads);
 
-            if nrx >= num_sockets {
-                // Optimal case: 1:1 thread-to-socket mapping
+            if receiver_threads >= num_sockets {
                 println!("Using 1:1 thread-to-socket mapping (optimal)");
                 for socket_id in 0..num_sockets {
                     let shared_clone = Arc::clone(&self.shared);
@@ -464,18 +322,17 @@ impl SynRt {
                     );
                 }
             } else {
-                // Round-robin polling: fewer threads than sockets
                 println!(
-                    "WARNING: nrx ({}) < num_sockets ({}). Using round-robin polling.",
-                    nrx, num_sockets
+                    "WARNING: receiver_threads ({}) < num_sockets ({}). Using round-robin polling.",
+                    receiver_threads, num_sockets
                 );
-                let sockets_per_thread = (num_sockets + nrx - 1) / nrx; // Ceiling division
+                let sockets_per_thread = (num_sockets + receiver_threads - 1) / receiver_threads;
 
-                for thread_id in 0..nrx {
+                for thread_id in 0..receiver_threads {
                     let start_socket = thread_id * sockets_per_thread;
                     let end_socket = std::cmp::min(start_socket + sockets_per_thread, num_sockets);
                     let socket_range = start_socket..end_socket;
-                    let socket_range_display = socket_range.clone(); // For display
+                    let socket_range_display = socket_range.clone();
 
                     let shared_clone = Arc::clone(&self.shared);
                     let core_id = receiver_offset + thread_id;
@@ -507,10 +364,10 @@ impl SynRt {
 
         // Spawn multiple resolution threads
         let mut resolution_handles = Vec::new();
-        for thread_id in 0..system_threads {
+        for thread_id in 0..self.shared.system_threads {
             let shared_for_resolution = Arc::clone(&self.shared);
             let completed_rx_clone = completed_rx.clone();
-            let thread_core = core_offset + thread_id;
+            let thread_core = self.shared.core_offset + thread_id;
             // Each system thread gets its own slot: slots + thread_id
             let thread_slot = self.shared.slots + thread_id;
 
@@ -547,35 +404,19 @@ impl SynRt {
             });
             resolution_handles.push(resolution_handle);
         }
-        print_debug(|| format!("{} Resolution threads spawned", system_threads));
+        print_debug(|| format!("{} Resolution threads spawned", self.shared.system_threads));
 
         let start_time = Instant::now();
         // Check for max_runtime
         print_debug(|| "Max runtime check started".to_string());
         if let Some(max_runtime) = self.shared.max_runtime {
-            let scheduler_guard = self.shared.scheduler.read();
+            let scheduler = self.shared.scheduler.read();
 
-            let scheduler = match scheduler_guard.as_ref() {
-                Some(s) => s,
-                None => {
-                    eprintln!("Scheduler is not initialized");
-                    return;
-                }
-            };
             let mut prev_completed_jobs = scheduler.total_jobs_completed();
             let mut prev_spawned_jobs = scheduler.total_jobs_spawned();
-            drop(scheduler_guard);
             sleep(RUN_SLEEP);
             loop {
-                let scheduler_guard = self.shared.scheduler.read();
-
-                let scheduler = match scheduler_guard.as_ref() {
-                    Some(s) => s,
-                    None => {
-                        eprintln!("Scheduler is not initialized");
-                        return;
-                    }
-                };
+                let scheduler = self.shared.scheduler.read();
 
                 let curr_completed_jobs = scheduler.total_jobs_completed();
                 let curr_spawned_jobs = scheduler.total_jobs_spawned();
@@ -596,8 +437,6 @@ impl SynRt {
                 prev_completed_jobs = curr_completed_jobs;
                 prev_spawned_jobs = curr_spawned_jobs;
 
-                drop(scheduler_guard);
-
                 if start_time.elapsed().as_secs() > max_runtime || completed {
                     // set exit signal
                     println!("Max runtime reached or graph completed, exiting...");
@@ -614,10 +453,9 @@ impl SynRt {
 
         // Shutdown and flush the flusher thread in the scheduler
         {
-            let scheduler_guard = self.shared.scheduler.read();
-            if let Some(scheduler) = scheduler_guard.as_ref() {
-                scheduler.shutdown_flusher();
-            }
+            let scheduler = self.shared.scheduler.read();
+            scheduler.shutdown_flusher();
+            
         }
 
         // Drop all senders to signal resolution threads to exit
@@ -627,12 +465,10 @@ impl SynRt {
             *tx_lock = None; // Drop the sender in SharedData
         }
         {
-            let scheduler_guard = self.shared.scheduler.read();
-            if let Some(scheduler) = scheduler_guard.as_ref() {
-                let tx_ref = scheduler.get_completed_tx_ref();
-                let mut tx_lock = tx_ref.lock();
-                *tx_lock = None; // Drop the sender in scheduler
-            }
+            let scheduler = self.shared.scheduler.read();
+            let tx_ref = scheduler.get_completed_tx_ref();
+            let mut tx_lock = tx_ref.lock();
+            *tx_lock = None; // Drop the sender in scheduler
         }
 
         // Wait for all resolution threads to finish (they will unblock when channel closes)
@@ -680,7 +516,7 @@ impl SynRt {
         }
 
         // Finish timing for system thread slots only
-        for thread_id in 0..system_threads {
+        for thread_id in 0..self.shared.system_threads {
             let system_slot = self.shared.slots + thread_id;
             if let Some(tb) = &self.shared.time_buffer {
                 let _ = tb.finish_slot_processing(system_slot);
@@ -740,17 +576,6 @@ impl SynRt {
     }
 
     /// Resolution Thread: Processes completed compute tasks and manages stream lifecycle
-    ///
-    /// ARCHITECTURE NOTE:
-    /// This thread has two independent responsibilities:
-    /// 1. PACKET RECEPTION (independent): Polls packet_receivers from network receivers
-    ///    and injects parsed packets into node_results via inject_network_packet()
-    /// 2. TASK SCHEDULING (via scheduler): Spawns compute node tasks (nx=false) respecting
-    ///    slot-priority buffering when enabled
-    ///
-    /// Network nodes (nx=true) are NOT spawned by this thread. They are triggered by
-    /// external packet arrival, not by task scheduling. Receiver threads handle packets
-    /// on independent cores (2-3), while this thread coordinates on system cores.
     fn resolution(
         shared: Arc<SharedData>,
         completed_rx: Receiver<Vec<(NodeInfo, CmTypes)>>,
@@ -760,8 +585,7 @@ impl SynRt {
     ) {
         // Initialize async recorder for system thread using universal indexing
         if let Some(ref recorder) = shared.async_recorder {
-            let system_core_offset = shared.core_offset.load(Ordering::SeqCst);
-            let channel_index = thread_core - system_core_offset;
+            let channel_index = thread_core - shared.core_offset;
             if let Some(tx) = recorder.get_worker_sender(channel_index) {
                 set_worker_recorder(tx);
             }
@@ -815,25 +639,48 @@ impl SynRt {
         // Persistent completion tracking across all batches for this stream
         let mut stream_slot_activity: HashMap<usize, bool> = HashMap::new();
 
+        // Packet Process Function
+        let network_config_opt = shared.graph.network_config();
+
         // Process completed nodes with dynamic batching from scheduler
         loop {
             // PRIORITY 1: Poll network packets (low-latency path)
             // Only poll if network_config is present and receivers were spawned
-            if !shared.packet_receivers.is_empty() {
-                for antenna_id in 0..shared.packet_receivers.len() {
+            let mut network_received_nodes = Vec::new();
+            if network_config_opt.is_some() && !shared.packet_receivers.is_empty() {
+                let packet_process_func = network_config_opt.unwrap().extract_packet_func.unwrap();
+                for receiver_id in 0..shared.packet_receivers.len() {
                     // Non-blocking poll - process all available packets
-                    while let Ok(packet_msg) = shared.packet_receivers[antenna_id].try_recv() {
-                        // Inject packet directly into resolution system
-                        inject_network_packet(&shared, packet_msg);
+                    while let Ok(packet_msg) = shared.packet_receivers[receiver_id].try_recv() {
+                        let received_bytes_cm = CmTypes::from_any(packet_msg.packet_bytes);
+                        let socket_id = packet_msg.socket_id;
+
+                        let packet_cm = packet_process_func(vec![received_bytes_cm]);
+                        let counter = shared.socket_packet_counter.get(socket_id).unwrap();
+                        let packet_index = counter.fetch_add(1, Ordering::Relaxed);
+                        let node_info = NodeInfo::new(0, 0, packet_index, 0); // assuming node_id 0 for network input
+                        network_received_nodes.push((node_info, packet_cm));
                     }
                 }
             }
 
             // PRIORITY 2: Receive batch from scheduler (blocking)
-            let batch = match completed_rx.recv() {
+            let mut batch = match completed_rx.recv() {
                 Ok(batch_from_scheduler) => batch_from_scheduler,
                 Err(_) => return, // Channel closed
             };
+
+            // Combine network received nodes with scheduled batch
+            // Place network nodes at the front to prioritize processing
+            if !network_received_nodes.is_empty() {
+                batch.splice(0..0, network_received_nodes);
+                print_debug(|| {
+                    format!(
+                        "Injected {:?} network nodes to batch",
+                        network_received_nodes.len()
+                    )
+                });
+            }
 
             print_debug(|| {
                 format!(
@@ -1170,16 +1017,6 @@ impl SynRt {
                     // Clear nodes_sent_to_queue for this slot - MUST happen before new nodes spawn
                     shared.resolution_state.clear_slot_sent_flags(proc_slot);
 
-                    // Clear slot_network_packets for this slot to prepare for new stream
-                    {
-                        let mut packets = shared.slot_network_packets.write();
-                        if proc_slot < packets.len() {
-                            packets[proc_slot]
-                                .iter_mut()
-                                .for_each(|p| *p = CmTypes::Init);
-                        }
-                    }
-
                     print_debug(|| {
                         format!(
                             "Cleared all state for slot {} before spawning new stream",
@@ -1366,15 +1203,7 @@ impl SynRt {
 
     pub fn write_record(&self, path: &str) {
         // Get scheduler with proper error handling
-        let scheduler_guard = self.shared.scheduler.read();
-
-        let scheduler = match scheduler_guard.as_ref() {
-            Some(s) => s,
-            None => {
-                eprintln!("Scheduler is not initialized");
-                return;
-            }
-        };
+        let scheduler = self.shared.scheduler.read();
 
         scheduler.write_record(path);
         self.write_runtime_record(path);
@@ -1391,67 +1220,41 @@ impl SynRt {
     }
 }
 
-/// Helper function to extract a single socket from CmTypes::Any
-fn extract_single_socket(result: &CmTypes, name: &str) -> NetworkSocket {
-    match result {
-        CmTypes::Any(any_arc) => {
-            let any_lock = any_arc.read().unwrap();
-            if let Some(udp_socket) = any_lock.downcast_ref::<std::net::UdpSocket>() {
-                match udp_socket.try_clone() {
-                    Ok(cloned) => NetworkSocket::Udp(cloned),
-                    Err(e) => panic!("Failed to clone UdpSocket from '{}': {}", name, e),
-                }
-            } else {
-                panic!(
-                    "Socket reference '{}' must contain UdpSocket wrapped in CmTypes::Any",
-                    name
-                );
-            }
+fn prepare_network_infrastructure(
+    graph: &Graph,
+    workers: usize,
+) -> (
+    Vec<NetworkSocket>,
+    Vec<Sender<PacketMessage>>,
+    Vec<Receiver<PacketMessage>>,
+    Vec<AtomicUsize>,
+) {
+    if let Some(config_spec) = graph.network_config() {
+        let receiver_sockets = bind_udp_socket_range(
+            &config_spec.address,
+            config_spec.start_port,
+            config_spec.num_sockets,
+        );
+
+        let mut packet_senders = Vec::with_capacity(config_spec.num_sockets);
+        let mut packet_receivers = Vec::with_capacity(config_spec.num_sockets);
+        for _ in 0..config_spec.num_sockets {
+            let (tx, rx) = crossbeam_channel::bounded(config_spec.buffer_depth);
+            packet_senders.push(tx);
+            packet_receivers.push(rx);
         }
-        other => panic!(
-            "Socket reference '{}' must be CmTypes::Any, got {:?}",
-            name, other
-        ),
-    }
-}
 
-/// Helper function to extract a vector of sockets from CmTypes::VecAny
-fn extract_socket_vector(
-    result: &CmTypes,
-    name: &str,
-    expected_count: usize,
-) -> Vec<NetworkSocket> {
-    match result {
-        CmTypes::VecAny(lock) => {
-            let guard = lock.read().unwrap();
+        let packet_drop_counters = (0..config_spec.num_sockets)
+            .map(|_| AtomicUsize::new(0))
+            .collect();
 
-            if guard.len() != expected_count {
-                panic!(
-                    "Socket range '{}' contains {} sockets but expected {}",
-                    name,
-                    guard.len(),
-                    expected_count
-                );
-            }
-
-            let mut sockets = Vec::with_capacity(expected_count);
-            for (idx, boxed) in guard.iter().enumerate() {
-                if let Some(udp_socket) = boxed.downcast_ref::<std::net::UdpSocket>() {
-                    match udp_socket.try_clone() {
-                        Ok(cloned) => sockets.push(NetworkSocket::Udp(cloned)),
-                        Err(e) => {
-                            panic!("Failed to clone UdpSocket[{}] from '{}': {}", idx, name, e)
-                        }
-                    }
-                } else {
-                    panic!("Socket range '{}' element {} is not UdpSocket", name, idx);
-                }
-            }
-            sockets
-        }
-        other => panic!(
-            "Socket range reference '{}' must be CmTypes::VecAny, got {:?}",
-            name, other
-        ),
+        (
+            receiver_sockets,
+            packet_senders,
+            packet_receivers,
+            packet_drop_counters,
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
     }
 }

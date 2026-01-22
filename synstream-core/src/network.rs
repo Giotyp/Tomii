@@ -29,12 +29,8 @@ use crate::runtime_funcs::SharedData;
 /// Raw packet message forwarded from receiver thread to resolution
 #[derive(Debug, Clone)]
 pub struct PacketMessage {
-    /// Which receiver/socket produced this packet
-    pub antenna_id: usize,
-    /// Slot assignment (frame_id % total_slots)
-    pub slot: usize,
-    /// Raw packet data
     pub packet_bytes: Vec<u8>,
+    pub socket_id: usize,
     /// Reception timestamp (rdtsc or micros)
     pub timestamp: u64,
 }
@@ -68,82 +64,22 @@ impl NetworkSocket {
     }
 }
 
-/// Network configuration parsed from graph JSON
-#[derive(Debug, Clone)]
-pub struct NetworkConfig {
-    /// Socket type (UDP or TCP)
-    pub socket_type: SocketType,
-    /// Number of sockets to create/bind
-    pub num_sockets: usize,
-    /// Fixed packet size in bytes
-    pub packet_length: usize,
-    /// SPSC channel capacity per socket
-    pub buffer_depth: usize,
+pub fn bind_udp_socket_range(address: &str, start_port: usize, count: usize) -> Vec<NetworkSocket> {
+    let mut sockets = Vec::with_capacity(count);
+    for i in 0..count {
+        let port = start_port + i;
+        let bind_addr = format!("{}:{}", address, port);
 
-    // Socket reference methods (mutually exclusive)
-    pub socket_refs: Option<Vec<String>>,
-    pub socket_range_ref: Option<String>,
+        let socket = UdpSocket::bind(&bind_addr)
+            .unwrap_or_else(|e| panic!("Failed to bind UDP socket {}: {}", bind_addr, e));
 
-    // Fixed-offset frame ID extraction
-    pub frame_id_offset: Option<usize>,
-    pub frame_id_length: Option<usize>,
+        socket
+            .set_nonblocking(false)
+            .expect("Failed to set blocking mode");
 
-    /// User-defined function to parse raw packet bytes into structured data
-    /// Signature: fn(packet_bytes: &[u8]) -> CmTypes
-    pub extract_packet: String,
-
-    /// First graph node to receive parsed packets
-    pub first_processing_node: String,
-
-    /// DEPRECATED: Initialization function name for socket creation
-    #[deprecated(note = "Use socket_refs or socket_range_ref instead")]
-    pub socket_initializer: Option<String>,
-}
-
-impl Default for NetworkConfig {
-    fn default() -> Self {
-        #[allow(deprecated)]
-        NetworkConfig {
-            socket_type: SocketType::Udp,
-            num_sockets: 1,
-            packet_length: 1500,
-            buffer_depth: 128,
-            socket_refs: None,
-            socket_range_ref: None,
-            frame_id_offset: None,
-            frame_id_length: None,
-            extract_packet: String::from("process_packet"),
-            first_processing_node: String::new(),
-            socket_initializer: Some(String::from("init_udp_socket")),
-        }
+        sockets.push(NetworkSocket::Udp(socket));
     }
-}
-
-/// Extract frame ID from raw packet bytes using user-provided function
-///
-/// **DEPRECATED:** Use `NetworkConfig.frame_id_offset` and `frame_id_length` with
-/// built-in `extract_frame_id_fixed()` instead. This function is maintained for
-/// backward compatibility only.
-///
-/// # Safety
-///
-/// This function loads and calls a user-provided FFI function.
-/// The user library must export `extract_frame_id_from_bytes` with signature:
-/// `pub extern "C" fn extract_frame_id_from_bytes(ptr: *const u8, len: usize) -> usize`
-pub unsafe fn extract_frame_id(packet_bytes: &[u8], dylib_path: &str) -> usize {
-    use libloading::{Library, Symbol};
-
-    // Load user library
-    let lib =
-        Library::new(dylib_path).expect("Failed to load user library for frame ID extraction");
-
-    // Get user's extract_frame_id_from_bytes function
-    let func: Symbol<unsafe extern "C" fn(*const u8, usize) -> usize> = lib
-        .get(b"extract_frame_id_from_bytes")
-        .expect("User library must export 'extract_frame_id_from_bytes' when using network_config");
-
-    // Call user function with packet bytes
-    func(packet_bytes.as_ptr(), packet_bytes.len())
+    sockets
 }
 
 /// Dedicated receiver loop for single socket (optimal: 1 thread per socket)
@@ -174,8 +110,8 @@ pub fn single_socket_receiver_loop(
     let drop_counter = &shared.packet_drop_counters[socket_id];
     let shutdown = &shared.shutdown_flag;
 
-    let network_config = shared
-        .network_config
+    let network_config = shared.graph
+        .network_config()
         .as_ref()
         .expect("Network config must be present for receiver threads");
     let packet_length = network_config.packet_length;
@@ -203,24 +139,10 @@ pub fn single_socket_receiver_loop(
                     continue;
                 }
 
-                // Extract frame ID (fixed-offset if configured, else legacy user function)
-                let frame_id = if let (Some(offset), Some(length)) = (
-                    network_config.frame_id_offset,
-                    network_config.frame_id_length,
-                ) {
-                    // NEW: Use built-in fixed-offset extraction
-                    crate::network_funcs::extract_frame_id_fixed(&buffer[..size], offset, length)
-                } else {
-                    // LEGACY: Fall back to user-provided dylib function
-                    unsafe { extract_frame_id(&buffer, &dylib_path) }
-                };
-                let slot = frame_id % slots;
-
                 // Create message
                 let msg = PacketMessage {
-                    antenna_id: socket_id,
-                    slot,
                     packet_bytes: buffer.clone(),
+                    socket_id,
                     timestamp: crate::utils_rdtsc::rdtsc(),
                 };
 
@@ -228,8 +150,8 @@ pub fn single_socket_receiver_loop(
                 if tx.try_send(msg).is_err() {
                     drop_counter.fetch_add(1, Ordering::Relaxed);
                     eprintln!(
-                        "Receiver {}: channel full, packet dropped (frame_id={})",
-                        socket_id, frame_id
+                        "Receiver {}: channel full, packet dropped",
+                        socket_id
                     );
                 }
             }
@@ -267,8 +189,8 @@ pub fn multi_socket_receiver_loop(
         .name(format!("rx-multi-{}", thread_id))
         .spawn(|| {});
 
-    let network_config = shared
-        .network_config
+    let network_config = shared.graph
+        .network_config()
         .as_ref()
         .expect("Network config must be present for receiver threads");
     let packet_length = network_config.packet_length;
@@ -317,36 +239,18 @@ pub fn multi_socket_receiver_loop(
                         continue;
                     }
 
-                    // Extract frame ID (fixed-offset if configured, else legacy user function)
-                    let frame_id = if let (Some(offset), Some(length)) = (
-                        network_config.frame_id_offset,
-                        network_config.frame_id_length,
-                    ) {
-                        // NEW: Use built-in fixed-offset extraction
-                        crate::network_funcs::extract_frame_id_fixed(
-                            &buffer[..size],
-                            offset,
-                            length,
-                        )
-                    } else {
-                        // LEGACY: Fall back to user-provided dylib function
-                        unsafe { extract_frame_id(buffer, &dylib_path) }
-                    };
-                    let slot = frame_id % slots;
-
                     // Create message
                     let msg = PacketMessage {
-                        antenna_id: socket_id,
-                        slot,
                         packet_bytes: buffer.clone(),
+                        socket_id,
                         timestamp: crate::utils_rdtsc::rdtsc(),
                     };
 
                     // Try send (non-blocking)
                     if tx.try_send(msg).is_err() {
                         drop_counter.fetch_add(1, Ordering::Relaxed);
-                        eprintln!("Receiver thread {} socket {}: channel full, packet dropped (frame_id={})",
-                                  thread_id, socket_id, frame_id);
+                        eprintln!("Receiver thread {} socket {}: channel full, packet dropped",
+                                  thread_id, socket_id);
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -367,32 +271,5 @@ pub fn multi_socket_receiver_loop(
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_packet_message_creation() {
-        let msg = PacketMessage {
-            antenna_id: 0,
-            slot: 5,
-            packet_bytes: vec![1, 2, 3, 4],
-            timestamp: 1234567890,
-        };
-
-        assert_eq!(msg.antenna_id, 0);
-        assert_eq!(msg.slot, 5);
-        assert_eq!(msg.packet_bytes.len(), 4);
-    }
-
-    #[test]
-    fn test_network_config_default() {
-        let config = NetworkConfig::default();
-        assert_eq!(config.packet_length, 1500);
-        assert_eq!(config.buffer_depth, 128);
-        assert_eq!(config.num_sockets, 1);
     }
 }

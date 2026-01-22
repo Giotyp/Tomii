@@ -1,13 +1,12 @@
 use core::panic;
 use std::fs::File;
 use std::io::Read;
-use std::sync::Arc;
 
 use crate::func_reg::*;
 use crate::graph::*;
 use crate::graph_struct::*;
 use crate::json_structs::*;
-use crate::network::{NetworkConfig, SocketType};
+use crate::network::SocketType;
 use crate::obj_gen::init_objects;
 use crate::prelude::*;
 use rapidhash::{HashMapExt, RapidHashMap};
@@ -167,6 +166,11 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
     let mut graph = Graph::new();
     let mut name_to_id: RapidHashMap<String, IdType> = RapidHashMap::new();
 
+    // If network_config is present in graph, we reserve id:0 for network
+    if let Some(network_config_json) = &graph_parsed.network_config {
+        let _ = NodeCount.fetch_add(1, SeqCst);
+    }
+
     for node_json in graph_parsed.nodes.iter() {
         let mut args = Vec::new();
         let mut loop_args_vec = Vec::new();
@@ -258,53 +262,12 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
         graph.add_post_node(node);
     }
 
-    // Parse ID function if present
-    if let Some(id_function_json) = &graph_parsed.id_function {
-        let func_ptr = get_func(&id_function_json.function_name);
-
-        let predecessor = &id_function_json.predecessor;
-        let pred_id = name_to_id
-            .get(predecessor)
-            .expect("ID function predecessor not found")
-            .clone();
-
-        let mut args = Vec::new();
-        for arg_json in &id_function_json.args {
-            args.push(parse_arg(arg_json, &init_vec, &obj_id_map, &name_to_id));
-        }
-
-        let id_function = IdFunction {
-            func_ptr,
-            predecessor: pred_id,
-            args,
-        };
-
-        graph.set_id_function(&id_function);
-    }
-
     // Set the initialized objects in the graph
     graph.set_init_objects(&init_vec);
     graph.obj_id_map = obj_id_map.clone();
 
     // Parse network configuration if present
     if let Some(network_config_json) = &graph_parsed.network_config {
-        // Resolve factors for num_sockets and packet_length
-        let num_sockets = network_config_json
-            .num_sockets
-            .resolve(&init_vec, &obj_id_map, workers);
-        let packet_length =
-            network_config_json
-                .packet_length
-                .resolve(&init_vec, &obj_id_map, workers);
-
-        // Validate first_processing_node exists
-        if !name_to_id.contains_key(&network_config_json.first_processing_node) {
-            panic!(
-                "Network config error: first_processing_node '{}' not found in graph nodes",
-                network_config_json.first_processing_node
-            );
-        }
-
         // Parse socket type
         let socket_type = match network_config_json.socket_type.to_lowercase().as_str() {
             "udp" => SocketType::Udp,
@@ -314,44 +277,59 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             ),
         };
 
-        // Create NetworkConfig (sockets will be initialized in runtime)
-        #[allow(deprecated)]
-        let network_config = NetworkConfig {
+        // Resolve SimpleArgJson fields to concrete types
+        let num_sockets = network_config_json
+            .num_sockets
+            .resolve(&init_vec, &obj_id_map, workers);
+        let packet_length =
+            network_config_json
+                .packet_length
+                .resolve(&init_vec, &obj_id_map, workers);
+        let address: String = {
+            let given_address = network_config_json.address;
+            if obj_id_map.contains_key(&given_address) {
+                let obj_id = obj_id_map.get(&given_address).unwrap();
+                init_objects[*obj_id][0]
+            } else {
+                given_address
+            }
+        };
+        let start_port = network_config_json
+            .start_port
+            .resolve(&init_vec, &obj_id_map, workers);
+
+        // Resolve extract_packet_func to function pointer
+        let extract_packet_func = get_func(&network_config_json.extract_packet_func);
+        // Resolve id_function to function pointer
+        let id_function = get_func(&network_config_json.id_function);
+
+        let graph_network_config = GraphNetworkConfig {
             socket_type,
             num_sockets,
             packet_length,
             buffer_depth: network_config_json.buffer_depth,
-            socket_refs: network_config_json.socket_refs.clone(),
-            socket_range_ref: network_config_json.socket_range_ref.clone(),
-            frame_id_offset: network_config_json.frame_id_offset,
-            frame_id_length: network_config_json.frame_id_length,
-            extract_packet: network_config_json.extract_packet.clone(),
-            first_processing_node: network_config_json.first_processing_node.clone(),
-            socket_initializer: network_config_json.socket_initializer.clone(),
+            address,
+            start_port,
+            extract_packet_func,
+            id_function
         };
 
         println!("Network configuration parsed:");
-        println!("  Socket type: {:?}", network_config.socket_type);
-        println!("  Number of sockets: {}", network_config.num_sockets);
-        println!("  Packet length: {} bytes", network_config.packet_length);
-        println!("  Buffer depth: {} packets", network_config.buffer_depth);
-        if let Some(ref refs) = network_config.socket_refs {
-            println!("  Socket refs: {:?}", refs);
-        } else if let Some(ref range_ref) = network_config.socket_range_ref {
-            println!("  Socket range ref: {}", range_ref);
-        } else if let Some(ref init) = network_config.socket_initializer {
-            println!("  Socket initializer (DEPRECATED): {}", init);
-        }
-        if let (Some(offset), Some(length)) = (network_config.frame_id_offset, network_config.frame_id_length) {
-            println!("  Frame ID: offset={}, length={} bytes", offset, length);
-        }
-        println!("  Extract packet function: {}", network_config.extract_packet);
+        println!("  Socket type: {:?}", graph_network_config.socket_type);
+        println!("  Number of sockets: {}", graph_network_config.num_sockets);
+        println!("  Packet length: {}", graph_network_config.packet_length);
         println!(
-            "  First processing node: {}",
-            network_config.first_processing_node
+            "  Buffer depth: {} packets",
+            graph_network_config.buffer_depth
+        );
+        println!("  Address: {}", graph_network_config.address);
+        println!("  Start port: {}", graph_network_config.start_port);
+        println!(
+            "  Extract packet function: {}",
+            network_config_json.extract_packet_func
         );
 
-        graph.network_config = Some(Arc::new(network_config));
+        graph.set_network_config(&graph_network_config);
     } else {
         println!("No network_config found - skipping network receiver setup");
     }

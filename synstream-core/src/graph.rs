@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::graph_struct::*;
-use crate::network::NetworkConfig;
 use crate::{debug::print_debug, IdType};
 use synstream_types::*;
 
@@ -15,11 +14,10 @@ pub struct Graph {
     pub initial_nodes: Vec<IdType>,
     pub successors: Vec<Vec<IdType>>,
     pub condition_nodes: HashSet<IdType>,
-    pub id_function: Option<IdFunction>,
     pub post_nodes: Option<Vec<Node>>,
     pub init_objects: Option<Vec<Vec<CmTypes>>>,
     pub obj_id_map: RapidHashMap<String, usize>,
-    pub network_config: Option<Arc<NetworkConfig>>,
+    pub network_config: Option<Arc<GraphNetworkConfig>>,
 }
 
 impl GraphStruct for Graph {
@@ -141,7 +139,6 @@ impl Graph {
             initial_nodes: Vec::new(),
             successors: Vec::new(),
             condition_nodes: HashSet::new(),
-            id_function: None,
             post_nodes: None,
             init_objects: None,
             obj_id_map: RapidHashMap::default(),
@@ -155,10 +152,6 @@ impl Graph {
 
     pub fn set_init_objects(&mut self, init_objects: &Vec<Vec<CmTypes>>) {
         self.init_objects = Some(init_objects.clone());
-    }
-
-    pub fn set_id_function(&mut self, id_function: &IdFunction) {
-        self.id_function = Some(id_function.clone());
     }
 
     pub fn set_post_nodes(&mut self, post_nodes: Option<Vec<Node>>) {
@@ -222,6 +215,14 @@ impl Graph {
             }
         }
         pred_idxs
+    }
+
+    pub fn set_network_config(&mut self, config: &GraphNetworkConfig) {
+        self.network_config = Some(Arc::new(config.clone()));
+    }
+
+    pub fn network_config(&self) -> Option<Arc<GraphNetworkConfig>> {
+        self.network_config.clone()
     }
 }
 
