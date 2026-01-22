@@ -206,6 +206,11 @@ impl From<C64> for Complex64 {
 }
 
 impl CmTypes {
+    // Default CmPtr pointer
+    pub fn default_pointer() -> CmPtr {
+        |_: Vec<CmTypes>| CmTypes::None
+    }
+
     // Helper constructors for Arc-wrapped types - more ergonomic than calling Arc::new directly
     pub fn new_string<S: AsRef<str>>(s: S) -> Self {
         CmTypes::String(Arc::from(s.as_ref()))
@@ -1397,7 +1402,6 @@ lazy_static! {
         add!("$res",    |s| s.parse::<usize>().map(CmTypes::Res).map_err(|_| CustomError::new(&format!("invalid res: '{}'", s))));
         add!("$factor", |_| Ok(CmTypes::Ref(0)));  // Runtime node index
         add!("$worker", |_| Ok(CmTypes::Ref(1)));  // Runtime worker count
-        add!("$network", |_| Ok(CmTypes::Ref(2))); // Network packet injection
         add!("$barrier", |s| Ok(CmTypes::Barrier(Arc::from(s))));
         add!("None",    |_| Ok(CmTypes::None));
         add!("Init",    |_| Ok(CmTypes::Init));

@@ -90,7 +90,6 @@ pub fn single_socket_receiver_loop(
     shared: Arc<SharedData>,
     socket_id: usize,
     core_id: usize,
-    dylib_path: String,
 ) {
     // Pin to core
     if let Some(core_ids) = core_affinity::get_core_ids() {
@@ -110,12 +109,11 @@ pub fn single_socket_receiver_loop(
     let drop_counter = &shared.packet_drop_counters[socket_id];
     let shutdown = &shared.shutdown_flag;
 
-    let network_config = shared.graph
+    let network_config_arc = shared.graph
         .network_config()
-        .as_ref()
         .expect("Network config must be present for receiver threads");
-    let packet_length = network_config.packet_length;
-    let slots = shared.slots;
+    let packet_length = network_config_arc.packet_length;
+    let _slots = shared.slots;
 
     let mut buffer = vec![0u8; packet_length];
 
@@ -175,7 +173,6 @@ pub fn multi_socket_receiver_loop(
     thread_id: usize,
     socket_range: std::ops::Range<usize>,
     core_id: usize,
-    dylib_path: String,
 ) {
     // Pin to core
     if let Some(core_ids) = core_affinity::get_core_ids() {
@@ -189,12 +186,11 @@ pub fn multi_socket_receiver_loop(
         .name(format!("rx-multi-{}", thread_id))
         .spawn(|| {});
 
-    let network_config = shared.graph
+    let network_config_arc = shared.graph
         .network_config()
-        .as_ref()
         .expect("Network config must be present for receiver threads");
-    let packet_length = network_config.packet_length;
-    let slots = shared.slots;
+    let packet_length = network_config_arc.packet_length;
+    let _slots = shared.slots;
 
     // Pre-allocate buffers for each socket (avoid allocation per recv)
     let mut buffers: Vec<Vec<u8>> = socket_range

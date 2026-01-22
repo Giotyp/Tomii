@@ -45,28 +45,14 @@ impl GraphStruct for Graph {
                 }
             }
         }
-        if !has_preds {
-            // Check if this node has $network arguments (waits for network injection)
-            let has_network_arg = node.args.iter().any(|arg| {
-                matches!(arg.type_, CmTypes::Ref(2)) // $network uses Ref(2)
+        if !has_preds && node.name != "$network" {
+            print_debug(|| {
+                format!(
+                    "Adding initial node: {} with id {} and factor {}",
+                    node.name, node.id, node.factor
+                )
             });
-
-            if !has_network_arg {
-                print_debug(|| {
-                    format!(
-                        "Adding initial node: {} with id {} and factor {}",
-                        node.name, node.id, node.factor
-                    )
-                });
-                self.initial_nodes.push(node.id);
-            } else {
-                print_debug(|| {
-                    format!(
-                        "Skipping initial node (has $network arg): {} with id {} and factor {}",
-                        node.name, node.id, node.factor
-                    )
-                });
-            }
+            self.initial_nodes.push(node.id);
         }
         if Self::has_condition(&node.args) {
             self.condition_nodes.insert(node.id);

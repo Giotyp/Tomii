@@ -106,8 +106,6 @@ pub struct Node {
     pub func_ptr: Option<CmPtr>,
     // Optional node to loop after execution
     pub loop_: Option<Loop>,
-    // Network isolation flag
-    pub nx: bool,
 }
 
 impl Node {
@@ -134,9 +132,10 @@ pub struct GraphNetworkConfig {
     pub socket_type: SocketType,
     pub num_sockets: usize,
     pub packet_length: usize,
+    pub stream_packets: usize,
     pub buffer_depth: usize,
     pub address: String,
     pub start_port: usize,
     pub extract_packet_func: Option<CmPtr>,
-    pub id_function: Option<CmPtr>
+    pub id_function: Option<CmPtr>,
 }

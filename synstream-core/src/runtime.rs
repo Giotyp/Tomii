@@ -12,8 +12,8 @@ use crate::debug::print_debug;
 use crate::graph::*;
 use crate::graph_struct::*;
 use crate::network::{
-    bind_udp_socket_range, multi_socket_receiver_loop, single_socket_receiver_loop,
-    NetworkSocket, PacketMessage,
+    bind_udp_socket_range, multi_socket_receiver_loop, single_socket_receiver_loop, NetworkSocket,
+    PacketMessage,
 };
 use crate::resolution_state::{MultiThreadedState, ResolutionState, SingleThreadedState};
 use crate::runtime_funcs::*;
@@ -197,7 +197,7 @@ impl SynRt {
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
         let (receiver_sockets, packet_senders, packet_receivers, packet_drop_counters) =
-            prepare_network_infrastructure(app_graph, workers);
+            prepare_network_infrastructure(app_graph);
 
         let shared = Arc::new(SharedData {
             graph: app_graph.clone(),
@@ -239,7 +239,9 @@ impl SynRt {
             packet_drop_counters,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             // Slot-level network packet storage: initialized with empty vecs per slot
-            socket_packet_counter: Arc::new(vec![AtomicUsize::new(0); slots]),
+            socket_packet_counter: Arc::new(
+                (0..slots).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>(),
+            ),
         });
 
         SynRt { shared }
@@ -310,10 +312,9 @@ impl SynRt {
                 for socket_id in 0..num_sockets {
                     let shared_clone = Arc::clone(&self.shared);
                     let core_id = receiver_offset + socket_id;
-                    let dylib_clone = dylib_path.clone();
 
                     let handle = spawn(move || {
-                        single_socket_receiver_loop(shared_clone, socket_id, core_id, dylib_clone);
+                        single_socket_receiver_loop(shared_clone, socket_id, core_id);
                     });
                     handles.push(handle);
                     println!(
@@ -336,16 +337,9 @@ impl SynRt {
 
                     let shared_clone = Arc::clone(&self.shared);
                     let core_id = receiver_offset + thread_id;
-                    let dylib_clone = dylib_path.clone();
 
                     let handle = spawn(move || {
-                        multi_socket_receiver_loop(
-                            shared_clone,
-                            thread_id,
-                            socket_range,
-                            core_id,
-                            dylib_clone,
-                        );
+                        multi_socket_receiver_loop(shared_clone, thread_id, socket_range, core_id);
                     });
                     handles.push(handle);
                     println!(
@@ -410,10 +404,13 @@ impl SynRt {
         // Check for max_runtime
         print_debug(|| "Max runtime check started".to_string());
         if let Some(max_runtime) = self.shared.max_runtime {
-            let scheduler = self.shared.scheduler.read();
-
-            let mut prev_completed_jobs = scheduler.total_jobs_completed();
-            let mut prev_spawned_jobs = scheduler.total_jobs_spawned();
+            let (mut prev_completed_jobs, mut prev_spawned_jobs) = {
+                let scheduler = self.shared.scheduler.read();
+                (
+                    scheduler.total_jobs_completed(),
+                    scheduler.total_jobs_spawned(),
+                )
+            };
             sleep(RUN_SLEEP);
             loop {
                 let scheduler = self.shared.scheduler.read();
@@ -442,6 +439,8 @@ impl SynRt {
                     println!("Max runtime reached or graph completed, exiting...");
                     // Process post-nodes if any
                     println!("Processing possible post-nodes...");
+                    // Drop scheduler guard before calling mutable method
+                    drop(scheduler);
                     self.schedule_post_nodes();
                     // Signal flusher thread to shut down (will be done after loop)
                     break;
@@ -455,7 +454,6 @@ impl SynRt {
         {
             let scheduler = self.shared.scheduler.read();
             scheduler.shutdown_flusher();
-            
         }
 
         // Drop all senders to signal resolution threads to exit
@@ -493,7 +491,7 @@ impl SynRt {
             }
 
             // Report packet drop statistics
-            if let Some(ref network_config) = self.shared.network_config {
+            if let Some(ref network_config) = self.shared.graph.network_config {
                 let num_sockets = network_config.num_sockets;
                 let mut total_drops = 0;
                 println!("\nPacket Drop Statistics:");
@@ -591,7 +589,7 @@ impl SynRt {
             }
         }
 
-        let all_slots: Vec<usize> = (0..shared.slots).collect();
+        // let all_slots: Vec<usize> = (0..shared.slots).collect();
         if thread_id == 0 {
             // Ensure only one thread does initial preparation
             if shared
@@ -648,7 +646,11 @@ impl SynRt {
             // Only poll if network_config is present and receivers were spawned
             let mut network_received_nodes = Vec::new();
             if network_config_opt.is_some() && !shared.packet_receivers.is_empty() {
-                let packet_process_func = network_config_opt.unwrap().extract_packet_func.unwrap();
+                let packet_process_func = network_config_opt
+                    .as_ref()
+                    .unwrap()
+                    .extract_packet_func
+                    .unwrap();
                 for receiver_id in 0..shared.packet_receivers.len() {
                     // Non-blocking poll - process all available packets
                     while let Ok(packet_msg) = shared.packet_receivers[receiver_id].try_recv() {
@@ -673,13 +675,9 @@ impl SynRt {
             // Combine network received nodes with scheduled batch
             // Place network nodes at the front to prioritize processing
             if !network_received_nodes.is_empty() {
+                let network_count = network_received_nodes.len();
                 batch.splice(0..0, network_received_nodes);
-                print_debug(|| {
-                    format!(
-                        "Injected {:?} network nodes to batch",
-                        network_received_nodes.len()
-                    )
-                });
+                print_debug(|| format!("Injected {:?} network nodes to batch", network_count));
             }
 
             print_debug(|| {
@@ -1222,7 +1220,6 @@ impl SynRt {
 
 fn prepare_network_infrastructure(
     graph: &Graph,
-    workers: usize,
 ) -> (
     Vec<NetworkSocket>,
     Vec<Sender<PacketMessage>>,

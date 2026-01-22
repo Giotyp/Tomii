@@ -54,6 +54,21 @@ pub struct ArgCacheEntry {
     pub real_res_indexes: Vec<usize>,
 }
 
+impl Default for ArgCacheEntry {
+    fn default() -> Self {
+        ArgCacheEntry {
+            args: Vec::new(),
+            buffer_ref_indexes: Vec::new(),
+            buffer_values: Vec::new(),
+            rt_idxs_indexes: Vec::new(),
+            rt_workers_indexes: Vec::new(),
+            rt_network_indexes: Vec::new(),
+            res_indexes: Vec::new(),
+            real_res_indexes: Vec::new(),
+        }
+    }
+}
+
 impl std::fmt::Debug for ArgCacheEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ArgCacheEntry")
@@ -76,6 +91,27 @@ pub fn node_cache_entry(
     initial_nodes: &Vec<crate::IdType>,
     condition_nodes: &std::collections::HashSet<crate::IdType>,
 ) -> NodeCacheEntry {
+    print_debug(|| {
+        format!(
+            "Creating node cache entry for node {} name {}",
+            node.id, node.name
+        )
+    });
+
+    // For network node, create empty cache entry
+    if node.name == "$network" {
+        return NodeCacheEntry {
+            factor: node.factor,
+            pred_vec: Vec::new(),
+            name: node.name.clone(),
+            func_ptr: CmTypes::default_pointer(),
+            arg_cache: ArgCacheEntry::default(),
+            is_initial: false,
+            is_condition: false,
+            cond_index: 0,
+        };
+    }
+
     let mut rt_idxs_indexes = Vec::new();
     let mut buffer_ref_indexes = Vec::new();
     let mut buffer_values = Vec::new();
@@ -328,36 +364,34 @@ fn execute_task(
 
     // Add result to batch buffer and flush if full
     let scheduler_guard = shared.scheduler.read();
-    if let Some(scheduler) = scheduler_guard.as_ref() {
-        let batch_buffer = scheduler.get_batch_buffer();
-        let batching_size = scheduler.get_batching_size();
-        let batch_last_sent = scheduler.get_batch_last_sent();
-        let completed_tx_ref = scheduler.get_completed_tx_ref();
-        let flush_notify = scheduler.get_flush_notify();
+    let scheduler = &*scheduler_guard;
+    let batch_buffer = scheduler.get_batch_buffer();
+    let batching_size = scheduler.get_batching_size();
+    let batch_last_sent = scheduler.get_batch_last_sent();
+    let completed_tx_ref = scheduler.get_completed_tx_ref();
+    let flush_notify = scheduler.get_flush_notify();
 
-        // Fast path: batching_size=1 means send immediately without buffering
-        if batching_size == 1 {
+    // Fast path: batching_size=1 means send immediately without buffering
+    if batching_size == 1 {
+        if let Some(tx) = completed_tx_ref.lock().as_ref() {
+            let _ = tx.send(vec![(node_info.clone(), result)]);
+        }
+    } else {
+        // Single lock operation - check and flush atomically
+        let mut batch = batch_buffer.lock();
+        batch.push((node_info.clone(), result));
+
+        if batch.len() >= batching_size {
+            let batch_to_send = std::mem::replace(&mut *batch, Vec::with_capacity(batching_size));
+            drop(batch);
+            *batch_last_sent.lock() = std::time::Instant::now();
+
             if let Some(tx) = completed_tx_ref.lock().as_ref() {
-                let _ = tx.send(vec![(node_info.clone(), result)]);
+                let _ = tx.send(batch_to_send);
             }
         } else {
-            // Single lock operation - check and flush atomically
-            let mut batch = batch_buffer.lock();
-            batch.push((node_info.clone(), result));
-
-            if batch.len() >= batching_size {
-                let batch_to_send =
-                    std::mem::replace(&mut *batch, Vec::with_capacity(batching_size));
-                drop(batch);
-                *batch_last_sent.lock() = std::time::Instant::now();
-
-                if let Some(tx) = completed_tx_ref.lock().as_ref() {
-                    let _ = tx.send(batch_to_send);
-                }
-            } else {
-                // Notify flusher thread that there's pending data
-                let _ = flush_notify.try_send(());
-            }
+            // Notify flusher thread that there's pending data
+            let _ = flush_notify.try_send(());
         }
     }
 }
@@ -410,13 +444,7 @@ pub fn send_to_scheduler(
 
         // Get the unified scheduler - it handles routing to network pool internally
         let scheduler_guard = shared.scheduler.read();
-        let scheduler = match scheduler_guard.as_ref() {
-            Some(s) => Arc::clone(s),
-            None => {
-                eprintln!("Scheduler is not initialized");
-                return;
-            }
-        };
+        let scheduler = &*scheduler_guard;
 
         // Spawn task - route to network pool if requested
         let meta_data = (node_info.id, node_info.slot, node_info.index);
@@ -424,7 +452,7 @@ pub fn send_to_scheduler(
         let pre_built_args = pre_built_args_vec[i].clone();
 
         if use_network_scheduler {
-            scheduler.spawn_task_with_meta_network(Some(meta_data), move || {
+            scheduler.spawn_task_with_meta(Some(meta_data), move || {
                 execute_task(
                     &shared_clone,
                     func_ptr,
@@ -625,12 +653,10 @@ pub fn process_id_function(
     let network_config_opt = shared.graph.network_config();
 
     if let Some(network_config) = network_config_opt {
-        let msg = "ID function is not set".to_string();
-        
         if node_info.id == 0 {
             let id_function = network_config.id_function.unwrap();
-            // Call the id function
-            let id_result = id_function(result);
+            // Call the id function - wrap single result in Vec as expected by signature
+            let id_result = id_function(vec![result.clone()]);
 
             // Extract stream from the result
             if let Some(new_stream) = id_result.valid_number_to_usize() {
@@ -744,7 +770,7 @@ pub fn parse_cached_args(
 
     // Pre-fetch workers count if needed
     let workers = if !args_cache.rt_workers_indexes.is_empty() {
-        shared.workers.load(Ordering::Relaxed)
+        shared.workers
     } else {
         0
     };
@@ -804,7 +830,7 @@ pub fn parse_args(
 fn handle_special_ref(obj_id: usize, node_index: usize, workers: usize) -> Option<Vec<CmTypes>> {
     match obj_id {
         0 => Some(vec![CmTypes::Usize(node_index)]),
-        1 => Some(vec![CmTypes::Usize(workers.load(Ordering::Relaxed))]),
+        1 => Some(vec![CmTypes::Usize(workers)]),
         _ => None,
     }
 }

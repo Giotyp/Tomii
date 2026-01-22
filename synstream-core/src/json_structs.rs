@@ -17,12 +17,13 @@ pub struct NetworkConfigJson {
     pub socket_type: String,
     pub num_sockets: Factor,
     pub packet_length: Factor,
+    pub stream_packets: Factor,
     #[serde(default = "default_buffer_depth")]
     pub buffer_depth: usize,
     pub address: String,
     pub start_port: Factor,
     pub extract_packet_func: String,
-    pub id_function: String
+    pub id_function: String,
 }
 
 fn default_buffer_depth() -> usize {

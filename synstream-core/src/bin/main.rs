@@ -1,11 +1,12 @@
 use clap::Parser;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
+use std::time::Instant;
 use synstream_core::debug::*;
 use synstream_core::graph::Graph;
 use synstream_core::graph_gen::from_json;
 use synstream_core::runtime::SynRt;
-use synstream_core::scheduler::{create_unified_scheduler, SchedulerType};
+use synstream_core::scheduler::{create_scheduler, SchedulerType};
 
 #[derive(Parser)]
 #[clap(author = "George Typaldos", version, about)]
@@ -31,6 +32,14 @@ struct Args {
         help = "Number of threads for resolution operation"
     )]
     system_threads: usize,
+    #[clap(
+        long,
+        value_name = "RECEIVER_THREADS",
+        required = false,
+        default_value = "1",
+        help = "Number of threads for resolution operation"
+    )]
+    receiver_threads: usize,
     #[clap(
         long,
         value_name = "MAX_RUNTIME",
@@ -142,6 +151,7 @@ fn main() {
         args.workers,
         args.core_offset,
         args.system_threads,
+        args.receiver_threads,
         args.slots,
         args.max_streams,
         runtime,
@@ -175,6 +185,7 @@ pub fn run_graph(
     workers: usize,
     core_offset: usize,
     system_threads: usize,
+    receiver_threads: usize,
     slots: usize,
     max_streams: usize,
     max_runtime: Option<u64>,
@@ -185,8 +196,14 @@ pub fn run_graph(
     batching_limit: u64,
     slot_priority_enabled: bool,
 ) -> SynRt {
+    let receiver_threads = if graph.network_config().is_some() {
+        receiver_threads
+    } else {
+        0
+    };
+
     // Create a single AsyncRecorder sized for all threads: workers + network + system
-    let total_recorders = workers + system_threads;
+    let total_recorders = workers + system_threads + receiver_threads;
     let shared_recorder = if record {
         Some(std::sync::Arc::new(
             synstream_core::async_recorder::AsyncRecorder::new(total_recorders, 1000),
@@ -195,16 +212,17 @@ pub fn run_graph(
         None
     };
 
-    let base_instant = Arc::new(Instant::now());
+    let base_instant = Instant::now();
 
     let scheduler = create_scheduler(
         scheduler_type,
         core_offset,
         workers,
         record,
-        shared_recorder,
+        shared_recorder.clone(),
         base_instant,
         system_threads,
+        receiver_threads,
         batching_size,
         batching_limit,
     );
@@ -220,7 +238,7 @@ pub fn run_graph(
         scheduler,
         base_instant,
         slot_priority_enabled,
-        shared_recorder.clone(),
+        shared_recorder,
     );
 
     synrt.run();

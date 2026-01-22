@@ -1,5 +1,5 @@
 [workspace]
-members = ["synstream-core", "synstream-types", "examples/matrix-*"]
+members = ["synstream-core", "synstream-types", "examples/*"]
 resolver = "3"
 
 [profile.release]

@@ -16,14 +16,12 @@ pub fn init_objects(
     let mut obj_id_map: RapidHashMap<String, usize> = RapidHashMap::new();
 
     // Keep index 0 for $index, 1 for $workers, 2 for $network -- resolved at runtime
-    let _ = ObjectCount.fetch_add(3, SeqCst);
+    let _ = ObjectCount.fetch_add(2, SeqCst);
     obj_id_map.insert("$index".to_string(), 0);
     obj_id_map.insert("$workers".to_string(), 1);
-    obj_id_map.insert("$network".to_string(), 2);
     // Initialize $index and $workers
     init_objects.push(vec![CmTypes::Usize(0)]);
     init_objects.push(vec![CmTypes::Usize(1)]);
-    init_objects.push(vec![CmTypes::Usize(2)]);
 
     for init in initializations_json.iter() {
         let name = &init.name;
