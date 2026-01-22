@@ -677,7 +677,11 @@ impl SynRt {
             // PRIORITY 2: Receive batch from scheduler (non-blocking)
             let mut batch = match completed_rx.try_recv() {
                 Ok(batch_from_scheduler) => batch_from_scheduler,
-                Err(_) => Vec::new(), // Channel closed or no messages yet
+                Err(crossbeam_channel::TryRecvError::Empty) => Vec::new(), // No messages yet, continue
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    println!("Resolution thread {} detected channel closure, exiting...", thread_id);
+                    break; // Exit the resolution loop
+                }
             };
 
             // Combine network received nodes with scheduled batch
