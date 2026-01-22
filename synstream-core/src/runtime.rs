@@ -665,14 +665,27 @@ impl SynRt {
                                     format!("All {} packets for stream received", stream_packets)
                                 });
                                 // Increase total stream receive counter
-                                let _ = shared
+                                let completed_streams = shared
                                     .streams_receive_counter
-                                    .fetch_add(1, Ordering::Relaxed);
+                                    .fetch_add(1, Ordering::Relaxed)
+                                    + 1; // +1 because fetch_add returns old value
+
+                                // Signal receiver threads to terminate when all expected streams received
+                                if completed_streams >= shared.max_streams {
+                                    println!(
+                                        "All {} streams received ({} packets each), signaling receiver shutdown",
+                                        shared.max_streams, stream_packets
+                                    );
+                                    shared.shutdown_flag.store(true, Ordering::SeqCst);
+                                }
                             }
                         }
                     }
                 }
             }
+
+            // Track if any work was performed this iteration (network packets, batch processing, etc.)
+            let mut work_performed = false;
 
             // PRIORITY 2: Receive batch from scheduler (non-blocking)
             let mut batch = match completed_rx.try_recv() {
@@ -687,6 +700,7 @@ impl SynRt {
             // Combine network received nodes with scheduled batch
             // Place network nodes at the front to prioritize processing
             if !network_received_nodes.is_empty() {
+                work_performed = true; // Network packets received
                 let network_count = network_received_nodes.len();
                 batch.splice(0..0, network_received_nodes);
                 print_debug(|| format!("Injected {:?} network nodes to batch", network_count));
@@ -703,6 +717,9 @@ impl SynRt {
             };
 
             // Process the entire batch
+            if !batch.is_empty() {
+                work_performed = true; // Processing nodes from scheduler or network
+            }
             for (mut node_info, result) in batch {
                 print_debug(|| {
                     format!(
@@ -1093,35 +1110,38 @@ impl SynRt {
                 }
             }
 
-            if let Some(tb) = &shared.time_buffer {
-                let end_time = if let Some(tb) = &shared.time_buffer {
-                    tb.measure_time()
-                } else {
-                    TimingMethod::Instant(Instant::now())
-                };
-                let duration = tb.measure_duration(start_time, end_time);
-                tb.add_task_time(
-                    thread_slot,
-                    &format!("Resolution Thread {}", thread_id),
-                    usize::MAX,
-                    duration,
-                );
-            }
+            // Only record timing/metrics when actual work was performed
+            if work_performed {
+                if let Some(tb) = &shared.time_buffer {
+                    let end_time = if let Some(tb) = &shared.time_buffer {
+                        tb.measure_time()
+                    } else {
+                        TimingMethod::Instant(Instant::now())
+                    };
+                    let duration = tb.measure_duration(start_time, end_time);
+                    tb.add_task_time(
+                        thread_slot,
+                        &format!("Resolution Thread {}", thread_id),
+                        usize::MAX,
+                        duration,
+                    );
+                }
 
-            // Lock-free recording via per-worker channel
-            if shared.async_recorder.is_some() {
-                let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
-                let end_ns = shared.base_instant.elapsed().as_nanos();
-                submit_record(Record {
-                    slot: thread_slot,
-                    job_id,
-                    start_ns,
-                    end_ns,
-                    worker: thread_core,
-                    task_id: IdType::MAX,
-                    // arbitrary index value
-                    index: 0,
-                });
+                // Lock-free recording via per-worker channel
+                if shared.async_recorder.is_some() {
+                    let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
+                    let end_ns = shared.base_instant.elapsed().as_nanos();
+                    submit_record(Record {
+                        slot: thread_slot,
+                        job_id,
+                        start_ns,
+                        end_ns,
+                        worker: thread_core,
+                        task_id: IdType::MAX,
+                        // arbitrary index value
+                        index: 0,
+                    });
+                }
             }
         } // End of resolution processing loop
     }
