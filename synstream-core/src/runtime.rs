@@ -238,10 +238,8 @@ impl SynRt {
             receiver_sockets,
             packet_drop_counters,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
-            // Slot-level network packet storage: initialized with empty vecs per slot
-            socket_packet_counter: Arc::new(
-                (0..slots).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>(),
-            ),
+            stream_packet_counter: Arc::new(AtomicUsize::new(0)),
+            streams_receive_counter: Arc::new(AtomicUsize::new(0)),
         });
 
         SynRt { shared }
@@ -645,23 +643,33 @@ impl SynRt {
             // PRIORITY 1: Poll network packets (low-latency path)
             // Only poll if network_config is present and receivers were spawned
             let mut network_received_nodes = Vec::new();
-            if network_config_opt.is_some() && !shared.packet_receivers.is_empty() {
-                let packet_process_func = network_config_opt
-                    .as_ref()
-                    .unwrap()
-                    .extract_packet_func
-                    .unwrap();
-                for receiver_id in 0..shared.packet_receivers.len() {
-                    // Non-blocking poll - process all available packets
-                    while let Ok(packet_msg) = shared.packet_receivers[receiver_id].try_recv() {
-                        let received_bytes_cm = CmTypes::from_any(packet_msg.packet_bytes);
-                        let socket_id = packet_msg.socket_id;
+            if let Some(network_config) = network_config_opt.as_ref() {
+                let stream_packets = network_config.stream_packets;
+                if !shared.packet_receivers.is_empty() {
+                    let packet_process_func = network_config.extract_packet_func.unwrap();
+                    for receiver_id in 0..shared.packet_receivers.len() {
+                        // Non-blocking poll - process all available packets
+                        while let Ok(packet_msg) = shared.packet_receivers[receiver_id].try_recv() {
+                            let received_bytes_cm = CmTypes::from_any(packet_msg.packet_bytes);
 
-                        let packet_cm = packet_process_func(vec![received_bytes_cm]);
-                        let counter = shared.socket_packet_counter.get(socket_id).unwrap();
-                        let packet_index = counter.fetch_add(1, Ordering::Relaxed);
-                        let node_info = NodeInfo::new(0, 0, packet_index, 0); // assuming node_id 0 for network input
-                        network_received_nodes.push((node_info, packet_cm));
+                            let packet_cm = packet_process_func(vec![received_bytes_cm]);
+                            let counter = shared.stream_packet_counter.clone();
+                            let packet_index = counter.fetch_add(1, Ordering::Relaxed);
+                            let node_info = NodeInfo::new(0, 0, packet_index, 0); // assuming node_id 0 for network input
+                            network_received_nodes.push((node_info, packet_cm));
+
+                            if packet_index + 1 == stream_packets {
+                                // Reset counter for next stream
+                                shared.stream_packet_counter.store(0, Ordering::Relaxed);
+                                print_debug(|| {
+                                    format!("All {} packets for stream received", stream_packets)
+                                });
+                                // Increase total stream receive counter
+                                let _ = shared
+                                    .streams_receive_counter
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
                     }
                 }
             }

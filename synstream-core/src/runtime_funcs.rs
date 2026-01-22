@@ -286,7 +286,8 @@ pub struct SharedData {
     pub packet_drop_counters: Vec<AtomicUsize>,
     pub shutdown_flag: Arc<AtomicBool>,
 
-    pub socket_packet_counter: Arc<Vec<AtomicUsize>>,
+    pub stream_packet_counter: Arc<AtomicUsize>,
+    pub streams_receive_counter: Arc<AtomicUsize>,
 }
 
 #[inline(always)]
