@@ -666,10 +666,10 @@ impl SynRt {
                 }
             }
 
-            // PRIORITY 2: Receive batch from scheduler (blocking)
-            let mut batch = match completed_rx.recv() {
+            // PRIORITY 2: Receive batch from scheduler (non-blocking)
+            let mut batch = match completed_rx.try_recv() {
                 Ok(batch_from_scheduler) => batch_from_scheduler,
-                Err(_) => return, // Channel closed
+                Err(_) => Vec::new(), // Channel closed or no messages yet
             };
 
             // Combine network received nodes with scheduled batch
@@ -679,14 +679,6 @@ impl SynRt {
                 batch.splice(0..0, network_received_nodes);
                 print_debug(|| format!("Injected {:?} network nodes to batch", network_count));
             }
-
-            print_debug(|| {
-                format!(
-                    "Thread {:?} -- Processing batch of {} nodes",
-                    thread_id,
-                    batch.len()
-                )
-            });
 
             // Local tracking for THIS batch only
             let mut nodes_sent_in_slot: HashMap<usize, usize> = HashMap::new();
@@ -919,14 +911,6 @@ impl SynRt {
             // Check for stream completion - iterate over ALL slots with activity, not just current batch
             // Collect slots first to avoid borrow issues when mutating the map
             let slots_to_check: Vec<usize> = stream_slot_activity.keys().copied().collect();
-
-            print_debug(|| {
-                format!(
-                    "Stream_slot_activity has {} slots to check: {:?}",
-                    slots_to_check.len(),
-                    slots_to_check
-                )
-            });
 
             for proc_slot in slots_to_check {
                 print_debug(|| {

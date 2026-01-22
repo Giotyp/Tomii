@@ -23,7 +23,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crate::debug::print_debug;
 use crate::runtime_funcs::SharedData;
 
 /// Raw packet message forwarded from receiver thread to resolution
@@ -79,6 +78,12 @@ pub fn bind_udp_socket_range(address: &str, start_port: usize, count: usize) -> 
 
         sockets.push(NetworkSocket::Udp(socket));
     }
+    println!(
+        "Successfully bound UDP sockets {}-{} on address {}",
+        start_port,
+        start_port + count - 1,
+        address
+    );
     sockets
 }
 
@@ -86,11 +91,7 @@ pub fn bind_udp_socket_range(address: &str, start_port: usize, count: usize) -> 
 ///
 /// This function runs in a dedicated OS thread, pinned to a specific core.
 /// It continuously receives packets, extracts frame IDs, and forwards to resolution.
-pub fn single_socket_receiver_loop(
-    shared: Arc<SharedData>,
-    socket_id: usize,
-    core_id: usize,
-) {
+pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, core_id: usize) {
     // Pin to core
     if let Some(core_ids) = core_affinity::get_core_ids() {
         if core_id < core_ids.len() {
@@ -109,7 +110,8 @@ pub fn single_socket_receiver_loop(
     let drop_counter = &shared.packet_drop_counters[socket_id];
     let shutdown = &shared.shutdown_flag;
 
-    let network_config_arc = shared.graph
+    let network_config_arc = shared
+        .graph
         .network_config()
         .expect("Network config must be present for receiver threads");
     let packet_length = network_config_arc.packet_length;
@@ -117,12 +119,12 @@ pub fn single_socket_receiver_loop(
 
     let mut buffer = vec![0u8; packet_length];
 
-    print_debug(|| format!("Receiver thread {} started on core {}", socket_id, core_id));
+    println!("Receiver thread {} started on core {}", socket_id, core_id);
 
     loop {
         // Check shutdown signal
         if shutdown.load(Ordering::Relaxed) {
-            print_debug(|| format!("Receiver {} shutting down", socket_id));
+            println!("Receiver {} shutting down", socket_id);
             break;
         }
 
@@ -147,10 +149,7 @@ pub fn single_socket_receiver_loop(
                 // Try send (non-blocking to avoid stalling receiver)
                 if tx.try_send(msg).is_err() {
                     drop_counter.fetch_add(1, Ordering::Relaxed);
-                    eprintln!(
-                        "Receiver {}: channel full, packet dropped",
-                        socket_id
-                    );
+                    eprintln!("Receiver {}: channel full, packet dropped", socket_id);
                 }
             }
             Err(e) => {
@@ -161,7 +160,7 @@ pub fn single_socket_receiver_loop(
         }
     }
 
-    print_debug(|| format!("Receiver thread {} exited", socket_id));
+    println!("Receiver thread {} exited", socket_id);
 }
 
 /// Receiver loop for multiple sockets (round-robin polling when nrx < num_sockets)
@@ -186,7 +185,8 @@ pub fn multi_socket_receiver_loop(
         .name(format!("rx-multi-{}", thread_id))
         .spawn(|| {});
 
-    let network_config_arc = shared.graph
+    let network_config_arc = shared
+        .graph
         .network_config()
         .expect("Network config must be present for receiver threads");
     let packet_length = network_config_arc.packet_length;
@@ -201,19 +201,17 @@ pub fn multi_socket_receiver_loop(
     let shutdown = &shared.shutdown_flag;
     let read_timeout = Duration::from_micros(100); // Tunable: balance latency vs CPU
 
-    print_debug(|| {
-        format!(
-            "Multi-socket receiver thread {} polling sockets {:?} on core {}",
-            thread_id, socket_range, core_id
-        )
-    });
+    println!(
+        "Multi-socket receiver thread {} polling sockets {:?} on core {}",
+        thread_id, socket_range, core_id
+    );
 
     loop {
         // Round-robin poll all assigned sockets
         for (local_idx, socket_id) in socket_range.clone().enumerate() {
             // Check shutdown (amortized across sockets)
             if shutdown.load(Ordering::Relaxed) {
-                print_debug(|| format!("Multi-socket receiver {} shutting down", thread_id));
+                println!("Multi-socket receiver {} shutting down", thread_id);
                 return;
             }
 
@@ -245,8 +243,10 @@ pub fn multi_socket_receiver_loop(
                     // Try send (non-blocking)
                     if tx.try_send(msg).is_err() {
                         drop_counter.fetch_add(1, Ordering::Relaxed);
-                        eprintln!("Receiver thread {} socket {}: channel full, packet dropped",
-                                  thread_id, socket_id);
+                        eprintln!(
+                            "Receiver thread {} socket {}: channel full, packet dropped",
+                            thread_id, socket_id
+                        );
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {

@@ -106,12 +106,6 @@ impl AsyncRecorder {
 
             // Periodic logging for diagnostics
             if collected > 0 && last_flush.elapsed() >= flush_interval {
-                let total: usize = slot_records.values().map(|v| v.len()).sum();
-                eprintln!(
-                    "[AsyncRecorder] Buffered {} records across {} slots",
-                    total,
-                    slot_records.len()
-                );
                 last_flush = std::time::Instant::now();
             }
 
