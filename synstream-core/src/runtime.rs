@@ -402,36 +402,14 @@ impl SynRt {
         // Check for max_runtime
         print_debug(|| "Max runtime check started".to_string());
         if let Some(max_runtime) = self.shared.max_runtime {
-            let (mut prev_completed_jobs, mut prev_spawned_jobs) = {
-                let scheduler = self.shared.scheduler.read();
-                (
-                    scheduler.total_jobs_completed(),
-                    scheduler.total_jobs_spawned(),
-                )
-            };
             sleep(RUN_SLEEP);
             let mut finish: bool = false;
             loop {
                 let scheduler = self.shared.scheduler.read();
 
-                let curr_completed_jobs = scheduler.total_jobs_completed();
-                let curr_spawned_jobs = scheduler.total_jobs_spawned();
-                let pending_jobs = scheduler.pending_jobs();
+                let completed_streams = self.shared.stream_complete_counter.load(Ordering::SeqCst);
 
-                let completed = {
-                    if pending_jobs == 0
-                        && curr_completed_jobs > 0
-                        && curr_completed_jobs == prev_completed_jobs
-                        && curr_spawned_jobs == prev_spawned_jobs
-                    {
-                        true
-                    } else {
-                        false
-                    }
-                };
-
-                prev_completed_jobs = curr_completed_jobs;
-                prev_spawned_jobs = curr_spawned_jobs;
+                let completed = { completed_streams == self.shared.max_streams };
 
                 if start_time.elapsed().as_secs() > max_runtime {
                     println!("Max runtime reached exiting...");
@@ -646,6 +624,8 @@ impl SynRt {
         // Packet Process Function
         let network_config_opt = shared.graph.network_config();
 
+        let mut receive_finished: bool = false;
+
         // Process completed nodes with dynamic batching from scheduler
         loop {
             // PRIORITY 1: Poll network packets (low-latency path)
@@ -653,7 +633,7 @@ impl SynRt {
             let mut network_received_nodes = Vec::new();
             if let Some(network_config) = network_config_opt.as_ref() {
                 let stream_packets = network_config.stream_packets;
-                if !shared.packet_receivers.is_empty() {
+                if !receive_finished && !shared.packet_receivers.is_empty() {
                     let packet_process_func = network_config.extract_packet_func.unwrap();
                     for receiver_id in 0..shared.packet_receivers.len() {
                         // Non-blocking poll - process all available packets
@@ -707,9 +687,12 @@ impl SynRt {
                                 // Note: Receiver threads will continue running until main loop exits
                                 if completed_streams >= shared.max_streams {
                                     println!(
-                                        "All {} streams received ({} packets each) - receivers will continue until execution completes",
+                                        "All {} streams received ({} packets each) - receivers will shutdown",
                                         shared.max_streams, stream_packets
                                     );
+                                    // Signal shutdown
+                                    shared.shutdown_flag.store(true, Ordering::SeqCst);
+                                    receive_finished = true;
                                 }
                             }
                         }
@@ -736,7 +719,6 @@ impl SynRt {
             // Combine network received nodes with scheduled batch
             // Place network nodes at the front to prioritize processing
             if !network_received_nodes.is_empty() {
-                work_performed = true; // Network packets received
                 let network_count = network_received_nodes.len();
                 batch.splice(0..0, network_received_nodes);
                 print_debug(|| format!("Injected {:?} network nodes to batch", network_count));
