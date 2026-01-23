@@ -68,6 +68,13 @@ struct Args {
     timing: Option<String>,
     #[clap(long, help = "Enable scheduler recording", required = false)]
     record: bool,
+    #[clap(
+        long,
+        value_name = "STREAM_ID",
+        required = false,
+        help = "Record only a specific stream (memory optimization)"
+    )]
+    record_stream: Option<usize>,
     #[clap(long, help = "Use rdtsc for timing")]
     use_rdtsc: bool,
     #[clap(
@@ -156,6 +163,7 @@ fn main() {
         args.max_streams,
         runtime,
         args.record,
+        args.record_stream,
         args.use_rdtsc,
         timing_enabled,
         args.batching_size,
@@ -190,6 +198,7 @@ pub fn run_graph(
     max_streams: usize,
     max_runtime: Option<u64>,
     record: bool,
+    record_stream: Option<usize>,
     use_rdtsc: bool,
     timing_enabled: bool,
     batching_size: usize,
@@ -214,6 +223,11 @@ pub fn run_graph(
 
     let base_instant = Instant::now();
 
+    // Create available_stream_slots early so it can be shared with scheduler
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+    let available_stream_slots = Arc::new(RwLock::new(vec![usize::MAX; slots]));
+
     let scheduler = create_scheduler(
         scheduler_type,
         core_offset,
@@ -225,6 +239,8 @@ pub fn run_graph(
         receiver_threads,
         batching_size,
         batching_limit,
+        record_stream,
+        Arc::clone(&available_stream_slots),
     );
 
     let mut synrt = SynRt::new(
@@ -234,11 +250,13 @@ pub fn run_graph(
         max_runtime,
         use_rdtsc,
         record,
+        record_stream,
         timing_enabled,
         scheduler,
         base_instant,
         slot_priority_enabled,
         shared_recorder,
+        available_stream_slots,
     );
 
     synrt.run();

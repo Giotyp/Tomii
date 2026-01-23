@@ -233,6 +233,9 @@ struct SchedulerBase {
     // Flush notification channel to eliminate polling sleep
     flush_notify_tx: crossbeam_channel::Sender<()>,
     flush_notify_rx: Arc<Mutex<crossbeam_channel::Receiver<()>>>,
+    // Stream-specific recording filter
+    record_stream: Option<usize>,
+    available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
 }
 
 impl SchedulerBase {
@@ -246,6 +249,8 @@ impl SchedulerBase {
         receiver_threads: usize,
         batching_size: usize,
         batching_limit: u64,
+        record_stream: Option<usize>,
+        available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
     ) -> Self {
         let total_recorders = workers + receiver_threads + system_threads;
         let async_recorder = if record {
@@ -298,6 +303,8 @@ impl SchedulerBase {
             flusher_shutdown: Arc::new(AtomicUsize::new(0)),
             flush_notify_tx,
             flush_notify_rx: Arc::new(Mutex::new(flush_notify_rx)),
+            record_stream,
+            available_stream_slots,
         }
     }
 
@@ -443,6 +450,8 @@ impl SchedulerBase {
         let completed = Arc::clone(&self.total_completed);
         let base = Arc::clone(&self.base_instant);
         let recorder_enabled = self.async_recorder.is_some();
+        let record_stream = self.record_stream;
+        let available_stream_slots = Arc::clone(&self.available_stream_slots);
 
         let (task_id, slot, index) = meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN));
 
@@ -453,7 +462,18 @@ impl SchedulerBase {
             let end = (*base).elapsed().as_nanos();
 
             // Lock-free recording via per-worker channel
-            if recorder_enabled {
+            // Check if we should record this slot based on stream filter
+            let should_record = match record_stream {
+                None => true, // Record all streams
+                Some(target_stream) => {
+                    // Get current stream for this slot
+                    let slots_read = available_stream_slots.read();
+                    let current_stream = slots_read.get(slot).copied().unwrap_or(usize::MAX);
+                    current_stream == target_stream
+                }
+            };
+
+            if recorder_enabled && should_record {
                 submit_record(Record {
                     slot,
                     job_id,
@@ -513,6 +533,8 @@ impl FifoScheduler {
         receiver_threads: usize,
         batching_size: usize,
         batching_limit: u64,
+        record_stream: Option<usize>,
+        available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
     ) -> Self {
         Self {
             base: SchedulerBase::new(
@@ -525,6 +547,8 @@ impl FifoScheduler {
                 receiver_threads,
                 batching_size,
                 batching_limit,
+                record_stream,
+                available_stream_slots,
             ),
         }
     }
@@ -561,6 +585,8 @@ impl WorkStealScheduler {
         receiver_threads: usize,
         batching_size: usize,
         batching_limit: u64,
+        record_stream: Option<usize>,
+        available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
     ) -> Self {
         Self {
             base: SchedulerBase::new(
@@ -573,6 +599,8 @@ impl WorkStealScheduler {
                 receiver_threads,
                 batching_size,
                 batching_limit,
+                record_stream,
+                available_stream_slots,
             ),
         }
     }
@@ -764,6 +792,8 @@ pub fn create_scheduler(
     receiver_threads: usize,
     batching_size: usize,
     batching_limit: u64,
+    record_stream: Option<usize>,
+    available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
 ) -> SchedulerImpl {
     match scheduler_type {
         SchedulerType::Fifo => SchedulerImpl::Fifo(FifoScheduler::new(
@@ -776,6 +806,8 @@ pub fn create_scheduler(
             receiver_threads,
             batching_size,
             batching_limit,
+            record_stream,
+            available_stream_slots,
         )),
         SchedulerType::WorkStealing => SchedulerImpl::WorkStealing(WorkStealScheduler::new(
             core_offset,
@@ -787,6 +819,8 @@ pub fn create_scheduler(
             receiver_threads,
             batching_size,
             batching_limit,
+            record_stream,
+            available_stream_slots,
         )),
     }
 }

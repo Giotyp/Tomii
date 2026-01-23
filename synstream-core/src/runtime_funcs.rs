@@ -237,6 +237,7 @@ pub struct SharedData {
     pub workers: usize,
     pub core_offset: usize,
     pub receiver_core_offset: usize,
+    pub record_stream: Option<usize>,
 
     // Node cache for fast repeated access
     pub node_cache: Vec<NodeCacheEntry>,
@@ -1018,4 +1019,20 @@ pub fn initial_nodes(shared: &Arc<SharedData>, slots: Vec<usize>) -> Vec<NodeInf
         }
     }
     node_infos
+}
+
+/// Check if we should record for a given slot based on its current stream ID.
+/// Returns true if recording is enabled for all streams (None) or if the slot's
+/// current stream matches the target stream.
+#[inline(always)]
+pub fn should_record_slot(shared: &Arc<SharedData>, slot: usize) -> bool {
+    match shared.record_stream {
+        None => true, // Record all streams
+        Some(target_stream) => {
+            // Get current stream for this slot
+            let slots_read = shared.available_stream_slots.read();
+            let current_stream = slots_read.get(slot).copied().unwrap_or(usize::MAX);
+            current_stream == target_stream
+        }
+    }
 }

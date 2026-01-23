@@ -37,11 +37,13 @@ impl SynRt {
         max_runtime: Option<u64>,
         use_rdtsc: bool,
         record: bool,
+        record_stream: Option<usize>,
         timing_enabled: bool,
         scheduler: SchedulerImpl,
         base_instant: Instant,
         slot_priority_enabled: bool,
         async_recorder: Option<Arc<AsyncRecorder>>, // Optional shared recorder from caller
+        available_stream_slots: Arc<RwLock<Vec<usize>>>, // Shared with scheduler for recording filter
     ) -> SynRt {
         // Initialize stream completion counters
         let stream_completion_counts = Arc::new(RwLock::new(Vec::new()));
@@ -53,13 +55,6 @@ impl SynRt {
             completion_counts.push(AtomicUsize::new(0));
         }
         drop(completion_counts);
-
-        let available_stream_slots = Arc::new(RwLock::new(Vec::new()));
-        let mut available_write = available_stream_slots.write();
-        for _ in 0..slots {
-            available_write.push(std::usize::MAX); // real stream id
-        }
-        drop(available_write);
 
         // Build node cache for fast repeated access
         let node_cache: Vec<NodeCacheEntry> = app_graph
@@ -216,6 +211,7 @@ impl SynRt {
             workers,
             core_offset,
             receiver_core_offset,
+            record_stream,
             async_recorder,
             base_instant: Arc::new(base_instant),
             job_counter,
@@ -542,7 +538,8 @@ impl SynRt {
         }
 
         // Lock-free recording via per-worker channel
-        if shared.async_recorder.is_some() {
+        let current_stream = shared.stream_complete_counter.load(Ordering::Relaxed);
+        if shared.async_recorder.is_some() && should_record_slot(&shared, current_stream) {
             let end_ns = shared.base_instant.elapsed().as_nanos();
             let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
             submit_record(Record {
@@ -648,6 +645,9 @@ impl SynRt {
                             network_received_nodes.push((node_info, packet_cm));
 
                             // Submit record for packet reception
+                            // Note: Network packets are recorded separately as they arrive before
+                            // stream/slot assignment. For --record-stream filtering, network packets
+                            // are always recorded since filtering happens at compute task level.
                             if shared.async_recorder.is_some() {
                                 let receiver_slot = shared.slots + 1;
                                 let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
@@ -1145,7 +1145,8 @@ impl SynRt {
                 }
 
                 // Lock-free recording via per-worker channel
-                if shared.async_recorder.is_some() {
+                let current_stream = shared.stream_complete_counter.load(Ordering::Relaxed);
+                if shared.async_recorder.is_some() && should_record_slot(&shared, current_stream) {
                     let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
                     let end_ns = shared.base_instant.elapsed().as_nanos();
                     submit_record(Record {
