@@ -51,6 +51,9 @@ pub trait ResolutionState: Send + Sync {
     // Decrease dependency count and return new count
     fn decrease_dependency(&self, node_info: &NodeInfo) -> Option<usize>;
 
+    // Increase dependency count and return new count
+    fn increment_dependency(&self, node_info: &NodeInfo) -> Option<usize>;
+
     // Reinitialize dependency map for a slot
     fn reinit_dependencies(&self, nodes: &Vec<crate::graph_struct::Node>, slot: usize);
 }
@@ -61,6 +64,7 @@ pub struct SingleThreadedState {
     nodes_sent_to_queue: SingleThreadedCell<Vec<Vec<bool>>>,
     completed_slots: SingleThreadedCell<HashSet<usize>>,
     max_factor: usize,
+    node_offsets: Vec<usize>,
     dependency_count_vec: Arc<Vec<usize>>,
 }
 
@@ -80,11 +84,20 @@ impl SingleThreadedState {
             nodes_sent.push(vec![false; num_nodes * max_factor]);
         }
 
+        // Compute node_offsets for correct flat index calculation
+        let mut node_offsets = Vec::with_capacity(num_nodes);
+        let mut offset = 0;
+        for node in nodes.iter() {
+            node_offsets.push(offset);
+            offset += node.factor;
+        }
+
         Self {
             dependency_map: SingleThreadedCell::new(dependency_map),
             nodes_sent_to_queue: SingleThreadedCell::new(nodes_sent),
             completed_slots: SingleThreadedCell::new(HashSet::new()),
             max_factor,
+            node_offsets,
             dependency_count_vec: Arc::new(dependency_count_vec),
         }
     }
@@ -95,7 +108,7 @@ impl ResolutionState for SingleThreadedState {
     fn try_mark_sent(&self, slot: usize, node_id: usize, index: usize) -> bool {
         // Direct mutable access - no synchronization overhead at all
         let sent = self.nodes_sent_to_queue.get_mut();
-        let flat_idx = node_id * self.max_factor + index;
+        let flat_idx = self.node_offsets[node_id] + index;
         if !sent[slot][flat_idx] {
             sent[slot][flat_idx] = true;
             true
@@ -107,7 +120,7 @@ impl ResolutionState for SingleThreadedState {
     #[inline]
     fn reset_sent(&self, slot: usize, node_id: usize, index: usize) {
         let sent = self.nodes_sent_to_queue.get_mut();
-        let flat_idx = node_id * self.max_factor + index;
+        let flat_idx = self.node_offsets[node_id] + index;
         sent[slot][flat_idx] = false;
     }
 
@@ -140,6 +153,11 @@ impl ResolutionState for SingleThreadedState {
     }
 
     #[inline]
+    fn increment_dependency(&self, node_info: &NodeInfo) -> Option<usize> {
+        self.dependency_map.get_mut().increment(node_info)
+    }
+
+    #[inline]
     fn reinit_dependencies(&self, nodes: &Vec<crate::graph_struct::Node>, slot: usize) {
         self.dependency_map
             .get_mut()
@@ -153,6 +171,7 @@ pub struct MultiThreadedState {
     nodes_sent_to_queue: Arc<Vec<Vec<AtomicBool>>>,
     completed_slots: Arc<Mutex<HashSet<usize>>>,
     max_factor: usize,
+    node_offsets: Vec<usize>,
     dependency_count_vec: Arc<Vec<usize>>,
 }
 
@@ -176,11 +195,20 @@ impl MultiThreadedState {
             nodes_sent.push(slot_sent);
         }
 
+        // Compute node_offsets for correct flat index calculation
+        let mut node_offsets = Vec::with_capacity(num_nodes);
+        let mut offset = 0;
+        for node in nodes.iter() {
+            node_offsets.push(offset);
+            offset += node.factor;
+        }
+
         Self {
             dependency_map: Arc::new(RwLock::new(dependency_map)),
             nodes_sent_to_queue: Arc::new(nodes_sent),
             completed_slots: Arc::new(Mutex::new(HashSet::new())),
             max_factor,
+            node_offsets,
             dependency_count_vec: Arc::new(dependency_count_vec),
         }
     }
@@ -189,7 +217,7 @@ impl MultiThreadedState {
 impl ResolutionState for MultiThreadedState {
     #[inline]
     fn try_mark_sent(&self, slot: usize, node_id: usize, index: usize) -> bool {
-        let flat_idx = node_id * self.max_factor + index;
+        let flat_idx = self.node_offsets[node_id] + index;
         self.nodes_sent_to_queue[slot][flat_idx]
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
@@ -197,7 +225,7 @@ impl ResolutionState for MultiThreadedState {
 
     #[inline]
     fn reset_sent(&self, slot: usize, node_id: usize, index: usize) {
-        let flat_idx = node_id * self.max_factor + index;
+        let flat_idx = self.node_offsets[node_id] + index;
         self.nodes_sent_to_queue[slot][flat_idx].store(false, Ordering::Release);
     }
 
@@ -226,6 +254,11 @@ impl ResolutionState for MultiThreadedState {
     #[inline]
     fn decrease_dependency(&self, node_info: &NodeInfo) -> Option<usize> {
         self.dependency_map.write().decrease(node_info)
+    }
+
+    #[inline]
+    fn increment_dependency(&self, node_info: &NodeInfo) -> Option<usize> {
+        self.dependency_map.write().increment(node_info)
     }
 
     #[inline]

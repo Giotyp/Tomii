@@ -849,7 +849,9 @@ impl SynRt {
                             let num_indexes = std::cmp::max(succ_factor, remaining);
                             (0..num_indexes).collect::<Vec<_>>()
                         } else {
-                            vec![node_info.index % succ_factor]
+                            // Condition nodes: create all successor instances
+                            // The condition check will filter correctly
+                            (0..succ_factor).collect::<Vec<_>>()
                         }
                     };
 
@@ -902,12 +904,22 @@ impl SynRt {
                         nodes_to_schedule.push(succ_info.clone());
                         *nodes_sent += 1;
                     } else {
-                        // Reset the flag via resolution state
+                        // Condition failed - restore dependency to prevent zombie state
+                        shared.resolution_state.increment_dependency(&succ_info);
+
+                        // Reset sent flag so it can be marked later
                         shared.resolution_state.reset_sent(
                             node_info.slot,
                             succ_info.id as usize,
                             succ_info.index,
                         );
+
+                        print_debug(|| {
+                            format!(
+                                "Condition failed for node {:?}[{}] - restored dependency",
+                                succ_info.id, succ_info.index
+                            )
+                        });
                     }
                 }
 

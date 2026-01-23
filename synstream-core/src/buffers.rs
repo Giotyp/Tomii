@@ -184,6 +184,28 @@ impl<T: Clone + PartialEq + Debug> VecMap<T> {
         None
     }
 
+    pub fn increment(&mut self, node_info: &NodeInfo) -> Option<usize>
+    where
+        T: std::ops::Add<usize, Output = T>,
+        T: From<usize>,
+        usize: From<T>,
+    {
+        if node_info.slot < self.slots && (node_info.id as usize) < self.nodes_len {
+            let node_id = node_info.id as usize;
+            let factor = self.node_factors[node_id];
+            if node_info.index < factor {
+                let idx = node_info.slot * self.per_slot_size
+                    + self.node_offsets[node_id]
+                    + node_info.index;
+                let cur_val = &mut self.buffer[idx];
+                let current: usize = (*cur_val).clone().into();
+                *cur_val = T::from(current + 1);
+                return Some(current + 1);
+            }
+        }
+        None
+    }
+
     pub fn set(&mut self, node_info: &NodeInfo, element: T) {
         if node_info.slot < self.slots && (node_info.id as usize) < self.nodes_len {
             let node_id = node_info.id as usize;

@@ -302,15 +302,15 @@ fn execute_task(
     let worker_id = crate::scheduler::get_current_worker_id().unwrap_or(usize::MAX);
 
     // Measure argument building time separately
-    let arg_build_start = if !node_info.post_node {
-        Some(if let Some(tb) = time_buf {
-            tb.measure_time()
-        } else {
-            TimingMethod::Instant(Instant::now())
-        })
-    } else {
-        None
-    };
+    // let arg_build_start = if !node_info.post_node {
+    //     Some(if let Some(tb) = time_buf {
+    //         tb.measure_time()
+    //     } else {
+    //         TimingMethod::Instant(Instant::now())
+    //     })
+    // } else {
+    //     None
+    // };
 
     // Build arguments here in the worker thread
     let arg_vec = if let Some(args) = pre_built_args {
@@ -329,18 +329,18 @@ fn execute_task(
         )
     };
 
-    if let Some(arg_start) = arg_build_start {
-        if let Some(tb) = time_buf {
-            let arg_end = tb.measure_time();
-            let arg_duration = tb.measure_duration(arg_start, arg_end);
-            tb.add_task_time(
-                node_info.slot,
-                &format!("{}-argbuild", node_name),
-                worker_id,
-                arg_duration,
-            );
-        }
-    }
+    // if let Some(arg_start) = arg_build_start {
+    //     if let Some(tb) = time_buf {
+    //         let arg_end = tb.measure_time();
+    //         let arg_duration = tb.measure_duration(arg_start, arg_end);
+    //         tb.add_task_time(
+    //             node_info.slot,
+    //             &format!("{}-argbuild", node_name),
+    //             worker_id,
+    //             arg_duration,
+    //         );
+    //     }
+    // }
 
     // Start timing for actual function execution
     let start_time = if !node_info.post_node {
