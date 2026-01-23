@@ -542,16 +542,14 @@ pub fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
     let can_restart = total_streams_processed < shared.max_streams;
 
     if can_restart {
-        print_debug(|| {
-            format!(
-                "Slot {} completed stream. Starting new: completed={}, active={}, total={}, max={}",
+        println!(
+                "SynRt -- Slot {} completed stream. Starting new: completed={}, active={}, total={}, max={}",
                 slot,
                 completed_streams,
                 currently_active_streams,
                 total_streams_processed,
                 shared.max_streams
-            )
-        });
+            );
 
         // Release the slot
         release_slot(shared, slot);
@@ -569,12 +567,10 @@ pub fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
 
         true // Signal to caller: slot should restart
     } else {
-        print_debug(|| {
-            format!(
-                "Slot {} completed. Max streams ({}) reached: completed={}, active={}",
-                slot, shared.max_streams, completed_streams, currently_active_streams
-            )
-        });
+        println!(
+            "SynRt -- Slot {} completed. Max streams ({}) reached: completed={}, active={}",
+            slot, shared.max_streams, completed_streams, currently_active_streams
+        );
 
         false // Signal to caller: no restart needed
     }
@@ -1007,21 +1003,6 @@ pub fn activate_next_slot(
     })
 }
 
-/// Get initial compute nodes for given slots (task scheduling path)
-///
-/// Returns nodes that are candidates for immediate execution or buffering,
-/// depending on slot state and slot-priority configuration.
-///
-/// IMPORTANT: Network nodes are excluded from this path!
-/// - At graph build time, nodes with $network args are NOT added to initial_nodes
-///   (see graph.rs:45-50)
-/// - Network nodes are triggered by packet injection from receiver threads,
-///   not via this task-scheduling path
-/// - This function returns ONLY compute nodes (nx=false)
-///
-/// Usage:
-/// - Immediately schedule if slot is active (or slot-priority disabled)
-/// - Buffer for later if slot is inactive (when slot-priority enabled)
 pub fn initial_nodes(shared: &Arc<SharedData>, slots: Vec<usize>) -> Vec<NodeInfo> {
     let mut node_infos = Vec::new();
     for slot in slots {

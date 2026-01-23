@@ -410,6 +410,7 @@ impl SynRt {
                 )
             };
             sleep(RUN_SLEEP);
+            let mut finish: bool = false;
             loop {
                 let scheduler = self.shared.scheduler.read();
 
@@ -432,9 +433,16 @@ impl SynRt {
                 prev_completed_jobs = curr_completed_jobs;
                 prev_spawned_jobs = curr_spawned_jobs;
 
-                if start_time.elapsed().as_secs() > max_runtime || completed {
+                if start_time.elapsed().as_secs() > max_runtime {
+                    println!("Max runtime reached exiting...");
+                    finish = true;
+                } else if completed {
+                    println!("No pending jobs and all jobs completed, exiting...");
+                    finish = true;
+                }
+
+                if finish {
                     // set exit signal
-                    println!("Max runtime reached or graph completed, exiting...");
                     // Process post-nodes if any
                     println!("Processing possible post-nodes...");
                     // Drop scheduler guard before calling mutable method
@@ -501,7 +509,7 @@ impl SynRt {
                     }
                 }
                 if total_drops == 0 {
-                    println!("  No packets dropped - excellent!");
+                    println!("  No packets dropped!");
                 } else {
                     println!(
                         "  TOTAL: {} packets dropped across all sockets",
@@ -650,13 +658,38 @@ impl SynRt {
                     for receiver_id in 0..shared.packet_receivers.len() {
                         // Non-blocking poll - process all available packets
                         while let Ok(packet_msg) = shared.packet_receivers[receiver_id].try_recv() {
-                            let received_bytes_cm = CmTypes::from_any(packet_msg.packet_bytes);
+                            let received_bytes_cm =
+                                CmTypes::from_any(packet_msg.packet_bytes.clone());
 
                             let packet_cm = packet_process_func(vec![received_bytes_cm]);
                             let counter = shared.stream_packet_counter.clone();
                             let packet_index = counter.fetch_add(1, Ordering::Relaxed);
                             let node_info = NodeInfo::new(0, 0, packet_index, 0); // assuming node_id 0 for network input
                             network_received_nodes.push((node_info, packet_cm));
+
+                            // Submit record for packet reception
+                            if shared.async_recorder.is_some() {
+                                let receiver_slot = shared.slots + 1;
+                                let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
+
+                                // Convert rdtsc timestamp to nanoseconds relative to base_instant
+                                // Assuming packet_msg.timestamp is already in rdtsc units or nanos
+                                let packet_rcv = packet_msg
+                                    .timestamp
+                                    .duration_since(*shared.base_instant)
+                                    .as_nanos();
+                                let delta_ns = 10000u128; // Small delta to make it visible in graphs
+
+                                submit_record(Record {
+                                    slot: receiver_slot,
+                                    job_id,
+                                    start_ns: packet_rcv,
+                                    end_ns: packet_rcv + delta_ns,
+                                    worker: packet_msg.receiver_core_id,
+                                    task_id: 0,
+                                    index: packet_index,
+                                });
+                            }
 
                             if packet_index + 1 == stream_packets {
                                 // Reset counter for next stream
@@ -670,13 +703,13 @@ impl SynRt {
                                     .fetch_add(1, Ordering::Relaxed)
                                     + 1; // +1 because fetch_add returns old value
 
-                                // Signal receiver threads to terminate when all expected streams received
+                                // Log when all expected streams have been received
+                                // Note: Receiver threads will continue running until main loop exits
                                 if completed_streams >= shared.max_streams {
                                     println!(
-                                        "All {} streams received ({} packets each), signaling receiver shutdown",
+                                        "All {} streams received ({} packets each) - receivers will continue until execution completes",
                                         shared.max_streams, stream_packets
                                     );
-                                    shared.shutdown_flag.store(true, Ordering::SeqCst);
                                 }
                             }
                         }
@@ -692,7 +725,10 @@ impl SynRt {
                 Ok(batch_from_scheduler) => batch_from_scheduler,
                 Err(crossbeam_channel::TryRecvError::Empty) => Vec::new(), // No messages yet, continue
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                    println!("Resolution thread {} detected channel closure, exiting...", thread_id);
+                    println!(
+                        "Resolution thread {} detected channel closure, exiting...",
+                        thread_id
+                    );
                     break; // Exit the resolution loop
                 }
             };
@@ -1047,12 +1083,6 @@ impl SynRt {
                     // Flush buffered nodes from newly activated slot (if any)
                     if let Some(nodes) = buffered_nodes {
                         if !nodes.is_empty() {
-                            print_debug(|| {
-                                format!(
-                                    "Slot-Priority: Flushing {} buffered nodes from activated slot",
-                                    nodes.len()
-                                )
-                            });
                             Self::preparation(&shared, &nodes, thread_core, thread_slot, false);
                         }
                     }
@@ -1089,13 +1119,6 @@ impl SynRt {
                             if shared.slot_priority_enabled && !is_slot_active(&shared, proc_slot) {
                                 let mut slot_buffers = shared.slot_buffers.write();
                                 slot_buffers[proc_slot].extend(compute_nodes);
-                                print_debug(|| {
-                                    format!(
-                                        "Slot-Priority: Buffered {} init nodes for slot {}",
-                                        slot_buffers[proc_slot].len(),
-                                        proc_slot
-                                    )
-                                });
                             } else {
                                 Self::preparation(
                                     &shared,

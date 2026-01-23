@@ -21,7 +21,7 @@ use std::net::UdpSocket;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::runtime_funcs::SharedData;
 
@@ -31,7 +31,11 @@ pub struct PacketMessage {
     pub packet_bytes: Vec<u8>,
     pub socket_id: usize,
     /// Reception timestamp (rdtsc or micros)
-    pub timestamp: u64,
+    pub timestamp: Instant,
+    /// Receiver thread ID (for recording)
+    pub receiver_thread_id: usize,
+    /// Receiver core ID (for recording)
+    pub receiver_core_id: usize,
 }
 
 /// Network socket types supported by SynStream
@@ -99,6 +103,8 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
         }
     }
 
+    let read_timeout = Duration::from_micros(100);
+
     // Set thread name
     let _ = thread::Builder::new()
         .name(format!("rx-{}", socket_id))
@@ -106,6 +112,7 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
 
     // Get socket and channel references
     let socket = &shared.receiver_sockets[socket_id];
+    let _ = socket.set_read_timeout(Some(read_timeout));
     let tx = &shared.packet_senders[socket_id];
     let drop_counter = &shared.packet_drop_counters[socket_id];
     let shutdown = &shared.shutdown_flag;
@@ -123,7 +130,7 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
 
     loop {
         // Check shutdown signal
-        if shutdown.load(Ordering::Relaxed) {
+        if shutdown.load(Ordering::SeqCst) {
             println!("Receiver {} shutting down", socket_id);
             break;
         }
@@ -143,7 +150,9 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
                 let msg = PacketMessage {
                     packet_bytes: buffer.clone(),
                     socket_id,
-                    timestamp: crate::utils_rdtsc::rdtsc(),
+                    timestamp: Instant::now(),
+                    receiver_thread_id: socket_id, // In single-socket mode, thread_id == socket_id
+                    receiver_core_id: core_id,
                 };
 
                 // Try send (non-blocking to avoid stalling receiver)
@@ -151,6 +160,14 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
                     drop_counter.fetch_add(1, Ordering::Relaxed);
                     eprintln!("Receiver {}: channel full, packet dropped", socket_id);
                 }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Timeout - move to next socket (normal in round-robin)
+                continue;
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                // Timeout - loop back to check shutdown
+                continue;
             }
             Err(e) => {
                 eprintln!("Receiver {}: recv error: {}", socket_id, e);
@@ -237,7 +254,9 @@ pub fn multi_socket_receiver_loop(
                     let msg = PacketMessage {
                         packet_bytes: buffer.clone(),
                         socket_id,
-                        timestamp: crate::utils_rdtsc::rdtsc(),
+                        timestamp: Instant::now(),
+                        receiver_thread_id: thread_id, // Multi-socket mode uses dedicated thread_id
+                        receiver_core_id: core_id,
                     };
 
                     // Try send (non-blocking)
