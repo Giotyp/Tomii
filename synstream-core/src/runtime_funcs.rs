@@ -1219,7 +1219,7 @@ fn collect_successors_for_node(
         // Add successor node info for each instance
         for succ_index in succ_indexes {
             let succ_info =
-                NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.pred_index);
+                NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.index);
             succ_updates.push((succ_info, has_condition, succ_id));
         }
     }
