@@ -762,7 +762,12 @@ impl SynRt {
             if !batch.is_empty() {
                 work_performed = true; // Processing nodes from scheduler or network
             }
-            for (mut node_info, result) in batch {
+
+            // PHASE 2A: Sequential Phase 1 - Store results and decrement atomics
+            // This phase must be sequential due to ID function side effects
+            let mut nodes_for_successor_processing = Vec::new();
+
+            for (mut node_info, result) in batch.into_iter() {
                 print_debug(|| {
                     format!(
                         "Thread {:?} -- Processing Completed {:?}",
@@ -792,7 +797,7 @@ impl SynRt {
                     continue;
                 }
 
-                // store result - single lock acquisition
+                // store result - single lock acquisition (consumes result)
                 shared.node_results.write().set(&node_info, result);
 
                 // Mark this slot as having activity (for persistent completion tracking)
@@ -820,85 +825,38 @@ impl SynRt {
                     shared.slot_pending_tasks[node_info.slot].fetch_sub(1, Ordering::Release);
                 }
 
-                // Get successors
-                let successors: &Vec<IdType> = {
-                    if node_id_usize >= shared.graph.successors.len() {
-                        &Vec::new()
-                    } else {
-                        &shared.graph.successors[node_id_usize]
-                    }
-                };
+                // Collect node for successor processing (Phase 2A: Parallel Phase 2)
+                // Note: result has been consumed by .set(), so we only store node_info
+                nodes_for_successor_processing.push(node_info);
+            }
+
+            // PHASE 2A: Parallel Phase 2 - Collect successor information in parallel
+            // This phase only reads from immutable graph/cache structures, no side effects
+            // We need to convert nodes back to (node_info, dummy_result) for the parallel collection function
+            // Note: The result value is not used in successor collection, only node_info matters
+            let batch_for_parallel: Vec<(NodeInfo, CmTypes)> = nodes_for_successor_processing
+                .iter()
+                .map(|node_info| (node_info.clone(), CmTypes::Bool(false)))
+                .collect();
+
+            let all_successor_updates = if !batch_for_parallel.is_empty() {
+                collect_batch_successors(&shared, &batch_for_parallel)
+            } else {
+                Vec::new()
+            };
+
+            // PHASE 2A: Sequential Phase 3 - Process dependency updates using pre-collected successor data
+            for (idx, node_info) in nodes_for_successor_processing.into_iter().enumerate() {
+                let succ_updates = all_successor_updates.get(idx).cloned().unwrap_or_default();
+
+                let mut nodes_to_schedule: Vec<NodeInfo> = Vec::new();
 
                 print_debug(|| {
                     format!(
                         "Thread {:?} -- Successors of node {:?}: {:?}",
-                        thread_id, node_info, successors
+                        thread_id, node_info, succ_updates.len()
                     )
                 });
-
-                let mut nodes_to_schedule: Vec<NodeInfo> = Vec::new();
-
-                // Collect all potential successors with their info
-                let mut succ_updates: Vec<(NodeInfo, bool, IdType)> = Vec::new();
-
-                for succ_id in successors {
-                    let succ_id = *succ_id;
-                    let succ_cache = &shared.node_cache[succ_id as usize];
-
-                    // Use pre-computed flag for lock-free check
-                    let has_condition = succ_cache.is_condition;
-
-                    // Lock-free remaining count access
-                    let remaining = {
-                        let succ_id_to_rem_idx = shared.node_id_to_rem[succ_id as usize];
-                        if has_condition {
-                            shared.remaining_cond_nodes[node_info.slot][succ_id_to_rem_idx]
-                                .load(Ordering::Acquire)
-                        } else {
-                            shared.remaining_nodes[node_info.slot][succ_id_to_rem_idx]
-                                .load(Ordering::Acquire)
-                        }
-                    };
-
-                    if remaining == 0 {
-                        continue;
-                    }
-
-                    let succ_factor = succ_cache.factor;
-                    let node_factor = node_cache_entry.factor;
-
-                    let pred_count = succ_cache
-                        .pred_vec
-                        .get(node_info.id as usize)
-                        .cloned()
-                        .unwrap_or(0);
-
-                    let succ_indexes = {
-                        if succ_factor == node_factor && pred_count <= 1 {
-                            vec![node_info.index]
-                        } else if !has_condition {
-                            let num_indexes = std::cmp::max(succ_factor, remaining);
-                            (0..num_indexes).collect::<Vec<_>>()
-                        } else {
-                            // Condition nodes: create all successor instances
-                            // The condition check will filter correctly
-                            (0..succ_factor).collect::<Vec<_>>()
-                        }
-                    };
-
-                    print_debug(|| {
-                        format!(
-                            "Thread {:?} -- Processing successor id {} - {:?} of node {:?}",
-                            thread_id, succ_id, succ_indexes, node_info
-                        )
-                    });
-
-                    for succ_index in succ_indexes {
-                        let succ_info =
-                            NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.index);
-                        succ_updates.push((succ_info, has_condition, succ_id));
-                    }
-                }
 
                 // Batch process dependency decrements using resolution state
                 // Collect condition nodes to check OUTSIDE the lock to avoid nested locking
