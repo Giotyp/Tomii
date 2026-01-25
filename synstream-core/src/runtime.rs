@@ -170,6 +170,24 @@ impl SynRt {
             remaining_init.push(slot_remaining_init);
         }
 
+        // Initialize O(1) slot completion counters - Phase 1.2 optimization
+        // These replace the O(N×F) linear scan in slot completion checking
+        let mut slot_pending_tasks = Vec::with_capacity(slots);
+        let mut slot_pending_cond_tasks = Vec::with_capacity(slots);
+
+        for slot in 0..slots {
+            // Sum all initial dependency counts for non-initial nodes in this slot
+            let total_tasks: usize = remaining_init[slot].iter().sum();
+            slot_pending_tasks.push(AtomicUsize::new(total_tasks));
+
+            // Sum all condition node factors for this slot
+            let total_cond_tasks: usize = remaining_cond_nodes[slot]
+                .iter()
+                .map(|atomic| atomic.load(Ordering::Relaxed))
+                .sum();
+            slot_pending_cond_tasks.push(AtomicUsize::new(total_cond_tasks));
+        }
+
         // Initialize slot states for priority processing
         let slot_states = Arc::new(RwLock::new(Vec::new()));
         {
@@ -222,6 +240,8 @@ impl SynRt {
             node_id_is_cond: Arc::new(node_id_is_cond),
             remaining_init: Arc::new(remaining_init),
             initial_prep_done: Arc::new(AtomicUsize::new(0)),
+            slot_pending_tasks: Arc::new(slot_pending_tasks),
+            slot_pending_cond_tasks: Arc::new(slot_pending_cond_tasks),
             batch_buffer,
             batch_last_sent,
             flusher_shutdown,
@@ -784,9 +804,16 @@ impl SynRt {
                 if node_cache_entry.is_condition {
                     shared.remaining_cond_nodes[node_info.slot][node_id_to_rem_idx]
                         .fetch_sub(1, Ordering::Release);
+
+                    // Phase 1.2: Also decrement slot-wide condition counter
+                    shared.slot_pending_cond_tasks[node_info.slot].fetch_sub(1, Ordering::Release);
                 } else if !node_cache_entry.is_initial {
                     shared.remaining_nodes[node_info.slot][node_id_to_rem_idx]
                         .fetch_sub(1, Ordering::Release);
+
+                    // Phase 1.2: Also decrement slot-wide task counter for O(1) completion check
+                    // This maintains synchronization with per-node remaining_nodes atomics
+                    shared.slot_pending_tasks[node_info.slot].fetch_sub(1, Ordering::Release);
                 }
 
                 // Get successors
@@ -995,20 +1022,16 @@ impl SynRt {
                     continue;
                 }
 
-                // Check if all nodes in this slot have been processed (lock-free)
-                // This works across batch boundaries now because stream_slot_activity is persistent
-                let all_nodes_processed = shared.remaining_nodes[proc_slot]
-                    .iter()
-                    .all(|count| count.load(Ordering::Acquire) == 0);
+                // Check if all nodes in this slot have been processed (O(1) lock-free)
+                // Phase 1.2 optimization: Use aggregated counter instead of O(N×F) scan
+                let all_nodes_processed =
+                    shared.slot_pending_tasks[proc_slot].load(Ordering::Acquire) == 0;
 
                 print_debug(|| {
-                    let counts: Vec<usize> = shared.remaining_nodes[proc_slot]
-                        .iter()
-                        .map(|c| c.load(Ordering::Acquire))
-                        .collect();
+                    let pending = shared.slot_pending_tasks[proc_slot].load(Ordering::Acquire);
                     format!(
-                        "Slot {} remaining_nodes: {:?}, all_processed={}",
-                        proc_slot, counts, all_nodes_processed
+                        "Slot {} pending_tasks: {}, all_processed={}",
+                        proc_slot, pending, all_nodes_processed
                     )
                 });
 
@@ -1044,16 +1067,26 @@ impl SynRt {
                         slot_remaining[node_rem_idx].store(*init_val, Ordering::Release);
                     }
 
+                    // Phase 1.2: Reinit slot-wide counters for O(1) completion check
+                    let total_tasks: usize = slot_init.iter().sum();
+                    shared.slot_pending_tasks[proc_slot].store(total_tasks, Ordering::Release);
+
                     // Reinit remaining_cond_nodes for this slot (reset to factor values)
                     let slot_cond_remaining = &shared.remaining_cond_nodes[proc_slot];
+                    let mut total_cond_tasks = 0;
                     for node_id in 0..shared.graph.nodes.len() {
                         if shared.node_id_is_cond[node_id] {
                             let node_id_to_rem_idx = shared.node_id_to_rem[node_id];
                             let factor = shared.node_cache[node_id].factor;
                             slot_cond_remaining[node_id_to_rem_idx]
                                 .store(factor, Ordering::Release);
+                            total_cond_tasks += factor;
                         }
                     }
+
+                    // Phase 1.2: Reinit slot-wide condition counter
+                    shared.slot_pending_cond_tasks[proc_slot]
+                        .store(total_cond_tasks, Ordering::Release);
 
                     // Clear nodes_sent_to_queue for this slot - MUST happen before new nodes spawn
                     shared.resolution_state.clear_slot_sent_flags(proc_slot);

@@ -26,25 +26,30 @@ impl GraphStruct for Graph {
         assert!(node.id as usize == self.nodes.len());
 
         let mut has_preds = false;
-        // Analyze predecessors
+
+        // Phase 1.3: Use HashSet for O(1) duplicate detection during construction
+        // Collect unique predecessors for this node
+        let mut unique_preds = HashSet::new();
         for arg in &node.args {
             if let Some(pred) = &arg.predecessor {
-                // Includes both result predecessors and condition predecessors
-                // so that the last one will trigger the node execution
-
                 if !has_preds {
                     has_preds = true;
                 }
-                // Add predecessor to successors list
-                while self.successors.len() <= pred.id as usize {
-                    self.successors.push(Vec::new());
-                }
-
-                if !self.successors[pred.id as usize].contains(&node.id) {
-                    self.successors[pred.id as usize].push(node.id);
-                }
+                unique_preds.insert(pred.id);
             }
         }
+
+        // Add this node to each unique predecessor's successor list
+        for pred_id in unique_preds {
+            // Ensure successors vec is large enough
+            while self.successors.len() <= pred_id as usize {
+                self.successors.push(Vec::new());
+            }
+
+            // O(1) check instead of O(E) contains() - duplicates already eliminated by HashSet
+            self.successors[pred_id as usize].push(node.id);
+        }
+
         if !has_preds && node.name != "$network" {
             print_debug(|| {
                 format!(
@@ -86,27 +91,30 @@ impl GraphStruct for Graph {
     fn dependency_count_vec(&self) -> Vec<usize> {
         // Return a vector with the dependency count for each node
         let mut dep_count_vec: Vec<usize> = Vec::new();
+
         for node in &self.nodes {
             let mut dep_count = 0;
-            let mut preds_seen: Vec<IdType> = Vec::new();
+            // Phase 1.3: Use HashSet for O(1) duplicate checking instead of O(A×P) Vec::contains
+            let mut preds_seen = HashSet::new();
 
-            // first check barriers
+            // First check barriers - they take precedence for dependency counting
             for arg in &node.args {
                 if arg.type_.is_barrier() {
                     if let Some(pred) = &arg.predecessor {
-                        if !preds_seen.contains(&pred.id) {
-                            preds_seen.push(pred.id);
+                        // O(1) insert returns true if newly inserted
+                        if preds_seen.insert(pred.id) {
                             dep_count += pred.indexes.len();
                         }
                     }
                 }
             }
 
+            // Then check non-barrier predecessors
             for arg in &node.args {
                 if !arg.type_.is_barrier() {
                     if let Some(pred) = &arg.predecessor {
-                        if !preds_seen.contains(&pred.id) {
-                            preds_seen.push(pred.id);
+                        // O(1) insert returns true if newly inserted
+                        if preds_seen.insert(pred.id) {
                             dep_count += pred.indexes.len();
                         }
                     }

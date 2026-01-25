@@ -1,5 +1,5 @@
 use crate::buffers::*;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::cell::UnsafeCell;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -167,7 +167,7 @@ impl ResolutionState for SingleThreadedState {
 
 // Multi-threaded resolution state - uses atomics for lock-free operations
 pub struct MultiThreadedState {
-    dependency_map: Arc<RwLock<VecMap<usize>>>,
+    dependency_map: Arc<AtomicVecMap>,
     nodes_sent_to_queue: Arc<Vec<Vec<AtomicBool>>>,
     completed_slots: Arc<Mutex<HashSet<usize>>>,
     max_factor: usize,
@@ -183,7 +183,7 @@ impl MultiThreadedState {
         dependency_count_vec: Vec<usize>,
         nodes: &Vec<crate::graph_struct::Node>,
     ) -> Self {
-        let mut dependency_map = VecMap::new(0);
+        let mut dependency_map = AtomicVecMap::new();
         dependency_map.init_map(nodes, slots, Some(&dependency_count_vec));
 
         let mut nodes_sent = Vec::new();
@@ -204,7 +204,7 @@ impl MultiThreadedState {
         }
 
         Self {
-            dependency_map: Arc::new(RwLock::new(dependency_map)),
+            dependency_map: Arc::new(dependency_map),
             nodes_sent_to_queue: Arc::new(nodes_sent),
             completed_slots: Arc::new(Mutex::new(HashSet::new())),
             max_factor,
@@ -253,18 +253,17 @@ impl ResolutionState for MultiThreadedState {
 
     #[inline]
     fn decrease_dependency(&self, node_info: &NodeInfo) -> Option<usize> {
-        self.dependency_map.write().decrease(node_info)
+        self.dependency_map.decrease(node_info)
     }
 
     #[inline]
     fn increment_dependency(&self, node_info: &NodeInfo) -> Option<usize> {
-        self.dependency_map.write().increment(node_info)
+        self.dependency_map.increment(node_info)
     }
 
     #[inline]
     fn reinit_dependencies(&self, nodes: &Vec<crate::graph_struct::Node>, slot: usize) {
         self.dependency_map
-            .write()
             .reinit_slot(nodes, slot, Some(&self.dependency_count_vec));
     }
 }

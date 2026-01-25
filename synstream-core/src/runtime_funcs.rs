@@ -274,6 +274,12 @@ pub struct SharedData {
     pub remaining_init: Arc<Vec<Vec<usize>>>,
     pub initial_prep_done: Arc<AtomicUsize>,
 
+    // O(1) slot completion counters - Phase 1.2 optimization
+    // slot_pending_tasks[slot] tracks total pending non-initial tasks for the slot
+    pub slot_pending_tasks: Arc<Vec<AtomicUsize>>,
+    // slot_pending_cond_tasks[slot] tracks total pending condition tasks for the slot
+    pub slot_pending_cond_tasks: Arc<Vec<AtomicUsize>>,
+
     // Slot priority processing state
     pub slot_states: Arc<RwLock<Vec<SlotState>>>,
     pub slot_priority_enabled: bool,
