@@ -24,6 +24,8 @@ use synstream_types::CmTypes;
 thread_local! {
     // Physical core ID where this thread is pinned. usize::MAX means unassigned.
     static WORKER_ID: Cell<usize> = Cell::new(usize::MAX);
+    // Worker thread index (0-based) for metrics. usize::MAX means not a worker thread.
+    static WORKER_INDEX: Cell<usize> = Cell::new(usize::MAX);
 }
 
 /// Get the current thread's physical core ID
@@ -36,9 +38,24 @@ pub fn get_current_worker_id() -> Option<usize> {
     }
 }
 
+/// Get the current thread's worker index (0-based, for metrics)
+pub fn get_current_worker_index() -> Option<usize> {
+    let idx = WORKER_INDEX.with(|c| c.get());
+    if idx == usize::MAX {
+        None
+    } else {
+        Some(idx)
+    }
+}
+
 /// Set the current thread's physical core ID
 pub fn set_current_worker_id(core_id: usize) {
     WORKER_ID.with(|c| c.set(core_id));
+}
+
+/// Set the current thread's worker index
+pub fn set_current_worker_index(index: usize) {
+    WORKER_INDEX.with(|c| c.set(index));
 }
 
 /// Create Threadpool with Rayon
@@ -186,6 +203,8 @@ pub fn create_threadpool(
 
             // Set WORKER_ID to physical core ID (for CSV recording)
             WORKER_ID.with(|c| c.set(core_id.id));
+            // Set WORKER_INDEX to thread index (for metrics array indexing)
+            WORKER_INDEX.with(|c| c.set(thread_index));
 
             // Universal channel indexing: channel_index = physical_core_id - system_core_offset
             let channel_index = core_id.id - system_core_offset;
@@ -206,6 +225,67 @@ pub fn create_threadpool(
         actual_receivers,
         worker_offset,
     )
+}
+
+/// Per-worker utilization tracking (optional, only when recording enabled)
+#[derive(Debug)]
+pub struct WorkerMetrics {
+    /// Number of tasks executed by each worker
+    tasks_per_worker: Vec<AtomicUsize>,
+    /// Cumulative idle time per worker (in nanoseconds)
+    idle_time_per_worker: Vec<AtomicUsize>,
+    /// Last timestamp when worker became idle
+    last_idle_timestamp: Vec<Mutex<Option<Instant>>>,
+}
+
+impl WorkerMetrics {
+    fn new(num_workers: usize) -> Self {
+        Self {
+            tasks_per_worker: (0..num_workers).map(|_| AtomicUsize::new(0)).collect(),
+            idle_time_per_worker: (0..num_workers).map(|_| AtomicUsize::new(0)).collect(),
+            last_idle_timestamp: (0..num_workers).map(|_| Mutex::new(None)).collect(),
+        }
+    }
+
+    fn record_task_start(&self, worker_idx: usize) {
+        // Worker transitioning from idle to busy
+        if let Some(idle_start) = self.last_idle_timestamp[worker_idx].lock().take() {
+            let idle_duration = idle_start.elapsed().as_nanos() as usize;
+            self.idle_time_per_worker[worker_idx].fetch_add(idle_duration, Ordering::Relaxed);
+        }
+    }
+
+    fn record_task_complete(&self, worker_idx: usize) {
+        self.tasks_per_worker[worker_idx].fetch_add(1, Ordering::Relaxed);
+        // Worker now idle
+        *self.last_idle_timestamp[worker_idx].lock() = Some(Instant::now());
+    }
+
+    pub fn print_stats(&self) {
+        println!("\n=== Worker Utilization Statistics ===");
+        for (idx, (tasks, idle_ns)) in self.tasks_per_worker.iter()
+            .zip(self.idle_time_per_worker.iter())
+            .enumerate()
+        {
+            let task_count = tasks.load(Ordering::Relaxed);
+            let idle_us = idle_ns.load(Ordering::Relaxed) / 1000;
+            println!("Worker {}: {} tasks, {}µs idle", idx, task_count, idle_us);
+        }
+
+        // Calculate load imbalance
+        let max_tasks = self.tasks_per_worker.iter()
+            .map(|a| a.load(Ordering::Relaxed))
+            .max().unwrap_or(0);
+        let min_tasks = self.tasks_per_worker.iter()
+            .map(|a| a.load(Ordering::Relaxed))
+            .min().unwrap_or(0);
+
+        if max_tasks > 0 {
+            let imbalance = ((max_tasks - min_tasks) as f64 / max_tasks as f64) * 100.0;
+            println!("Load imbalance: {:.2}%", imbalance);
+        }
+        println!("=====================================\n");
+    }
 }
 
 /// Shared base for schedulers with common state and logic.
@@ -236,6 +316,8 @@ struct SchedulerBase {
     // Stream-specific recording filter
     record_stream: Option<usize>,
     available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
+    // Phase 4: Worker utilization metrics (optional)
+    worker_metrics: Option<Arc<WorkerMetrics>>,
 }
 
 impl SchedulerBase {
@@ -251,6 +333,12 @@ impl SchedulerBase {
         batching_limit: u64,
         record_stream: Option<usize>,
         available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
+        // Phase 2: Accept shared batch infrastructure instead of creating our own
+        batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
+        batch_last_sent: Arc<Mutex<Instant>>,
+        flush_notify_rx: crossbeam_channel::Receiver<()>,
+        flush_notify_tx: crossbeam_channel::Sender<()>,
+        flusher_shutdown: Arc<AtomicUsize>,
     ) -> Self {
         let total_recorders = workers + receiver_threads + system_threads;
         let async_recorder = if record {
@@ -277,10 +365,15 @@ impl SchedulerBase {
             async_recorder.clone(),
         );
 
-        let batch_buffer = Arc::new(Mutex::new(Vec::with_capacity(batching_size)));
-        let batch_last_sent = Arc::new(Mutex::new(Instant::now()));
+        // Phase 2: Use shared batch infrastructure from parameters
         let completed_tx = Arc::new(Mutex::new(None));
-        let (flush_notify_tx, flush_notify_rx) = crossbeam_channel::unbounded();
+
+        // Phase 4: Initialize worker metrics (only when recording enabled)
+        let worker_metrics = if record {
+            Some(Arc::new(WorkerMetrics::new(workers)))
+        } else {
+            None
+        };
 
         Self {
             threadpool: worker_threadpool,
@@ -294,17 +387,18 @@ impl SchedulerBase {
             total_completed: Arc::new(AtomicUsize::new(0)),
             async_recorder,
             base_instant: Arc::new(base_instant),
-            batch_buffer,
-            batch_last_sent,
+            batch_buffer,  // From parameters
+            batch_last_sent,  // From parameters
             batching_size,
             batching_limit,
             completed_tx,
             flusher_handle: Arc::new(Mutex::new(None)),
-            flusher_shutdown: Arc::new(AtomicUsize::new(0)),
-            flush_notify_tx,
-            flush_notify_rx: Arc::new(Mutex::new(flush_notify_rx)),
+            flusher_shutdown,  // From parameters
+            flush_notify_tx,  // From parameters
+            flush_notify_rx: Arc::new(Mutex::new(flush_notify_rx)),  // From parameters
             record_stream,
             available_stream_slots,
+            worker_metrics,  // Phase 4
         }
     }
 
@@ -452,14 +546,31 @@ impl SchedulerBase {
         let recorder_enabled = self.async_recorder.is_some();
         let record_stream = self.record_stream;
         let available_stream_slots = Arc::clone(&self.available_stream_slots);
+        let metrics = self.worker_metrics.clone();  // Phase 4
 
         let (task_id, slot, index) = meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN));
 
         let wrapped_task = move || {
             let worker = get_current_worker_id().unwrap_or(usize::MAX);
+            let worker_idx = get_current_worker_index().unwrap_or(usize::MAX);
+
+            // Phase 4: Record task start (worker becomes busy)
+            if let Some(ref m) = metrics {
+                if worker_idx != usize::MAX {
+                    m.record_task_start(worker_idx);
+                }
+            }
+
             let start = (*base).elapsed().as_nanos();
             task();
             let end = (*base).elapsed().as_nanos();
+
+            // Phase 4: Record task completion (worker becomes idle)
+            if let Some(ref m) = metrics {
+                if worker_idx != usize::MAX {
+                    m.record_task_complete(worker_idx);
+                }
+            }
 
             // Lock-free recording via per-worker channel
             // Check if we should record this slot based on stream filter
@@ -535,6 +646,12 @@ impl FifoScheduler {
         batching_limit: u64,
         record_stream: Option<usize>,
         available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
+        // Phase 2: Accept shared batch infrastructure
+        batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
+        batch_last_sent: Arc<Mutex<Instant>>,
+        flush_notify_rx: crossbeam_channel::Receiver<()>,
+        flush_notify_tx: crossbeam_channel::Sender<()>,
+        flusher_shutdown: Arc<AtomicUsize>,
     ) -> Self {
         Self {
             base: SchedulerBase::new(
@@ -549,6 +666,11 @@ impl FifoScheduler {
                 batching_limit,
                 record_stream,
                 available_stream_slots,
+                batch_buffer,
+                batch_last_sent,
+                flush_notify_rx,
+                flush_notify_tx,
+                flusher_shutdown,
             ),
         }
     }
@@ -587,6 +709,12 @@ impl WorkStealScheduler {
         batching_limit: u64,
         record_stream: Option<usize>,
         available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
+        // Phase 2: Accept shared batch infrastructure
+        batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
+        batch_last_sent: Arc<Mutex<Instant>>,
+        flush_notify_rx: crossbeam_channel::Receiver<()>,
+        flush_notify_tx: crossbeam_channel::Sender<()>,
+        flusher_shutdown: Arc<AtomicUsize>,
     ) -> Self {
         Self {
             base: SchedulerBase::new(
@@ -601,6 +729,11 @@ impl WorkStealScheduler {
                 batching_limit,
                 record_stream,
                 available_stream_slots,
+                batch_buffer,
+                batch_last_sent,
+                flush_notify_rx,
+                flush_notify_tx,
+                flusher_shutdown,
             ),
         }
     }
@@ -773,6 +906,22 @@ impl SchedulerImpl {
             SchedulerImpl::WorkStealing(s) => s.base.get_async_recorder(),
         }
     }
+
+    /// Phase 4: Print worker utilization statistics
+    pub fn print_worker_stats(&self) {
+        match self {
+            SchedulerImpl::Fifo(s) => {
+                if let Some(ref m) = s.base.worker_metrics {
+                    m.print_stats();
+                }
+            }
+            SchedulerImpl::WorkStealing(s) => {
+                if let Some(ref m) = s.base.worker_metrics {
+                    m.print_stats();
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -794,6 +943,12 @@ pub fn create_scheduler(
     batching_limit: u64,
     record_stream: Option<usize>,
     available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
+    // Phase 2: Accept shared batch infrastructure to avoid duplication
+    batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
+    batch_last_sent: Arc<Mutex<Instant>>,
+    flush_notify_rx: crossbeam_channel::Receiver<()>,
+    flush_notify_tx: crossbeam_channel::Sender<()>,
+    flusher_shutdown: Arc<AtomicUsize>,
 ) -> SchedulerImpl {
     match scheduler_type {
         SchedulerType::Fifo => SchedulerImpl::Fifo(FifoScheduler::new(
@@ -808,6 +963,11 @@ pub fn create_scheduler(
             batching_limit,
             record_stream,
             available_stream_slots,
+            batch_buffer,
+            batch_last_sent,
+            flush_notify_rx,
+            flush_notify_tx,
+            flusher_shutdown,
         )),
         SchedulerType::WorkStealing => SchedulerImpl::WorkStealing(WorkStealScheduler::new(
             core_offset,
@@ -821,6 +981,11 @@ pub fn create_scheduler(
             batching_limit,
             record_stream,
             available_stream_slots,
+            batch_buffer,
+            batch_last_sent,
+            flush_notify_rx,
+            flush_notify_tx,
+            flusher_shutdown,
         )),
     }
 }

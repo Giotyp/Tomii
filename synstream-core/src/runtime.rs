@@ -44,6 +44,12 @@ impl SynRt {
         slot_priority_enabled: bool,
         async_recorder: Option<Arc<AsyncRecorder>>, // Optional shared recorder from caller
         available_stream_slots: Arc<RwLock<Vec<usize>>>, // Shared with scheduler for recording filter
+        // Phase 2: Accept shared batch infrastructure from caller
+        batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
+        batch_last_sent: Arc<Mutex<Instant>>,
+        batching_size: usize,
+        flush_notify_tx: crossbeam_channel::Sender<()>,
+        flusher_shutdown: Arc<AtomicUsize>,
     ) -> SynRt {
         // Initialize stream completion counters
         let stream_completion_counts = Arc::new(RwLock::new(Vec::new()));
@@ -57,7 +63,7 @@ impl SynRt {
         drop(completion_counts);
 
         // Build node cache for fast repeated access
-        let node_cache: Vec<NodeCacheEntry> = app_graph
+        let mut node_cache: Vec<NodeCacheEntry> = app_graph
             .nodes
             .iter()
             .map(|node| {
@@ -69,6 +75,13 @@ impl SynRt {
                 )
             })
             .collect();
+
+        // Phase 3B: Populate successor_count for inline execution optimization
+        for (node_id, entry) in node_cache.iter_mut().enumerate() {
+            if node_id < app_graph.successors.len() {
+                entry.successor_count = app_graph.successors[node_id].len();
+            }
+        }
 
         // Core configuration
         let system_threads = scheduler.system_threads();
@@ -102,10 +115,7 @@ impl SynRt {
 
         let job_counter = Arc::new(AtomicUsize::new(0));
 
-        // Initialize batch buffer for scheduler-side batching
-        let batch_buffer = Arc::new(Mutex::new(Vec::new()));
-        let batch_last_sent = Arc::new(Mutex::new(Instant::now()));
-        let flusher_shutdown = Arc::new(AtomicUsize::new(0));
+        // Phase 2: Batch infrastructure is now passed in from caller (no duplication)
 
         // Initialize shared dependency tracking structures
         let dependency_count_vec: Vec<usize> = app_graph.dependency_count_vec();
@@ -222,7 +232,7 @@ impl SynRt {
             stream_complete_counter: Arc::new(AtomicUsize::new(0)),
             available_stream_slots,
             time_buffer,
-            scheduler: Arc::new(RwLock::new(scheduler)),
+            scheduler: Arc::new(scheduler),
             completed_tx: Arc::new(RwLock::new(None)),
             system_threads,
             receiver_threads,
@@ -244,6 +254,8 @@ impl SynRt {
             slot_pending_cond_tasks: Arc::new(slot_pending_cond_tasks),
             batch_buffer,
             batch_last_sent,
+            batching_size,
+            flush_notify_tx: flush_notify_tx.clone(),
             flusher_shutdown,
             slot_states,
             slot_priority_enabled,
@@ -277,7 +289,7 @@ impl SynRt {
         }
 
         // Set completed_tx in the scheduler and start the flusher thread
-        self.shared.scheduler.read().set_completed_tx(completed_tx);
+        self.shared.scheduler.set_completed_tx(completed_tx);
 
         // Initialize node_results
         self.init_results(self.shared.slots);
@@ -421,8 +433,6 @@ impl SynRt {
             sleep(RUN_SLEEP);
             let mut finish: bool = false;
             loop {
-                let scheduler = self.shared.scheduler.read();
-
                 let completed_streams = self.shared.stream_complete_counter.load(Ordering::SeqCst);
 
                 let completed = { completed_streams == self.shared.max_streams };
@@ -439,8 +449,6 @@ impl SynRt {
                     // set exit signal
                     // Process post-nodes if any
                     println!("Processing possible post-nodes...");
-                    // Drop scheduler guard before calling mutable method
-                    drop(scheduler);
                     self.schedule_post_nodes();
                     // Signal flusher thread to shut down (will be done after loop)
                     break;
@@ -451,10 +459,7 @@ impl SynRt {
         }
 
         // Shutdown and flush the flusher thread in the scheduler
-        {
-            let scheduler = self.shared.scheduler.read();
-            scheduler.shutdown_flusher();
-        }
+        self.shared.scheduler.shutdown_flusher();
 
         // Drop all senders to signal resolution threads to exit
         // This will close the channel and unblock the resolution threads
@@ -463,8 +468,7 @@ impl SynRt {
             *tx_lock = None; // Drop the sender in SharedData
         }
         {
-            let scheduler = self.shared.scheduler.read();
-            let tx_ref = scheduler.get_completed_tx_ref();
+            let tx_ref = self.shared.scheduler.get_completed_tx_ref();
             let mut tx_lock = tx_ref.lock();
             *tx_lock = None; // Drop the sender in scheduler
         }
@@ -1267,10 +1271,7 @@ impl SynRt {
     }
 
     pub fn write_record(&self, path: &str) {
-        // Get scheduler with proper error handling
-        let scheduler = self.shared.scheduler.read();
-
-        scheduler.write_record(path);
+        self.shared.scheduler.write_record(path);
         self.write_runtime_record(path);
     }
 

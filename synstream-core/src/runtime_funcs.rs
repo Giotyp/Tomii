@@ -32,6 +32,9 @@ pub struct NodeCacheEntry {
     pub is_condition: bool,
     // Pre-computed index into cond_indexes array (only valid if is_condition is true)
     pub cond_index: usize,
+    // Phase 3B: Number of successors (for inline execution optimization)
+    // Allows fast lookup without traversing successors list
+    pub successor_count: usize,
 }
 
 #[derive(Clone)]
@@ -109,6 +112,7 @@ pub fn node_cache_entry(
             is_initial: false,
             is_condition: false,
             cond_index: 0,
+            successor_count: 0,
         };
     }
 
@@ -222,6 +226,7 @@ pub fn node_cache_entry(
         is_initial: initial_nodes.contains(&node.id),
         is_condition: condition_nodes.contains(&node.id),
         cond_index,
+        successor_count: 0, // Will be filled by caller with successor list length
     }
 }
 
@@ -249,15 +254,17 @@ pub struct SharedData {
     pub time_buffer: Option<Arc<TimeBufferManager>>,
 
     // Shared between threads
-    pub scheduler: Arc<RwLock<SchedulerImpl>>,
+    pub scheduler: Arc<SchedulerImpl>,
     pub completed_tx: Arc<RwLock<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>>,
     pub async_recorder: Option<Arc<crate::async_recorder::AsyncRecorder>>,
     pub base_instant: Arc<Instant>,
     pub job_counter: Arc<AtomicUsize>,
 
-    // Scheduler-side batching structures
+    // Batching infrastructure (direct access to avoid scheduler dereference)
     pub batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
     pub batch_last_sent: Arc<Mutex<Instant>>,
+    pub batching_size: usize,  // immutable after init
+    pub flush_notify_tx: crossbeam_channel::Sender<()>,
     pub flusher_shutdown: Arc<AtomicUsize>,
 
     // Resolution state - abstracted for single vs multi-threaded
@@ -370,14 +377,12 @@ fn execute_task(
         }
     }
 
-    // Add result to batch buffer and flush if full
-    let scheduler_guard = shared.scheduler.read();
-    let scheduler = &*scheduler_guard;
-    let batch_buffer = scheduler.get_batch_buffer();
-    let batching_size = scheduler.get_batching_size();
-    let batch_last_sent = scheduler.get_batch_last_sent();
-    let completed_tx_ref = scheduler.get_completed_tx_ref();
-    let flush_notify = scheduler.get_flush_notify();
+    // Direct SharedData access (Phase 2 optimization - avoid scheduler dereference)
+    let batch_buffer = &shared.batch_buffer;
+    let batching_size = shared.batching_size;
+    let batch_last_sent = &shared.batch_last_sent;
+    let completed_tx_ref = shared.scheduler.get_completed_tx_ref();
+    let flush_notify = &shared.flush_notify_tx;
 
     // Fast path: batching_size=1 means send immediately without buffering
     if batching_size == 1 {
@@ -387,12 +392,28 @@ fn execute_task(
     } else {
         // Single lock operation - check and flush atomically
         let mut batch = batch_buffer.lock();
+
+        // OPTIMIZATION Phase 1A: Eager flush on first node
+        // If batch is empty when adding this result, flush immediately instead of waiting for timeout.
+        // This eliminates 100-200μs batch accumulation delay on the critical path.
+        let flush_immediately = batch.is_empty();
+
         batch.push((node_info.clone(), result));
 
-        if batch.len() >= batching_size {
+        if batch.len() >= batching_size || flush_immediately {
             let batch_to_send = std::mem::replace(&mut *batch, Vec::with_capacity(batching_size));
             drop(batch);
-            *batch_last_sent.lock() = std::time::Instant::now();
+            let now = std::time::Instant::now();
+            *batch_last_sent.lock() = now;
+
+            // Debug tracing: Record batch flush time for analysis
+            if flush_immediately && batch_to_send.len() == 1 {
+                print_debug(|| format!(
+                    "Phase 1A: Eager flush of node {:?} (batch_size={})",
+                    node_info.id,
+                    batch_to_send.len()
+                ));
+            }
 
             if let Some(tx) = completed_tx_ref.lock().as_ref() {
                 let _ = tx.send(batch_to_send);
@@ -450,17 +471,13 @@ pub fn send_to_scheduler(
         let time_buf = shared.time_buffer.clone();
         let shared_clone = Arc::clone(shared);
 
-        // Get the unified scheduler - it handles routing to network pool internally
-        let scheduler_guard = shared.scheduler.read();
-        let scheduler = &*scheduler_guard;
-
         // Spawn task - route to network pool if requested
         let meta_data = (node_info.id, node_info.slot, node_info.index);
         let node_info = node_info.clone();
         let pre_built_args = pre_built_args_vec[i].clone();
 
         if use_network_scheduler {
-            scheduler.spawn_task_with_meta(Some(meta_data), move || {
+            shared.scheduler.spawn_task_with_meta(Some(meta_data), move || {
                 execute_task(
                     &shared_clone,
                     func_ptr,
@@ -471,7 +488,7 @@ pub fn send_to_scheduler(
                 )
             });
         } else {
-            scheduler.spawn_task_with_meta(Some(meta_data), move || {
+            shared.scheduler.spawn_task_with_meta(Some(meta_data), move || {
                 execute_task(
                     &shared_clone,
                     func_ptr,
