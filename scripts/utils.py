@@ -84,58 +84,66 @@ def group_by_slot(records):
     return dict(sorted(slots.items()))
 
 
-def separate_worker_system_slots(slots, system_threads=0):
+def separate_worker_system_slots(slots, system_threads=0, worker_slots_count=0):
     """
-    Separate worker slots from system thread slots.
+    Separate worker slots from system thread slots and receiver thread slots.
+
+    Uses task_id-based detection to identify slot types:
+    - Worker slots: contain regular task_ids (typically 0-100)
+    - System slots: contain high task_ids (65534=prep, 65535=resolution)
+    - Receiver slots: contain packet reception task_ids (typically 0 or very low)
 
     Args:
         slots: Dictionary of slot_id -> records
         system_threads: Number of system threads (default: 0, auto-detect)
+        worker_slots_count: Number of worker slots (default: 0, auto-detect)
 
     Returns:
-        Tuple of (worker_slots, system_slots) dictionaries
+        Tuple of (worker_slots, system_slots, receiver_slots) dictionaries
     """
     all_slots = sorted(slots.keys())
 
     worker_slots = {}
     system_slots = {}
+    receiver_slots = {}
 
-    # Auto-detect system threads if not specified
-    if system_threads == 0:
-        # Find the maximum task_id across all slots
-        max_task_id = 0
-        for slot_records in slots.values():
-            for rec in slot_records:
-                task_id = rec[5]
-                max_task_id = max(max_task_id, task_id)
+    # Find max task_id to identify system thread task_ids
+    max_task_id = 0
+    for slot_records in slots.values():
+        for rec in slot_records:
+            task_id = rec[5]
+            max_task_id = max(max_task_id, task_id)
 
-        # Resolution task is the max, preparation is max - 1
+    # System thread task_ids are very high (65534, 65535)
+    # Only treat as system thread if max_task_id is above a threshold
+    SYSTEM_TASK_THRESHOLD = 10000  # System tasks are IdType::MAX - 1 and IdType::MAX
+
+    if max_task_id >= SYSTEM_TASK_THRESHOLD:
+        # We have system thread tasks in the data
         resolution_task_id = max_task_id
         preparation_task_id = max_task_id - 1
-        system_slot_ids = set()
-
-        for slot_id, slot_records in slots.items():
-            for rec in slot_records:
-                task_id = rec[5]  # task_id is at index 5
-                if task_id == resolution_task_id or task_id == preparation_task_id:
-                    system_slot_ids.add(slot_id)
-
-        system_threads = len(system_slot_ids)
-
-    if system_threads > 0 and len(all_slots) > system_threads:
-        # System thread slots are the highest numbered slots
-        system_slot_threshold = max(all_slots) - system_threads + 1
-
-        for slot_id, slot_records in slots.items():
-            if slot_id >= system_slot_threshold:
-                system_slots[slot_id] = slot_records
-            else:
-                worker_slots[slot_id] = slot_records
     else:
-        # No system threads specified, all are worker slots
-        worker_slots = slots
+        # No system thread tasks detected - all slots are worker or receiver slots
+        resolution_task_id = -1
+        preparation_task_id = -1
 
-    return worker_slots, system_slots
+    packet_rx_task_id = 0  # Packet reception uses task_id 0
+
+    # Classify each slot based on the task_ids it contains
+    for slot_id, slot_records in slots.items():
+        slot_task_ids = set(rec[5] for rec in slot_records)
+
+        # Check if this slot contains system thread tasks
+        if resolution_task_id in slot_task_ids or preparation_task_id in slot_task_ids:
+            system_slots[slot_id] = slot_records
+        # Check if this slot contains ONLY packet reception tasks
+        elif slot_task_ids == {packet_rx_task_id}:
+            receiver_slots[slot_id] = slot_records
+        else:
+            # Regular worker slot
+            worker_slots[slot_id] = slot_records
+
+    return worker_slots, system_slots, receiver_slots
 
 
 def group_by_worker(records):

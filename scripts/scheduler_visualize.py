@@ -12,11 +12,24 @@ on a worker; Time is shown in microseconds by default (use `--units ns/ms/us/s`
 to change). The x-axis is time, and the y-axis is the worker number. The
 color of the bar is determined by the `task_id`.
 
+Slots are categorized as:
+- Worker slots: [0 ... slots-1] - Main computational tasks
+- System slots: [slots ... slots+system_threads-1] - Resolution/preparation threads
+- Receiver slots: [slots+system_threads ... max] - Network packet reception threads
+
+Time baseline (time zero):
+- By default: Earliest received packet timestamp (shows full end-to-end latency)
+- With --no-rcv: Earliest worker task timestamp (excludes packet reception time)
+
 Args:
     csv: Path to CSV file.
     -o, --out: Output image path (default: schedule.png).
     --units: Time units for x-axis (ns, us, ms, s). Default is us.
     --exclude: Comma-separated list of task_id values to exclude from plotting.
+    --slots: Number of worker slots (default: 0, auto-detect).
+    --system-threads: Number of system threads (default: 0, auto-detect).
+    --no-rcv: Use earliest worker task as time zero instead of earliest packet.
+    --slot: Plot only the specified slot (useful when using --record-stream).
 """
 import argparse
 from collections import defaultdict
@@ -52,8 +65,19 @@ def visualize(
     exclude=None,
     task_names=None,
     system_threads=0,
+    worker_slots_count=0,
+    no_rcv=False,
+    plot_slot=None,
 ):
     records = read_csv(csv_path)
+    # filter by specific slot if provided
+    if plot_slot is not None:
+        records = [r for r in records if r[0] == plot_slot]
+        if not records:
+            print(f"No records found for slot {plot_slot} in {csv_path}")
+            return
+        print(f"Filtering to only slot {plot_slot}: {len(records)} records")
+
     # filter excluded task_ids if provided
     exclude_set = set()
     if exclude:
@@ -69,15 +93,19 @@ def visualize(
 
     slots = group_by_slot(records)
 
-    # Separate worker slots from system thread slots based on system_threads parameter
-    worker_slots, system_slots = separate_worker_system_slots(slots, system_threads)
+    # Separate worker slots from system thread slots and receiver thread slots
+    worker_slots, system_slots, receiver_slots = separate_worker_system_slots(
+        slots, system_threads, worker_slots_count
+    )
 
     print(f"Worker slots: {sorted(worker_slots.keys())}")
     print(f"System slots: {sorted(system_slots.keys())}")
+    print(f"Receiver slots: {sorted(receiver_slots.keys())}")
 
     # Identify resolution task_id from system slots
     resolution_task_id = -1
     preparation_task_id = -1
+    packet_rx_task_id = -1
     all_system_records = []
     for sys_slot_records in system_slots.values():
         all_system_records.extend(sys_slot_records)
@@ -89,15 +117,39 @@ def visualize(
         print(f"Resolution task_id identified as: {resolution_task_id}")
         print(f"Preparation task_id identified as: {preparation_task_id}")
 
+    # Identify packet reception task_id from receiver slots
+    all_receiver_records = []
+    for rcv_slot_records in receiver_slots.values():
+        all_receiver_records.extend(rcv_slot_records)
+
+    if all_receiver_records:
+        rcv_task_ids = set(r[5] for r in all_receiver_records)
+        # Packet reception typically uses task_id 0 or IdType::MAX - 2
+        if len(rcv_task_ids) == 1:
+            packet_rx_task_id = list(rcv_task_ids)[0]
+            print(f"Packet RX task_id identified as: {packet_rx_task_id}")
+
     # choose global baseline so all subplots share same time origin
-    # Use the earliest start time from worker records only
+    # Use the earliest packet reception time as baseline (unless --no-rcv is set)
     worker_records = [r for slot_recs in worker_slots.values() for r in slot_recs]
-    if worker_records:
+
+    if not no_rcv and all_receiver_records:
+        # Use earliest received packet as time zero
+        global_min = min(r[2] for r in all_receiver_records)
+        print(f"Using earliest packet reception as time zero (offset: {global_min} ns)")
+    elif worker_records:
+        # Use earliest worker task as time zero
         global_min = min(r[2] for r in worker_records)
-        global_max = max(r[3] for r in worker_records)
+        print(f"Using earliest worker task as time zero (offset: {global_min} ns)")
     else:
         # Fallback if no worker records
         global_min = min(r[2] for r in all_system_records)
+        print(f"Using earliest system task as time zero (offset: {global_min} ns)")
+
+    # Global max is always from worker records (end of computation)
+    if worker_records:
+        global_max = max(r[3] for r in worker_records)
+    else:
         global_max = max(r[3] for r in all_system_records)
 
     # Filter system records: only filter out tasks that start before global_min for resolution tasks
@@ -166,13 +218,14 @@ def visualize(
     print("Per-Task Timing Statistics")
     print("=" * 80)
 
-    # Print global minimum timestamp
+    # Print global minimum timestamp (before offsetting)
     global_min_scaled = global_min / scale
     global_max_scaled = global_max / scale
 
-    print(f"Global Minimum Timestamp: {global_min_scaled:.4f} {units}\n")
-    print(f"Global Maximum Timestamp: {global_max_scaled:.4f} {units}\n")
+    print(f"Global Minimum Timestamp (raw): {global_min_scaled:.4f} {units}")
+    print(f"Global Maximum Timestamp (raw): {global_max_scaled:.4f} {units}")
     print(f"Total Duration: {global_max_scaled - global_min_scaled:.4f} {units}\n")
+    print(f"Offsetting all timestamps by {global_min_scaled:.4f} {units} (time zero)\n")
 
     task_stats = defaultdict(
         lambda: {
@@ -181,22 +234,25 @@ def visualize(
             "min": float("inf"),
             "max": 0,
             "min_start": float("inf"),
+            "max_end": 0,
         }
     )
 
     for rec in records:
         slot, job_id, start_ns, end_ns, worker, task_id, index = rec
-        # Skip system slots
-        if slot in system_slots:
+        # Skip system slots and receiver slots
+        if slot in system_slots or slot in receiver_slots:
             continue
         duration_ns = end_ns - start_ns
         task_stats[task_id]["count"] += 1
         task_stats[task_id]["total_duration"] += duration_ns
         task_stats[task_id]["min"] = min(task_stats[task_id]["min"], duration_ns)
         task_stats[task_id]["max"] = max(task_stats[task_id]["max"], duration_ns)
+        # Apply offset to start/end times for statistics
         task_stats[task_id]["min_start"] = min(
-            task_stats[task_id]["min_start"], start_ns
+            task_stats[task_id]["min_start"], start_ns - global_min
         )
+        task_stats[task_id]["max_end"] = max(task_stats[task_id]["max_end"], end_ns - global_min)
 
     # Print statistics for each task_id
     for task_id in sorted(task_stats.keys()):
@@ -207,17 +263,20 @@ def visualize(
         min_duration = stats["min"]
         max_duration = stats["max"]
         min_start_time = stats["min_start"]
+        max_end_time = stats["max_end"]
 
         total_scaled = total_duration / scale
         avg_scaled = avg_duration / scale
         min_scaled = min_duration / scale
         max_scaled = max_duration / scale
         min_start_scaled = min_start_time / scale
+        max_end_scaled = max_end_time / scale
 
         task_label = id_map.get(task_id, task_id)
         print(f"Task {task_label}:")
         print(f"  Executions: {count}")
         print(f"  First Start: {min_start_scaled:.4f} {units}")
+        print(f"  Last End: {max_end_scaled:.4f} {units}")
         print(f"  Total Time: {total_scaled:.4f} {units}")
         print(f"  Avg/Task: {avg_scaled:.4f} {units}")
         print(f"  Min: {min_scaled:.4f} {units}")
@@ -238,11 +297,12 @@ def visualize(
     if n_worker_slots == 1:
         axs = [axs]
 
-    # overall x limits - start from global_min with small left margin for visualization
-    left_margin = (global_max - global_min) * 0.01  # 1% left margin
-    right_margin = (global_max - global_min) * 0.02  # 2% right margin
-    x_min = (global_min - left_margin) / scale
-    x_max = (global_max + right_margin) / scale
+    # overall x limits - start from 0 (since we offset everything) with small margins
+    duration = global_max - global_min
+    left_margin = duration * 0.01  # 1% left margin
+    right_margin = duration * 0.02  # 2% right margin
+    x_min = -left_margin / scale  # Slightly negative to give breathing room
+    x_max = (duration + right_margin) / scale
 
     # id_map was already built earlier for statistics
     for label in id_map.values():
@@ -262,6 +322,17 @@ def visualize(
             elif tid == preparation_task_id:
                 unique_keys.add("system-prep")
 
+    # Receiver records
+    receiver_workers = set()
+    all_receiver_records_flat = []
+    for rcv_slot_id, rcv_slot_records in receiver_slots.items():
+        for r in rcv_slot_records:
+            tid = r[5]
+            receiver_workers.add(r[4])
+            all_receiver_records_flat.append(r)
+            if tid == packet_rx_task_id:
+                unique_keys.add("packet-rx")
+
     # Define order for legend/colors
     list_keys = []
 
@@ -277,16 +348,23 @@ def visualize(
     if "system-prep" in unique_keys:
         list_keys.append("system-prep")
 
+    # 3. Receiver tasks (append if present in unique_keys)
+    if "packet-rx" in unique_keys:
+        list_keys.append("packet-rx")
+
     color_map = {}
     for i, k in enumerate(list_keys):
         color_map[k] = cmap[i % len(cmap)]
     # Force system-thread entries (resolution and prep) to use a consistent color
     system_res_color = csscolors["black"]
     system_prep_color = csscolors["peru"]
+    packet_rx_color = csscolors["royalblue"]
     if "system-res" in color_map:
         color_map["system-res"] = system_res_color
     if "system-prep" in color_map:
         color_map["system-prep"] = system_prep_color
+    if "packet-rx" in color_map:
+        color_map["packet-rx"] = packet_rx_color
 
     # Plot worker slots with system thread activities side-by-side
     plot_idx = 0
@@ -302,6 +380,14 @@ def visualize(
             elif rec[5] == preparation_task_id:
                 prep_tasks_by_worker[worker].append(rec)
 
+    # Collect all receiver records grouped by worker
+    packet_rx_tasks_by_worker = defaultdict(list)
+    for rcv_slot_id, rcv_slot_records in receiver_slots.items():
+        for rec in rcv_slot_records:
+            worker = rec[4]
+            if rec[5] == packet_rx_task_id:
+                packet_rx_tasks_by_worker[worker].append(rec)
+
     # Plot each worker slot
     for slot, recs in sorted(slots.items()):
         ax = axs[plot_idx]
@@ -313,8 +399,9 @@ def visualize(
         for rec in recs:
             _, job_id, start_ns, end_ns, worker, task_id, index = rec
             workers.add(worker)
-            start = start_ns / scale
-            end = end_ns / scale
+            # Apply offset to start/end times
+            start = (start_ns - global_min) / scale
+            end = (end_ns - global_min) / scale
             width = max(end - start, 1e-6)
 
             label = id_map.get(task_id, task_id)
@@ -329,29 +416,34 @@ def visualize(
                 zorder=2,
             )
 
-        # Collect all system thread workers
+        # Collect all system thread workers and receiver workers
         all_system_workers = set(prep_tasks_by_worker.keys()) | set(
             res_tasks_by_worker.keys()
         )
+        all_receiver_workers = set(packet_rx_tasks_by_worker.keys())
         system_workers_in_slot.update(all_system_workers)
+        system_workers_in_slot.update(all_receiver_workers)
         workers.update(all_system_workers)
+        workers.update(all_receiver_workers)
 
-        # Plot system threads with half-height bars side by side
-        bar_height = 0.4  # Half of normal height for each type
+        # Plot system/receiver threads with third-height bars side by side
+        num_overlay_types = 3  # prep, res, packet-rx
+        bar_height = 0.6 / num_overlay_types  # Divide normal bar height among types
 
-        # Plot resolution tasks (bottom half)
+        # Plot resolution tasks (bottom third)
         for worker in all_system_workers:
             for rec in res_tasks_by_worker[worker]:
                 _, job_id, start_ns, end_ns, _, task_id, index = rec
-                start = start_ns / scale
-                end = end_ns / scale
+                # Apply offset to start/end times
+                start = (start_ns - global_min) / scale
+                end = (end_ns - global_min) / scale
                 width = max(end - start, 1e-6)
 
                 label = "system-res"
                 col = color_map.get(label, system_res_color)
-                # Position at worker - bar_height/2 (bottom half)
+                # Position at worker - bar_height (bottom third)
                 ax.barh(
-                    worker - bar_height / 2,
+                    worker - bar_height,
                     width,
                     left=start,
                     height=bar_height,
@@ -361,19 +453,43 @@ def visualize(
                     zorder=1,
                 )
 
-        # Plot preparation tasks (top half)
+        # Plot preparation tasks (middle third)
         for worker in all_system_workers:
             for rec in prep_tasks_by_worker[worker]:
                 _, job_id, start_ns, end_ns, _, task_id, index = rec
-                start = start_ns / scale
-                end = end_ns / scale
+                # Apply offset to start/end times
+                start = (start_ns - global_min) / scale
+                end = (end_ns - global_min) / scale
                 width = max(end - start, 1e-6)
 
                 label = "system-prep"
                 col = color_map.get(label, system_prep_color)
-                # Position at worker + bar_height/2 (top half)
+                # Position at worker (middle third)
                 ax.barh(
-                    worker + bar_height / 2,
+                    worker,
+                    width,
+                    left=start,
+                    height=bar_height,
+                    align="center",
+                    color=col,
+                    alpha=0.8,
+                    zorder=1,
+                )
+
+        # Plot packet reception tasks (top third)
+        for worker in all_receiver_workers:
+            for rec in packet_rx_tasks_by_worker[worker]:
+                _, job_id, start_ns, end_ns, _, task_id, index = rec
+                # Apply offset to start/end times
+                start = (start_ns - global_min) / scale
+                end = (end_ns - global_min) / scale
+                width = max(end - start, 1e-6)
+
+                label = "packet-rx"
+                col = color_map.get(label, packet_rx_color)
+                # Position at worker + bar_height (top third)
+                ax.barh(
+                    worker + bar_height,
                     width,
                     left=start,
                     height=bar_height,
@@ -421,10 +537,11 @@ def visualize(
     num_worker_cores = len(pure_worker_cores)
     num_system_threads = len(system_slots)
     num_worker_slots = len(slots)
+    num_receiver_threads = len(receiver_slots)
     plt.suptitle(
         f"{title}\n"
         f"Worker Cores: {num_worker_cores} / System Threads: {num_system_threads} / "
-        f"Worker Slots: {num_worker_slots}"
+        f"Receiver Threads: {num_receiver_threads} / Worker Slots: {num_worker_slots}"
     )
 
     # add legend
@@ -488,6 +605,24 @@ def main():
         help="Number of system threads (slots at the end are system thread slots). Use 0 for auto-detect.",
         default=0,
     )
+    p.add_argument(
+        "--slots",
+        type=int,
+        help="Number of worker slots (slots 0 to slots-1 are worker slots). Use 0 for auto-detect.",
+        default=0,
+    )
+    p.add_argument(
+        "--no-rcv",
+        action="store_true",
+        help="Use earliest worker task as time zero instead of earliest received packet.",
+        default=False,
+    )
+    p.add_argument(
+        "--slot",
+        type=int,
+        help="Plot only the specified slot (useful when using --record-stream).",
+        default=None,
+    )
     args = p.parse_args()
     task_names = args.tasks
     print("Task names:", task_names)
@@ -500,6 +635,9 @@ def main():
         exclude=args.exclude,
         task_names=task_names,
         system_threads=args.system_threads,
+        worker_slots_count=args.slots,
+        no_rcv=args.no_rcv,
+        plot_slot=args.slot,
     )
 
 
