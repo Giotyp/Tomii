@@ -184,6 +184,10 @@ fn main() {
             let csv_file = dir.join(format!("{}_sched.csv", time_name));
             synrt.write_record(csv_file.to_str().unwrap());
         }
+    } else {
+        if args.record {
+            synrt.write_record("scheduler_record.csv");
+        }
     }
 }
 

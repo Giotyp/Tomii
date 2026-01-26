@@ -533,7 +533,6 @@ pub fn send_to_scheduler(
     nodes_to_schedule: &Vec<NodeInfo>,
     pre_built_args_vec: &Vec<Option<Vec<CmTypes>>>,
     custom_func_vec: &Vec<Option<CmPtr>>,
-    use_network_scheduler: bool,
 ) {
     for (i, node_info) in nodes_to_schedule.iter().enumerate() {
         // Capture spawn timestamp before any processing
@@ -581,35 +580,19 @@ pub fn send_to_scheduler(
         let node_info = node_info.clone();
         let pre_built_args = pre_built_args_vec[i].clone();
 
-        if use_network_scheduler {
-            shared
-                .scheduler
-                .spawn_task_with_meta(Some(meta_data), move || {
-                    execute_task(
-                        &shared_clone,
-                        func_ptr,
-                        &node_info,
-                        &time_buf,
-                        &node_name,
-                        pre_built_args,
-                        spawn_ns,
-                    )
-                });
-        } else {
-            shared
-                .scheduler
-                .spawn_task_with_meta(Some(meta_data), move || {
-                    execute_task(
-                        &shared_clone,
-                        func_ptr,
-                        &node_info,
-                        &time_buf,
-                        &node_name,
-                        pre_built_args,
-                        spawn_ns,
-                    )
-                });
-        }
+        shared
+            .scheduler
+            .spawn_task_with_meta(Some(meta_data), move || {
+                execute_task(
+                    &shared_clone,
+                    func_ptr,
+                    &node_info,
+                    &time_buf,
+                    &node_name,
+                    pre_built_args,
+                    spawn_ns,
+                )
+            });
     }
 }
 

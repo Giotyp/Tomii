@@ -541,7 +541,6 @@ impl SynRt {
         nodes_to_schedule: &Vec<NodeInfo>,
         thread_core: usize,
         thread_slot: usize,
-        use_network_scheduler: bool,
     ) {
         let start_time = if let Some(tb) = &shared.time_buffer {
             tb.measure_time()
@@ -559,7 +558,6 @@ impl SynRt {
             nodes_to_schedule,
             &pre_built_args_vec,
             &custom_func_vec,
-            use_network_scheduler,
         );
 
         if let Some(tb) = &shared.time_buffer {
@@ -635,7 +633,7 @@ impl SynRt {
 
                 // Send compute nodes to regular scheduler (only active slots)
                 if !compute_nodes.is_empty() {
-                    Self::preparation(&shared, &compute_nodes, thread_core, thread_slot, false);
+                    Self::preparation(&shared, &compute_nodes, thread_core, thread_slot);
                 }
             }
         }
@@ -984,8 +982,9 @@ impl SynRt {
                 // Process each unique successor ONCE using optimized per-node decrements
                 for (succ_node_id, has_cond) in unique_successors {
                     // Call the new optimized method that decrements once and returns all ready indices
-                    let ready_indices =
-                        shared.resolution_state.decrease_and_get_ready(node_info.slot, succ_node_id);
+                    let ready_indices = shared
+                        .resolution_state
+                        .decrease_and_get_ready(node_info.slot, succ_node_id);
 
                     // Schedule all newly ready instances
                     for ready_index in ready_indices {
@@ -1061,7 +1060,7 @@ impl SynRt {
                     for node_info in &active_nodes {
                         *nodes_sent_in_slot.entry(node_info.slot).or_insert(0) += 1;
                     }
-                    Self::preparation(&shared, &active_nodes, thread_core, thread_slot, false);
+                    Self::preparation(&shared, &active_nodes, thread_core, thread_slot);
                 }
 
                 // Buffer nodes from inactive slots
@@ -1204,7 +1203,7 @@ impl SynRt {
                     // Flush buffered nodes from newly activated slot (if any)
                     if let Some(nodes) = buffered_nodes {
                         if !nodes.is_empty() {
-                            Self::preparation(&shared, &nodes, thread_core, thread_slot, false);
+                            Self::preparation(&shared, &nodes, thread_core, thread_slot);
                         }
                     }
 
@@ -1246,7 +1245,6 @@ impl SynRt {
                                     &compute_nodes,
                                     thread_core,
                                     thread_slot,
-                                    false,
                                 );
                             }
                         }
@@ -1314,13 +1312,7 @@ impl SynRt {
                     functions.push(func);
                     post_schedule.push(node_info);
                 }
-                send_to_scheduler(
-                    &self.shared,
-                    &post_schedule,
-                    &pre_build_args,
-                    &functions,
-                    false,
-                );
+                send_to_scheduler(&self.shared, &post_schedule, &pre_build_args, &functions);
                 print_debug(|| format!("Added post node: {}", post_node.name));
                 // Wait until all are completed by checking node_results
                 let mut completed_count = 0;
