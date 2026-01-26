@@ -177,6 +177,31 @@ impl ResolutionState for SingleThreadedState {
             .reinit_slot(nodes, slot, Some(&self.dependency_count_vec));
     }
 
+    fn decrease_and_get_ready(&self, slot: usize, node_id: usize) -> Vec<usize> {
+        let mut ready_indices = Vec::new();
+        let dep_map = self.dependency_map.get_mut();
+
+        // Iterate through all possible instance indices up to max_factor
+        // VecMap::decrease will return None for indices that don't exist for this node
+        for index in 0..self.max_factor {
+            let node_info = NodeInfo::new(node_id as crate::IdType, slot, index, 0);
+
+            // Attempt to decrease the dependency count for this instance
+            if let Some(new_count) = dep_map.decrease(&node_info) {
+                // If dependency count reached zero, this instance is potentially ready
+                if new_count == 0 {
+                    // Check if already sent to avoid duplicate scheduling
+                    if self.try_mark_sent(slot, node_id, index) {
+                        ready_indices.push(index);
+                    }
+                }
+            }
+            // If decrease() returns None, this index doesn't exist for this node - skip it
+        }
+
+        ready_indices
+    }
+
     fn debug_info(&self) -> String {
         format!("{:?}", self)
     }

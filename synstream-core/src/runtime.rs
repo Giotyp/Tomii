@@ -965,9 +965,6 @@ impl SynRt {
                 });
 
                 // Batch process dependency decrements using resolution state
-                // Collect condition nodes to check OUTSIDE the lock to avoid nested locking
-                let mut cond_nodes_to_check: Vec<(NodeInfo, usize)> = Vec::new();
-
                 // if not exist, init nodes_sent for slot to 0
                 let nodes_sent: &mut usize = nodes_sent_in_slot.entry(node_info.slot).or_insert(0);
 
@@ -1001,45 +998,43 @@ impl SynRt {
                         } else {
                             // Collect condition nodes - will evaluate outside lock
                             let cond_idx = shared.node_cache[succ_node_id].cond_index;
-                            cond_nodes_to_check.push((succ_info, cond_idx));
+                            let succ_id = succ_info.id as usize;
+                            let succ_cache = &shared.node_cache[succ_id];
+
+                            // Check for node-level condition (new format)
+                            let condition_passed = if let Some(cond_cache) =
+                                &succ_cache.node_condition
+                            {
+                                let node_cond =
+                                    shared.graph.nodes[succ_id].condition.as_ref().unwrap();
+                                evaluate_node_condition(&shared, &succ_info, cond_cache, node_cond)
+                            } else {
+                                // Fall back to arg-based condition (old format)
+                                conditions_met(&shared, &succ_info, &cond_indexes[cond_idx])
+                            };
+
+                            if condition_passed {
+                                nodes_to_schedule.push(succ_info.clone());
+                                *nodes_sent += 1;
+                            } else {
+                                // Condition failed - restore dependency to prevent zombie state
+                                shared.resolution_state.increment_dependency(&succ_info);
+
+                                // Reset sent flag so it can be marked later
+                                shared.resolution_state.reset_sent(
+                                    node_info.slot,
+                                    succ_info.id as usize,
+                                    succ_info.index,
+                                );
+
+                                print_debug(|| {
+                                    format!(
+                                        "Condition failed for node {:?}[{}] - restored dependency",
+                                        succ_info.id, succ_info.index
+                                    )
+                                });
+                            }
                         }
-                    }
-                }
-
-                // Evaluate conditions OUTSIDE the locks - conditions_met takes node_results.read()
-                for (succ_info, cond_idx) in cond_nodes_to_check {
-                    let succ_id = succ_info.id as usize;
-                    let succ_cache = &shared.node_cache[succ_id];
-
-                    // Check for node-level condition (new format)
-                    let condition_passed = if let Some(cond_cache) = &succ_cache.node_condition {
-                        let node_cond = shared.graph.nodes[succ_id].condition.as_ref().unwrap();
-                        evaluate_node_condition(&shared, &succ_info, cond_cache, node_cond)
-                    } else {
-                        // Fall back to arg-based condition (old format)
-                        conditions_met(&shared, &succ_info, &cond_indexes[cond_idx])
-                    };
-
-                    if condition_passed {
-                        nodes_to_schedule.push(succ_info.clone());
-                        *nodes_sent += 1;
-                    } else {
-                        // Condition failed - restore dependency to prevent zombie state
-                        shared.resolution_state.increment_dependency(&succ_info);
-
-                        // Reset sent flag so it can be marked later
-                        shared.resolution_state.reset_sent(
-                            node_info.slot,
-                            succ_info.id as usize,
-                            succ_info.index,
-                        );
-
-                        print_debug(|| {
-                            format!(
-                                "Condition failed for node {:?}[{}] - restored dependency",
-                                succ_info.id, succ_info.index
-                            )
-                        });
                     }
                 }
 
