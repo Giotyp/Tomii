@@ -343,6 +343,7 @@ pub struct SharedData {
     pub batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
     pub batch_last_sent: Arc<Mutex<Instant>>,
     pub batching_size: usize, // immutable after init
+    pub batching_limit: u64,
     pub flush_notify_tx: crossbeam_channel::Sender<()>,
     pub flusher_shutdown: Arc<AtomicUsize>,
 

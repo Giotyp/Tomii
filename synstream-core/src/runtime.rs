@@ -48,6 +48,7 @@ impl SynRt {
         batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
         batch_last_sent: Arc<Mutex<Instant>>,
         batching_size: usize,
+        batching_limit: u64,
         flush_notify_tx: crossbeam_channel::Sender<()>,
         flusher_shutdown: Arc<AtomicUsize>,
     ) -> SynRt {
@@ -255,6 +256,7 @@ impl SynRt {
             batch_buffer,
             batch_last_sent,
             batching_size,
+            batching_limit,
             flush_notify_tx: flush_notify_tx.clone(),
             flusher_shutdown,
             slot_states,
@@ -650,6 +652,8 @@ impl SynRt {
         let mut receive_finished: bool = false;
         let mut first_packet_received: bool = false;
 
+        let receive_timeout = Duration::from_micros(shared.batching_limit);
+
         // Process completed nodes with dynamic batching from scheduler
         loop {
             // PRIORITY 1: Poll network packets (low-latency path)
@@ -794,11 +798,11 @@ impl SynRt {
             // Track if any work was performed this iteration (network packets, batch processing, etc.)
             let mut work_performed = false;
 
-            // PRIORITY 2: Receive batch from scheduler (non-blocking)
-            let mut batch = match completed_rx.try_recv() {
+            // PRIORITY 2: Receive batch from scheduler
+            let mut batch = match completed_rx.recv_timeout(receive_timeout) {
                 Ok(batch_from_scheduler) => batch_from_scheduler,
-                Err(crossbeam_channel::TryRecvError::Empty) => Vec::new(), // No messages yet, continue
-                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => Vec::new(), // No messages yet, continue
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                     println!(
                         "Resolution thread {} detected channel closure, exiting...",
                         thread_id

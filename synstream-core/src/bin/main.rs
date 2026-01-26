@@ -273,6 +273,7 @@ pub fn run_graph(
         batch_buffer,
         batch_last_sent,
         batching_size,
+        batching_limit,
         flush_notify_tx,
         flusher_shutdown,
     );
