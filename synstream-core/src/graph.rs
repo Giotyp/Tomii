@@ -59,7 +59,8 @@ impl GraphStruct for Graph {
             });
             self.initial_nodes.push(node.id);
         }
-        if Self::has_condition(&node.args) {
+        // Check for both arg-based conditions (old format) and node-level conditions (new format)
+        if Self::has_condition(&node.args) || node.condition.is_some() {
             self.condition_nodes.insert(node.id);
         }
         self.nodes.push(node);

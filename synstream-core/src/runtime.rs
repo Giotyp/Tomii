@@ -988,7 +988,19 @@ impl SynRt {
 
                 // Evaluate conditions OUTSIDE the locks - conditions_met takes node_results.read()
                 for (succ_info, cond_idx) in cond_nodes_to_check {
-                    if conditions_met(&shared, &succ_info, &cond_indexes[cond_idx]) {
+                    let succ_id = succ_info.id as usize;
+                    let succ_cache = &shared.node_cache[succ_id];
+
+                    // Check for node-level condition (new format)
+                    let condition_passed = if let Some(cond_cache) = &succ_cache.node_condition {
+                        let node_cond = shared.graph.nodes[succ_id].condition.as_ref().unwrap();
+                        evaluate_node_condition(&shared, &succ_info, cond_cache, node_cond)
+                    } else {
+                        // Fall back to arg-based condition (old format)
+                        conditions_met(&shared, &succ_info, &cond_indexes[cond_idx])
+                    };
+
+                    if condition_passed {
                         nodes_to_schedule.push(succ_info.clone());
                         *nodes_sent += 1;
                     } else {

@@ -64,13 +64,40 @@ impl InitCondition {
     }
 }
 
-#[derive(Clone)]
+/// Node-level condition (new format)
+#[derive(Clone, Debug)]
+pub struct NodeCondition {
+    pub operation: CondOp,
+    pub eval_value: CmTypes,
+    pub func_ptr: CmPtr,
+    pub args: Vec<Arg>,
+}
+
+impl NodeCondition {
+    pub fn evaluate(&self, result_value: &CmTypes) -> bool {
+        // Evaluate function result against expected value
+        match self.operation {
+            CondOp::Eq => result_value == &self.eval_value,
+            CondOp::Neq => result_value != &self.eval_value,
+            CondOp::Gt => {
+                // Implement if needed
+                false
+            }
+            CondOp::Lt => {
+                // Implement if needed
+                false
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Predecessor {
     pub id: IdType,
     pub indexes: Vec<isize>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Arg {
     pub type_: CmTypes,
     // Optional condition for initialization
@@ -106,6 +133,8 @@ pub struct Node {
     pub func_ptr: Option<CmPtr>,
     // Optional node to loop after execution
     pub loop_: Option<Loop>,
+    // Optional node-level condition
+    pub condition: Option<NodeCondition>,
 }
 
 impl Node {

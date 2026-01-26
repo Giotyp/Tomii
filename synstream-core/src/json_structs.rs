@@ -38,6 +38,16 @@ pub struct ConditionJson {
     pub value_type: String,
 }
 
+// Node-level condition structure (new format)
+#[derive(Debug, Deserialize)]
+pub struct NodeConditionJson {
+    pub operation: String,
+    pub value: String,
+    pub value_type: String,
+    pub function: String,
+    pub args: Vec<ArgJson>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PredJson {
     pub name: String,
@@ -68,6 +78,7 @@ pub struct NodeJson {
     pub loop_: Option<LoopJson>,
     pub loop_args: Option<Vec<ArgJson>>,
     pub args: Vec<ArgJson>,
+    pub condition: Option<NodeConditionJson>,
 }
 
 // Initializations

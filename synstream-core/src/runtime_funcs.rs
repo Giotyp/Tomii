@@ -35,6 +35,16 @@ pub struct NodeCacheEntry {
     // Phase 3B: Number of successors (for inline execution optimization)
     // Allows fast lookup without traversing successors list
     pub successor_count: usize,
+    // Node-level condition cache (new format)
+    pub node_condition: Option<NodeConditionCache>,
+}
+
+#[derive(Clone)]
+pub struct NodeConditionCache {
+    pub operation: CondOp,
+    pub eval_value: CmTypes,
+    pub func_ptr: CmPtr,
+    pub arg_cache: ArgCacheEntry,
 }
 
 #[derive(Clone)]
@@ -113,6 +123,7 @@ pub fn node_cache_entry(
             is_condition: false,
             cond_index: 0,
             successor_count: 0,
+            node_condition: None,
         };
     }
 
@@ -217,6 +228,73 @@ pub fn node_cache_entry(
         0
     };
 
+    // Parse node-level condition if present
+    let node_condition = if let Some(cond) = &node.condition {
+        // Build arg cache for condition args
+        let mut cond_rt_idxs_indexes = Vec::new();
+        let mut cond_buffer_ref_indexes = Vec::new();
+        let mut cond_buffer_values = Vec::new();
+        let mut cond_rt_workers_indexes = Vec::new();
+        let mut cond_rt_network_indexes = Vec::new();
+        let mut cond_real_res_indexes = Vec::new();
+        let mut cond_res_indexes = Vec::new();
+        let mut cond_args_vec = vec![CmTypes::None; cond.args.len()];
+
+        let mut cond_idx_count = 0;
+        for (idx, arg) in cond.args.iter().enumerate() {
+            match &arg.type_ {
+                CmTypes::Ref(obj_id) => {
+                    if *obj_id == 0 {
+                        cond_rt_idxs_indexes.push(cond_idx_count);
+                    } else if *obj_id == 1 {
+                        cond_rt_workers_indexes.push(cond_idx_count);
+                    } else if *obj_id == 2 {
+                        cond_rt_network_indexes.push(cond_idx_count);
+                    } else {
+                        let obj_vec = &init_objects[*obj_id];
+                        if obj_vec.len() > 1 {
+                            cond_buffer_ref_indexes.push(cond_idx_count);
+                            cond_buffer_values.push(obj_vec.clone());
+                        } else {
+                            cond_args_vec[cond_idx_count] = obj_vec[0].clone();
+                        }
+                    }
+                }
+                CmTypes::Res(_) => {
+                    cond_res_indexes.push(cond_idx_count);
+                    cond_real_res_indexes.push(idx);
+                }
+                CmTypes::Barrier(_) => {
+                    // Ignore barriers in condition args
+                }
+                _ => {
+                    cond_args_vec[cond_idx_count] = arg.type_.clone();
+                }
+            }
+            cond_idx_count += 1;
+        }
+
+        let cond_arg_cache = ArgCacheEntry {
+            args: cond_args_vec,
+            buffer_ref_indexes: cond_buffer_ref_indexes,
+            buffer_values: cond_buffer_values,
+            rt_idxs_indexes: cond_rt_idxs_indexes,
+            rt_workers_indexes: cond_rt_workers_indexes,
+            rt_network_indexes: cond_rt_network_indexes,
+            res_indexes: cond_res_indexes,
+            real_res_indexes: cond_real_res_indexes,
+        };
+
+        Some(NodeConditionCache {
+            operation: cond.operation.clone(),
+            eval_value: cond.eval_value.clone(),
+            func_ptr: cond.func_ptr,
+            arg_cache: cond_arg_cache,
+        })
+    } else {
+        None
+    };
+
     NodeCacheEntry {
         factor: node.factor,
         pred_vec,
@@ -227,6 +305,7 @@ pub fn node_cache_entry(
         is_condition: condition_nodes.contains(&node.id),
         cond_index,
         successor_count: 0, // Will be filled by caller with successor list length
+        node_condition,
     }
 }
 
@@ -532,6 +611,33 @@ pub fn conditions_met(
         }
     }
     is_ready
+}
+
+/// Evaluate node-level condition (new format)
+/// Returns true if condition passes (node should be scheduled)
+#[inline]
+pub fn evaluate_node_condition(
+    shared: &Arc<SharedData>,
+    node_info: &NodeInfo,
+    cond_cache: &NodeConditionCache,
+    node_cond: &NodeCondition,
+) -> bool {
+    // Build condition args using cached arg data
+    let cond_args = parse_cached_args(
+        shared,
+        &cond_cache.arg_cache,
+        node_info.id,
+        node_info.index,
+        node_info.slot,
+        node_info.pred_index,
+        None,
+    );
+
+    // Execute condition function to get result
+    let cond_result = (cond_cache.func_ptr)(cond_args);
+
+    // Evaluate result against expected value using operation
+    node_cond.evaluate(&cond_result)
 }
 
 #[inline]

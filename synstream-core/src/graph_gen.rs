@@ -257,6 +257,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             factor: network_config.stream_packets,
             func_ptr: None,
             loop_: None,
+            condition: None,
         };
         graph.add_node(net_node);
     }
@@ -304,6 +305,33 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             }
         };
 
+        // Parse node-level condition if present
+        let condition = if let Some(cond_json) = &node_json.condition {
+            let cond_func_ptr = get_func(&cond_json.function)
+                .expect(&format!("Condition function '{}' not found", cond_json.function));
+            let cond_operation = CondOp::from_str(&cond_json.operation)
+                .expect(&format!("Invalid condition operation: {}", cond_json.operation));
+
+            // Parse condition value
+            let cond_value = string_to_cmtype(cond_json.value_type.clone(), cond_json.value.clone())
+                .expect(&format!("Failed to parse condition value: {}", cond_json.value));
+
+            // Parse condition args
+            let mut cond_args = Vec::new();
+            for arg_json in &cond_json.args {
+                cond_args.push(parse_arg(arg_json, &init_vec, &obj_id_map, &name_to_id));
+            }
+
+            Some(NodeCondition {
+                operation: cond_operation,
+                eval_value: cond_value,
+                func_ptr: cond_func_ptr,
+                args: cond_args,
+            })
+        } else {
+            None
+        };
+
         let node_count = NodeCount.fetch_add(1, SeqCst);
         name_to_id.insert(node_json.name.clone(), node_count);
 
@@ -315,6 +343,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             factor: factor,
             func_ptr,
             loop_,
+            condition,
         };
 
         graph.add_node(node);
@@ -345,6 +374,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             factor,
             func_ptr,
             loop_: None,
+            condition: None,
         };
 
         graph.add_post_node(node);
