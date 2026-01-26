@@ -66,7 +66,15 @@ pub fn create_threadpool(
     receiver_threads: usize,
     system_threads: usize,
     async_recorder: Option<Arc<AsyncRecorder>>,
-) -> (ThreadPool, usize, usize, usize, usize, usize) {
+) -> (
+    ThreadPool,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    Option<core_affinity::CoreId>,
+) {
     // Create threadpool and pin workers to cores
     let mut core_ids = core_affinity::get_core_ids().unwrap();
     core_ids.sort();
@@ -88,16 +96,18 @@ pub fn create_threadpool(
         actual_workers,
         actual_receivers,
         actual_system_threads,
+        main_core_opt,
     ) = if available_cores < 2 {
         panic!(
             "Insufficient cores: need minimum 2 cores (1 system + 1 worker), found {}",
             available_cores
         );
-    } else if core_offset + total_needed <= available_cores {
-        // Ideal case: can honor offset and allocate all threads
-        let sys_start = core_offset;
-        let recv_start = core_offset + system_threads;
-        let worker_start = core_offset + system_threads + receiver_threads;
+    } else if core_offset + total_needed + 1 <= available_cores {
+        // We can reserve an extra core for the main thread at `core_offset`.
+        let main_idx = core_offset;
+        let sys_start = core_offset + 1;
+        let recv_start = sys_start + system_threads;
+        let worker_start = recv_start + receiver_threads;
         (
             sys_start,
             recv_start,
@@ -105,16 +115,31 @@ pub fn create_threadpool(
             workers,
             receiver_threads,
             system_threads,
+            Some(core_ids[main_idx].clone()),
+        )
+    } else if core_offset + total_needed <= available_cores {
+        // Can honor requested offset but no spare core for main
+        let sys_start = core_offset;
+        let recv_start = core_offset + system_threads;
+        let worker_start = recv_start + receiver_threads;
+        (
+            sys_start,
+            recv_start,
+            worker_start,
+            workers,
+            receiver_threads,
+            system_threads,
+            None,
         )
     } else if total_needed <= available_cores {
-        // Can fit all threads but not with requested offset
+        // Fit all threads but not with requested offset: use offset 0
         eprintln!(
             "Warning: Cannot honor core_offset {}. Using offset 0 instead.",
             core_offset
         );
         let sys_start = 0;
         let recv_start = system_threads;
-        let worker_start = system_threads + receiver_threads;
+        let worker_start = recv_start + receiver_threads;
         (
             sys_start,
             recv_start,
@@ -122,16 +147,16 @@ pub fn create_threadpool(
             workers,
             receiver_threads,
             system_threads,
+            None,
         )
     } else {
-        // Not enough cores for all threads - reduce proportionally
-        let max_system = 1; // Always need at least 1 system thread
+        // Not enough cores: reduce proportionally
+        let max_system = 1; // at least one system thread
         let remaining = available_cores.saturating_sub(max_system);
         let max_receivers = receiver_threads.min(remaining / 2).max(0);
         let max_workers = remaining.saturating_sub(max_receivers).max(1);
         eprintln!(
-                "Warning: Requested {} system + {} receivers + {} workers = {} total exceeds {} available cores.\n\
-                Using {} system at core 0, {} receivers starting at core {}, {} workers starting at core {}.",
+                "Warning: Requested {} system + {} receivers + {} workers = {} total exceeds {} available cores.\nUsing {} system at core 0, {} receivers starting at core {}, {} workers starting at core {}.",
                 system_threads, receiver_threads, workers, total_needed, available_cores,
                 max_system, max_receivers, max_system, max_workers, max_system + max_receivers
             );
@@ -142,6 +167,7 @@ pub fn create_threadpool(
             max_workers,
             max_receivers,
             max_system,
+            None,
         )
     };
 
@@ -169,6 +195,9 @@ pub fn create_threadpool(
     // Print core allocation
     println!("========== Core Allocation ==========");
     println!("Available cores: {}", available_cores);
+    if let Some(main_core) = main_core_opt.clone() {
+        println!("Main thread: pinned at core {:?}", main_core);
+    }
     println!(
         "System threads: {} at cores {}..{}",
         actual_system_threads,
@@ -224,6 +253,7 @@ pub fn create_threadpool(
         receiver_offset,
         actual_receivers,
         worker_offset,
+        main_core_opt,
     )
 }
 
@@ -263,7 +293,9 @@ impl WorkerMetrics {
 
     pub fn print_stats(&self) {
         println!("\n=== Worker Utilization Statistics ===");
-        for (idx, (tasks, idle_ns)) in self.tasks_per_worker.iter()
+        for (idx, (tasks, idle_ns)) in self
+            .tasks_per_worker
+            .iter()
             .zip(self.idle_time_per_worker.iter())
             .enumerate()
         {
@@ -273,12 +305,18 @@ impl WorkerMetrics {
         }
 
         // Calculate load imbalance
-        let max_tasks = self.tasks_per_worker.iter()
+        let max_tasks = self
+            .tasks_per_worker
+            .iter()
             .map(|a| a.load(Ordering::Relaxed))
-            .max().unwrap_or(0);
-        let min_tasks = self.tasks_per_worker.iter()
+            .max()
+            .unwrap_or(0);
+        let min_tasks = self
+            .tasks_per_worker
+            .iter()
             .map(|a| a.load(Ordering::Relaxed))
-            .min().unwrap_or(0);
+            .min()
+            .unwrap_or(0);
 
         if max_tasks > 0 {
             let imbalance = ((max_tasks - min_tasks) as f64 / max_tasks as f64) * 100.0;
@@ -297,6 +335,8 @@ struct SchedulerBase {
     receiver_core_offset: usize,
     receiver_threads: usize,
     worker_core_offset: usize,
+    // Optional reserved core for main/orchestrator thread
+    main_core: Option<core_affinity::CoreId>,
     pending_jobs: Arc<AtomicUsize>,
     total_spawned: Arc<AtomicUsize>,
     total_completed: Arc<AtomicUsize>,
@@ -357,6 +397,7 @@ impl SchedulerBase {
             receiver_core_offset,
             receiver_threads,
             worker_core_offset,
+            main_core,
         ) = create_threadpool(
             core_offset,
             workers,
@@ -382,23 +423,24 @@ impl SchedulerBase {
             receiver_core_offset,
             receiver_threads,
             worker_core_offset,
+            main_core,
             pending_jobs: Arc::new(AtomicUsize::new(0)),
             total_spawned: Arc::new(AtomicUsize::new(0)),
             total_completed: Arc::new(AtomicUsize::new(0)),
             async_recorder,
             base_instant: Arc::new(base_instant),
-            batch_buffer,  // From parameters
-            batch_last_sent,  // From parameters
+            batch_buffer,    // From parameters
+            batch_last_sent, // From parameters
             batching_size,
             batching_limit,
             completed_tx,
             flusher_handle: Arc::new(Mutex::new(None)),
-            flusher_shutdown,  // From parameters
+            flusher_shutdown, // From parameters
             flush_notify_tx,  // From parameters
-            flush_notify_rx: Arc::new(Mutex::new(flush_notify_rx)),  // From parameters
+            flush_notify_rx: Arc::new(Mutex::new(flush_notify_rx)), // From parameters
             record_stream,
             available_stream_slots,
-            worker_metrics,  // Phase 4
+            worker_metrics, // Phase 4
         }
     }
 
@@ -546,7 +588,7 @@ impl SchedulerBase {
         let recorder_enabled = self.async_recorder.is_some();
         let record_stream = self.record_stream;
         let available_stream_slots = Arc::clone(&self.available_stream_slots);
-        let metrics = self.worker_metrics.clone();  // Phase 4
+        let metrics = self.worker_metrics.clone(); // Phase 4
 
         let (task_id, slot, index) = meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN));
 
@@ -625,6 +667,10 @@ impl SchedulerBase {
 
     fn get_async_recorder(&self) -> Option<Arc<AsyncRecorder>> {
         self.async_recorder.clone()
+    }
+
+    fn get_main_core(&self) -> Option<core_affinity::CoreId> {
+        self.main_core.clone()
     }
 }
 
@@ -904,6 +950,13 @@ impl SchedulerImpl {
         match self {
             SchedulerImpl::Fifo(s) => s.base.get_async_recorder(),
             SchedulerImpl::WorkStealing(s) => s.base.get_async_recorder(),
+        }
+    }
+
+    pub fn main_core(&self) -> Option<core_affinity::CoreId> {
+        match self {
+            SchedulerImpl::Fifo(s) => s.base.get_main_core(),
+            SchedulerImpl::WorkStealing(s) => s.base.get_main_core(),
         }
     }
 

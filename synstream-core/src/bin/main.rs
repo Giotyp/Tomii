@@ -1,4 +1,5 @@
 use clap::Parser;
+use core_affinity;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -258,6 +259,13 @@ pub fn run_graph(
         flush_notify_tx.clone(),
         flusher_shutdown.clone(),
     );
+
+    // Pin main thread to reserved core if scheduler reserved one
+    if let Some(core_id) = scheduler.main_core() {
+        // Attempt to pin the current (main) thread to the reserved core
+        core_affinity::set_for_current(core_id);
+        println!("Pinned main thread to core {:?}", core_id);
+    }
 
     let mut synrt = SynRt::new(
         graph,
