@@ -342,7 +342,7 @@ pub struct SharedData {
     // Batching infrastructure (direct access to avoid scheduler dereference)
     pub batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
     pub batch_last_sent: Arc<Mutex<Instant>>,
-    pub batching_size: usize,  // immutable after init
+    pub batching_size: usize, // immutable after init
     pub flush_notify_tx: crossbeam_channel::Sender<()>,
     pub flusher_shutdown: Arc<AtomicUsize>,
 
@@ -391,8 +391,28 @@ fn execute_task(
     time_buf: &Option<Arc<TimeBufferManager>>,
     node_name: &str,
     pre_built_args: Option<Vec<CmTypes>>,
+    spawn_ns: u128,
 ) {
+    // Capture execution start timestamp immediately
+    let exec_start_ns = shared.base_instant.elapsed().as_nanos();
+
     let worker_id = crate::scheduler::get_current_worker_id().unwrap_or(usize::MAX);
+
+    // Record scheduling latency if async recorder enabled and slot should be recorded
+    if let Some(recorder) = &shared.async_recorder {
+        if should_record_slot(shared, node_info.slot) {
+            let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
+            crate::async_recorder::submit_record(crate::Record {
+                slot: node_info.slot,
+                job_id,
+                start_ns: spawn_ns,
+                end_ns: exec_start_ns,
+                worker: worker_id,
+                task_id: IdType::MAX - 3 * (node_info.id as IdType),
+                index: node_info.index,
+            });
+        }
+    }
 
     // Measure argument building time separately
     // let arg_build_start = if !node_info.post_node {
@@ -487,11 +507,13 @@ fn execute_task(
 
             // Debug tracing: Record batch flush time for analysis
             if flush_immediately && batch_to_send.len() == 1 {
-                print_debug(|| format!(
-                    "Phase 1A: Eager flush of node {:?} (batch_size={})",
-                    node_info.id,
-                    batch_to_send.len()
-                ));
+                print_debug(|| {
+                    format!(
+                        "Phase 1A: Eager flush of node {:?} (batch_size={})",
+                        node_info.id,
+                        batch_to_send.len()
+                    )
+                });
             }
 
             if let Some(tx) = completed_tx_ref.lock().as_ref() {
@@ -513,6 +535,9 @@ pub fn send_to_scheduler(
     use_network_scheduler: bool,
 ) {
     for (i, node_info) in nodes_to_schedule.iter().enumerate() {
+        // Capture spawn timestamp before any processing
+        let spawn_ns = shared.base_instant.elapsed().as_nanos();
+
         let (func_ptr, node_name) = {
             if node_info.post_node {
                 let nodes = &shared
@@ -556,27 +581,33 @@ pub fn send_to_scheduler(
         let pre_built_args = pre_built_args_vec[i].clone();
 
         if use_network_scheduler {
-            shared.scheduler.spawn_task_with_meta(Some(meta_data), move || {
-                execute_task(
-                    &shared_clone,
-                    func_ptr,
-                    &node_info,
-                    &time_buf,
-                    &node_name,
-                    pre_built_args,
-                )
-            });
+            shared
+                .scheduler
+                .spawn_task_with_meta(Some(meta_data), move || {
+                    execute_task(
+                        &shared_clone,
+                        func_ptr,
+                        &node_info,
+                        &time_buf,
+                        &node_name,
+                        pre_built_args,
+                        spawn_ns,
+                    )
+                });
         } else {
-            shared.scheduler.spawn_task_with_meta(Some(meta_data), move || {
-                execute_task(
-                    &shared_clone,
-                    func_ptr,
-                    &node_info,
-                    &time_buf,
-                    &node_name,
-                    pre_built_args,
-                )
-            });
+            shared
+                .scheduler
+                .spawn_task_with_meta(Some(meta_data), move || {
+                    execute_task(
+                        &shared_clone,
+                        func_ptr,
+                        &node_info,
+                        &time_buf,
+                        &node_name,
+                        pre_built_args,
+                        spawn_ns,
+                    )
+                });
         }
     }
 }
@@ -1216,9 +1247,7 @@ pub fn collect_batch_successors(
 
         batch
             .par_iter()
-            .map(|(node_info, _result)| {
-                collect_successors_for_node(shared, node_info)
-            })
+            .map(|(node_info, _result)| collect_successors_for_node(shared, node_info))
             .collect()
     } else if batch_len == 1 {
         // Single-node path: sequential without rayon overhead
@@ -1287,8 +1316,7 @@ fn collect_successors_for_node(
                 shared.remaining_cond_nodes[node_info.slot][succ_id_to_rem_idx]
                     .load(Ordering::Acquire)
             } else {
-                shared.remaining_nodes[node_info.slot][succ_id_to_rem_idx]
-                    .load(Ordering::Acquire)
+                shared.remaining_nodes[node_info.slot][succ_id_to_rem_idx].load(Ordering::Acquire)
             }
         };
 
@@ -1324,8 +1352,7 @@ fn collect_successors_for_node(
 
         // Add successor node info for each instance
         for succ_index in succ_indexes {
-            let succ_info =
-                NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.index);
+            let succ_info = NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.index);
             succ_updates.push((succ_info, has_condition, succ_id));
         }
     }

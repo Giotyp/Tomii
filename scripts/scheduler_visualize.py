@@ -12,6 +12,12 @@ on a worker; Time is shown in microseconds by default (use `--units ns/ms/us/s`
 to change). The x-axis is time, and the y-axis is the worker number. The
 color of the bar is determined by the `task_id`.
 
+Scheduling Latency Visualization:
+- Automatically detects scheduling latency records (task_id = IdType::MAX - 3*original_task_id)
+- Displays spawn time as a colored circle marker (○)
+- Shows scheduling delay as a dashed line connecting spawn to execution start
+- Provides detailed latency statistics (avg, median, min, max, P95, P99)
+
 Slots are categorized as:
 - Worker slots: [0 ... slots-1] - Main computational tasks
 - System slots: [slots ... slots+system_threads-1] - Resolution/preparation threads
@@ -68,6 +74,7 @@ def visualize(
     worker_slots_count=0,
     no_rcv=False,
     plot_slot=None,
+    plot_latency=False,
 ):
     records = read_csv(csv_path)
     # filter by specific slot if provided
@@ -77,6 +84,54 @@ def visualize(
             print(f"No records found for slot {plot_slot} in {csv_path}")
             return
         print(f"Filtering to only slot {plot_slot}: {len(records)} records")
+
+    # ========================================================================
+    # SCHEDULING LATENCY DETECTION: Separate execution and scheduling records
+    # ========================================================================
+    # Encoding: task_id = IdType::MAX - 3 * original_task_id for scheduling latency
+    # Detect IdType::MAX as the maximum task_id in the dataset
+    all_task_ids = [r[5] for r in records]
+    max_task_id = max(all_task_ids)
+    IDTYPE_MAX = max_task_id  # Assume max is at or near IdType::MAX
+
+    print(f"\nScheduling Latency Detection:")
+    print(f"  Estimated IdType::MAX: {IDTYPE_MAX}")
+
+    scheduling_latency_recs = []
+    execution_recs = []
+
+    for rec in records:
+        slot, job_id, start_ns, end_ns, worker, task_id, index = rec
+
+        offset = IDTYPE_MAX - task_id
+
+        # Heuristic: scheduling latency records have offset = 3*k for small k
+        # Also check that it's not a system task (which use MAX-1, MAX-2)
+        if offset > 0 and offset % 3 == 0:
+            original_task_id = offset // 3
+            # Sanity check: original task_id should be reasonable (< 1000)
+            # This avoids false positives from regular tasks
+            if 0 < original_task_id < 1000:
+                scheduling_latency_recs.append(
+                    {
+                        "slot": slot,
+                        "spawn_ns": start_ns,  # When task was spawned to scheduler
+                        "exec_ns": end_ns,  # When worker started executing
+                        "worker": worker,
+                        "original_task_id": original_task_id,
+                        "index": index,
+                        "job_id": job_id,
+                    }
+                )
+                continue
+
+        execution_recs.append(rec)
+
+    print(f"  Found {len(scheduling_latency_recs)} scheduling latency records")
+    print(f"  Found {len(execution_recs)} execution records")
+
+    # Use execution_recs instead of records from here on
+    records = execution_recs
 
     # filter excluded task_ids if provided
     exclude_set = set()
@@ -292,6 +347,76 @@ def visualize(
 
     print("=" * 80 + "\n")
 
+    # ========================================================================
+    # SCHEDULING LATENCY STATISTICS
+    # ========================================================================
+    if scheduling_latency_recs:
+        print("=" * 80)
+        print("Scheduling Latency Statistics")
+        print("=" * 80)
+        print(f"Total scheduling latency records: {len(scheduling_latency_recs)}\n")
+
+        # Group by original task_id
+        latency_stats = defaultdict(
+            lambda: {
+                "count": 0,
+                "total_latency": 0,
+                "min": float("inf"),
+                "max": 0,
+                "latencies": [],
+            }
+        )
+
+        for sched_rec in scheduling_latency_recs:
+            orig_task_id = sched_rec["original_task_id"]
+            latency_ns = sched_rec["exec_ns"] - sched_rec["spawn_ns"]
+
+            latency_stats[orig_task_id]["count"] += 1
+            latency_stats[orig_task_id]["total_latency"] += latency_ns
+            latency_stats[orig_task_id]["min"] = min(
+                latency_stats[orig_task_id]["min"], latency_ns
+            )
+            latency_stats[orig_task_id]["max"] = max(
+                latency_stats[orig_task_id]["max"], latency_ns
+            )
+            latency_stats[orig_task_id]["latencies"].append(latency_ns)
+
+        # Print statistics for each task
+        for task_id in sorted(latency_stats.keys()):
+            stats = latency_stats[task_id]
+            count = stats["count"]
+            total_latency = stats["total_latency"]
+            avg_latency = total_latency / count
+            min_latency = stats["min"]
+            max_latency = stats["max"]
+
+            # Calculate median and percentiles
+            latencies = sorted(stats["latencies"])
+            median_latency = latencies[len(latencies) // 2]
+            p95_latency = latencies[int(len(latencies) * 0.95)]
+            p99_latency = latencies[int(len(latencies) * 0.99)]
+
+            total_scaled = total_latency / scale
+            avg_scaled = avg_latency / scale
+            min_scaled = min_latency / scale
+            max_scaled = max_latency / scale
+            median_scaled = median_latency / scale
+            p95_scaled = p95_latency / scale
+            p99_scaled = p99_latency / scale
+
+            task_label = id_map.get(task_id, task_id)
+            print(f"Task {task_label}:")
+            print(f"  Measurements: {count}")
+            print(f"  Avg Latency: {avg_scaled:.4f} {units}")
+            print(f"  Median: {median_scaled:.4f} {units}")
+            print(f"  Min: {min_scaled:.4f} {units}")
+            print(f"  Max: {max_scaled:.4f} {units}")
+            print(f"  P95: {p95_scaled:.4f} {units}")
+            print(f"  P99: {p99_scaled:.4f} {units}")
+            print()
+
+        print("=" * 80 + "\n")
+
     n_worker_slots = len(slots)
 
     if n_worker_slots == 0:
@@ -502,6 +627,46 @@ def visualize(
                 alpha=0.7,
             )
 
+        # ====================================================================
+        # SCHEDULING LATENCY VISUALIZATION: Plot spawn markers with lines
+        # ====================================================================
+        # Filter scheduling latency records for this slot
+        if plot_latency:
+            slot_sched_recs = [r for r in scheduling_latency_recs if r["slot"] == slot]
+
+            for sched_rec in slot_sched_recs:
+                spawn_time = (sched_rec["spawn_ns"] - global_min) / scale
+                exec_time = (sched_rec["exec_ns"] - global_min) / scale
+                worker = sched_rec["worker"]
+                orig_task_id = sched_rec["original_task_id"]
+
+                # Get color from original task
+                label = id_map.get(orig_task_id, orig_task_id)
+                col = color_map.get(label, "gray")
+
+                # Draw dashed line from spawn to execution start (scheduling latency gap)
+                ax.plot(
+                    [spawn_time, exec_time],
+                    [worker, worker],
+                    color="black",
+                    linewidth=1.5,
+                    alpha=0.6,
+                    zorder=2.5,
+                    linestyle="--",
+                )
+
+                # Draw marker at spawn time (when task was sent to scheduler)
+                ax.plot(
+                    spawn_time,
+                    worker,
+                    marker="o",
+                    markersize=5,
+                    color=col,
+                    markeredgecolor="black",
+                    markeredgewidth=0.8,
+                    zorder=3,
+                )  # Higher zorder to appear on top
+
         ax.set_ylabel(f"slot {slot}")
         if workers:
             ax.set_yticks(sorted(list(workers)))
@@ -546,6 +711,26 @@ def visualize(
     for key in list_keys[:max_legend]:
         patch = mpatches.Patch(color=color_map.get(key, "gray"), label=str(key))
         legend_handles.append(patch)
+
+    # Add scheduling latency marker explanation if we have latency records
+    if scheduling_latency_recs and plot_latency:
+        import matplotlib.lines as mlines
+
+        # Create a custom legend entry for spawn markers
+        spawn_marker = mlines.Line2D(
+            [],
+            [],
+            color="gray",
+            marker="o",
+            markersize=5,
+            markeredgecolor="black",
+            markeredgewidth=0.8,
+            linestyle="--",
+            linewidth=1.5,
+            label="Spawn → Exec (sched latency)",
+        )
+        legend_handles.append(spawn_marker)
+
     if legend_handles:
         # place legend above the top subplot
         axs[0].legend(
@@ -616,6 +801,14 @@ def main():
         help="Plot only the specified slot (useful when using --record-stream).",
         default=None,
     )
+
+    p.add_argument(
+        "--plot-latency",
+        action="store_true",
+        help="Enable scheduling latency visualization (spawn markers and lines).",
+        default=False,
+    )
+
     args = p.parse_args()
     task_names = args.tasks
     print("Task names:", task_names)
@@ -631,6 +824,7 @@ def main():
         worker_slots_count=args.slots,
         no_rcv=args.no_rcv,
         plot_slot=args.slot,
+        plot_latency=args.plot_latency,
     )
 
 
