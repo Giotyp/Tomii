@@ -145,6 +145,11 @@ impl SynRt {
                 &app_graph.nodes,
             ))
         };
+        // Print ResolutionState
+        println!(
+            "\nResolutionState initialized:\n{}\n",
+            resolution_state.debug_info()
+        );
 
         // Initialize remaining nodes trackers with AtomicUsize for thread-safe access
         let mut remaining_nodes = Vec::new();

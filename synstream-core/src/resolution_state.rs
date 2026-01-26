@@ -2,6 +2,7 @@ use crate::buffers::*;
 use parking_lot::Mutex;
 use std::cell::UnsafeCell;
 use std::collections::HashSet;
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -56,6 +57,9 @@ pub trait ResolutionState: Send + Sync {
 
     // Reinitialize dependency map for a slot
     fn reinit_dependencies(&self, nodes: &Vec<crate::graph_struct::Node>, slot: usize);
+
+    // Debug info for trait object printing
+    fn debug_info(&self) -> String;
 }
 
 // Single-threaded resolution state - UnsafeCell for zero-overhead interior mutability
@@ -163,6 +167,26 @@ impl ResolutionState for SingleThreadedState {
             .get_mut()
             .reinit_slot(nodes, slot, Some(&self.dependency_count_vec));
     }
+
+    fn debug_info(&self) -> String {
+        format!("{:?}", self)
+    }
+}
+
+impl fmt::Debug for SingleThreadedState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SingleThreadedState")
+            .field("dependency_map", self.dependency_map.get_mut())
+            .field(
+                "nodes_sent_to_queue",
+                &self.nodes_sent_to_queue.get_mut() as &Vec<Vec<bool>>,
+            )
+            .field("completed_slots", self.completed_slots.get_mut())
+            .field("max_factor", &self.max_factor)
+            .field("node_offsets", &self.node_offsets)
+            .field("dependency_count_vec", &self.dependency_count_vec)
+            .finish()
+    }
 }
 
 // Multi-threaded resolution state - uses atomics for lock-free operations
@@ -265,5 +289,36 @@ impl ResolutionState for MultiThreadedState {
     fn reinit_dependencies(&self, nodes: &Vec<crate::graph_struct::Node>, slot: usize) {
         self.dependency_map
             .reinit_slot(nodes, slot, Some(&self.dependency_count_vec));
+    }
+
+    fn debug_info(&self) -> String {
+        format!("{:?}", self)
+    }
+}
+
+impl fmt::Debug for MultiThreadedState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Collect atomic bools into regular bools for display
+        let nodes_sent_bools: Vec<Vec<bool>> = self
+            .nodes_sent_to_queue
+            .iter()
+            .map(|slot| {
+                slot.iter()
+                    .map(|b| b.load(Ordering::Acquire))
+                    .collect::<Vec<bool>>()
+            })
+            .collect();
+
+        // Collect completed slots from mutex
+        let completed_slots = self.completed_slots.lock().clone();
+
+        f.debug_struct("MultiThreadedState")
+            .field("\ndependency_map", &self.dependency_map)
+            .field("\nnodes_sent_to_queue", &nodes_sent_bools)
+            .field("\ncompleted_slots", &completed_slots)
+            .field("\nmax_factor", &self.max_factor)
+            .field("\nnode_offsets", &self.node_offsets)
+            .field("\ndependency_count_vec", &self.dependency_count_vec)
+            .finish()
     }
 }
