@@ -114,8 +114,13 @@ def visualize(
         sys_task_ids = [r[5] for r in all_system_records]
         resolution_task_id = max(sys_task_ids)
         preparation_task_id = resolution_task_id - 1
+        # Idle/wait task is typically one below preparation (IdType::MAX - 2)
+        wait_task_id = resolution_task_id - 2
         print(f"Resolution task_id identified as: {resolution_task_id}")
         print(f"Preparation task_id identified as: {preparation_task_id}")
+        print(f"Idle-wait task_id identified as: {wait_task_id}")
+    else:
+        wait_task_id = None
 
     # Identify packet reception task_id from receiver slots
     all_receiver_records = []
@@ -252,7 +257,9 @@ def visualize(
         task_stats[task_id]["min_start"] = min(
             task_stats[task_id]["min_start"], start_ns - global_min
         )
-        task_stats[task_id]["max_end"] = max(task_stats[task_id]["max_end"], end_ns - global_min)
+        task_stats[task_id]["max_end"] = max(
+            task_stats[task_id]["max_end"], end_ns - global_min
+        )
 
     # Print statistics for each task_id
     for task_id in sorted(task_stats.keys()):
@@ -321,6 +328,8 @@ def visualize(
                 unique_keys.add("system-res")
             elif tid == preparation_task_id:
                 unique_keys.add("system-prep")
+            elif wait_task_id is not None and tid == wait_task_id:
+                unique_keys.add("system-wait")
 
     # Receiver records
     receiver_workers = set()
@@ -347,6 +356,8 @@ def visualize(
         list_keys.append("system-res")
     if "system-prep" in unique_keys:
         list_keys.append("system-prep")
+    if "system-wait" in unique_keys:
+        list_keys.append("system-wait")
 
     # 3. Receiver tasks (append if present in unique_keys)
     if "packet-rx" in unique_keys:
@@ -359,12 +370,15 @@ def visualize(
     system_res_color = csscolors["black"]
     system_prep_color = csscolors["peru"]
     packet_rx_color = csscolors["royalblue"]
+    system_wait_color = csscolors["red"]
     if "system-res" in color_map:
         color_map["system-res"] = system_res_color
     if "system-prep" in color_map:
         color_map["system-prep"] = system_prep_color
     if "packet-rx" in color_map:
         color_map["packet-rx"] = packet_rx_color
+    if "system-wait" in color_map:
+        color_map["system-wait"] = system_wait_color
 
     # Plot worker slots with system thread activities side-by-side
     plot_idx = 0
@@ -372,6 +386,7 @@ def visualize(
     # Collect all system records grouped by worker
     prep_tasks_by_worker = defaultdict(list)
     res_tasks_by_worker = defaultdict(list)
+    wait_tasks_by_worker = defaultdict(list)
     for sys_slot_id, sys_slot_records in system_slots.items():
         for rec in sys_slot_records:
             worker = rec[4]
@@ -379,6 +394,8 @@ def visualize(
                 res_tasks_by_worker[worker].append(rec)
             elif rec[5] == preparation_task_id:
                 prep_tasks_by_worker[worker].append(rec)
+            elif wait_task_id is not None and rec[5] == wait_task_id:
+                wait_tasks_by_worker[worker].append(rec)
 
     # Collect all receiver records grouped by worker
     packet_rx_tasks_by_worker = defaultdict(list)
@@ -426,78 +443,54 @@ def visualize(
         workers.update(all_system_workers)
         workers.update(all_receiver_workers)
 
-        # Plot system/receiver threads with third-height bars side by side
-        num_overlay_types = 3  # prep, res, packet-rx
-        bar_height = 0.6 / num_overlay_types  # Divide normal bar height among types
+        # Plot system/receiver threads with overlay bars side by side
+        overlay_keys = []
+        # Order: resolution (bottom), preparation, idle-wait, packet-rx (top)
+        if "system-res" in unique_keys:
+            overlay_keys.append("system-res")
+        if "system-prep" in unique_keys:
+            overlay_keys.append("system-prep")
+        if "system-wait" in unique_keys:
+            overlay_keys.append("system-wait")
+        if "packet-rx" in unique_keys:
+            overlay_keys.append("packet-rx")
 
-        # Plot resolution tasks (bottom third)
-        for worker in all_system_workers:
-            for rec in res_tasks_by_worker[worker]:
-                _, job_id, start_ns, end_ns, _, task_id, index = rec
-                # Apply offset to start/end times
-                start = (start_ns - global_min) / scale
-                end = (end_ns - global_min) / scale
-                width = max(end - start, 1e-6)
+        num_overlay_types = max(1, len(overlay_keys))
+        bar_height = 0.6 / num_overlay_types
 
-                label = "system-res"
-                col = color_map.get(label, system_res_color)
-                # Position at worker - bar_height (bottom third)
-                ax.barh(
-                    worker - bar_height,
-                    width,
-                    left=start,
-                    height=bar_height,
-                    align="center",
-                    color=col,
-                    alpha=0.8,
-                    zorder=1,
-                )
+        # Helper to plot a given overlay key at an index
+        for i, key in enumerate(overlay_keys):
+            offset = (i - (num_overlay_types - 1) / 2.0) * bar_height
+            if key == "system-res":
+                tasks_by_worker = res_tasks_by_worker
+                col_key = "system-res"
+            elif key == "system-prep":
+                tasks_by_worker = prep_tasks_by_worker
+                col_key = "system-prep"
+            elif key == "system-wait":
+                tasks_by_worker = wait_tasks_by_worker
+                col_key = "system-wait"
+            else:  # packet-rx
+                tasks_by_worker = packet_rx_tasks_by_worker
+                col_key = "packet-rx"
 
-        # Plot preparation tasks (middle third)
-        for worker in all_system_workers:
-            for rec in prep_tasks_by_worker[worker]:
-                _, job_id, start_ns, end_ns, _, task_id, index = rec
-                # Apply offset to start/end times
-                start = (start_ns - global_min) / scale
-                end = (end_ns - global_min) / scale
-                width = max(end - start, 1e-6)
-
-                label = "system-prep"
-                col = color_map.get(label, system_prep_color)
-                # Position at worker (middle third)
-                ax.barh(
-                    worker,
-                    width,
-                    left=start,
-                    height=bar_height,
-                    align="center",
-                    color=col,
-                    alpha=0.8,
-                    zorder=1,
-                )
-
-        # Plot packet reception tasks (top third)
-        for worker in all_receiver_workers:
-            for rec in packet_rx_tasks_by_worker[worker]:
-                _, job_id, start_ns, end_ns, _, task_id, index = rec
-                # Apply offset to start/end times
-                start = (start_ns - global_min) / scale
-                end = (end_ns - global_min) / scale
-                width = max(end - start, 1e-6)
-
-                label = "packet-rx"
-                col = color_map.get(label, packet_rx_color)
-                # Position at worker + bar_height (top third)
-                ax.barh(
-                    worker + bar_height,
-                    width,
-                    left=start,
-                    height=bar_height,
-                    align="center",
-                    color=col,
-                    alpha=0.8,
-                    zorder=1,
-                )
+            for worker in tasks_by_worker.keys():
+                for rec in tasks_by_worker[worker]:
+                    _, job_id, start_ns, end_ns, _, task_id, index = rec
+                    start = (start_ns - global_min) / scale
+                    end = (end_ns - global_min) / scale
+                    width = max(end - start, 1e-6)
+                    col = color_map.get(col_key, "gray")
+                    ax.barh(
+                        worker + offset,
+                        width,
+                        left=start,
+                        height=bar_height,
+                        align="center",
+                        color=col,
+                        alpha=0.8,
+                        zorder=1,
+                    )
 
         # Draw separator lines for system workers
         for sys_worker in system_workers_in_slot:

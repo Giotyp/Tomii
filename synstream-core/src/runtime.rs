@@ -644,6 +644,8 @@ impl SynRt {
 
         // Packet Process Function
         let network_config_opt = shared.graph.network_config();
+        // Track start of idle/wait periods so we can record waiting time
+        let mut wait_start_ns: Option<u128> = None;
 
         let mut receive_finished: bool = false;
 
@@ -742,10 +744,40 @@ impl SynRt {
 
             // Combine network received nodes with scheduled batch
             // Place network nodes at the front to prioritize processing
+            let mut empty_network: bool = true;
             if !network_received_nodes.is_empty() {
+                empty_network = false;
                 let network_count = network_received_nodes.len();
                 batch.splice(0..0, network_received_nodes);
                 print_debug(|| format!("Injected {:?} network nodes to batch", network_count));
+            }
+
+            // If nothing arrived from network or scheduler, mark start of wait period.
+            // Otherwise, if we previously were waiting, record the idle interval now.
+            if empty_network && batch.is_empty() {
+                if wait_start_ns.is_none() {
+                    wait_start_ns = Some(shared.base_instant.elapsed().as_nanos());
+                }
+            } else {
+                if let Some(start_ns_wait) = wait_start_ns.take() {
+                    // Only record if recorder enabled and slot chosen for recording
+                    if shared.async_recorder.is_some() {
+                        let current_stream = shared.stream_complete_counter.load(Ordering::Relaxed);
+                        if should_record_slot(&shared, current_stream) {
+                            let end_ns = shared.base_instant.elapsed().as_nanos();
+                            let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
+                            submit_record(Record {
+                                slot: thread_slot,
+                                job_id,
+                                start_ns: start_ns_wait,
+                                end_ns,
+                                worker: thread_core,
+                                task_id: IdType::MAX - 2,
+                                index: 0,
+                            });
+                        }
+                    }
+                }
             }
 
             // Local tracking for THIS batch only
@@ -854,7 +886,9 @@ impl SynRt {
                 print_debug(|| {
                     format!(
                         "Thread {:?} -- Successors of node {:?}: {:?}",
-                        thread_id, node_info, succ_updates.len()
+                        thread_id,
+                        node_info,
+                        succ_updates.len()
                     )
                 });
 
