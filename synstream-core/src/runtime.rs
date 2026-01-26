@@ -648,6 +648,7 @@ impl SynRt {
         let mut wait_start_ns: Option<u128> = None;
 
         let mut receive_finished: bool = false;
+        let mut first_packet_received: bool = false;
 
         // Process completed nodes with dynamic batching from scheduler
         loop {
@@ -658,8 +659,66 @@ impl SynRt {
                 let stream_packets = network_config.stream_packets;
                 if !receive_finished && !shared.packet_receivers.is_empty() {
                     let packet_process_func = network_config.extract_packet_func.unwrap();
+
+                    // Block until first packet arrives
+                    if !first_packet_received {
+                        for receiver_id in 0..shared.packet_receivers.len() {
+                            if let Ok(packet_msg) = shared.packet_receivers[receiver_id].recv() {
+                                first_packet_received = true;
+                                print_debug(|| "First packet received, switching to non-blocking polling".to_string());
+                                // Process this first packet
+                                let received_bytes_cm =
+                                    CmTypes::from_any(packet_msg.packet_bytes.clone());
+                                let packet_cm = packet_process_func(vec![received_bytes_cm]);
+                                let counter = shared.stream_packet_counter.clone();
+                                let packet_index = counter.fetch_add(1, Ordering::Relaxed);
+                                let node_info = NodeInfo::new(0, 0, packet_index, 0);
+                                network_received_nodes.push((node_info, packet_cm));
+
+                                if shared.async_recorder.is_some() {
+                                    let receiver_slot = shared.slots + 1;
+                                    let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
+                                    let packet_rcv = packet_msg
+                                        .timestamp
+                                        .duration_since(*shared.base_instant)
+                                        .as_nanos();
+                                    let delta_ns = 10000u128;
+                                    submit_record(Record {
+                                        slot: receiver_slot,
+                                        job_id,
+                                        start_ns: packet_rcv,
+                                        end_ns: packet_rcv + delta_ns,
+                                        worker: packet_msg.receiver_core_id,
+                                        task_id: 0,
+                                        index: packet_index,
+                                    });
+                                }
+
+                                if packet_index + 1 == stream_packets {
+                                    shared.stream_packet_counter.store(0, Ordering::Relaxed);
+                                    print_debug(|| {
+                                        format!("All {} packets for stream received", stream_packets)
+                                    });
+                                    let completed_streams = shared
+                                        .streams_receive_counter
+                                        .fetch_add(1, Ordering::Relaxed)
+                                        + 1;
+                                    if completed_streams >= shared.max_streams {
+                                        println!(
+                                            "All {} streams received ({} packets each) - receivers will shutdown",
+                                            shared.max_streams, stream_packets
+                                        );
+                                        shared.shutdown_flag.store(true, Ordering::SeqCst);
+                                        receive_finished = true;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    // Non-blocking poll - process all available packets
                     for receiver_id in 0..shared.packet_receivers.len() {
-                        // Non-blocking poll - process all available packets
                         while let Ok(packet_msg) = shared.packet_receivers[receiver_id].try_recv() {
                             let received_bytes_cm =
                                 CmTypes::from_any(packet_msg.packet_bytes.clone());
