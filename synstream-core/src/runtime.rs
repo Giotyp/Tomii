@@ -665,7 +665,10 @@ impl SynRt {
                         for receiver_id in 0..shared.packet_receivers.len() {
                             if let Ok(packet_msg) = shared.packet_receivers[receiver_id].recv() {
                                 first_packet_received = true;
-                                print_debug(|| "First packet received, switching to non-blocking polling".to_string());
+                                print_debug(|| {
+                                    "First packet received, switching to non-blocking polling"
+                                        .to_string()
+                                });
                                 // Process this first packet
                                 let received_bytes_cm =
                                     CmTypes::from_any(packet_msg.packet_bytes.clone());
@@ -676,7 +679,7 @@ impl SynRt {
                                 network_received_nodes.push((node_info, packet_cm));
 
                                 if shared.async_recorder.is_some() {
-                                    let receiver_slot = shared.slots + 1;
+                                    let receiver_slot = shared.slots + shared.system_threads;
                                     let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
                                     let packet_rcv = packet_msg
                                         .timestamp
@@ -697,7 +700,10 @@ impl SynRt {
                                 if packet_index + 1 == stream_packets {
                                     shared.stream_packet_counter.store(0, Ordering::Relaxed);
                                     print_debug(|| {
-                                        format!("All {} packets for stream received", stream_packets)
+                                        format!(
+                                            "All {} packets for stream received",
+                                            stream_packets
+                                        )
                                     });
                                     let completed_streams = shared
                                         .streams_receive_counter
@@ -734,7 +740,7 @@ impl SynRt {
                             // stream/slot assignment. For --record-stream filtering, network packets
                             // are always recorded since filtering happens at compute task level.
                             if shared.async_recorder.is_some() {
-                                let receiver_slot = shared.slots + 1;
+                                let receiver_slot = shared.slots + shared.system_threads;
                                 let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
 
                                 // Convert rdtsc timestamp to nanoseconds relative to base_instant
