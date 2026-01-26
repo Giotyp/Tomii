@@ -4,7 +4,7 @@ use crate::graph_struct::Node;
 use crate::IdType;
 use std::cmp::PartialEq;
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct NodeInfo {
@@ -480,5 +480,395 @@ impl Debug for AtomicVecMap {
             }
         }
         write!(f, "}}")
+    }
+}
+
+/// Per-node dependency entry for threshold-based spawning
+/// Replaces per-instance tracking with unified per-node tracking
+#[derive(Debug)]
+pub struct NodeDependencyEntry {
+    /// Single atomic counter for all instances of this node
+    remaining_deps: AtomicUsize,
+
+    /// Bitmap for sent tracking (prevents double-spawn)
+    instances_sent: Vec<AtomicBool>,
+
+    /// Cached metadata (avoid lookups)
+    factor: usize,
+
+    /// Dependencies per instance
+    deps_per_instance: usize,
+
+    /// Whether this node has a barrier dependency
+    has_barrier: bool,
+}
+
+impl NodeDependencyEntry {
+    /// Create a new dependency entry for a node in a slot
+    pub fn new(factor: usize, total_deps: usize, has_barrier: bool) -> Self {
+        let deps_per_instance = if factor > 0 {
+            total_deps / factor
+        } else {
+            0
+        };
+
+        let mut instances_sent = Vec::with_capacity(factor);
+        for _ in 0..factor {
+            instances_sent.push(AtomicBool::new(false));
+        }
+
+        Self {
+            remaining_deps: AtomicUsize::new(total_deps),
+            instances_sent,
+            factor,
+            deps_per_instance,
+            has_barrier,
+        }
+    }
+
+    /// Get the threshold for a specific instance to become ready
+    /// Instance i is ready when: remaining_deps <= (factor - i - 1) × deps_per_instance
+    #[inline]
+    fn threshold_for_instance(&self, instance_idx: usize) -> usize {
+        if instance_idx >= self.factor {
+            return usize::MAX; // Invalid instance
+        }
+        (self.factor - instance_idx - 1) * self.deps_per_instance
+    }
+
+    /// Atomically decrease dependency and return indices of newly ready instances
+    /// Returns vector of instance indices that are now ready to spawn
+    pub fn decrease_and_get_ready(&self) -> Vec<usize> {
+        // Use fetch_update to safely handle zero dependencies (prevents underflow)
+        let result = self.remaining_deps.fetch_update(Ordering::AcqRel, Ordering::Acquire, |val| {
+            if val > 0 {
+                Some(val - 1)
+            } else {
+                None // Don't update if already 0
+            }
+        });
+
+        // Determine the current remaining dependency count
+        let new_remaining = match result {
+            Ok(prev) => prev - 1,  // Successfully decremented
+            Err(current) => current  // Already at 0
+        };
+
+        // Check for ready instances (works for both 0-dependency and regular nodes)
+        if self.has_barrier {
+            // Barrier nodes: spawn all instances when dependencies reach 0
+            if new_remaining == 0 {
+                // Atomic: spawn all unsent instances
+                let mut ready = Vec::new();
+                for idx in 0..self.factor {
+                    if self.instances_sent[idx]
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                        .is_ok()
+                    {
+                        ready.push(idx);
+                    }
+                }
+                return ready;
+            } else {
+                return Vec::new(); // Barrier not yet ready
+            }
+        }
+
+        // Fast path for normal (non-barrier) nodes: check if we're still above threshold
+        // If remaining_deps > factor × deps_per_instance, no instances can be ready
+        let max_threshold = self.factor * self.deps_per_instance;
+        if new_remaining > max_threshold {
+            return Vec::new();
+        }
+
+        // Slow path: check each instance to see if it's now ready
+        let mut ready = Vec::new();
+        for idx in 0..self.factor {
+            // Instance idx is ready if: new_remaining <= threshold(idx)
+            if new_remaining <= self.threshold_for_instance(idx) {
+                // Try to mark as sent (CAS to prevent double-spawn)
+                if self.instances_sent[idx]
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    ready.push(idx);
+                }
+            }
+        }
+
+        ready
+    }
+
+    /// Increment dependency counter (used when condition fails and dependency needs to be restored)
+    /// Returns the new dependency count
+    pub fn increment_dependency(&self) -> usize {
+        self.remaining_deps.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// Reset the sent flag for a specific instance (used when conditions not met)
+    pub fn reset_sent_flag(&self, instance_idx: usize) {
+        if instance_idx < self.instances_sent.len() {
+            self.instances_sent[instance_idx].store(false, Ordering::Release);
+        }
+    }
+
+    /// Clear all sent flags for this entry
+    pub fn clear_sent_flags(&self) {
+        for flag in &self.instances_sent {
+            flag.store(false, Ordering::Release);
+        }
+    }
+
+    /// Reset this entry for a new slot iteration
+    pub fn reset(&self, new_total_deps: usize) {
+        self.remaining_deps.store(new_total_deps, Ordering::Release);
+        for flag in &self.instances_sent {
+            flag.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// Optimized per-node dependency map using 2D slot×node indexing
+/// Replaces per-instance VecMap/AtomicVecMap for significant memory savings
+#[derive(Debug)]
+pub struct NodeDepMap {
+    /// 2D layout: slots[slot][node_id] -> NodeDependencyEntry
+    slots: Vec<Vec<NodeDependencyEntry>>,
+}
+
+impl NodeDepMap {
+    /// Create a new NodeDepMap initialized for all slots and nodes
+    pub fn new(nodes: &Vec<Node>, slots: usize, dep_counts: &Vec<usize>) -> Self {
+        let num_nodes = nodes.len();
+        let mut map_slots = Vec::with_capacity(slots);
+
+        for _ in 0..slots {
+            let mut slot_entries = Vec::with_capacity(num_nodes);
+
+            for node_id in 0..num_nodes {
+                let node = &nodes[node_id];
+                let total_deps = dep_counts[node_id];
+                let has_barrier = node.args.iter().any(|arg| arg.is_barrier());
+
+                let entry = NodeDependencyEntry::new(node.factor, total_deps, has_barrier);
+                slot_entries.push(entry);
+            }
+
+            map_slots.push(slot_entries);
+        }
+
+        Self { slots: map_slots }
+    }
+
+    /// Get ready instances for a node in a slot by decrementing dependencies once
+    #[inline]
+    pub fn decrease_and_get_ready(&self, slot: usize, node_id: usize) -> Vec<usize> {
+        if slot < self.slots.len() && node_id < self.slots[slot].len() {
+            self.slots[slot][node_id].decrease_and_get_ready()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Increment dependency for a specific node (used when condition fails)
+    /// Returns the new dependency count
+    #[inline]
+    pub fn increment_dependency(&self, slot: usize, node_id: usize) -> Option<usize> {
+        if slot < self.slots.len() && node_id < self.slots[slot].len() {
+            Some(self.slots[slot][node_id].increment_dependency())
+        } else {
+            None
+        }
+    }
+
+    /// Reset the sent flag for an instance (used when conditions not met)
+    #[inline]
+    pub fn reset_sent_flag(&self, slot: usize, node_id: usize, instance_idx: usize) {
+        if slot < self.slots.len() && node_id < self.slots[slot].len() {
+            self.slots[slot][node_id].reset_sent_flag(instance_idx);
+        }
+    }
+
+    /// Clear all sent flags for a slot (used during slot reinitialization)
+    pub fn clear_slot_sent_flags(&self, slot: usize) {
+        if slot < self.slots.len() {
+            for entry in &self.slots[slot] {
+                entry.clear_sent_flags();
+            }
+        }
+    }
+
+    /// Reset dependencies for a slot (used for multi-slot streaming)
+    pub fn reinit_slot(&self, nodes: &Vec<Node>, slot: usize, dep_counts: &Vec<usize>) {
+        if slot < self.slots.len() {
+            for node_id in 0..nodes.len() {
+                if node_id < self.slots[slot].len() {
+                    let total_deps = dep_counts[node_id];
+                    self.slots[slot][node_id].reset(total_deps);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_node_dependency_entry_creation() {
+        // factor=4, total_deps=8 (2 per instance)
+        let entry = NodeDependencyEntry::new(4, 8, false);
+        assert_eq!(entry.factor, 4);
+        assert_eq!(entry.deps_per_instance, 2);
+        assert!(!entry.has_barrier);
+    }
+
+    #[test]
+    fn test_threshold_calculation() {
+        // factor=4, deps_per_inst=2
+        let entry = NodeDependencyEntry::new(4, 8, false);
+        // Instance 0: (4-0-1)*2 = 6
+        // Instance 1: (4-1-1)*2 = 4
+        // Instance 2: (4-2-1)*2 = 2
+        // Instance 3: (4-3-1)*2 = 0
+        assert_eq!(entry.threshold_for_instance(0), 6);
+        assert_eq!(entry.threshold_for_instance(1), 4);
+        assert_eq!(entry.threshold_for_instance(2), 2);
+        assert_eq!(entry.threshold_for_instance(3), 0);
+    }
+
+    #[test]
+    fn test_threshold_spawning_factor_4() {
+        // factor=4, deps_per_inst=2, total_deps=8
+        let entry = NodeDependencyEntry::new(4, 8, false);
+
+        // Call 1: 8->7, instance 0 threshold=6, not ready (7 > 6)
+        let ready = entry.decrease_and_get_ready();
+        assert!(ready.is_empty());
+
+        // Call 2: 7->6, instance 0 threshold=6, ready! (6 <= 6)
+        let ready = entry.decrease_and_get_ready();
+        assert_eq!(ready, vec![0]);
+
+        // Call 3: 6->5, instance 1 threshold=4, not ready (5 > 4)
+        let ready = entry.decrease_and_get_ready();
+        assert!(ready.is_empty());
+
+        // Call 4: 5->4, instance 1 threshold=4, ready! (4 <= 4)
+        let ready = entry.decrease_and_get_ready();
+        assert_eq!(ready, vec![1]);
+
+        // Call 5: 4->3, instance 2 threshold=2, not ready (3 > 2)
+        let ready = entry.decrease_and_get_ready();
+        assert!(ready.is_empty());
+
+        // Call 6: 3->2, instance 2 threshold=2, ready! (2 <= 2)
+        let ready = entry.decrease_and_get_ready();
+        assert_eq!(ready, vec![2]);
+
+        // Call 7: 2->1, instance 3 threshold=0, not ready (1 > 0)
+        let ready = entry.decrease_and_get_ready();
+        assert!(ready.is_empty());
+
+        // Call 8: 1->0, instance 3 threshold=0, ready! (0 <= 0)
+        let ready = entry.decrease_and_get_ready();
+        assert_eq!(ready, vec![3]);
+    }
+
+    #[test]
+    fn test_barrier_spawns_all_at_once() {
+        // Barrier node with factor=3, total_deps=3
+        let entry = NodeDependencyEntry::new(3, 3, true);
+
+        // Decrease until deps reach 0
+        for _ in 0..2 {
+            let ready = entry.decrease_and_get_ready();
+            assert!(ready.is_empty()); // Barrier not ready yet
+        }
+
+        // Final decrease brings deps to 0, barrier spawns all
+        let ready = entry.decrease_and_get_ready();
+        assert_eq!(ready.len(), 3);
+        assert!(ready.contains(&0));
+        assert!(ready.contains(&1));
+        assert!(ready.contains(&2));
+    }
+
+    #[test]
+    fn test_no_double_spawn() {
+        let entry = NodeDependencyEntry::new(2, 4, false);
+
+        // factor=2, total_deps=4, deps_per_instance=2
+        // Instance 0 threshold = (2-0-1)*2 = 2
+        // Instance 1 threshold = (2-1-1)*2 = 0
+
+        // Call 1: 4->3, instance 0 threshold=2, not ready (3 > 2)
+        let ready = entry.decrease_and_get_ready();
+        assert!(ready.is_empty());
+
+        // Call 2: 3->2, instance 0 threshold=2, ready! (2 <= 2)
+        let ready = entry.decrease_and_get_ready();
+        assert_eq!(ready, vec![0]);
+
+        // Call 3: 2->1, instance 1 threshold=0, not ready (1 > 0)
+        let ready = entry.decrease_and_get_ready();
+        assert!(ready.is_empty());
+
+        // Call 4: 1->0, instance 1 threshold=0, ready! (0 <= 0)
+        let ready = entry.decrease_and_get_ready();
+        assert_eq!(ready, vec![1]);
+
+        // Call 5: try another decrement (would underflow)
+        // No more deps to satisfy, nothing ready
+        let ready = entry.decrease_and_get_ready();
+        assert!(ready.is_empty());
+    }
+
+    #[test]
+    fn test_entry_reset() {
+        let entry = NodeDependencyEntry::new(2, 4, false);
+
+        // Decrease twice
+        let _ = entry.decrease_and_get_ready();
+        let _ = entry.decrease_and_get_ready();
+
+        // Reset for new slot
+        entry.reset(4);
+
+        // Should behave like new
+        let ready = entry.decrease_and_get_ready();
+        assert!(ready.is_empty());
+    }
+
+    #[test]
+    fn test_node_dep_map_creation() {
+        let nodes = vec![
+            Node {
+                name: "node0".to_string(),
+                args: vec![],
+                id: 0,
+                loop_args: None,
+                factor: 2,
+                func_ptr: None,
+                loop_: None,
+                condition: None,
+            },
+            Node {
+                name: "node1".to_string(),
+                args: vec![],
+                id: 1,
+                loop_args: None,
+                factor: 3,
+                func_ptr: None,
+                loop_: None,
+                condition: None,
+            },
+        ];
+        let dep_counts = vec![4, 6];
+
+        let map = NodeDepMap::new(&nodes, 2, &dep_counts);
+        assert_eq!(map.slots.len(), 2); // 2 slots
+        assert_eq!(map.slots[0].len(), 2); // 2 nodes
     }
 }

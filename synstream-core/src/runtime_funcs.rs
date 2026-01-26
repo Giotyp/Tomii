@@ -400,7 +400,7 @@ fn execute_task(
     let worker_id = crate::scheduler::get_current_worker_id().unwrap_or(usize::MAX);
 
     // Record scheduling latency if async recorder enabled and slot should be recorded
-    if let Some(recorder) = &shared.async_recorder {
+    if shared.async_recorder.is_some() {
         if should_record_slot(shared, node_info.slot) {
             let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
             crate::async_recorder::submit_record(crate::Record {

@@ -3,7 +3,6 @@ use parking_lot::Mutex;
 use std::cell::UnsafeCell;
 use std::collections::HashSet;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 // Single-threaded wrapper that provides interior mutability without locks
@@ -49,7 +48,7 @@ pub trait ResolutionState: Send + Sync {
     // Clear all sent flags for a slot
     fn clear_slot_sent_flags(&self, slot: usize);
 
-    // Decrease dependency count and return new count
+    // Decrease dependency count and return new count (legacy per-instance method)
     fn decrease_dependency(&self, node_info: &NodeInfo) -> Option<usize>;
 
     // Increase dependency count and return new count
@@ -57,6 +56,16 @@ pub trait ResolutionState: Send + Sync {
 
     // Reinitialize dependency map for a slot
     fn reinit_dependencies(&self, nodes: &Vec<crate::graph_struct::Node>, slot: usize);
+
+    // NEW: Optimized per-node decrements returning batch of ready instances
+    // Decrements the dependency counter for a node in a slot once and returns
+    // all instance indices that are now ready to spawn. This replaces N per-instance
+    // decrements with a single per-node decrement, enabling threshold-based spawning.
+    fn decrease_and_get_ready(&self, _slot: usize, _node_id: usize) -> Vec<usize> {
+        // Default implementation for backward compatibility: return empty
+        // This allows implementations that don't override it to continue working
+        Vec::new()
+    }
 
     // Debug info for trait object printing
     fn debug_info(&self) -> String;
@@ -191,48 +200,27 @@ impl fmt::Debug for SingleThreadedState {
 
 // Multi-threaded resolution state - uses atomics for lock-free operations
 pub struct MultiThreadedState {
-    dependency_map: Arc<AtomicVecMap>,
-    nodes_sent_to_queue: Arc<Vec<Vec<AtomicBool>>>,
+    // Per-node dependency tracking with threshold-based spawning
+    node_dep_map: Arc<crate::buffers::NodeDepMap>,
+
     completed_slots: Arc<Mutex<HashSet<usize>>>,
-    max_factor: usize,
-    node_offsets: Vec<usize>,
     dependency_count_vec: Arc<Vec<usize>>,
 }
 
 impl MultiThreadedState {
     pub fn new(
-        num_nodes: usize,
+        _num_nodes: usize,
         slots: usize,
-        max_factor: usize,
+        _max_factor: usize,
         dependency_count_vec: Vec<usize>,
         nodes: &Vec<crate::graph_struct::Node>,
     ) -> Self {
-        let mut dependency_map = AtomicVecMap::new();
-        dependency_map.init_map(nodes, slots, Some(&dependency_count_vec));
-
-        let mut nodes_sent = Vec::new();
-        for _ in 0..slots {
-            let mut slot_sent = Vec::with_capacity(num_nodes * max_factor);
-            for _ in 0..(num_nodes * max_factor) {
-                slot_sent.push(AtomicBool::new(false));
-            }
-            nodes_sent.push(slot_sent);
-        }
-
-        // Compute node_offsets for correct flat index calculation
-        let mut node_offsets = Vec::with_capacity(num_nodes);
-        let mut offset = 0;
-        for node in nodes.iter() {
-            node_offsets.push(offset);
-            offset += node.factor;
-        }
+        // Initialize per-node dependency map with threshold-based spawning
+        let node_dep_map = crate::buffers::NodeDepMap::new(nodes, slots, &dependency_count_vec);
 
         Self {
-            dependency_map: Arc::new(dependency_map),
-            nodes_sent_to_queue: Arc::new(nodes_sent),
+            node_dep_map: Arc::new(node_dep_map),
             completed_slots: Arc::new(Mutex::new(HashSet::new())),
-            max_factor,
-            node_offsets,
             dependency_count_vec: Arc::new(dependency_count_vec),
         }
     }
@@ -240,17 +228,16 @@ impl MultiThreadedState {
 
 impl ResolutionState for MultiThreadedState {
     #[inline]
-    fn try_mark_sent(&self, slot: usize, node_id: usize, index: usize) -> bool {
-        let flat_idx = self.node_offsets[node_id] + index;
-        self.nodes_sent_to_queue[slot][flat_idx]
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
+    fn try_mark_sent(&self, _slot: usize, _node_id: usize, _index: usize) -> bool {
+        // LEGACY METHOD: No longer used - decrease_and_get_ready() handles sent marking internally
+        // Kept for trait compatibility with SingleThreadedState
+        false
     }
 
     #[inline]
     fn reset_sent(&self, slot: usize, node_id: usize, index: usize) {
-        let flat_idx = self.node_offsets[node_id] + index;
-        self.nodes_sent_to_queue[slot][flat_idx].store(false, Ordering::Release);
+        // Delegate to NodeDepMap
+        self.node_dep_map.reset_sent_flag(slot, node_id, index);
     }
 
     #[inline]
@@ -270,25 +257,35 @@ impl ResolutionState for MultiThreadedState {
 
     #[inline]
     fn clear_slot_sent_flags(&self, slot: usize) {
-        for flag in self.nodes_sent_to_queue[slot].iter() {
-            flag.store(false, Ordering::Release);
-        }
+        // Delegate to NodeDepMap
+        self.node_dep_map.clear_slot_sent_flags(slot);
     }
 
     #[inline]
-    fn decrease_dependency(&self, node_info: &NodeInfo) -> Option<usize> {
-        self.dependency_map.decrease(node_info)
+    fn decrease_dependency(&self, _node_info: &NodeInfo) -> Option<usize> {
+        // LEGACY METHOD: No longer used - decrease_and_get_ready() is the new API
+        // Kept for trait compatibility with SingleThreadedState
+        None
     }
 
     #[inline]
     fn increment_dependency(&self, node_info: &NodeInfo) -> Option<usize> {
-        self.dependency_map.increment(node_info)
+        // Delegate to NodeDepMap
+        self.node_dep_map
+            .increment_dependency(node_info.slot, node_info.id as usize)
     }
 
     #[inline]
     fn reinit_dependencies(&self, nodes: &Vec<crate::graph_struct::Node>, slot: usize) {
-        self.dependency_map
-            .reinit_slot(nodes, slot, Some(&self.dependency_count_vec));
+        // Delegate to NodeDepMap
+        self.node_dep_map
+            .reinit_slot(nodes, slot, &self.dependency_count_vec);
+    }
+
+    #[inline]
+    fn decrease_and_get_ready(&self, slot: usize, node_id: usize) -> Vec<usize> {
+        // Use the optimized per-node dependency tracking from NodeDepMap
+        self.node_dep_map.decrease_and_get_ready(slot, node_id)
     }
 
     fn debug_info(&self) -> String {
@@ -298,26 +295,12 @@ impl ResolutionState for MultiThreadedState {
 
 impl fmt::Debug for MultiThreadedState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Collect atomic bools into regular bools for display
-        let nodes_sent_bools: Vec<Vec<bool>> = self
-            .nodes_sent_to_queue
-            .iter()
-            .map(|slot| {
-                slot.iter()
-                    .map(|b| b.load(Ordering::Acquire))
-                    .collect::<Vec<bool>>()
-            })
-            .collect();
-
         // Collect completed slots from mutex
         let completed_slots = self.completed_slots.lock().clone();
 
         f.debug_struct("MultiThreadedState")
-            .field("\ndependency_map", &self.dependency_map)
-            .field("\nnodes_sent_to_queue", &nodes_sent_bools)
+            .field("\nnode_dep_map", &self.node_dep_map)
             .field("\ncompleted_slots", &completed_slots)
-            .field("\nmax_factor", &self.max_factor)
-            .field("\nnode_offsets", &self.node_offsets)
             .field("\ndependency_count_vec", &self.dependency_count_vec)
             .finish()
     }

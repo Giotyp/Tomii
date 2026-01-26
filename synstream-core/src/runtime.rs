@@ -973,24 +973,36 @@ impl SynRt {
                 // if not exist, init nodes_sent for slot to 0
                 let nodes_sent: &mut usize = nodes_sent_in_slot.entry(node_info.slot).or_insert(0);
 
-                for (succ_info, has_cond, succ_id) in succ_updates {
-                    if let Some(dep) = shared.resolution_state.decrease_dependency(&succ_info) {
-                        if dep == 0 {
-                            // Try to atomically claim the slot via resolution state
-                            if shared.resolution_state.try_mark_sent(
-                                node_info.slot,
-                                succ_id as usize,
-                                succ_info.index,
-                            ) {
-                                if !has_cond {
-                                    nodes_to_schedule.push(succ_info);
-                                    *nodes_sent += 1;
-                                } else {
-                                    // Collect condition nodes - will evaluate outside lock
-                                    let cond_idx = shared.node_cache[succ_id as usize].cond_index;
-                                    cond_nodes_to_check.push((succ_info, cond_idx));
-                                }
-                            }
+                // NEW: Collect unique successor node_ids with their has_cond flag
+                // This allows us to call decrease_and_get_ready() once per node instead of once per instance
+                use std::collections::HashMap;
+                let mut unique_successors: HashMap<usize, bool> = HashMap::new();
+                for (_, has_cond, succ_id) in &succ_updates {
+                    unique_successors.insert(*succ_id as usize, *has_cond);
+                }
+
+                // Process each unique successor ONCE using optimized per-node decrements
+                for (succ_node_id, has_cond) in unique_successors {
+                    // Call the new optimized method that decrements once and returns all ready indices
+                    let ready_indices =
+                        shared.resolution_state.decrease_and_get_ready(node_info.slot, succ_node_id);
+
+                    // Schedule all newly ready instances
+                    for ready_index in ready_indices {
+                        let succ_info = NodeInfo::new(
+                            succ_node_id as IdType,
+                            node_info.slot,
+                            ready_index,
+                            node_info.index,
+                        );
+
+                        if !has_cond {
+                            nodes_to_schedule.push(succ_info);
+                            *nodes_sent += 1;
+                        } else {
+                            // Collect condition nodes - will evaluate outside lock
+                            let cond_idx = shared.node_cache[succ_node_id].cond_index;
+                            cond_nodes_to_check.push((succ_info, cond_idx));
                         }
                     }
                 }
