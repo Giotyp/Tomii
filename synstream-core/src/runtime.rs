@@ -690,10 +690,14 @@ impl SynRt {
                                     "First packet received, switching to non-blocking polling"
                                         .to_string()
                                 });
+
+                                let packet_timestamp = packet_msg.timestamp;
+                                let receiver_core_id = packet_msg.receiver_core_id;
+
                                 // Start timing for first packet processing (if timing enabled)
                                 if let Some(_tb) = &shared.time_buffer {
                                     first_packet_timing = Some(FirstPacketTiming {
-                                        start: TimingMethod::Instant(packet_msg.timestamp),
+                                        start: TimingMethod::Instant(packet_timestamp),
                                         packet_index: 0,
                                         packet_processed_recorded: false,
                                         batch_insertion_measured: false,
@@ -719,8 +723,7 @@ impl SynRt {
                                     }
                                 }
                                 // Process this first packet
-                                let received_bytes_cm =
-                                    CmTypes::from_any(packet_msg.packet_bytes.clone());
+                                let received_bytes_cm = CmTypes::from_any(packet_msg.packet_bytes);
 
                                 let counter = shared.stream_packet_counter.clone();
                                 let packet_index = counter.fetch_add(1, Ordering::Relaxed);
@@ -831,8 +834,7 @@ impl SynRt {
                                 if shared.async_recorder.is_some() {
                                     let receiver_slot = shared.slots + shared.system_threads;
                                     let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
-                                    let packet_rcv = packet_msg
-                                        .timestamp
+                                    let packet_rcv = packet_timestamp
                                         .duration_since(*shared.base_instant)
                                         .as_nanos();
                                     let delta_ns = 10000u128;
@@ -841,7 +843,7 @@ impl SynRt {
                                         job_id,
                                         start_ns: packet_rcv,
                                         end_ns: packet_rcv + delta_ns,
-                                        worker: packet_msg.receiver_core_id,
+                                        worker: receiver_core_id,
                                         task_id: 0,
                                         index: packet_index,
                                     });
@@ -880,8 +882,10 @@ impl SynRt {
                     // Non-blocking poll - process all available packets
                     for receiver_id in 0..shared.packet_receivers.len() {
                         while let Ok(packet_msg) = shared.packet_receivers[receiver_id].try_recv() {
-                            let received_bytes_cm =
-                                CmTypes::from_any(packet_msg.packet_bytes.clone());
+                            let packet_timestamp = packet_msg.timestamp;
+                            let receiver_core_id = packet_msg.receiver_core_id;
+
+                            let received_bytes_cm = CmTypes::from_any(packet_msg.packet_bytes);
 
                             // Process packet
                             let packet_cm = packet_process_func(vec![received_bytes_cm]);
@@ -913,8 +917,7 @@ impl SynRt {
                                 let receiver_slot = shared.slots + shared.system_threads;
                                 let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
 
-                                let packet_rcv = packet_msg
-                                    .timestamp
+                                let packet_rcv = packet_timestamp
                                     .duration_since(*shared.base_instant)
                                     .as_nanos();
                                 let delta_ns = 10000u128; // Small delta to make it visible in graphs
@@ -924,7 +927,7 @@ impl SynRt {
                                     job_id,
                                     start_ns: packet_rcv,
                                     end_ns: packet_rcv + delta_ns,
-                                    worker: packet_msg.receiver_core_id,
+                                    worker: receiver_core_id,
                                     task_id: 0,
                                     index: packet_index,
                                 });
