@@ -782,47 +782,36 @@ pub fn process_id_function(
     let network_config_opt = shared.graph.network_config();
 
     if let Some(network_config) = network_config_opt {
-        if node_info.id == 0 {
-            let id_function = network_config.id_function.unwrap();
-            // Call the id function - wrap single result in Vec as expected by signature
-            let id_result = id_function(vec![result.clone()]);
+        let id_function = network_config.id_function.unwrap();
+        // Call the id function - wrap single result in Vec as expected by signature
+        let id_result = id_function(vec![result.clone()]);
 
-            // Extract stream from the result
-            if let Some(new_stream) = id_result.valid_number_to_usize() {
-                // Validate stream range
-                let current_counter = shared.stream_complete_counter.load(Ordering::SeqCst);
-                let max_allowed_stream = current_counter + shared.slots;
+        // Extract stream from the result
+        if let Some(new_stream) = id_result.valid_number_to_usize() {
+            // Validate stream range
+            let current_counter = shared.stream_complete_counter.load(Ordering::SeqCst);
+            let max_allowed_stream = current_counter + shared.slots;
 
-                if new_stream >= max_allowed_stream {
-                    eprintln!(
+            if new_stream >= max_allowed_stream {
+                eprintln!(
                                 "ID function returned stream {} which exceeds maximum allowed {} (current_counter: {}, slots: {})",
                                 new_stream, max_allowed_stream, current_counter, shared.slots
                             );
-                    return None;
-                }
-                print_debug(|| {
-                    format!(
-                        "ID function determined stream {} for {:?}",
-                        new_stream, node_info
-                    )
-                });
-                return Some(new_stream);
-            } else {
-                panic!("ID function did not return a valid number for stream");
+                return None;
             }
+            print_debug(|| {
+                format!(
+                    "ID function determined stream {} for {:?}",
+                    new_stream, node_info
+                )
+            });
+            return Some(new_stream);
+        } else {
+            panic!("ID function did not return a valid number for stream");
         }
+    } else {
+        None
     }
-    // find real stream belonging to this slot
-    let available_slots = shared.available_stream_slots.read();
-    for (slot_id, &real_stream) in available_slots.iter().enumerate() {
-        if slot_id == node_info.slot {
-            if real_stream == usize::MAX {
-                return Some(node_info.slot);
-            }
-            return Some(real_stream);
-        }
-    }
-    panic!("Could not find stream for node");
 }
 
 #[inline]
