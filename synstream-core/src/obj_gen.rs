@@ -15,7 +15,7 @@ pub fn init_objects(
     let mut init_objects: Vec<Vec<CmTypes>> = Vec::new();
     let mut obj_id_map: RapidHashMap<String, usize> = RapidHashMap::new();
 
-    // Keep index 0 for $index, 1 for $workers, 2 for $network -- resolved at runtime
+    // Keep index 0 for $index, 1 for $workers -- resolved at runtime
     let _ = ObjectCount.fetch_add(2, SeqCst);
     obj_id_map.insert("$index".to_string(), 0);
     obj_id_map.insert("$workers".to_string(), 1);

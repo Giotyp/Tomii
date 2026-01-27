@@ -59,8 +59,6 @@ pub struct ArgCacheEntry {
     pub rt_idxs_indexes: Vec<usize>,
     // indexes of $ref::worker in args
     pub rt_workers_indexes: Vec<usize>,
-    // indexes of $network in args
-    pub rt_network_indexes: Vec<usize>,
     // indexes of $res in args
     pub res_indexes: Vec<usize>,
     // real indexes of $res
@@ -75,7 +73,6 @@ impl Default for ArgCacheEntry {
             buffer_values: Vec::new(),
             rt_idxs_indexes: Vec::new(),
             rt_workers_indexes: Vec::new(),
-            rt_network_indexes: Vec::new(),
             res_indexes: Vec::new(),
             real_res_indexes: Vec::new(),
         }
@@ -90,7 +87,6 @@ impl std::fmt::Debug for ArgCacheEntry {
             .field("buffer_values", &self.buffer_values)
             .field("rt_idxs_indexes", &self.rt_idxs_indexes)
             .field("rt_workers_indexes", &self.rt_workers_indexes)
-            .field("rt_network_indexes", &self.rt_network_indexes)
             .field("res_indexes", &self.res_indexes)
             .field("real_res_indexes", &self.real_res_indexes)
             .finish()
@@ -131,7 +127,6 @@ pub fn node_cache_entry(
     let mut buffer_ref_indexes = Vec::new();
     let mut buffer_values = Vec::new();
     let mut rt_workers_indexes = Vec::new();
-    let mut rt_network_indexes = Vec::new();
     let mut real_res_indexes = Vec::new();
     let mut res_indexes = Vec::new();
     let mut args = vec![CmTypes::None; node.args.len()];
@@ -152,9 +147,6 @@ pub fn node_cache_entry(
                 } else if *obj_id == 1 {
                     // Reserved for $workers
                     rt_workers_indexes.push(idx_count);
-                } else if *obj_id == 2 {
-                    // Reserved for $network
-                    rt_network_indexes.push(idx_count);
                 } else {
                     // For init_object values
                     let obj_vec = &init_objects[*obj_id];
@@ -199,7 +191,6 @@ pub fn node_cache_entry(
         buffer_values,
         rt_idxs_indexes,
         rt_workers_indexes,
-        rt_network_indexes,
         res_indexes,
         real_res_indexes,
     };
@@ -235,7 +226,6 @@ pub fn node_cache_entry(
         let mut cond_buffer_ref_indexes = Vec::new();
         let mut cond_buffer_values = Vec::new();
         let mut cond_rt_workers_indexes = Vec::new();
-        let mut cond_rt_network_indexes = Vec::new();
         let mut cond_real_res_indexes = Vec::new();
         let mut cond_res_indexes = Vec::new();
         let mut cond_args_vec = vec![CmTypes::None; cond.args.len()];
@@ -248,8 +238,6 @@ pub fn node_cache_entry(
                         cond_rt_idxs_indexes.push(cond_idx_count);
                     } else if *obj_id == 1 {
                         cond_rt_workers_indexes.push(cond_idx_count);
-                    } else if *obj_id == 2 {
-                        cond_rt_network_indexes.push(cond_idx_count);
                     } else {
                         let obj_vec = &init_objects[*obj_id];
                         if obj_vec.len() > 1 {
@@ -280,7 +268,6 @@ pub fn node_cache_entry(
             buffer_values: cond_buffer_values,
             rt_idxs_indexes: cond_rt_idxs_indexes,
             rt_workers_indexes: cond_rt_workers_indexes,
-            rt_network_indexes: cond_rt_network_indexes,
             res_indexes: cond_res_indexes,
             real_res_indexes: cond_real_res_indexes,
         };
