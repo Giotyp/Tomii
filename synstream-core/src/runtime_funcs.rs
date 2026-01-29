@@ -1157,67 +1157,6 @@ pub fn should_record_slot(shared: &Arc<SharedData>, slot: usize) -> bool {
     }
 }
 
-// ============================================================================
-// PHASE 2A: Parallel Batch Processing with Reduced Locking
-// ============================================================================
-
-/// Parallel phase: Collect successor information for all batch nodes in parallel
-///
-/// This function processes batch nodes in parallel using rayon, collecting
-/// successor information without acquiring locks. Each node's successor data
-/// is computed independently, then used in the sequential dependency resolution
-/// phase that follows.
-///
-/// # Arguments
-/// * `shared` - Shared runtime data (Arc, thread-safe)
-/// * `batch` - Batch of completed (NodeInfo, result) pairs
-///
-/// # Returns
-/// Vector of successor update vectors, one per batch node.
-/// `all_successor_updates[i]` corresponds to `batch[i]`.
-///
-/// # Performance
-/// - Parallel path (batch_len > 1): Uses rayon::par_iter() for ~4-8x speedup
-/// - Sequential path (batch_len <= 1): Avoids rayon overhead
-/// - Target: 150-200μs reduction in resolution loop latency for typical batches
-///
-/// # Thread Safety
-/// This function only performs read operations on immutable data structures:
-/// - `shared.graph.successors` - immutable after construction
-/// - `shared.node_cache` - immutable and properly shared
-/// - Atomic load operations with Acquire ordering (safe for visibility)
-/// No modifications to shared state occur during this phase.
-pub fn collect_batch_successors(
-    shared: &Arc<SharedData>,
-    batch: &Vec<(NodeInfo, CmTypes)>,
-) -> Vec<Vec<(NodeInfo, bool, IdType)>> {
-    use rayon::prelude::*;
-
-    let batch_len = batch.len();
-
-    // Only use parallel path if batch size > 1 to avoid rayon overhead
-    // Single-node batches use sequential path (faster than rayon setup)
-    if batch_len > 1 {
-        print_debug(|| {
-            format!(
-                "Phase 2A: Processing batch of {} nodes in parallel",
-                batch_len
-            )
-        });
-
-        batch
-            .par_iter()
-            .map(|(node_info, _result)| collect_successors_for_node(shared, node_info))
-            .collect()
-    } else if batch_len == 1 {
-        // Single-node path: sequential without rayon overhead
-        vec![collect_successors_for_node(shared, &batch[0].0)]
-    } else {
-        // Empty batch
-        Vec::new()
-    }
-}
-
 /// Sequential helper: Collect successors for a single node (read-only)
 ///
 /// This function extracts the inner loop from the original sequential resolution
@@ -1242,7 +1181,7 @@ pub fn collect_batch_successors(
 /// 3. Atomic load operations use Acquire ordering - ensures visibility of prior writes
 /// 4. No concurrent writes during this phase - parallel threads only read
 #[inline]
-fn collect_successors_for_node(
+pub fn collect_successors_for_node(
     shared: &Arc<SharedData>,
     node_info: &NodeInfo,
 ) -> Vec<(NodeInfo, bool, IdType)> {

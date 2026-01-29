@@ -653,20 +653,6 @@ impl SynRt {
         // Track start of idle/wait periods so we can record waiting time
         let mut wait_start_ns: Option<u128> = None;
 
-        // Track timing for the first packet and its sub-phases
-        struct FirstPacketTiming {
-            start: TimingMethod,
-            packet_index: usize,
-            packet_processed_recorded: bool,
-            batch_insertion_measured: bool,
-            id_func_measured: bool,
-            slot_assign_measured: bool,
-            packet_recv_ns: Option<u128>,
-            recv_to_resolution_measured: bool,
-        }
-
-        let mut first_packet_timing: Option<FirstPacketTiming> = None;
-
         let mut receive_finished: bool = false;
         let mut first_packet_received: bool = false;
 
@@ -681,226 +667,84 @@ impl SynRt {
                 if !receive_finished && !shared.packet_receivers.is_empty() {
                     let packet_process_func = network_config.extract_packet_func.unwrap();
 
-                    // Block until first packet arrives
-                    if !first_packet_received {
-                        for receiver_id in 0..shared.packet_receivers.len() {
-                            if let Ok(packet_msg) = shared.packet_receivers[receiver_id].recv() {
-                                first_packet_received = true;
-                                print_debug(|| {
-                                    "First packet received, switching to non-blocking polling"
-                                        .to_string()
-                                });
-
-                                let packet_timestamp = packet_msg.timestamp;
-                                let receiver_core_id = packet_msg.receiver_core_id;
-
-                                // Start timing for first packet processing (if timing enabled)
-                                if let Some(_tb) = &shared.time_buffer {
-                                    first_packet_timing = Some(FirstPacketTiming {
-                                        start: TimingMethod::Instant(packet_timestamp),
-                                        packet_index: 0,
-                                        packet_processed_recorded: false,
-                                        batch_insertion_measured: false,
-                                        id_func_measured: false,
-                                        slot_assign_measured: false,
-                                        packet_recv_ns: None,
-                                        recv_to_resolution_measured: false,
-                                    });
-                                }
-                                // Record receive timestamp immediately (before processing)
-                                if let Some(ref mut fpt) = first_packet_timing {
-                                    if !fpt.packet_processed_recorded {
-                                        if let Some(tb) = &shared.time_buffer {
-                                            let end = tb.measure_time();
-                                            let dur = tb.measure_duration(fpt.start.clone(), end);
-                                            tb.add_task_time(
-                                                thread_slot,
-                                                "First Packet - Received",
-                                                usize::MAX,
-                                                dur,
-                                            );
-                                        }
-                                    }
-                                }
-                                // Process this first packet
-                                let received_bytes_cm = CmTypes::from_any(packet_msg.packet_bytes);
-
-                                let counter = shared.stream_packet_counter.clone();
-                                let packet_index = counter.fetch_add(1, Ordering::Relaxed);
-                                let mut node_info = NodeInfo::new(0, 0, packet_index, 0);
-
-                                // Record packet processing end for first packet
-                                let packet_cm = if let Some(ref mut fpt) = first_packet_timing {
-                                    if !fpt.packet_processed_recorded {
-                                        if let Some(tb) = &shared.time_buffer {
-                                            let proc_start = tb.measure_time();
-                                            let packet_cm =
-                                                packet_process_func(vec![received_bytes_cm]);
-                                            let end = tb.measure_time();
-                                            let dur = tb.measure_duration(proc_start, end);
-                                            tb.add_task_time(
-                                                thread_slot,
-                                                "First Packet - Packet Processing",
-                                                usize::MAX,
-                                                dur,
-                                            );
-                                            fpt.packet_processed_recorded = true;
-                                            // store the observed packet index
-                                            fpt.packet_index = packet_index;
-                                            packet_cm
-                                        } else {
-                                            packet_process_func(vec![received_bytes_cm])
-                                        }
-                                    } else {
-                                        packet_process_func(vec![received_bytes_cm])
-                                    }
-                                } else {
-                                    packet_process_func(vec![received_bytes_cm])
-                                };
-
-                                // Call id_function and time it for the first packet
-                                let new_stream_opt = if let Some(ref mut fpt) = first_packet_timing
-                                {
-                                    if !fpt.id_func_measured {
-                                        if let Some(tb) = &shared.time_buffer {
-                                            let id_start = tb.measure_time();
-                                            let res = process_id_function(
-                                                &shared, &node_info, &packet_cm,
-                                            );
-                                            let id_end = tb.measure_time();
-                                            let id_dur = tb.measure_duration(id_start, id_end);
-                                            tb.add_task_time(
-                                                thread_slot,
-                                                "First Packet - ID Function",
-                                                usize::MAX,
-                                                id_dur,
-                                            );
-                                            fpt.id_func_measured = true;
-                                            res
-                                        } else {
-                                            process_id_function(&shared, &node_info, &packet_cm)
-                                        }
-                                    } else {
-                                        process_id_function(&shared, &node_info, &packet_cm)
-                                    }
-                                } else {
-                                    process_id_function(&shared, &node_info, &packet_cm)
-                                };
-
-                                if let Some(new_stream) = new_stream_opt {
-                                    // Assign streams to an available stream slot (time this for first packet)
-                                    if let Some(ref mut fpt) = first_packet_timing {
-                                        if !fpt.slot_assign_measured {
-                                            if let Some(tb) = &shared.time_buffer {
-                                                let sa_start = tb.measure_time();
-                                                node_info.slot = assign_stream_to_available_slot(
-                                                    &shared, new_stream,
-                                                );
-                                                let sa_end = tb.measure_time();
-                                                let sa_dur = tb.measure_duration(sa_start, sa_end);
-                                                tb.add_task_time(
-                                                    thread_slot,
-                                                    "First Packet - Slot Assignment",
-                                                    usize::MAX,
-                                                    sa_dur,
-                                                );
-                                                fpt.slot_assign_measured = true;
-                                            } else {
-                                                node_info.slot = assign_stream_to_available_slot(
-                                                    &shared, new_stream,
-                                                );
-                                            }
-                                        } else {
-                                            node_info.slot = assign_stream_to_available_slot(
-                                                &shared, new_stream,
-                                            );
-                                        }
-                                    } else {
-                                        node_info.slot =
-                                            assign_stream_to_available_slot(&shared, new_stream);
-                                    }
-                                } else {
-                                    // ID function failed, skip processing this node
-                                    print_debug(|| {
-                                        format!(
-                                            "Thread {:?} -- Skipping further processing of node {:?} due to ID function failure",
-                                            thread_id, node_info)
-                                    });
-                                    continue;
-                                }
-
-                                network_received_nodes.push((node_info, packet_cm));
-
-                                if shared.async_recorder.is_some() {
-                                    let receiver_slot = shared.slots + shared.system_threads;
-                                    let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
-                                    let packet_rcv = packet_timestamp
-                                        .duration_since(*shared.base_instant)
-                                        .as_nanos();
-                                    let delta_ns = 10000u128;
-                                    submit_record(Record {
-                                        slot: receiver_slot,
-                                        job_id,
-                                        start_ns: packet_rcv,
-                                        end_ns: packet_rcv + delta_ns,
-                                        worker: receiver_core_id,
-                                        task_id: 0,
-                                        index: packet_index,
-                                    });
-                                    // store receive timestamp for first-packet timing
-                                    if let Some(ref mut fpt) = first_packet_timing {
-                                        fpt.packet_recv_ns = Some(packet_rcv);
-                                    }
-                                }
-
-                                if packet_index + 1 == stream_packets {
-                                    shared.stream_packet_counter.store(0, Ordering::Relaxed);
-                                    print_debug(|| {
-                                        format!(
-                                            "All {} packets for stream received",
-                                            stream_packets
-                                        )
-                                    });
-                                    let completed_streams = shared
-                                        .streams_receive_counter
-                                        .fetch_add(1, Ordering::Relaxed)
-                                        + 1;
-                                    if completed_streams >= shared.max_streams {
-                                        println!(
-                                            "All {} streams received ({} packets each) - receivers will shutdown",
-                                            shared.max_streams, stream_packets
-                                        );
-                                        shared.shutdown_flag.store(true, Ordering::SeqCst);
-                                        receive_finished = true;
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                    }
-
-                    // Non-blocking poll - process all available packets
                     for receiver_id in 0..shared.packet_receivers.len() {
-                        while let Ok(packet_msg) = shared.packet_receivers[receiver_id].try_recv() {
-                            let packet_timestamp = packet_msg.timestamp;
+                        if let Ok(packet_msg) = shared.packet_receivers[receiver_id].try_recv() {
                             let receiver_core_id = packet_msg.receiver_core_id;
+                            let packet_timestamp = packet_msg.timestamp;
+                            if !first_packet_received {
+                                if let Some(tb) = &shared.time_buffer {
+                                    let packet_rcv = tb.measure_time();
+                                    let dur = tb.measure_duration(
+                                        TimingMethod::Instant(packet_msg.timestamp),
+                                        packet_rcv,
+                                    );
+                                    tb.add_task_time(
+                                        thread_slot,
+                                        "First Packet - Received",
+                                        usize::MAX,
+                                        dur,
+                                    );
+                                }
+                                first_packet_received = true;
+                            }
 
+                            // Process packet and record
                             let received_bytes_cm = CmTypes::from_any(packet_msg.packet_bytes);
+                            let start_proc = if let Some(tb) = &shared.time_buffer {
+                                tb.measure_time()
+                            } else {
+                                TimingMethod::Instant(Instant::now())
+                            };
 
-                            // Process packet
                             let packet_cm = packet_process_func(vec![received_bytes_cm]);
+
+                            if let Some(tb) = &shared.time_buffer {
+                                let end_proc = tb.measure_time();
+                                let dur = tb.measure_duration(start_proc, end_proc);
+                                tb.add_task_time(thread_slot, "Packet Processing", usize::MAX, dur);
+                            }
+
                             let counter = shared.stream_packet_counter.clone();
                             let packet_index = counter.fetch_add(1, Ordering::Relaxed);
                             let mut node_info = NodeInfo::new(0, 0, packet_index, 0); // assuming node_id 0 for network input
 
-                            // Call id_function
+                            // Call id_function and record
+                            let start_id = if let Some(tb) = &shared.time_buffer {
+                                tb.measure_time()
+                            } else {
+                                TimingMethod::Instant(Instant::now())
+                            };
+
                             let new_stream_opt =
                                 process_id_function(&shared, &node_info, &packet_cm);
 
+                            if let Some(tb) = &shared.time_buffer {
+                                let end_id = tb.measure_time();
+                                let dur = tb.measure_duration(start_id, end_id);
+                                tb.add_task_time(thread_slot, "ID Function", usize::MAX, dur);
+                            }
+
                             if let Some(new_stream) = new_stream_opt {
                                 // Assign streams to an available stream slot
+                                let start_sa = if let Some(tb) = &shared.time_buffer {
+                                    tb.measure_time()
+                                } else {
+                                    TimingMethod::Instant(Instant::now())
+                                };
+
                                 node_info.slot =
                                     assign_stream_to_available_slot(&shared, new_stream);
+
+                                if let Some(tb) = &shared.time_buffer {
+                                    let end_sa = tb.measure_time();
+                                    let dur = tb.measure_duration(start_sa, end_sa);
+                                    tb.add_task_time(
+                                        thread_slot,
+                                        "Slot Assignment",
+                                        usize::MAX,
+                                        dur,
+                                    );
+                                }
                             } else {
                                 // ID function failed, skip processing this node
                                 print_debug(|| {
@@ -932,7 +776,6 @@ impl SynRt {
                                     index: packet_index,
                                 });
                             }
-
                             if packet_index + 1 == stream_packets {
                                 // Reset counter for next stream
                                 shared.stream_packet_counter.store(0, Ordering::Relaxed);
@@ -984,30 +827,8 @@ impl SynRt {
             if !network_received_nodes.is_empty() {
                 empty_network = false;
                 let network_count = network_received_nodes.len();
-                // If we have first-packet timing, measure the batch insertion duration
-                if first_packet_timing.is_some() {
-                    if let Some(tb) = &shared.time_buffer {
-                        let insert_start = tb.measure_time();
-                        batch.splice(0..0, network_received_nodes);
-                        let insert_end = tb.measure_time();
-                        if let Some(ref mut fpt) = first_packet_timing {
-                            if !fpt.batch_insertion_measured {
-                                let dur = tb.measure_duration(insert_start, insert_end);
-                                tb.add_task_time(
-                                    thread_slot,
-                                    "First Packet - Batch Insertion",
-                                    usize::MAX,
-                                    dur,
-                                );
-                                fpt.batch_insertion_measured = true;
-                            }
-                        }
-                    } else {
-                        batch.splice(0..0, network_received_nodes);
-                    }
-                } else {
-                    batch.splice(0..0, network_received_nodes);
-                }
+                batch.splice(0..0, network_received_nodes);
+
                 print_debug(|| format!("Injected {:?} network nodes to batch", network_count));
             }
 
@@ -1072,27 +893,6 @@ impl SynRt {
                     continue;
                 }
 
-                // If this is the first packet's node, record time from receive -> resolution processing
-                if let Some(ref mut fpt) = first_packet_timing {
-                    if !fpt.recv_to_resolution_measured {
-                        if let Some(packet_recv_ns) = fpt.packet_recv_ns {
-                            if node_info.id == 0 && node_info.index as usize == fpt.packet_index {
-                                let now_ns = shared.base_instant.elapsed().as_nanos();
-                                let delta_ns = now_ns.saturating_sub(packet_recv_ns);
-                                if let Some(tb) = &shared.time_buffer {
-                                    tb.add_task_time(
-                                        thread_slot,
-                                        "First Packet - Receive->Resolution",
-                                        usize::MAX,
-                                        Duration::from_nanos(delta_ns as u64),
-                                    );
-                                }
-                                fpt.recv_to_resolution_measured = true;
-                            }
-                        }
-                    }
-                }
-
                 // Get available or assigned slot
                 if node_info.id != 0 {
                     // find real stream belonging to this slot
@@ -1147,20 +947,10 @@ impl SynRt {
                 nodes_for_successor_processing.push(node_info);
             }
 
-            // PHASE 2A: Parallel Phase 2 - Collect successor information in parallel
-            // This phase only reads from immutable graph/cache structures, no side effects
-            // We need to convert nodes back to (node_info, dummy_result) for the parallel collection function
-            // Note: The result value is not used in successor collection, only node_info matters
-            let batch_for_parallel: Vec<(NodeInfo, CmTypes)> = nodes_for_successor_processing
+            let all_successor_updates = nodes_for_successor_processing
                 .iter()
-                .map(|node_info| (node_info.clone(), CmTypes::Bool(false)))
-                .collect();
-
-            let all_successor_updates = if !batch_for_parallel.is_empty() {
-                collect_batch_successors(&shared, &batch_for_parallel)
-            } else {
-                Vec::new()
-            };
+                .map(|node_info| collect_successors_for_node(&shared, node_info))
+                .collect::<Vec<_>>();
 
             // PHASE 2A: Sequential Phase 3 - Process dependency updates using pre-collected successor data
             for (idx, node_info) in nodes_for_successor_processing.into_iter().enumerate() {
