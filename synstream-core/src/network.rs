@@ -216,7 +216,7 @@ pub fn multi_socket_receiver_loop(
         .collect();
 
     let shutdown = &shared.shutdown_flag;
-    let read_timeout = Duration::from_micros(100); // Tunable: balance latency vs CPU
+    let read_timeout = Duration::from_micros(10); // Tunable: balance latency vs CPU
 
     println!(
         "Multi-socket receiver thread {} polling sockets {:?} on core {}",

@@ -654,9 +654,32 @@ impl SynRt {
         let mut wait_start_ns: Option<u128> = None;
 
         let mut receive_finished: bool = false;
+        let mut first_packet_rcv_time: Option<TimingMethod> = None;
         let mut first_packet_received: bool = false;
+        let mut resolution_started: bool = false;
 
         let receive_timeout = Duration::from_micros(shared.batching_limit);
+        let mut work_performed: bool;
+
+        // split receiver channels (packet_receivers) among system threads
+        let num_receiver_channels = shared.packet_receivers.len();
+        let receivers_per_thread = if num_receiver_channels > 0 {
+            (num_receiver_channels + shared.system_threads - 1) / shared.system_threads
+        } else {
+            0
+        };
+        let first_receiver_id = thread_id * receivers_per_thread;
+        let last_receiver_id = std::cmp::min(
+            first_receiver_id + receivers_per_thread,
+            num_receiver_channels,
+        );
+        println!(
+            "Resolution thread {} handling packet receiver channels {} to {} (total {} channels)",
+            thread_id,
+            first_receiver_id,
+            last_receiver_id - 1,
+            num_receiver_channels
+        );
 
         // Process completed nodes with dynamic batching from scheduler
         loop {
@@ -667,13 +690,16 @@ impl SynRt {
                 if !receive_finished && !shared.packet_receivers.is_empty() {
                     let packet_process_func = network_config.extract_packet_func.unwrap();
 
-                    for receiver_id in 0..shared.packet_receivers.len() {
-                        if let Ok(packet_msg) = shared.packet_receivers[receiver_id].try_recv() {
+                    for receiver_id in first_receiver_id..last_receiver_id {
+                        if let Ok(packet_msg) =
+                            shared.packet_receivers[receiver_id].recv_timeout(receive_timeout)
+                        {
                             let receiver_core_id = packet_msg.receiver_core_id;
                             let packet_timestamp = packet_msg.timestamp;
                             if !first_packet_received {
                                 if let Some(tb) = &shared.time_buffer {
                                     let packet_rcv = tb.measure_time();
+                                    first_packet_rcv_time = Some(packet_rcv.clone());
                                     let dur = tb.measure_duration(
                                         TimingMethod::Instant(packet_msg.timestamp),
                                         packet_rcv,
@@ -804,20 +830,31 @@ impl SynRt {
                     }
                 }
             }
+            if !first_packet_received {
+                continue; // Skip rest of loop until first packet received
+            }
 
             // Track if any work was performed this iteration (network packets, batch processing, etc.)
-            let mut work_performed = false;
+            work_performed = false;
 
             // Receive batch from scheduler
-            let mut batch = match completed_rx.recv_timeout(receive_timeout) {
-                Ok(batch_from_scheduler) => batch_from_scheduler,
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => Vec::new(), // No messages yet, continue
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                    println!(
-                        "Resolution thread {} detected channel closure, exiting...",
-                        thread_id
-                    );
-                    break; // Exit the resolution loop
+            let mut batch: Vec<(NodeInfo, CmTypes)> = {
+                if resolution_started {
+                    let b: Vec<(NodeInfo, CmTypes)> =
+                        match completed_rx.recv_timeout(receive_timeout) {
+                            Ok(batch_from_scheduler) => batch_from_scheduler,
+                            Err(crossbeam_channel::RecvTimeoutError::Timeout) => Vec::new(), // No messages yet, continue
+                            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                                println!(
+                                    "Resolution thread {} detected channel closure, exiting...",
+                                    thread_id
+                                );
+                                break; // Exit the resolution loop
+                            }
+                        };
+                    b
+                } else {
+                    Vec::<(NodeInfo, CmTypes)>::new()
                 }
             };
 
@@ -875,11 +912,21 @@ impl SynRt {
                 work_performed = true; // Processing nodes from scheduler or network
             }
 
-            // PHASE 2A: Sequential Phase 1 - Store results and decrement atomics
+            //  Store results and decrement atomics
             // This phase must be sequential due to ID function side effects
             let mut nodes_for_successor_processing = Vec::new();
 
             for (mut node_info, result) in batch.into_iter() {
+                if !resolution_started {
+                    resolution_started = true;
+                    // Add record to time buffer for first resolution
+                    if let Some(tb) = &shared.time_buffer {
+                        let end_time = tb.measure_time();
+                        let first_rcv = first_packet_rcv_time.take().unwrap();
+                        let dur = tb.measure_duration(first_rcv, end_time);
+                        tb.add_task_time(thread_slot, "First Resolution", usize::MAX, dur);
+                    }
+                }
                 print_debug(|| {
                     format!(
                         "Thread {:?} -- Processing Completed {:?}",

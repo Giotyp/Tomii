@@ -480,9 +480,7 @@ fn execute_task(
         // Single lock operation - check and flush atomically
         let mut batch = batch_buffer.lock();
 
-        // OPTIMIZATION Phase 1A: Eager flush on first node
         // If batch is empty when adding this result, flush immediately instead of waiting for timeout.
-        // This eliminates 100-200μs batch accumulation delay on the critical path.
         let flush_immediately = batch.is_empty();
 
         batch.push((node_info.clone(), result));
