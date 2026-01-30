@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use crate::async_recorder::{set_worker_recorder, submit_record, AsyncRecorder};
+use crate::batch_queue::{Receiver as BatchReceiver, Sender as BatchSender};
 use crate::buffers::NodeInfo;
 use crate::debug::print_debug;
 use crate::{IdType, Record};
@@ -342,17 +343,11 @@ struct SchedulerBase {
     total_completed: Arc<AtomicUsize>,
     async_recorder: Option<Arc<AsyncRecorder>>,
     base_instant: Arc<Instant>,
-    // Batching fields
-    batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
-    batch_last_sent: Arc<Mutex<Instant>>,
-    batching_size: usize,
-    batching_limit: u64,
-    completed_tx: Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>>,
-    flusher_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
-    flusher_shutdown: Arc<AtomicUsize>,
-    // Flush notification channel to eliminate polling sleep
-    flush_notify_tx: crossbeam_channel::Sender<()>,
-    flush_notify_rx: Arc<Mutex<crossbeam_channel::Receiver<()>>>,
+    // Batch queue for lock-free task completion delivery
+    batch_queue_tx: BatchSender<(NodeInfo, CmTypes)>,
+    batch_queue_rx: Arc<BatchReceiver<(NodeInfo, CmTypes)>>,
+    target_batch_size: usize,
+    batch_timeout_us: u64,
     // Stream-specific recording filter
     record_stream: Option<usize>,
     available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
@@ -369,16 +364,10 @@ impl SchedulerBase {
         base_instant: Instant,
         system_threads: usize,
         receiver_threads: usize,
-        batching_size: usize,
-        batching_limit: u64,
+        target_batch_size: usize,
+        batch_timeout_us: u64,
         record_stream: Option<usize>,
         available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
-        // Phase 2: Accept shared batch infrastructure instead of creating our own
-        batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
-        batch_last_sent: Arc<Mutex<Instant>>,
-        flush_notify_rx: crossbeam_channel::Receiver<()>,
-        flush_notify_tx: crossbeam_channel::Sender<()>,
-        flusher_shutdown: Arc<AtomicUsize>,
     ) -> Self {
         let total_recorders = workers + receiver_threads + system_threads;
         let async_recorder = if record {
@@ -406,8 +395,8 @@ impl SchedulerBase {
             async_recorder.clone(),
         );
 
-        // Phase 2: Use shared batch infrastructure from parameters
-        let completed_tx = Arc::new(Mutex::new(None));
+        // Create batch_queue for lock-free task completion delivery
+        let (batch_queue_tx, batch_queue_rx) = crate::batch_queue::unbounded();
 
         // Phase 4: Initialize worker metrics (only when recording enabled)
         let worker_metrics = if record {
@@ -429,18 +418,13 @@ impl SchedulerBase {
             total_completed: Arc::new(AtomicUsize::new(0)),
             async_recorder,
             base_instant: Arc::new(base_instant),
-            batch_buffer,    // From parameters
-            batch_last_sent, // From parameters
-            batching_size,
-            batching_limit,
-            completed_tx,
-            flusher_handle: Arc::new(Mutex::new(None)),
-            flusher_shutdown, // From parameters
-            flush_notify_tx,  // From parameters
-            flush_notify_rx: Arc::new(Mutex::new(flush_notify_rx)), // From parameters
+            batch_queue_tx,
+            batch_queue_rx: Arc::new(batch_queue_rx),
+            target_batch_size,
+            batch_timeout_us,
             record_stream,
             available_stream_slots,
-            worker_metrics, // Phase 4
+            worker_metrics,
         }
     }
 
@@ -487,90 +471,20 @@ impl SchedulerBase {
         self.total_completed.load(Ordering::SeqCst)
     }
 
-    fn set_completed_tx(&self, tx: Sender<Vec<(NodeInfo, CmTypes)>>) {
-        let mut completed_tx_lock = self.completed_tx.lock();
-        *completed_tx_lock = Some(tx);
+    fn get_batch_queue_tx(&self) -> BatchSender<(NodeInfo, CmTypes)> {
+        self.batch_queue_tx.clone()
     }
 
-    fn start_flusher_thread(&self) {
-        let batch_buffer = Arc::clone(&self.batch_buffer);
-        let batch_last_sent = Arc::clone(&self.batch_last_sent);
-        let completed_tx = Arc::clone(&self.completed_tx);
-        let shutdown = Arc::clone(&self.flusher_shutdown);
-        let batching_size = self.batching_size;
-        let batching_limit = self.batching_limit;
-        let batch_timeout = Duration::from_micros(batching_limit);
-        let flush_notify_rx = Arc::clone(&self.flush_notify_rx);
-
-        let handle = std::thread::spawn(move || {
-            let rx = flush_notify_rx.lock();
-            loop {
-                // Check for shutdown signal
-                if shutdown.load(Ordering::SeqCst) == 1 {
-                    // Final flush before exit
-                    let mut batch = batch_buffer.lock();
-                    if !batch.is_empty() {
-                        let batch_to_send = std::mem::take(&mut *batch);
-                        drop(batch);
-                        if let Some(tx) = completed_tx.lock().as_ref() {
-                            let _ = tx.send(batch_to_send);
-                        }
-                    }
-                    break;
-                }
-
-                // Wait for notification or timeout - NO POLLING SLEEP
-                let _ = rx.recv_timeout(batch_timeout);
-
-                let should_flush = {
-                    let last_sent = batch_last_sent.lock();
-                    last_sent.elapsed() >= batch_timeout
-                };
-
-                if should_flush {
-                    let mut batch = batch_buffer.lock();
-                    if !batch.is_empty() {
-                        let batch_to_send =
-                            std::mem::replace(&mut *batch, Vec::with_capacity(batching_size));
-                        drop(batch);
-                        *batch_last_sent.lock() = Instant::now();
-
-                        if let Some(tx) = completed_tx.lock().as_ref() {
-                            let _ = tx.send(batch_to_send);
-                        }
-                    }
-                }
-            }
-        });
-
-        let mut flusher_lock = self.flusher_handle.lock();
-        *flusher_lock = Some(handle);
+    fn get_batch_queue_rx(&self) -> Arc<BatchReceiver<(NodeInfo, CmTypes)>> {
+        Arc::clone(&self.batch_queue_rx)
     }
 
-    fn flush_batch(&self) {
-        let mut batch = self.batch_buffer.lock();
-        if !batch.is_empty() {
-            let batch_to_send =
-                std::mem::replace(&mut *batch, Vec::with_capacity(self.batching_size));
-            drop(batch);
-            *self.batch_last_sent.lock() = Instant::now();
-
-            if let Some(tx) = self.completed_tx.lock().as_ref() {
-                let _ = tx.send(batch_to_send);
-            }
-        }
+    fn get_target_batch_size(&self) -> usize {
+        self.target_batch_size
     }
 
-    fn shutdown_flusher(&self) {
-        // Signal shutdown
-        self.flusher_shutdown.store(1, Ordering::SeqCst);
-
-        // Wait for flusher thread to finish
-        let mut handle_lock = self.flusher_handle.lock();
-        if let Some(handle) = handle_lock.take() {
-            drop(handle_lock); // Release lock before joining
-            let _ = handle.join();
-        }
+    fn get_batch_timeout_us(&self) -> u64 {
+        self.batch_timeout_us
     }
 
     /// Common task spawning logic. `spawn_fn` handles the specific spawning (e.g., FIFO or work-stealing).
@@ -645,26 +559,6 @@ impl SchedulerBase {
         spawn_fn(Box::new(wrapped_task));
     }
 
-    fn get_batch_buffer(&self) -> Arc<Mutex<Vec<(NodeInfo, CmTypes)>>> {
-        Arc::clone(&self.batch_buffer)
-    }
-
-    fn get_batch_last_sent(&self) -> Arc<Mutex<Instant>> {
-        Arc::clone(&self.batch_last_sent)
-    }
-
-    fn get_batching_size(&self) -> usize {
-        self.batching_size
-    }
-
-    fn get_flush_notify(&self) -> crossbeam_channel::Sender<()> {
-        self.flush_notify_tx.clone()
-    }
-
-    fn get_completed_tx_ref(&self) -> Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>> {
-        Arc::clone(&self.completed_tx)
-    }
-
     fn get_async_recorder(&self) -> Option<Arc<AsyncRecorder>> {
         self.async_recorder.clone()
     }
@@ -688,16 +582,10 @@ impl FifoScheduler {
         base_instant: Instant,
         system_threads: usize,
         receiver_threads: usize,
-        batching_size: usize,
-        batching_limit: u64,
+        target_batch_size: usize,
+        batch_timeout_us: u64,
         record_stream: Option<usize>,
         available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
-        // Phase 2: Accept shared batch infrastructure
-        batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
-        batch_last_sent: Arc<Mutex<Instant>>,
-        flush_notify_rx: crossbeam_channel::Receiver<()>,
-        flush_notify_tx: crossbeam_channel::Sender<()>,
-        flusher_shutdown: Arc<AtomicUsize>,
     ) -> Self {
         Self {
             base: SchedulerBase::new(
@@ -708,15 +596,10 @@ impl FifoScheduler {
                 base_instant,
                 system_threads,
                 receiver_threads,
-                batching_size,
-                batching_limit,
+                target_batch_size,
+                batch_timeout_us,
                 record_stream,
                 available_stream_slots,
-                batch_buffer,
-                batch_last_sent,
-                flush_notify_rx,
-                flush_notify_tx,
-                flusher_shutdown,
             ),
         }
     }
@@ -751,16 +634,10 @@ impl WorkStealScheduler {
         base_instant: Instant,
         system_threads: usize,
         receiver_threads: usize,
-        batching_size: usize,
-        batching_limit: u64,
+        target_batch_size: usize,
+        batch_timeout_us: u64,
         record_stream: Option<usize>,
         available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
-        // Phase 2: Accept shared batch infrastructure
-        batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
-        batch_last_sent: Arc<Mutex<Instant>>,
-        flush_notify_rx: crossbeam_channel::Receiver<()>,
-        flush_notify_tx: crossbeam_channel::Sender<()>,
-        flusher_shutdown: Arc<AtomicUsize>,
     ) -> Self {
         Self {
             base: SchedulerBase::new(
@@ -771,15 +648,10 @@ impl WorkStealScheduler {
                 base_instant,
                 system_threads,
                 receiver_threads,
-                batching_size,
-                batching_limit,
+                target_batch_size,
+                batch_timeout_us,
                 record_stream,
                 available_stream_slots,
-                batch_buffer,
-                batch_last_sent,
-                flush_notify_rx,
-                flush_notify_tx,
-                flusher_shutdown,
             ),
         }
     }
@@ -890,59 +762,31 @@ impl SchedulerImpl {
         }
     }
 
-    pub fn set_completed_tx(&self, tx: Sender<Vec<(NodeInfo, CmTypes)>>) {
+    pub fn get_batch_queue_tx(&self) -> BatchSender<(NodeInfo, CmTypes)> {
         match self {
-            SchedulerImpl::Fifo(s) => s.base.set_completed_tx(tx),
-            SchedulerImpl::WorkStealing(s) => s.base.set_completed_tx(tx),
+            SchedulerImpl::Fifo(s) => s.base.get_batch_queue_tx(),
+            SchedulerImpl::WorkStealing(s) => s.base.get_batch_queue_tx(),
         }
     }
 
-    pub fn flush_batch(&self) {
+    pub fn get_batch_queue_rx(&self) -> Arc<BatchReceiver<(NodeInfo, CmTypes)>> {
         match self {
-            SchedulerImpl::Fifo(s) => s.base.flush_batch(),
-            SchedulerImpl::WorkStealing(s) => s.base.flush_batch(),
+            SchedulerImpl::Fifo(s) => s.base.get_batch_queue_rx(),
+            SchedulerImpl::WorkStealing(s) => s.base.get_batch_queue_rx(),
         }
     }
 
-    pub fn get_batch_buffer(&self) -> Arc<Mutex<Vec<(NodeInfo, CmTypes)>>> {
+    pub fn get_target_batch_size(&self) -> usize {
         match self {
-            SchedulerImpl::Fifo(s) => s.base.get_batch_buffer(),
-            SchedulerImpl::WorkStealing(s) => s.base.get_batch_buffer(),
+            SchedulerImpl::Fifo(s) => s.base.get_target_batch_size(),
+            SchedulerImpl::WorkStealing(s) => s.base.get_target_batch_size(),
         }
     }
 
-    pub fn get_batch_last_sent(&self) -> Arc<Mutex<Instant>> {
+    pub fn get_batch_timeout_us(&self) -> u64 {
         match self {
-            SchedulerImpl::Fifo(s) => s.base.get_batch_last_sent(),
-            SchedulerImpl::WorkStealing(s) => s.base.get_batch_last_sent(),
-        }
-    }
-
-    pub fn get_batching_size(&self) -> usize {
-        match self {
-            SchedulerImpl::Fifo(s) => s.base.get_batching_size(),
-            SchedulerImpl::WorkStealing(s) => s.base.get_batching_size(),
-        }
-    }
-
-    pub fn get_flush_notify(&self) -> crossbeam_channel::Sender<()> {
-        match self {
-            SchedulerImpl::Fifo(s) => s.base.get_flush_notify(),
-            SchedulerImpl::WorkStealing(s) => s.base.get_flush_notify(),
-        }
-    }
-
-    pub fn get_completed_tx_ref(&self) -> Arc<Mutex<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>> {
-        match self {
-            SchedulerImpl::Fifo(s) => s.base.get_completed_tx_ref(),
-            SchedulerImpl::WorkStealing(s) => s.base.get_completed_tx_ref(),
-        }
-    }
-
-    pub fn shutdown_flusher(&self) {
-        match self {
-            SchedulerImpl::Fifo(s) => s.base.shutdown_flusher(),
-            SchedulerImpl::WorkStealing(s) => s.base.shutdown_flusher(),
+            SchedulerImpl::Fifo(s) => s.base.get_batch_timeout_us(),
+            SchedulerImpl::WorkStealing(s) => s.base.get_batch_timeout_us(),
         }
     }
 
@@ -992,16 +836,10 @@ pub fn create_scheduler(
     base_instant: Instant,
     system_threads: usize,
     receiver_threads: usize,
-    batching_size: usize,
-    batching_limit: u64,
+    target_batch_size: usize,
+    batch_timeout_us: u64,
     record_stream: Option<usize>,
     available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
-    // Phase 2: Accept shared batch infrastructure to avoid duplication
-    batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
-    batch_last_sent: Arc<Mutex<Instant>>,
-    flush_notify_rx: crossbeam_channel::Receiver<()>,
-    flush_notify_tx: crossbeam_channel::Sender<()>,
-    flusher_shutdown: Arc<AtomicUsize>,
 ) -> SchedulerImpl {
     match scheduler_type {
         SchedulerType::Fifo => SchedulerImpl::Fifo(FifoScheduler::new(
@@ -1012,15 +850,10 @@ pub fn create_scheduler(
             base_instant,
             system_threads,
             receiver_threads,
-            batching_size,
-            batching_limit,
+            target_batch_size,
+            batch_timeout_us,
             record_stream,
             available_stream_slots,
-            batch_buffer,
-            batch_last_sent,
-            flush_notify_rx,
-            flush_notify_tx,
-            flusher_shutdown,
         )),
         SchedulerType::WorkStealing => SchedulerImpl::WorkStealing(WorkStealScheduler::new(
             core_offset,
@@ -1030,15 +863,10 @@ pub fn create_scheduler(
             base_instant,
             system_threads,
             receiver_threads,
-            batching_size,
-            batching_limit,
+            target_batch_size,
+            batch_timeout_us,
             record_stream,
             available_stream_slots,
-            batch_buffer,
-            batch_last_sent,
-            flush_notify_rx,
-            flush_notify_tx,
-            flusher_shutdown,
         )),
     }
 }

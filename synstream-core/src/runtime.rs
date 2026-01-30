@@ -1,7 +1,6 @@
 use core::panic;
 use core_affinity;
-use crossbeam_channel::{Receiver, Sender};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -47,13 +46,8 @@ impl SynRt {
         slot_priority_enabled: bool,
         async_recorder: Option<Arc<AsyncRecorder>>, // Optional shared recorder from caller
         available_stream_slots: Arc<RwLock<Vec<usize>>>, // Shared with scheduler for recording filter
-        // Phase 2: Accept shared batch infrastructure from caller
-        batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
-        batch_last_sent: Arc<Mutex<Instant>>,
-        batching_size: usize,
-        batching_limit: u64,
-        flush_notify_tx: crossbeam_channel::Sender<()>,
-        flusher_shutdown: Arc<AtomicUsize>,
+        target_batch_size: usize,
+        batch_timeout_us: u64,
     ) -> SynRt {
         // Initialize stream completion counters
         let stream_completion_counts = Arc::new(RwLock::new(Vec::new()));
@@ -119,7 +113,8 @@ impl SynRt {
 
         let job_counter = Arc::new(AtomicUsize::new(0));
 
-        // Phase 2: Batch infrastructure is now passed in from caller (no duplication)
+        // Create batch_queue for lock-free task completion delivery
+        let (batch_queue_tx, batch_queue_rx) = crate::batch_queue::unbounded();
 
         // Initialize shared dependency tracking structures
         let dependency_count_vec: Vec<usize> = app_graph.dependency_count_vec();
@@ -236,22 +231,25 @@ impl SynRt {
             slots,
             max_streams,
             max_runtime,
-            node_cache,
-            node_results: Arc::new(RwLock::new(VecMap::new(CmTypes::Init))),
-            stream_complete_counter: Arc::new(AtomicUsize::new(0)),
-            available_stream_slots,
-            time_buffer,
-            scheduler: Arc::new(scheduler),
-            completed_tx: Arc::new(RwLock::new(None)),
             system_threads,
             receiver_threads,
             workers,
             core_offset,
             receiver_core_offset,
             record_stream,
+            node_cache,
+            node_results: Arc::new(RwLock::new(VecMap::new(CmTypes::Init))),
+            stream_complete_counter: Arc::new(AtomicUsize::new(0)),
+            available_stream_slots,
+            time_buffer,
+            scheduler: Arc::new(scheduler),
             async_recorder,
             base_instant: Arc::new(base_instant),
             job_counter,
+            batch_queue_tx,
+            batch_queue_rx: Arc::new(batch_queue_rx),
+            target_batch_size,
+            batch_timeout_us,
             resolution_state,
             remaining_nodes: Arc::new(remaining_nodes),
             remaining_cond_nodes: Arc::new(remaining_cond_nodes),
@@ -261,12 +259,6 @@ impl SynRt {
             initial_prep_done: Arc::new(AtomicUsize::new(0)),
             slot_pending_tasks: Arc::new(slot_pending_tasks),
             slot_pending_cond_tasks: Arc::new(slot_pending_cond_tasks),
-            batch_buffer,
-            batch_last_sent,
-            batching_size,
-            batching_limit,
-            flush_notify_tx: flush_notify_tx.clone(),
-            flusher_shutdown,
             slot_states,
             slot_priority_enabled,
             slot_buffers,
@@ -289,18 +281,7 @@ impl SynRt {
     }
 
     pub fn run(&mut self) {
-        // create completed channel for batched results
-        let (completed_tx, completed_rx) =
-            crossbeam_channel::unbounded::<Vec<(NodeInfo, CmTypes)>>();
-
-        // Set completed_tx in SharedData
-        {
-            let mut tx_lock = self.shared.completed_tx.write();
-            *tx_lock = Some(completed_tx.clone());
-        }
-
-        // Set completed_tx in the scheduler and start the flusher thread
-        self.shared.scheduler.set_completed_tx(completed_tx);
+        // Batch queue is already initialized in SharedData
 
         // Initialize node_results
         self.init_results(self.shared.slots);
@@ -397,7 +378,6 @@ impl SynRt {
         let mut resolution_handles = Vec::new();
         for thread_id in 0..self.shared.system_threads {
             let shared_for_resolution = Arc::clone(&self.shared);
-            let completed_rx_clone = completed_rx.clone();
             let thread_core = self.shared.core_offset + thread_id;
             // Each system thread gets its own slot: slots + thread_id
             let thread_slot = self.shared.slots + thread_id;
@@ -425,13 +405,7 @@ impl SynRt {
                     );
                 }
 
-                Self::resolution(
-                    shared_for_resolution,
-                    completed_rx_clone,
-                    thread_core,
-                    thread_id,
-                    thread_slot,
-                );
+                Self::resolution(shared_for_resolution, thread_core, thread_id, thread_slot);
             });
             resolution_handles.push(resolution_handle);
         }
@@ -469,22 +443,9 @@ impl SynRt {
             }
         }
 
-        // Shutdown and flush the flusher thread in the scheduler
-        self.shared.scheduler.shutdown_flusher();
+        // No flusher thread to shutdown - batch_queue handles cleanup automatically
 
-        // Drop all senders to signal resolution threads to exit
-        // This will close the channel and unblock the resolution threads
-        {
-            let mut tx_lock = self.shared.completed_tx.write();
-            *tx_lock = None; // Drop the sender in SharedData
-        }
-        {
-            let tx_ref = self.shared.scheduler.get_completed_tx_ref();
-            let mut tx_lock = tx_ref.lock();
-            *tx_lock = None; // Drop the sender in scheduler
-        }
-
-        // Wait for all resolution threads to finish (they will unblock when channel closes)
+        // Wait for all resolution threads to finish
         for handle in resolution_handles {
             handle.join().unwrap();
         }
@@ -590,7 +551,6 @@ impl SynRt {
     /// Resolution Thread: Processes completed compute tasks and manages stream lifecycle
     fn resolution(
         shared: Arc<SharedData>,
-        completed_rx: Receiver<Vec<(NodeInfo, CmTypes)>>,
         thread_core: usize,
         thread_id: usize,
         thread_slot: usize,
@@ -658,7 +618,7 @@ impl SynRt {
 
         let mut first_packet_received: bool = false;
 
-        let receive_timeout = Duration::from_micros(shared.batching_limit);
+        let receive_timeout = Duration::from_micros(shared.batch_timeout_us);
         let mut packets_received: bool = false;
 
         // Process completed nodes with dynamic batching from scheduler
@@ -829,18 +789,10 @@ impl SynRt {
                 continue;
             }
 
-            // Receive batch from scheduler
-            let batch: Vec<(NodeInfo, CmTypes)> = match completed_rx.recv_timeout(receive_timeout) {
-                Ok(batch_from_scheduler) => batch_from_scheduler,
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => Vec::new(), // No messages yet, continue
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                    println!(
-                        "Resolution thread {} detected channel closure, exiting...",
-                        thread_id
-                    );
-                    break; // Exit the resolution loop
-                }
-            };
+            // Pull batch from lock-free queue with timeout
+            let batch = shared
+                .batch_queue_rx
+                .try_recv_chunk_timeout(shared.target_batch_size, receive_timeout);
 
             // If nothing arrived from network AND scheduler, mark start of wait period.
             // Otherwise, if we previously were waiting, record the idle interval now.
@@ -913,7 +865,18 @@ impl SynRt {
                 wait_start_ns = Some(shared.base_instant.elapsed().as_nanos());
             }
             packets_received = false;
-        } // End of resolution processing loop
+
+            // Check for completion of all streams
+            let completed_streams = shared.stream_complete_counter.load(Ordering::SeqCst);
+
+            if completed_streams == shared.max_streams {
+                println!(
+                    "Thread {} detected all streams completed, exiting resolution loop",
+                    thread_id
+                );
+                break;
+            }
+        }
     }
 }
 

@@ -5,8 +5,7 @@ use crate::resolution_state::ResolutionState;
 use crate::time_buffer::{TimeBufferManager, TimingMethod};
 use crate::{buffers::*, graph::*, graph_struct::*, scheduler::*, IdType};
 use core::panic;
-use crossbeam_channel::Sender;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -322,18 +321,15 @@ pub struct SharedData {
 
     // Shared between threads
     pub scheduler: Arc<SchedulerImpl>,
-    pub completed_tx: Arc<RwLock<Option<Sender<Vec<(NodeInfo, CmTypes)>>>>>,
     pub async_recorder: Option<Arc<crate::async_recorder::AsyncRecorder>>,
     pub base_instant: Arc<Instant>,
     pub job_counter: Arc<AtomicUsize>,
 
-    // Batching infrastructure (direct access to avoid scheduler dereference)
-    pub batch_buffer: Arc<Mutex<Vec<(NodeInfo, CmTypes)>>>,
-    pub batch_last_sent: Arc<Mutex<Instant>>,
-    pub batching_size: usize, // immutable after init
-    pub batching_limit: u64,
-    pub flush_notify_tx: crossbeam_channel::Sender<()>,
-    pub flusher_shutdown: Arc<AtomicUsize>,
+    // Batch queue infrastructure for lock-free task completion delivery
+    pub batch_queue_tx: BatchSender<(NodeInfo, CmTypes)>,
+    pub batch_queue_rx: Arc<BatchReceiver<(NodeInfo, CmTypes)>>,
+    pub target_batch_size: usize,
+    pub batch_timeout_us: u64,
 
     // Resolution state - abstracted for single vs multi-threaded
     pub resolution_state: Arc<dyn ResolutionState>,
@@ -466,52 +462,8 @@ fn execute_task(
         }
     }
 
-    // Direct SharedData access (Phase 2 optimization - avoid scheduler dereference)
-    let batch_buffer = &shared.batch_buffer;
-    let batching_size = shared.batching_size;
-    let batch_last_sent = &shared.batch_last_sent;
-    let completed_tx_ref = shared.scheduler.get_completed_tx_ref();
-    let flush_notify = &shared.flush_notify_tx;
-
-    // Fast path: batching_size=1 means send immediately without buffering
-    if batching_size == 1 {
-        if let Some(tx) = completed_tx_ref.lock().as_ref() {
-            let _ = tx.send(vec![(node_info.clone(), result)]);
-        }
-    } else {
-        // Single lock operation - check and flush atomically
-        let mut batch = batch_buffer.lock();
-
-        // If batch is empty when adding this result, flush immediately instead of waiting for timeout.
-        let flush_immediately = batch.is_empty();
-
-        batch.push((node_info.clone(), result));
-
-        if batch.len() >= batching_size || flush_immediately {
-            let batch_to_send = std::mem::replace(&mut *batch, Vec::with_capacity(batching_size));
-            drop(batch);
-            let now = std::time::Instant::now();
-            *batch_last_sent.lock() = now;
-
-            // Debug tracing: Record batch flush time for analysis
-            if flush_immediately && batch_to_send.len() == 1 {
-                print_debug(|| {
-                    format!(
-                        "Phase 1A: Eager flush of node {:?} (batch_size={})",
-                        node_info.id,
-                        batch_to_send.len()
-                    )
-                });
-            }
-
-            if let Some(tx) = completed_tx_ref.lock().as_ref() {
-                let _ = tx.send(batch_to_send);
-            }
-        } else {
-            // Notify flusher thread that there's pending data
-            let _ = flush_notify.try_send(());
-        }
-    }
+    // Direct lock-free push to batch_queue - no mutex, no batching logic
+    let _ = shared.batch_queue_tx.try_send((node_info.clone(), result));
 }
 
 #[inline]

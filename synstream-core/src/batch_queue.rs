@@ -11,6 +11,7 @@ struct Node<T> {
     next: *mut Node<T>,
 }
 
+#[derive(Debug)]
 struct Inner<T> {
     head: AtomicPtr<Node<T>>,
     receiver_alive: AtomicBool,
@@ -19,10 +20,12 @@ struct Inner<T> {
     condvar: Condvar,
 }
 
+#[derive(Debug, Clone)]
 pub struct Sender<T> {
     inner: Arc<Inner<T>>,
 }
 
+#[derive(Debug)]
 pub struct Receiver<T> {
     inner: Arc<Inner<T>>,
 }
@@ -261,6 +264,45 @@ impl<T> Receiver<T> {
         self.inner.condvar.wait_for(&mut lock, timeout);
 
         self.try_recv_all()
+    }
+
+    /// BLOCKING WITH TIMEOUT: Returns up to max_items, waiting up to timeout duration.
+    /// This is the optimal method for batched processing with bounded latency:
+    /// - If items available: returns immediately (up to max_items)
+    /// - If empty: waits up to timeout for items to arrive, then returns what's available
+    ///
+    /// Use this for resolution threads that want to process batches with configurable
+    /// size and latency bounds (controlled by batching_size and batching_limit args).
+    pub fn try_recv_chunk_timeout(&self, max_items: usize, timeout: Duration) -> Vec<T> {
+        if max_items == 0 {
+            return Vec::new();
+        }
+
+        // Phase 1: Try immediate non-blocking pull
+        let batch = self.try_recv_chunk(max_items);
+        if !batch.is_empty() {
+            return batch;
+        }
+
+        // Phase 2: Wait with timeout for items to arrive
+        let mut lock = self.inner.cv_lock.lock();
+        while self.inner.head.load(Ordering::Relaxed).is_null() {
+            if !self.inner.receiver_alive.load(Ordering::Acquire) {
+                return Vec::new();
+            }
+            // Wait with timeout - returns false if timeout elapsed
+            if !self.inner.condvar.wait_for(&mut lock, timeout).timed_out() {
+                // Condvar was signaled, not timeout - items available
+                break;
+            } else {
+                // Timeout elapsed - return empty Vec
+                return Vec::new();
+            }
+        }
+        drop(lock);
+
+        // Phase 3: Pull available items (up to max_items)
+        self.try_recv_chunk(max_items)
     }
 }
 

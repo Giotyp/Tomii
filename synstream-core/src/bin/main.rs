@@ -229,16 +229,9 @@ pub fn run_graph(
     let base_instant = Instant::now();
 
     // Create available_stream_slots early so it can be shared with scheduler
-    use parking_lot::{Mutex, RwLock};
+    use parking_lot::RwLock;
     use std::sync::Arc;
     let available_stream_slots = Arc::new(RwLock::new(vec![usize::MAX; slots]));
-
-    // Phase 2: Create batch infrastructure before scheduler (shared between scheduler and runtime)
-    use std::sync::atomic::AtomicUsize;
-    let batch_buffer = Arc::new(Mutex::new(Vec::with_capacity(batching_size)));
-    let batch_last_sent = Arc::new(Mutex::new(Instant::now()));
-    let (flush_notify_tx, flush_notify_rx) = crossbeam_channel::unbounded();
-    let flusher_shutdown = Arc::new(AtomicUsize::new(0));
 
     let scheduler = create_scheduler(
         scheduler_type,
@@ -253,11 +246,6 @@ pub fn run_graph(
         batching_limit,
         record_stream,
         Arc::clone(&available_stream_slots),
-        batch_buffer.clone(),
-        batch_last_sent.clone(),
-        flush_notify_rx,
-        flush_notify_tx.clone(),
-        flusher_shutdown.clone(),
     );
 
     // Pin main thread to reserved core if scheduler reserved one
@@ -281,13 +269,8 @@ pub fn run_graph(
         slot_priority_enabled,
         shared_recorder,
         available_stream_slots,
-        // Phase 2: Pass shared batch infrastructure
-        batch_buffer,
-        batch_last_sent,
         batching_size,
         batching_limit,
-        flush_notify_tx,
-        flusher_shutdown,
     );
 
     synrt.run();
