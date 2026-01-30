@@ -113,7 +113,7 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
     // Get socket and channel references
     let socket = &shared.receiver_sockets[socket_id];
     let _ = socket.set_read_timeout(Some(read_timeout));
-    let tx = &shared.packet_senders[socket_id];
+    let tx = &shared.packet_sender;
     let drop_counter = &shared.packet_drop_counters[socket_id];
     let shutdown = &shared.shutdown_flag;
 
@@ -223,6 +223,8 @@ pub fn multi_socket_receiver_loop(
         thread_id, socket_range, core_id
     );
 
+    let tx = &shared.packet_sender;
+
     loop {
         // Round-robin poll all assigned sockets
         for (local_idx, socket_id) in socket_range.clone().enumerate() {
@@ -234,7 +236,6 @@ pub fn multi_socket_receiver_loop(
 
             let socket = &shared.receiver_sockets[socket_id];
             let buffer = &mut buffers[local_idx];
-            let tx = &shared.packet_senders[socket_id];
             let drop_counter = &shared.packet_drop_counters[socket_id];
 
             // Set short read timeout to avoid blocking on one socket

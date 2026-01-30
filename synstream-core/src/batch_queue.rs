@@ -262,11 +262,6 @@ impl<T> Receiver<T> {
 
         self.try_recv_all()
     }
-
-    /// Alias for recv_timeout_all() - backward compatibility
-    pub fn recv_timeout(&self, timeout: Duration) -> Vec<T> {
-        self.recv_timeout_all(timeout)
-    }
 }
 
 impl<T> Drop for Receiver<T> {

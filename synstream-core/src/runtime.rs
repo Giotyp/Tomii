@@ -228,7 +228,7 @@ impl SynRt {
         // Initialize per-slot buffering queues
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
-        let (receiver_sockets, packet_senders, packet_receivers, packet_drop_counters) =
+        let (receiver_sockets, packet_sender, packet_receiver, packet_drop_counters) =
             prepare_network_infrastructure(app_graph);
 
         let shared = Arc::new(SharedData {
@@ -271,8 +271,9 @@ impl SynRt {
             slot_priority_enabled,
             slot_buffers,
             // Network fields (empty - will be initialized in run() if network_config present)
-            packet_senders,
-            packet_receivers,
+            receive_finished: Arc::new(AtomicBool::new(false)),
+            packet_sender,
+            packet_receiver,
             receiver_sockets,
             packet_drop_counters,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
@@ -655,220 +656,177 @@ impl SynRt {
         // Track start of idle/wait periods so we can record waiting time
         let mut wait_start_ns: Option<u128> = None;
 
-        let mut receive_finished: bool = false;
-        let mut first_packet_rcv_time: Option<TimingMethod> = None;
         let mut first_packet_received: bool = false;
-        let mut resolution_started: bool = false;
 
         let receive_timeout = Duration::from_micros(shared.batching_limit);
         let mut packets_received: bool = false;
 
-        // split receiver channels (packet_receivers) among system threads
-        let num_receiver_channels = shared.packet_receivers.len();
-        let receivers_per_thread = if num_receiver_channels > 0 {
-            (num_receiver_channels + shared.system_threads - 1) / shared.system_threads
-        } else {
-            0
-        };
-        let first_receiver_id = thread_id * receivers_per_thread;
-        let last_receiver_id = std::cmp::min(
-            first_receiver_id + receivers_per_thread,
-            num_receiver_channels,
-        );
-        println!(
-            "Resolution thread {} handling packet receiver channels {} to {} (total {} channels)",
-            thread_id,
-            first_receiver_id,
-            last_receiver_id - 1,
-            num_receiver_channels
-        );
-
         // Process completed nodes with dynamic batching from scheduler
         loop {
             // Only poll if network_config is present and receivers were spawned
-            while !receive_finished && thread_id == 0 {
+            if !shared.receive_finished.load(Ordering::SeqCst) {
                 // let mut nodes_to_process = Vec::<(NodeInfo, CmTypes)>::new();
                 if let Some(network_config) = network_config_opt.as_ref() {
                     let stream_packets = network_config.stream_packets;
-                    if !shared.packet_receivers.is_empty() {
-                        let packet_process_func = network_config.extract_packet_func.unwrap();
+                    let packet_process_func = network_config.extract_packet_func.unwrap();
 
-                        for receiver_id in 0..shared.packet_receivers.len() {
-                            let packets: Vec<PacketMessage> = shared.packet_receivers[receiver_id]
-                                .recv_timeout_all(receive_timeout);
+                    let packets: Vec<PacketMessage> =
+                        shared.packet_receiver.recv_timeout_all(receive_timeout);
 
-                            let mut nodes_to_process: Vec<(NodeInfo, CmTypes)> = Vec::new();
-                            for packet_msg in packets {
-                                let receiver_core_id = packet_msg.receiver_core_id;
-                                let packet_timestamp = packet_msg.timestamp;
-                                if let Some(tb) = &shared.time_buffer {
-                                    let packet_rcv = tb.measure_time();
-                                    let dur = tb.measure_duration(
-                                        TimingMethod::Instant(packet_msg.timestamp),
-                                        packet_rcv.clone(),
-                                    );
-                                    if !first_packet_received {
-                                        first_packet_received = true;
-                                    }
-                                    tb.add_task_time(
-                                        thread_slot,
-                                        "Packet Received",
-                                        usize::MAX,
-                                        dur,
-                                    );
-                                }
+                    let mut nodes_to_process: Vec<(NodeInfo, CmTypes)> = Vec::new();
+                    for packet_msg in packets {
+                        let receiver_core_id = packet_msg.receiver_core_id;
+                        let packet_timestamp = packet_msg.timestamp;
+                        if let Some(tb) = &shared.time_buffer {
+                            let packet_rcv = tb.measure_time();
+                            let dur = tb.measure_duration(
+                                TimingMethod::Instant(packet_msg.timestamp),
+                                packet_rcv.clone(),
+                            );
+                            tb.add_task_time(thread_slot, "Packet Received", usize::MAX, dur);
+                        }
 
-                                // Process packet and record
-                                let received_bytes_cm = CmTypes::from_any(packet_msg.packet_bytes);
-                                let start_proc = if let Some(tb) = &shared.time_buffer {
-                                    tb.measure_time()
-                                } else {
-                                    TimingMethod::Instant(Instant::now())
-                                };
+                        // Process packet and record
+                        let received_bytes_cm = CmTypes::from_any(packet_msg.packet_bytes);
+                        let start_proc = if let Some(tb) = &shared.time_buffer {
+                            tb.measure_time()
+                        } else {
+                            TimingMethod::Instant(Instant::now())
+                        };
 
-                                let packet_cm = packet_process_func(vec![received_bytes_cm]);
+                        let packet_cm = packet_process_func(vec![received_bytes_cm]);
 
-                                if let Some(tb) = &shared.time_buffer {
-                                    let end_proc = tb.measure_time();
-                                    let dur = tb.measure_duration(start_proc, end_proc);
-                                    tb.add_task_time(
-                                        thread_slot,
-                                        "Packet Processing",
-                                        usize::MAX,
-                                        dur,
-                                    );
-                                }
+                        if let Some(tb) = &shared.time_buffer {
+                            let end_proc = tb.measure_time();
+                            let dur = tb.measure_duration(start_proc, end_proc);
+                            tb.add_task_time(thread_slot, "Packet Processing", usize::MAX, dur);
+                        }
 
-                                let counter = shared.stream_packet_counter.clone();
-                                let packet_index = counter.fetch_add(1, Ordering::Relaxed);
-                                let mut node_info = NodeInfo::new(0, 0, packet_index, 0); // assuming node_id 0 for network input
+                        let counter = shared.stream_packet_counter.clone();
+                        let packet_index = counter.fetch_add(1, Ordering::Relaxed);
+                        let mut node_info = NodeInfo::new(0, 0, packet_index, 0); // assuming node_id 0 for network input
 
-                                // Call id_function and record
-                                let start_id = if let Some(tb) = &shared.time_buffer {
-                                    tb.measure_time()
-                                } else {
-                                    TimingMethod::Instant(Instant::now())
-                                };
+                        // Call id_function and record
+                        let start_id = if let Some(tb) = &shared.time_buffer {
+                            tb.measure_time()
+                        } else {
+                            TimingMethod::Instant(Instant::now())
+                        };
 
-                                let new_stream_opt =
-                                    process_id_function(&shared, &node_info, &packet_cm);
+                        let new_stream_opt = process_id_function(&shared, &node_info, &packet_cm);
 
-                                if let Some(tb) = &shared.time_buffer {
-                                    let end_id = tb.measure_time();
-                                    let dur = tb.measure_duration(start_id, end_id);
-                                    tb.add_task_time(thread_slot, "ID Function", usize::MAX, dur);
-                                }
+                        if let Some(tb) = &shared.time_buffer {
+                            let end_id = tb.measure_time();
+                            let dur = tb.measure_duration(start_id, end_id);
+                            tb.add_task_time(thread_slot, "ID Function", usize::MAX, dur);
+                        }
 
-                                if let Some(new_stream) = new_stream_opt {
-                                    // Assign streams to an available stream slot
-                                    let start_sa = if let Some(tb) = &shared.time_buffer {
-                                        tb.measure_time()
-                                    } else {
-                                        TimingMethod::Instant(Instant::now())
-                                    };
-
-                                    node_info.slot =
-                                        assign_stream_to_available_slot(&shared, new_stream);
-
-                                    if let Some(tb) = &shared.time_buffer {
-                                        let end_sa = tb.measure_time();
-                                        let dur = tb.measure_duration(start_sa, end_sa);
-                                        tb.add_task_time(
-                                            thread_slot,
-                                            "Slot Assignment",
-                                            usize::MAX,
-                                            dur,
-                                        );
-                                    }
-                                } else {
-                                    // ID function failed, skip processing this node
-                                    print_debug(|| {
-                                        format!(
-                                            "Thread {:?} -- Skipping further processing of node {:?} due to ID function failure",
-                                            thread_id, node_info)
-                                    });
-                                    continue;
-                                }
-
-                                let info_res = (node_info, packet_cm);
-                                nodes_to_process.push(info_res);
-                                packets_received = true;
-
-                                if shared.async_recorder.is_some() {
-                                    let receiver_slot = shared.slots + shared.system_threads;
-                                    let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
-
-                                    let packet_rcv = packet_timestamp
-                                        .duration_since(*shared.base_instant)
-                                        .as_nanos();
-                                    let delta_ns = 10000u128; // Small delta to make it visible in graphs
-
-                                    submit_record(Record {
-                                        slot: receiver_slot,
-                                        job_id,
-                                        start_ns: packet_rcv,
-                                        end_ns: packet_rcv + delta_ns,
-                                        worker: receiver_core_id,
-                                        task_id: 0,
-                                        index: packet_index,
-                                    });
-                                }
-                                if packet_index + 1 == stream_packets {
-                                    // Reset counter for next stream
-                                    shared.stream_packet_counter.store(0, Ordering::Relaxed);
-                                    print_debug(|| {
-                                        format!(
-                                            "All {} packets for stream received",
-                                            stream_packets
-                                        )
-                                    });
-                                    // Increase total stream receive counter
-                                    let completed_streams = shared
-                                        .streams_receive_counter
-                                        .fetch_add(1, Ordering::Relaxed)
-                                        + 1; // +1 because fetch_add returns old value
-
-                                    // Log when all expected streams have been received
-                                    // Note: Receiver threads will continue running until main loop exits
-                                    if completed_streams >= shared.max_streams {
-                                        println!(
-                                        "All {} streams received ({} packets each) - receivers will shutdown",
-                                        shared.max_streams, stream_packets
-                                    );
-                                        // Signal shutdown
-                                        shared.shutdown_flag.store(true, Ordering::SeqCst);
-                                        receive_finished = true;
-                                    }
-                                }
-                            }
-                            // Send to resolution processing and time it
-                            if nodes_to_process.len() == 0 {
-                                continue;
-                            }
-                            let start_ns_pkt = shared.base_instant.elapsed().as_nanos();
-                            let start_proc = if let Some(tb) = &shared.time_buffer {
+                        if let Some(new_stream) = new_stream_opt {
+                            // Assign streams to an available stream slot
+                            let start_sa = if let Some(tb) = &shared.time_buffer {
                                 tb.measure_time()
                             } else {
                                 TimingMethod::Instant(Instant::now())
                             };
-                            Self::process_batch_resolution(
-                                &shared,
-                                nodes_to_process,
-                                thread_core,
-                                thread_id,
-                                thread_slot,
-                                &cond_indexes,
-                                &mut stream_slot_activity,
-                                start_ns_pkt,
-                            );
+
+                            node_info.slot = assign_stream_to_available_slot(&shared, new_stream);
+
                             if let Some(tb) = &shared.time_buffer {
-                                let end_proc = tb.measure_time();
-                                let dur = tb.measure_duration(start_proc, end_proc);
-                                tb.add_task_time(thread_slot, "Batch Resolution", usize::MAX, dur);
-                            };
+                                let end_sa = tb.measure_time();
+                                let dur = tb.measure_duration(start_sa, end_sa);
+                                tb.add_task_time(thread_slot, "Slot Assignment", usize::MAX, dur);
+                            }
+                        } else {
+                            // ID function failed, skip processing this node
+                            print_debug(|| {
+                                format!(
+                                            "Thread {:?} -- Skipping further processing of node {:?} due to ID function failure",
+                                            thread_id, node_info)
+                            });
+                            continue;
+                        }
+
+                        let info_res = (node_info, packet_cm);
+                        nodes_to_process.push(info_res);
+                        packets_received = true;
+
+                        if shared.async_recorder.is_some() {
+                            let receiver_slot = shared.slots + shared.system_threads;
+                            let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
+
+                            let packet_rcv = packet_timestamp
+                                .duration_since(*shared.base_instant)
+                                .as_nanos();
+                            let delta_ns = 10000u128; // Small delta to make it visible in graphs
+
+                            submit_record(Record {
+                                slot: receiver_slot,
+                                job_id,
+                                start_ns: packet_rcv,
+                                end_ns: packet_rcv + delta_ns,
+                                worker: receiver_core_id,
+                                task_id: 0,
+                                index: packet_index,
+                            });
+                        }
+                    }
+                    // Send to resolution processing and time it
+                    if nodes_to_process.len() == 0 {
+                        continue;
+                    }
+
+                    if !first_packet_received {
+                        first_packet_received = true;
+                    }
+                    let start_ns_pkt = shared.base_instant.elapsed().as_nanos();
+                    let start_proc = if let Some(tb) = &shared.time_buffer {
+                        tb.measure_time()
+                    } else {
+                        TimingMethod::Instant(Instant::now())
+                    };
+                    Self::process_batch_resolution(
+                        &shared,
+                        nodes_to_process,
+                        thread_core,
+                        thread_id,
+                        thread_slot,
+                        &cond_indexes,
+                        &mut stream_slot_activity,
+                        start_ns_pkt,
+                    );
+                    if let Some(tb) = &shared.time_buffer {
+                        let end_proc = tb.measure_time();
+                        let dur = tb.measure_duration(start_proc, end_proc);
+                        tb.add_task_time(thread_slot, "Batch Resolution", usize::MAX, dur);
+                    };
+                    if shared.stream_packet_counter.load(Ordering::Relaxed) == stream_packets {
+                        // Reset counter for next stream
+                        shared.stream_packet_counter.store(0, Ordering::Relaxed);
+                        print_debug(|| {
+                            format!("All {} packets for stream received", stream_packets)
+                        });
+                        // Increase total stream receive counter
+                        let completed_streams = shared
+                            .streams_receive_counter
+                            .fetch_add(1, Ordering::Relaxed)
+                            + 1; // +1 because fetch_add returns old value
+
+                        // Log when all expected streams have been received
+                        // Note: Receiver threads will continue running until main loop exits
+                        if completed_streams >= shared.max_streams {
+                            println!(
+                                        "All {} streams received ({} packets each) - receivers will shutdown",
+                                        shared.max_streams, stream_packets
+                                    );
+                            // Signal shutdown
+                            shared.shutdown_flag.store(true, Ordering::SeqCst);
+                            shared.receive_finished.store(true, Ordering::SeqCst);
                         }
                     }
                 }
+            }
+            if !first_packet_received {
+                continue;
             }
 
             // Receive batch from scheduler
@@ -1464,10 +1422,14 @@ fn prepare_network_infrastructure(
     graph: &Graph,
 ) -> (
     Vec<NetworkSocket>,
-    Vec<BatchSender<PacketMessage>>,
-    Vec<BatchReceiver<PacketMessage>>,
+    BatchSender<PacketMessage>,
+    BatchReceiver<PacketMessage>,
     Vec<AtomicUsize>,
 ) {
+    let (packet_sender, packet_receiver): (
+        BatchSender<PacketMessage>,
+        BatchReceiver<PacketMessage>,
+    ) = batch_queue::unbounded();
     if let Some(config_spec) = graph.network_config() {
         let receiver_sockets = bind_udp_socket_range(
             &config_spec.address,
@@ -1475,25 +1437,17 @@ fn prepare_network_infrastructure(
             config_spec.num_sockets,
         );
 
-        let mut packet_senders = Vec::with_capacity(config_spec.num_sockets);
-        let mut packet_receivers = Vec::with_capacity(config_spec.num_sockets);
-        for _ in 0..config_spec.num_sockets {
-            let (tx, rx) = batch_queue::unbounded();
-            packet_senders.push(tx);
-            packet_receivers.push(rx);
-        }
-
         let packet_drop_counters = (0..config_spec.num_sockets)
             .map(|_| AtomicUsize::new(0))
             .collect();
 
         (
             receiver_sockets,
-            packet_senders,
-            packet_receivers,
+            packet_sender,
+            packet_receiver,
             packet_drop_counters,
         )
     } else {
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        (Vec::new(), packet_sender, packet_receiver, Vec::new())
     }
 }

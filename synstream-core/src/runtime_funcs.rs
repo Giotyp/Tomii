@@ -5,7 +5,7 @@ use crate::resolution_state::ResolutionState;
 use crate::time_buffer::{TimeBufferManager, TimingMethod};
 use crate::{buffers::*, graph::*, graph_struct::*, scheduler::*, IdType};
 use core::panic;
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::Sender;
 use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -362,8 +362,9 @@ pub struct SharedData {
     pub slot_buffers: Arc<RwLock<Vec<Vec<NodeInfo>>>>,
 
     // Network receiver infrastructure (optional - only present if network_config exists)
-    pub packet_senders: Vec<BatchSender<PacketMessage>>,
-    pub packet_receivers: Vec<BatchReceiver<PacketMessage>>,
+    pub receive_finished: Arc<AtomicBool>,
+    pub packet_sender: BatchSender<PacketMessage>,
+    pub packet_receiver: BatchReceiver<PacketMessage>,
     pub receiver_sockets: Vec<NetworkSocket>,
     pub packet_drop_counters: Vec<AtomicUsize>,
     pub shutdown_flag: Arc<AtomicBool>,
