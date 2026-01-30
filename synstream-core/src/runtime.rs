@@ -659,7 +659,7 @@ impl SynRt {
         let mut resolution_started: bool = false;
 
         let receive_timeout = Duration::from_micros(shared.batching_limit);
-        let mut work_performed: bool = false;
+        let mut packets_received: bool = false;
 
         // split receiver channels (packet_receivers) among system threads
         let num_receiver_channels = shared.packet_receivers.len();
@@ -684,14 +684,15 @@ impl SynRt {
         // Process completed nodes with dynamic batching from scheduler
         loop {
             // Only poll if network_config is present and receivers were spawned
-            while thread_id == 0 && !receive_finished {
-                let mut nodes_to_process = Vec::<(NodeInfo, CmTypes)>::new();
+            let mut nodes_to_process: Vec<(NodeInfo, CmTypes)> = Vec::new();
+            if !receive_finished {
+                // let mut nodes_to_process = Vec::<(NodeInfo, CmTypes)>::new();
                 if let Some(network_config) = network_config_opt.as_ref() {
                     let stream_packets = network_config.stream_packets;
                     if !shared.packet_receivers.is_empty() {
                         let packet_process_func = network_config.extract_packet_func.unwrap();
 
-                        for receiver_id in 0..shared.packet_receivers.len() {
+                        for receiver_id in first_receiver_id..last_receiver_id {
                             if let Ok(packet_msg) =
                                 shared.packet_receivers[receiver_id].recv_timeout(receive_timeout)
                             {
@@ -788,18 +789,34 @@ impl SynRt {
 
                                 let info_res = (node_info, packet_cm);
 
-                                // send to resolution processing directly
-                                // Self::process_batch_resolution(
-                                //     &shared,
-                                //     vec![info_res],
-                                //     thread_core,
-                                //     thread_id,
-                                //     thread_slot,
-                                //     &cond_indexes,
-                                //     &mut stream_slot_activity,
-                                // );
-                                nodes_to_process.push(info_res);
-                                work_performed = true;
+                                // Send to resolution processing and time it
+                                let start_ns_pkt = shared.base_instant.elapsed().as_nanos();
+                                let start_proc = if let Some(tb) = &shared.time_buffer {
+                                    tb.measure_time()
+                                } else {
+                                    TimingMethod::Instant(Instant::now())
+                                };
+                                Self::process_batch_resolution(
+                                    &shared,
+                                    vec![info_res],
+                                    thread_core,
+                                    thread_id,
+                                    thread_slot,
+                                    &cond_indexes,
+                                    &mut stream_slot_activity,
+                                    start_ns_pkt,
+                                );
+                                if let Some(tb) = &shared.time_buffer {
+                                    let end_proc = tb.measure_time();
+                                    let dur = tb.measure_duration(start_proc, end_proc);
+                                    tb.add_task_time(
+                                        thread_slot,
+                                        "Batch Resolution",
+                                        usize::MAX,
+                                        dur,
+                                    );
+                                };
+                                packets_received = true;
 
                                 if shared.async_recorder.is_some() {
                                     let receiver_slot = shared.slots + shared.system_threads;
@@ -849,28 +866,6 @@ impl SynRt {
                                 }
                             }
                         }
-                        // Send to resolution processing and time it
-                        let start_proc = if let Some(tb) = &shared.time_buffer {
-                            tb.measure_time()
-                        } else {
-                            TimingMethod::Instant(Instant::now())
-                        };
-                        if !nodes_to_process.is_empty() {
-                            Self::process_batch_resolution(
-                                &shared,
-                                nodes_to_process,
-                                thread_core,
-                                thread_id,
-                                thread_slot,
-                                &cond_indexes,
-                                &mut stream_slot_activity,
-                            );
-                        }
-                        if let Some(tb) = &shared.time_buffer {
-                            let end_proc = tb.measure_time();
-                            let dur = tb.measure_duration(start_proc, end_proc);
-                            tb.add_task_time(thread_slot, "Batch Resolution", usize::MAX, dur);
-                        }
                     }
                 }
             }
@@ -888,13 +883,11 @@ impl SynRt {
                 }
             };
 
-            // If nothing arrived from network or scheduler, mark start of wait period.
+            // If nothing arrived from network AND scheduler, mark start of wait period.
             // Otherwise, if we previously were waiting, record the idle interval now.
-            if (thread_id == 0 && !work_performed) || batch.is_empty() {
-                if wait_start_ns.is_none() {
-                    wait_start_ns = Some(shared.base_instant.elapsed().as_nanos());
-                }
-            } else {
+            // Treat "work" as either network activity (packets_received) OR a non-empty batch.
+            let has_work = packets_received || !batch.is_empty();
+            if !has_work {
                 if let Some(start_ns_wait) = wait_start_ns.take() {
                     // Only record if recorder enabled and slot chosen for recording
                     if shared.async_recorder.is_some() {
@@ -918,6 +911,7 @@ impl SynRt {
 
             // Process the entire batch
             if !batch.is_empty() {
+                let start_ns_batch = shared.base_instant.elapsed().as_nanos();
                 let start_proc = if let Some(tb) = &shared.time_buffer {
                     tb.measure_time()
                 } else {
@@ -931,6 +925,7 @@ impl SynRt {
                     thread_slot,
                     &cond_indexes,
                     &mut stream_slot_activity,
+                    start_ns_batch,
                 );
                 if let Some(tb) = &shared.time_buffer {
                     let end_proc = tb.measure_time();
@@ -956,8 +951,9 @@ impl SynRt {
                     let dur = tb.measure_duration(start_proc, end_proc);
                     tb.add_task_time(thread_slot, "Slot Check", usize::MAX, dur);
                 }
+                wait_start_ns = Some(shared.base_instant.elapsed().as_nanos());
             }
-            work_performed = false;
+            packets_received = false;
         } // End of resolution processing loop
     }
 }
@@ -974,12 +970,11 @@ impl SynRt {
         thread_slot: usize,
         cond_indexes: &[Vec<usize>],
         stream_slot_activity: &mut HashMap<usize, bool>,
+        start_ns: u128,
     ) {
         if batch.is_empty() {
             return;
         }
-
-        let start_ns = shared.base_instant.elapsed().as_nanos();
         let start_time = if let Some(tb) = &shared.time_buffer {
             tb.measure_time()
         } else {
