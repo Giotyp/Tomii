@@ -103,7 +103,7 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
         }
     }
 
-    let read_timeout = Duration::from_micros(100);
+    let read_timeout = Duration::from_micros(10);
 
     // Set thread name
     let _ = thread::Builder::new()
