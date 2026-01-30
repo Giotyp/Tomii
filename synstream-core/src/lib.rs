@@ -1,4 +1,5 @@
 pub mod async_recorder;
+pub mod batch_queue;
 pub mod buffers;
 pub mod debug;
 pub mod graph;

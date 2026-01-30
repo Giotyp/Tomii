@@ -1,3 +1,4 @@
+use crate::batch_queue::{Receiver as BatchReceiver, Sender as BatchSender};
 use crate::debug::print_debug;
 use crate::network::{NetworkSocket, PacketMessage};
 use crate::resolution_state::ResolutionState;
@@ -361,8 +362,8 @@ pub struct SharedData {
     pub slot_buffers: Arc<RwLock<Vec<Vec<NodeInfo>>>>,
 
     // Network receiver infrastructure (optional - only present if network_config exists)
-    pub packet_senders: Vec<Sender<PacketMessage>>,
-    pub packet_receivers: Vec<Receiver<PacketMessage>>,
+    pub packet_senders: Vec<BatchSender<PacketMessage>>,
+    pub packet_receivers: Vec<BatchReceiver<PacketMessage>>,
     pub receiver_sockets: Vec<NetworkSocket>,
     pub packet_drop_counters: Vec<AtomicUsize>,
     pub shutdown_flag: Arc<AtomicBool>,

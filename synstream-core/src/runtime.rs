@@ -9,6 +9,8 @@ use std::thread::{sleep, spawn, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::async_recorder::{set_worker_recorder, submit_record, AsyncRecorder};
+use crate::batch_queue;
+use crate::batch_queue::{Receiver as BatchReceiver, Sender as BatchSender};
 use crate::debug::print_debug;
 use crate::graph::*;
 use crate::graph_struct::*;
@@ -684,18 +686,19 @@ impl SynRt {
         // Process completed nodes with dynamic batching from scheduler
         loop {
             // Only poll if network_config is present and receivers were spawned
-            let mut nodes_to_process: Vec<(NodeInfo, CmTypes)> = Vec::new();
-            if !receive_finished {
+            while !receive_finished && thread_id == 0 {
                 // let mut nodes_to_process = Vec::<(NodeInfo, CmTypes)>::new();
                 if let Some(network_config) = network_config_opt.as_ref() {
                     let stream_packets = network_config.stream_packets;
                     if !shared.packet_receivers.is_empty() {
                         let packet_process_func = network_config.extract_packet_func.unwrap();
 
-                        for receiver_id in first_receiver_id..last_receiver_id {
-                            if let Ok(packet_msg) =
-                                shared.packet_receivers[receiver_id].recv_timeout(receive_timeout)
-                            {
+                        for receiver_id in 0..shared.packet_receivers.len() {
+                            let packets: Vec<PacketMessage> = shared.packet_receivers[receiver_id]
+                                .recv_timeout_all(receive_timeout);
+
+                            let mut nodes_to_process: Vec<(NodeInfo, CmTypes)> = Vec::new();
+                            for packet_msg in packets {
                                 let receiver_core_id = packet_msg.receiver_core_id;
                                 let packet_timestamp = packet_msg.timestamp;
                                 if let Some(tb) = &shared.time_buffer {
@@ -788,34 +791,7 @@ impl SynRt {
                                 }
 
                                 let info_res = (node_info, packet_cm);
-
-                                // Send to resolution processing and time it
-                                let start_ns_pkt = shared.base_instant.elapsed().as_nanos();
-                                let start_proc = if let Some(tb) = &shared.time_buffer {
-                                    tb.measure_time()
-                                } else {
-                                    TimingMethod::Instant(Instant::now())
-                                };
-                                Self::process_batch_resolution(
-                                    &shared,
-                                    vec![info_res],
-                                    thread_core,
-                                    thread_id,
-                                    thread_slot,
-                                    &cond_indexes,
-                                    &mut stream_slot_activity,
-                                    start_ns_pkt,
-                                );
-                                if let Some(tb) = &shared.time_buffer {
-                                    let end_proc = tb.measure_time();
-                                    let dur = tb.measure_duration(start_proc, end_proc);
-                                    tb.add_task_time(
-                                        thread_slot,
-                                        "Batch Resolution",
-                                        usize::MAX,
-                                        dur,
-                                    );
-                                };
+                                nodes_to_process.push(info_res);
                                 packets_received = true;
 
                                 if shared.async_recorder.is_some() {
@@ -865,6 +841,31 @@ impl SynRt {
                                     }
                                 }
                             }
+                            // Send to resolution processing and time it
+                            if nodes_to_process.len() == 0 {
+                                continue;
+                            }
+                            let start_ns_pkt = shared.base_instant.elapsed().as_nanos();
+                            let start_proc = if let Some(tb) = &shared.time_buffer {
+                                tb.measure_time()
+                            } else {
+                                TimingMethod::Instant(Instant::now())
+                            };
+                            Self::process_batch_resolution(
+                                &shared,
+                                nodes_to_process,
+                                thread_core,
+                                thread_id,
+                                thread_slot,
+                                &cond_indexes,
+                                &mut stream_slot_activity,
+                                start_ns_pkt,
+                            );
+                            if let Some(tb) = &shared.time_buffer {
+                                let end_proc = tb.measure_time();
+                                let dur = tb.measure_duration(start_proc, end_proc);
+                                tb.add_task_time(thread_slot, "Batch Resolution", usize::MAX, dur);
+                            };
                         }
                     }
                 }
@@ -1463,8 +1464,8 @@ fn prepare_network_infrastructure(
     graph: &Graph,
 ) -> (
     Vec<NetworkSocket>,
-    Vec<Sender<PacketMessage>>,
-    Vec<Receiver<PacketMessage>>,
+    Vec<BatchSender<PacketMessage>>,
+    Vec<BatchReceiver<PacketMessage>>,
     Vec<AtomicUsize>,
 ) {
     if let Some(config_spec) = graph.network_config() {
@@ -1477,7 +1478,7 @@ fn prepare_network_infrastructure(
         let mut packet_senders = Vec::with_capacity(config_spec.num_sockets);
         let mut packet_receivers = Vec::with_capacity(config_spec.num_sockets);
         for _ in 0..config_spec.num_sockets {
-            let (tx, rx) = crossbeam_channel::bounded(config_spec.buffer_depth);
+            let (tx, rx) = batch_queue::unbounded();
             packet_senders.push(tx);
             packet_receivers.push(rx);
         }
