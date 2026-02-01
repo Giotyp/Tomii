@@ -251,10 +251,20 @@ pub fn multi_socket_receiver_loop(
         .collect();
     let mut pool_head: usize = 0;
 
+    let mut first_packet_received: bool = false;
+    let mut first_packet_timestamp: Instant = Instant::now();
+    let mut last_packet_timestamp: Instant = Instant::now();
+
     loop {
         // Round-robin poll all assigned sockets
         for socket_id in socket_range.clone() {
             if shutdown.load(Ordering::Relaxed) {
+                // calculate time from base_instant for first and last packet
+                let last_first_dur = last_packet_timestamp.duration_since(first_packet_timestamp);
+                println!(
+                    "Multi-socket receiver {}: Total receiving: {:?}",
+                    thread_id, last_first_dur
+                );
                 println!("Multi-socket receiver {} shutting down", thread_id);
                 return;
             }
@@ -276,6 +286,14 @@ pub fn multi_socket_receiver_loop(
                         );
                         continue;
                     }
+                    let packet_timestamp = Instant::now();
+
+                    if !first_packet_received {
+                        first_packet_timestamp = packet_timestamp;
+                        first_packet_received = true;
+                    } else {
+                        last_packet_timestamp = packet_timestamp;
+                    }
 
                     // Move buffer out — O(1) pointer move
                     let packet_bytes = std::mem::take(&mut buffer_pool[pool_head]);
@@ -284,7 +302,7 @@ pub fn multi_socket_receiver_loop(
                     let msg = PacketMessage {
                         packet_bytes,
                         socket_id,
-                        timestamp: Instant::now(),
+                        timestamp: packet_timestamp,
                         receiver_thread_id: thread_id,
                         receiver_core_id: core_id,
                     };

@@ -480,10 +480,9 @@ pub fn send_to_scheduler(
     pre_built_args_vec: &Vec<Option<Vec<CmTypes>>>,
     custom_func_vec: &Vec<Option<CmPtr>>,
 ) {
+    // Capture spawn timestamp before any processing
+    let spawn_ns = shared.base_instant.elapsed().as_nanos();
     for (i, node_info) in nodes_to_schedule.iter().enumerate() {
-        // Capture spawn timestamp before any processing
-        let spawn_ns = shared.base_instant.elapsed().as_nanos();
-
         let (func_ptr, node_name) = {
             if node_info.post_node {
                 let nodes = &shared
