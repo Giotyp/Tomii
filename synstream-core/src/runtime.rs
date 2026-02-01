@@ -646,7 +646,7 @@ impl SynRt {
                     // Poll all per-thread packet channels (non-blocking)
                     let mut packets: Vec<PacketMessage> = Vec::new();
                     for rx in shared.packet_receivers.iter() {
-                        packets.extend(rx.try_recv_all());
+                        packets.extend(rx.recv_timeout_all(receive_timeout));
                     }
 
                     for packet_msg in packets {
@@ -803,7 +803,7 @@ impl SynRt {
             // Pull batch from lock-free queue with timeout
             let batch = shared
                 .batch_queue_rx
-                .try_recv_chunk_timeout(shared.target_batch_size, receive_timeout);
+                .recv_chunk_timeout(shared.target_batch_size, receive_timeout);
 
             // If nothing arrived from network AND scheduler, mark start of wait period.
             // Otherwise, if we previously were waiting, record the idle interval now.
