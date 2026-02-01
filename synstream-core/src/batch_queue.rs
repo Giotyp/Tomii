@@ -15,6 +15,12 @@ struct Node<T> {
 struct Inner<T> {
     head: AtomicPtr<Node<T>>,
     receiver_alive: AtomicBool,
+    /// Lazy-notification flag.  Senders only call `notify_one` on the
+    /// false→true transition, collapsing N consecutive pushes into a single
+    /// futex wake when the receiver is actively draining.  Receivers clear
+    /// the flag immediately before parking on the condvar so that any
+    /// subsequent push will re-arm the notification.
+    has_items: AtomicBool,
     // The lock is only used for the Condvar, not for the data transfer.
     cv_lock: Mutex<()>,
     condvar: Condvar,
@@ -34,6 +40,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let inner = Arc::new(Inner {
         head: AtomicPtr::new(ptr::null_mut()),
         receiver_alive: AtomicBool::new(true),
+        has_items: AtomicBool::new(false),
         cv_lock: Mutex::new(()),
         condvar: Condvar::new(),
     });
@@ -70,8 +77,12 @@ impl<T> Sender<T> {
                 .compare_exchange_weak(current_head, new_node, Ordering::Release, Ordering::Relaxed)
                 .is_ok()
             {
-                // Notifying while holding no data lock is extremely fast.
-                self.inner.condvar.notify_one();
+                // Lazy notification: only wake the receiver on the false→true
+                // transition.  When the receiver is actively draining (flag is
+                // already true) we skip the futex entirely.
+                if !self.inner.has_items.swap(true, Ordering::Release) {
+                    self.inner.condvar.notify_one();
+                }
                 return Ok(());
             }
         }
@@ -188,6 +199,9 @@ impl<T> Receiver<T> {
         }
 
         // Phase 2: Condvar Wait
+        // Clear flag before parking so any sender that pushes after this
+        // point will see false, set true, and call notify_one().
+        self.inner.has_items.store(false, Ordering::Release);
         let mut lock = self.inner.cv_lock.lock();
         while self.inner.head.load(Ordering::Relaxed).is_null() {
             if !self.inner.receiver_alive.load(Ordering::Acquire) {
@@ -240,6 +254,8 @@ impl<T> Receiver<T> {
 
         // Phase 2: Condvar Wait (Kernel-space)
         // We only hit this if the spin phase fails (i.e., the queue is truly idle).
+        // Clear flag before parking — any sender pushing after this will re-arm.
+        self.inner.has_items.store(false, Ordering::Release);
         let mut lock = self.inner.cv_lock.lock();
         while self.inner.head.load(Ordering::Relaxed).is_null() {
             if !self.inner.receiver_alive.load(Ordering::Acquire) {
@@ -247,20 +263,33 @@ impl<T> Receiver<T> {
             }
             self.inner.condvar.wait(&mut lock);
         }
+        drop(lock);
 
         self.try_recv_all()
     }
 
     /// BLOCKING WITH TIMEOUT: Useful for flushing buffers periodically.
     pub fn recv_timeout_all(&self, timeout: Duration) -> Vec<T> {
-        // Check once immediately
+        // Fast path: non-blocking drain
         let items = self.try_recv_all();
         if !items.is_empty() {
             return items;
         }
 
+        // Queue is empty — clear the flag before sleeping.  Any sender that
+        // pushes after this point will see false and call notify_one().
+        self.inner.has_items.store(false, Ordering::Release);
+
+        // Re-check: a sender may have pushed between our drain and the flag clear.
+        let items = self.try_recv_all();
+        if !items.is_empty() {
+            return items;
+        }
+
+        // Genuinely empty — sleep with timeout.
         let mut lock = self.inner.cv_lock.lock();
         self.inner.condvar.wait_for(&mut lock, timeout);
+        drop(lock);
 
         self.try_recv_all()
     }
@@ -283,25 +312,31 @@ impl<T> Receiver<T> {
             return batch;
         }
 
-        // Phase 2: Wait with timeout for items to arrive
+        // Phase 2: Clear flag before sleeping so the first subsequent push
+        // will re-arm the notification.
+        self.inner.has_items.store(false, Ordering::Release);
+
+        // Re-check: a sender may have pushed between Phase 1 and the flag clear.
+        let batch = self.try_recv_chunk(max_items);
+        if !batch.is_empty() {
+            return batch;
+        }
+
+        // Phase 3: Wait with timeout for items to arrive
         let mut lock = self.inner.cv_lock.lock();
         #[allow(clippy::never_loop)] // Intentional: condvar wait pattern with early returns
         while self.inner.head.load(Ordering::Relaxed).is_null() {
             if !self.inner.receiver_alive.load(Ordering::Acquire) {
                 return Vec::new();
             }
-            // Wait with timeout - returns false if timeout elapsed
-            if !self.inner.condvar.wait_for(&mut lock, timeout).timed_out() {
-                // Condvar was signaled, not timeout - items available
-                break;
-            } else {
-                // Timeout elapsed - return empty Vec
+            if self.inner.condvar.wait_for(&mut lock, timeout).timed_out() {
                 return Vec::new();
             }
+            break;
         }
         drop(lock);
 
-        // Phase 3: Pull available items (up to max_items)
+        // Phase 4: Pull available items (up to max_items)
         self.try_recv_chunk(max_items)
     }
 }

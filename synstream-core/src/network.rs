@@ -20,8 +20,13 @@
 use std::net::UdpSocket;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
+
+/// Pre-allocated buffer pool depth per receiver thread.
+/// Buffers are moved into PacketMessage via mem::take; empty slots are lazily
+/// refilled on the next recv.  Sized to cover the expected number of packets
+/// in flight between receiver pushes and resolution drains.
+const PACKET_BUFFER_POOL_DEPTH: usize = 1024;
 
 use crate::runtime_funcs::SharedData;
 
@@ -95,6 +100,8 @@ pub fn bind_udp_socket_range(address: &str, start_port: usize, count: usize) -> 
 ///
 /// This function runs in a dedicated OS thread, pinned to a specific core.
 /// It continuously receives packets, extracts frame IDs, and forwards to resolution.
+///
+/// Thread naming is handled by the caller via `thread::Builder::name()`.
 pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, core_id: usize) {
     // Pin to core
     if let Some(core_ids) = core_affinity::get_core_ids() {
@@ -103,17 +110,12 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
         }
     }
 
-    let read_timeout = Duration::from_micros(10);
-
-    // Set thread name
-    let _ = thread::Builder::new()
-        .name(format!("rx-{}", socket_id))
-        .spawn(|| {});
+    let read_timeout = Duration::from_micros(1);
 
     // Get socket and channel references
     let socket = &shared.receiver_sockets[socket_id];
     let _ = socket.set_read_timeout(Some(read_timeout));
-    let tx = &shared.packet_sender;
+    let tx = &shared.packet_senders[socket_id];
     let drop_counter = &shared.packet_drop_counters[socket_id];
     let shutdown = &shared.shutdown_flag;
 
@@ -122,21 +124,33 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
         .network_config()
         .expect("Network config must be present for receiver threads");
     let packet_length = network_config_arc.packet_length;
-    let _slots = shared.slots;
 
-    let mut buffer = vec![0u8; packet_length];
+    // Buffer pool: pre-allocate PACKET_BUFFER_POOL_DEPTH buffers.  Each recv
+    // moves the current buffer into the PacketMessage via mem::take (a 3-word
+    // pointer swap, no copy).  The vacated slot is lazily refilled on the next
+    // iteration only when it has been consumed.
+    let mut buffer_pool: Vec<Vec<u8>> = (0..PACKET_BUFFER_POOL_DEPTH)
+        .map(|_| vec![0u8; packet_length])
+        .collect();
+    let mut pool_head: usize = 0;
 
     println!("Receiver thread {} started on core {}", socket_id, core_id);
 
     loop {
-        // Check shutdown signal
-        if shutdown.load(Ordering::SeqCst) {
+        // Relaxed is sufficient: eventual visibility of shutdown is fine;
+        // a few extra iterations before exit do no harm.
+        if shutdown.load(Ordering::Relaxed) {
             println!("Receiver {} shutting down", socket_id);
             break;
         }
 
-        // Receive packet (blocking)
-        match socket.recv(&mut buffer) {
+        // Lazily refill the current pool slot if it was consumed
+        if buffer_pool[pool_head].len() != packet_length {
+            buffer_pool[pool_head] = vec![0u8; packet_length];
+        }
+
+        // Receive packet (blocking with read_timeout)
+        match socket.recv(&mut buffer_pool[pool_head]) {
             Ok(size) => {
                 if size != packet_length {
                     eprintln!(
@@ -146,32 +160,39 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
                     continue;
                 }
 
-                // Create message
+                // Move buffer out of pool — O(1) pointer move, no memcpy.
+                let packet_bytes = std::mem::take(&mut buffer_pool[pool_head]);
+                pool_head = (pool_head + 1) % PACKET_BUFFER_POOL_DEPTH;
+
                 let msg = PacketMessage {
-                    packet_bytes: buffer.clone(),
+                    packet_bytes,
                     socket_id,
                     timestamp: Instant::now(),
-                    receiver_thread_id: socket_id, // In single-socket mode, thread_id == socket_id
+                    receiver_thread_id: socket_id,
                     receiver_core_id: core_id,
                 };
 
-                // Try send (non-blocking to avoid stalling receiver)
-                if tx.try_send(msg).is_err() {
+                // Push to this thread's dedicated channel (no cross-thread CAS)
+                if tx.try_send(msg).is_ok() {
+                    // Shared lazy notification: only wake resolution on the
+                    // false→true transition.  Collapses bursts of packets into
+                    // a single futex wake.
+                    if !shared.packet_has_items.swap(true, Ordering::Release) {
+                        shared.packet_notify_cond.notify_one();
+                    }
+                } else {
                     drop_counter.fetch_add(1, Ordering::Relaxed);
                     eprintln!("Receiver {}: channel full, packet dropped", socket_id);
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Timeout - move to next socket (normal in round-robin)
                 continue;
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                // Timeout - loop back to check shutdown
                 continue;
             }
             Err(e) => {
                 eprintln!("Receiver {}: recv error: {}", socket_id, e);
-                // For UDP, this is typically fatal; break and let orchestration restart
                 break;
             }
         }
@@ -184,6 +205,8 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
 ///
 /// This function handles the case where we have fewer receiver threads than sockets.
 /// Each thread polls multiple sockets with short timeouts to avoid head-of-line blocking.
+///
+/// Thread naming is handled by the caller via `thread::Builder::name()`.
 pub fn multi_socket_receiver_loop(
     shared: Arc<SharedData>,
     thread_id: usize,
@@ -197,51 +220,54 @@ pub fn multi_socket_receiver_loop(
         }
     }
 
-    // Set thread name
-    let _ = thread::Builder::new()
-        .name(format!("rx-multi-{}", thread_id))
-        .spawn(|| {});
-
     let network_config_arc = shared
         .graph
         .network_config()
         .expect("Network config must be present for receiver threads");
     let packet_length = network_config_arc.packet_length;
-    let _slots = shared.slots;
-
-    // Pre-allocate buffers for each socket (avoid allocation per recv)
-    let mut buffers: Vec<Vec<u8>> = socket_range
-        .clone()
-        .map(|_| vec![0u8; packet_length])
-        .collect();
 
     let shutdown = &shared.shutdown_flag;
-    let read_timeout = Duration::from_micros(10); // Tunable: balance latency vs CPU
+    let read_timeout = Duration::from_micros(1);
+
+    // Set read timeout ONCE per socket during init — setsockopt on every
+    // poll iteration was a syscall (~100-500 ns) burned per socket per loop.
+    for socket_id in socket_range.clone() {
+        let socket = &shared.receiver_sockets[socket_id];
+        let _ = socket.set_read_timeout(Some(read_timeout));
+    }
 
     println!(
         "Multi-socket receiver thread {} polling sockets {:?} on core {}",
         thread_id, socket_range, core_id
     );
 
-    let tx = &shared.packet_sender;
+    let tx = &shared.packet_senders[thread_id];
+
+    // Buffer pool shared across all sockets assigned to this thread.
+    // Each successful recv moves the current buffer via mem::take; the slot
+    // is lazily refilled on the next pass through that position.
+    let mut buffer_pool: Vec<Vec<u8>> = (0..PACKET_BUFFER_POOL_DEPTH)
+        .map(|_| vec![0u8; packet_length])
+        .collect();
+    let mut pool_head: usize = 0;
 
     loop {
         // Round-robin poll all assigned sockets
-        for (local_idx, socket_id) in socket_range.clone().enumerate() {
-            // Check shutdown (amortized across sockets)
+        for socket_id in socket_range.clone() {
             if shutdown.load(Ordering::Relaxed) {
                 println!("Multi-socket receiver {} shutting down", thread_id);
                 return;
             }
 
             let socket = &shared.receiver_sockets[socket_id];
-            let buffer = &mut buffers[local_idx];
             let drop_counter = &shared.packet_drop_counters[socket_id];
 
-            // Set short read timeout to avoid blocking on one socket
-            let _ = socket.set_read_timeout(Some(read_timeout));
+            // Lazily refill pool slot if it was consumed
+            if buffer_pool[pool_head].len() != packet_length {
+                buffer_pool[pool_head] = vec![0u8; packet_length];
+            }
 
-            match socket.recv(buffer) {
+            match socket.recv(&mut buffer_pool[pool_head]) {
                 Ok(size) => {
                     if size != packet_length {
                         eprintln!(
@@ -251,17 +277,24 @@ pub fn multi_socket_receiver_loop(
                         continue;
                     }
 
-                    // Create message
+                    // Move buffer out — O(1) pointer move
+                    let packet_bytes = std::mem::take(&mut buffer_pool[pool_head]);
+                    pool_head = (pool_head + 1) % PACKET_BUFFER_POOL_DEPTH;
+
                     let msg = PacketMessage {
-                        packet_bytes: buffer.clone(),
+                        packet_bytes,
                         socket_id,
                         timestamp: Instant::now(),
-                        receiver_thread_id: thread_id, // Multi-socket mode uses dedicated thread_id
+                        receiver_thread_id: thread_id,
                         receiver_core_id: core_id,
                     };
 
-                    // Try send (non-blocking)
-                    if tx.try_send(msg).is_err() {
+                    if tx.try_send(msg).is_ok() {
+                        // Shared lazy notification
+                        if !shared.packet_has_items.swap(true, Ordering::Release) {
+                            shared.packet_notify_cond.notify_one();
+                        }
+                    } else {
                         drop_counter.fetch_add(1, Ordering::Relaxed);
                         eprintln!(
                             "Receiver thread {} socket {}: channel full, packet dropped",
@@ -270,11 +303,9 @@ pub fn multi_socket_receiver_loop(
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // Timeout - move to next socket (normal in round-robin)
                     continue;
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    // Timeout - move to next socket
                     continue;
                 }
                 Err(e) => {
@@ -282,7 +313,6 @@ pub fn multi_socket_receiver_loop(
                         "Receiver thread {} socket {}: recv error: {}",
                         thread_id, socket_id, e
                     );
-                    // Fatal error - exit thread
                     return;
                 }
             }

@@ -5,7 +5,7 @@ use crate::resolution_state::ResolutionState;
 use crate::time_buffer::{TimeBufferManager, TimingMethod};
 use crate::{buffers::*, graph::*, graph_struct::*, scheduler::*, IdType};
 use core::panic;
-use parking_lot::RwLock;
+use parking_lot::{Condvar, Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -359,8 +359,15 @@ pub struct SharedData {
 
     // Network receiver infrastructure (optional - only present if network_config exists)
     pub receive_finished: Arc<AtomicBool>,
-    pub packet_sender: BatchSender<PacketMessage>,
-    pub packet_receiver: BatchReceiver<PacketMessage>,
+    /// One channel per receiver thread — eliminates CAS contention on a shared head pointer.
+    pub packet_senders: Vec<BatchSender<PacketMessage>>,
+    pub packet_receivers: Vec<BatchReceiver<PacketMessage>>,
+    /// Shared lazy-notification condvar.  Receiver threads notify here after
+    /// pushing to their per-thread channel; the resolution thread sleeps here
+    /// when all per-thread channels are empty.
+    pub packet_notify_lock: Mutex<()>,
+    pub packet_notify_cond: Condvar,
+    pub packet_has_items: AtomicBool,
     pub receiver_sockets: Vec<NetworkSocket>,
     pub packet_drop_counters: Vec<AtomicUsize>,
     pub shutdown_flag: Arc<AtomicBool>,

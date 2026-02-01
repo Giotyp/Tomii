@@ -1,10 +1,10 @@
 use core::panic;
 use core_affinity;
-use parking_lot::RwLock;
+use parking_lot::{Condvar, Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::thread::{sleep, spawn, JoinHandle};
+use std::thread::{self, sleep, spawn, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::async_recorder::{set_worker_recorder, submit_record, AsyncRecorder};
@@ -223,8 +223,8 @@ impl SynRt {
         // Initialize per-slot buffering queues
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
-        let (receiver_sockets, packet_sender, packet_receiver, packet_drop_counters) =
-            prepare_network_infrastructure(app_graph);
+        let (receiver_sockets, packet_senders, packet_receivers, packet_drop_counters) =
+            prepare_network_infrastructure(app_graph, receiver_threads);
 
         let shared = Arc::new(SharedData {
             graph: app_graph.clone(),
@@ -262,10 +262,13 @@ impl SynRt {
             slot_states,
             slot_priority_enabled,
             slot_buffers,
-            // Network fields (empty - will be initialized in run() if network_config present)
+            // Network fields (empty vecs when no network_config)
             receive_finished: Arc::new(AtomicBool::new(false)),
-            packet_sender,
-            packet_receiver,
+            packet_senders,
+            packet_receivers,
+            packet_notify_lock: Mutex::new(()),
+            packet_notify_cond: Condvar::new(),
+            packet_has_items: AtomicBool::new(false),
             receiver_sockets,
             packet_drop_counters,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
@@ -331,9 +334,12 @@ impl SynRt {
                     let shared_clone = Arc::clone(&self.shared);
                     let core_id = receiver_offset + socket_id;
 
-                    let handle = spawn(move || {
-                        single_socket_receiver_loop(shared_clone, socket_id, core_id);
-                    });
+                    let handle = thread::Builder::new()
+                        .name(format!("rx-{}", socket_id))
+                        .spawn(move || {
+                            single_socket_receiver_loop(shared_clone, socket_id, core_id);
+                        })
+                        .expect("Failed to spawn receiver thread");
                     handles.push(handle);
                     println!(
                         "  Receiver thread {} (socket {}) spawned on core {}",
@@ -356,9 +362,17 @@ impl SynRt {
                     let shared_clone = Arc::clone(&self.shared);
                     let core_id = receiver_offset + thread_id;
 
-                    let handle = spawn(move || {
-                        multi_socket_receiver_loop(shared_clone, thread_id, socket_range, core_id);
-                    });
+                    let handle = thread::Builder::new()
+                        .name(format!("rx-multi-{}", thread_id))
+                        .spawn(move || {
+                            multi_socket_receiver_loop(
+                                shared_clone,
+                                thread_id,
+                                socket_range,
+                                core_id,
+                            );
+                        })
+                        .expect("Failed to spawn receiver thread");
                     handles.push(handle);
                     println!(
                         "  Multi-socket receiver {} polling sockets {:?} on core {}",
@@ -625,15 +639,16 @@ impl SynRt {
         loop {
             // Only poll if network_config is present and receivers were spawned
             if !shared.receive_finished.load(Ordering::SeqCst) {
-                // let mut nodes_to_process = Vec::<(NodeInfo, CmTypes)>::new();
                 if let Some(network_config) = network_config_opt.as_ref() {
                     let stream_packets = network_config.stream_packets;
                     let packet_process_func = network_config.extract_packet_func.unwrap();
 
-                    let packets: Vec<PacketMessage> =
-                        shared.packet_receiver.recv_timeout_all(receive_timeout);
+                    // Poll all per-thread packet channels (non-blocking)
+                    let mut packets: Vec<PacketMessage> = Vec::new();
+                    for rx in shared.packet_receivers.iter() {
+                        packets.extend(rx.try_recv_all());
+                    }
 
-                    let mut nodes_to_process: Vec<(NodeInfo, CmTypes)> = Vec::new();
                     for packet_msg in packets {
                         let receiver_core_id = packet_msg.receiver_core_id;
                         let packet_timestamp = packet_msg.timestamp;
@@ -707,7 +722,28 @@ impl SynRt {
                         }
 
                         let info_res = (node_info, packet_cm);
-                        nodes_to_process.push(info_res);
+
+                        let start_ns_pkt = shared.base_instant.elapsed().as_nanos();
+                        let start_proc = if let Some(tb) = &shared.time_buffer {
+                            tb.measure_time()
+                        } else {
+                            TimingMethod::Instant(Instant::now())
+                        };
+                        Self::process_batch_resolution(
+                            &shared,
+                            vec![info_res],
+                            thread_core,
+                            thread_id,
+                            thread_slot,
+                            &cond_indexes,
+                            &mut stream_slot_activity,
+                            start_ns_pkt,
+                        );
+                        if let Some(tb) = &shared.time_buffer {
+                            let end_proc = tb.measure_time();
+                            let dur = tb.measure_duration(start_proc, end_proc);
+                            tb.add_task_time(thread_slot, "Batch Resolution", usize::MAX, dur);
+                        };
                         packets_received = true;
 
                         if shared.async_recorder.is_some() {
@@ -730,35 +766,10 @@ impl SynRt {
                             });
                         }
                     }
-                    // Send to resolution processing and time it
-                    if nodes_to_process.len() == 0 {
-                        continue;
-                    }
 
                     if !first_packet_received {
                         first_packet_received = true;
                     }
-                    let start_ns_pkt = shared.base_instant.elapsed().as_nanos();
-                    let start_proc = if let Some(tb) = &shared.time_buffer {
-                        tb.measure_time()
-                    } else {
-                        TimingMethod::Instant(Instant::now())
-                    };
-                    Self::process_batch_resolution(
-                        &shared,
-                        nodes_to_process,
-                        thread_core,
-                        thread_id,
-                        thread_slot,
-                        &cond_indexes,
-                        &mut stream_slot_activity,
-                        start_ns_pkt,
-                    );
-                    if let Some(tb) = &shared.time_buffer {
-                        let end_proc = tb.measure_time();
-                        let dur = tb.measure_duration(start_proc, end_proc);
-                        tb.add_task_time(thread_slot, "Batch Resolution", usize::MAX, dur);
-                    };
                     if shared.stream_packet_counter.load(Ordering::Relaxed) == stream_packets {
                         // Reset counter for next stream
                         shared.stream_packet_counter.store(0, Ordering::Relaxed);
@@ -1383,34 +1394,43 @@ impl SynRt {
 
 fn prepare_network_infrastructure(
     graph: &Graph,
+    receiver_threads: usize,
 ) -> (
     Vec<NetworkSocket>,
-    BatchSender<PacketMessage>,
-    BatchReceiver<PacketMessage>,
+    Vec<BatchSender<PacketMessage>>,
+    Vec<BatchReceiver<PacketMessage>>,
     Vec<AtomicUsize>,
 ) {
-    let (packet_sender, packet_receiver): (
-        BatchSender<PacketMessage>,
-        BatchReceiver<PacketMessage>,
-    ) = batch_queue::unbounded();
     if let Some(config_spec) = graph.network_config() {
-        let receiver_sockets = bind_udp_socket_range(
-            &config_spec.address,
-            config_spec.start_port,
-            config_spec.num_sockets,
-        );
+        let num_sockets = config_spec.num_sockets;
+        // Actual threads spawned: 1:1 mode uses num_sockets threads,
+        // round-robin mode uses receiver_threads.  One channel per thread.
+        let actual_receivers = if receiver_threads >= num_sockets {
+            num_sockets
+        } else {
+            receiver_threads
+        };
 
-        let packet_drop_counters = (0..config_spec.num_sockets)
-            .map(|_| AtomicUsize::new(0))
-            .collect();
+        let mut packet_senders = Vec::with_capacity(actual_receivers);
+        let mut packet_receivers = Vec::with_capacity(actual_receivers);
+        for _ in 0..actual_receivers {
+            let (tx, rx) = batch_queue::unbounded();
+            packet_senders.push(tx);
+            packet_receivers.push(rx);
+        }
+
+        let receiver_sockets =
+            bind_udp_socket_range(&config_spec.address, config_spec.start_port, num_sockets);
+
+        let packet_drop_counters = (0..num_sockets).map(|_| AtomicUsize::new(0)).collect();
 
         (
             receiver_sockets,
-            packet_sender,
-            packet_receiver,
+            packet_senders,
+            packet_receivers,
             packet_drop_counters,
         )
     } else {
-        (Vec::new(), packet_sender, packet_receiver, Vec::new())
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
     }
 }
