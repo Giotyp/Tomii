@@ -103,7 +103,7 @@ pub fn create_threadpool(
             "Insufficient cores: need minimum 2 cores (1 system + 1 worker), found {}",
             available_cores
         );
-    } else if core_offset + total_needed + 1 <= available_cores {
+    } else if core_offset + total_needed < available_cores {
         // We can reserve an extra core for the main thread at `core_offset`.
         let main_idx = core_offset;
         let sys_start = core_offset + 1;

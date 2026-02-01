@@ -86,6 +86,8 @@ pub enum TimingRequest {
     },
     StartSlotProcessing {
         slot_id: usize,
+        /// Pre-captured start time at call site for precise timing
+        start_time: TimingMethod,
     },
     FinishSlotProcessing {
         slot_id: usize,
@@ -174,9 +176,12 @@ impl AsyncTimeBuffer {
                             );
                         }
                     }
-                    TimingRequest::StartSlotProcessing { slot_id } => {
+                    TimingRequest::StartSlotProcessing {
+                        slot_id,
+                        start_time,
+                    } => {
                         if let Ok(mut buf) = time_buffer.lock() {
-                            buf.start_slot_processing(slot_id);
+                            buf.start_slot_processing_with_time(slot_id, start_time);
                         }
                     }
                     TimingRequest::FinishSlotProcessing {
@@ -302,9 +307,19 @@ impl AsyncTimeBuffer {
         }
     }
 
-    /// Start slot processing asynchronously
-    pub fn start_slot_processing_async(&self, slot_id: usize) {
-        let request = TimingRequest::StartSlotProcessing { slot_id };
+    /// Start slot processing asynchronously with timestamp captured at call site
+    /// This ensures precise timing regardless of channel/queue latency
+    pub fn start_slot_processing_async(&self, slot_id: usize, use_rdtsc: bool) {
+        // Capture timestamp at call site for precise timing
+        let start_time = if use_rdtsc {
+            TimingMethod::Rdtsc(rdtsc())
+        } else {
+            TimingMethod::Instant(Instant::now())
+        };
+        let request = TimingRequest::StartSlotProcessing {
+            slot_id,
+            start_time,
+        };
         if let Err(_) = self.request_tx.send(request) {
             eprintln!("Warning: Failed to send timing request - controller may have shut down");
         }
@@ -415,6 +430,21 @@ impl TimeBuffer {
         } else {
             TimingMethod::Instant(Instant::now())
         };
+
+        self.slot_start_times[slot_id] = Some(start_time);
+        // Preserves any pre-slot-start timings
+    }
+
+    /// Mark the start of processing for a specific slot with pre-captured time
+    /// Used by async mode to ensure precise timing regardless of channel latency
+    pub fn start_slot_processing_with_time(&mut self, slot_id: usize, start_time: TimingMethod) {
+        if slot_id >= self.slots {
+            panic!(
+                "Slot ID {} out of bounds (max: {})",
+                slot_id,
+                self.slots - 1
+            );
+        }
 
         self.slot_start_times[slot_id] = Some(start_time);
         // Preserves any pre-slot-start timings
@@ -916,10 +946,11 @@ impl TimeBufferManager {
     }
 
     /// Start slot processing
+    /// In async mode, timestamp is captured at call site for precise timing
     pub fn start_slot_processing(&self, slot_id: usize) {
         if self.is_async {
             if let Some(ref async_buf) = self.async_buffer {
-                async_buf.start_slot_processing_async(slot_id);
+                async_buf.start_slot_processing_async(slot_id, self.use_rdtsc);
             }
         } else {
             if let Some(ref sync_buf) = self.sync_buffer {

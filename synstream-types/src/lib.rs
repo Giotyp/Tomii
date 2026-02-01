@@ -550,6 +550,12 @@ impl CmTypes {
     }
 
     /// Returns a raw mutable pointer to the inner type `T` if it matches.
+    ///
+    /// # Safety
+    /// The caller must ensure that:
+    /// - The returned pointer is not used to create multiple mutable references
+    /// - The pointer is not dereferenced after the `CmTypes` value is dropped
+    /// - Proper synchronization is used when accessing the data from multiple threads
     pub unsafe fn as_mut_ptr<T: Any + Send + Sync>(&self) -> Option<SendPtr<T>> {
         if let CmTypes::Any(lock) = self {
             match lock.read() {
@@ -702,9 +708,21 @@ pub trait SlicedAccess: Any + Send + Sync {
     fn is_range_borrowed(&self, start: usize, len: usize) -> bool;
     fn unset_range(&self, start: usize, len: usize);
     /// Get raw mutable pointer and length for a range, returns None if range is already borrowed
+    ///
+    /// # Safety
+    /// The caller must ensure that:
+    /// - The returned pointer is only used within the valid range `[start, start + len)`
+    /// - No other mutable references exist to the same range
+    /// - The pointer is not used after calling `unset_range` for this range
     unsafe fn get_mut_range_raw(&self, start: usize, len: usize) -> Option<(*mut u8, usize)>;
 
     /// Get raw mutable pointer with timeout and optional backoff between retries
+    ///
+    /// # Safety
+    /// The caller must ensure that:
+    /// - The returned pointer is only used within the valid range `[start, start + len)`
+    /// - No other mutable references exist to the same range
+    /// - The pointer is not used after calling `unset_range` for this range
     unsafe fn get_mut_range_raw_timeout(
         &self,
         start: usize,
@@ -715,9 +733,19 @@ pub trait SlicedAccess: Any + Send + Sync {
 
     /// Get raw immutable pointer and length for a range without setting write bits
     /// Returns None if any mutable borrows are active in the range
+    ///
+    /// # Safety
+    /// The caller must ensure that:
+    /// - The returned pointer is only used within the valid range `[start, start + len)`
+    /// - No mutable references are created to the same range while this pointer is in use
     unsafe fn get_range_raw(&self, start: usize, len: usize) -> Option<(*const u8, usize)>;
 
     /// Get raw immutable pointer with timeout
+    ///
+    /// # Safety
+    /// The caller must ensure that:
+    /// - The returned pointer is only used within the valid range `[start, start + len)`
+    /// - No mutable references are created to the same range while this pointer is in use
     unsafe fn get_range_raw_timeout(
         &self,
         start: usize,
@@ -753,7 +781,7 @@ impl<T> SlicedContainer<T> {
         data_ptr: SendPtr<T>,
         total_length: usize,
     ) -> Self {
-        let chunk_count = (total_length + Self::CHUNK_BITS - 1) / Self::CHUNK_BITS;
+        let chunk_count = total_length.div_ceil(Self::CHUNK_BITS);
         let write_chunks = (0..chunk_count).map(|_| AtomicU64::new(0)).collect();
 
         Self {
@@ -796,10 +824,9 @@ impl<T> SlicedContainer<T> {
 
     /// Get mutable access to a range of the buffer using chunked atomic bitsets
     /// Returns a mutable slice reference if successful, None if any part of the range overlaps
+    #[allow(clippy::mut_from_ref)] // Intentional: uses atomic bitsets for interior mutability tracking
     pub fn sliced_data_mut(&self, start: usize, len: usize) -> Option<&mut [T]> {
-        let Some(range_end) = self.range_end(start, len) else {
-            return None;
-        };
+        let range_end = self.range_end(start, len)?;
 
         if len == 0 {
             unsafe {
@@ -853,9 +880,7 @@ impl<T> SlicedContainer<T> {
         timeout: Duration,
         retry: Duration,
     ) -> Option<&mut [T]> {
-        let Some(_) = self.range_end(start, len) else {
-            return None;
-        };
+        let _ = self.range_end(start, len)?;
 
         if timeout.as_nanos() == 0 {
             return self.sliced_data_mut(start, len);
@@ -931,9 +956,7 @@ impl<T> SlicedContainer<T> {
     /// Returns Some(&[T]) if no mutable borrows are active in the range, None otherwise
     /// This allows multiple concurrent read-only accesses to the same data
     pub fn sliced_get_range(&self, start: usize, len: usize) -> Option<&[T]> {
-        let Some(range_end) = self.range_end(start, len) else {
-            return None;
-        };
+        let range_end = self.range_end(start, len)?;
 
         if len == 0 {
             unsafe {
@@ -966,9 +989,7 @@ impl<T> SlicedContainer<T> {
         len: usize,
         timeout: Duration,
     ) -> Option<&[T]> {
-        let Some(range_end) = self.range_end(start, len) else {
-            return None;
-        };
+        let range_end = self.range_end(start, len)?;
 
         if len == 0 {
             unsafe {
@@ -1119,11 +1140,11 @@ impl PartialEq for CmTypes {
             (CmTypes::F64(a), CmTypes::F64(b)) => a == b,
             (CmTypes::Char(a), CmTypes::Char(b)) => a == b,
             (CmTypes::Usize(a), CmTypes::Usize(b)) => a == b,
-            (CmTypes::String(a), CmTypes::String(b)) => &**a == &**b,
+            (CmTypes::String(a), CmTypes::String(b)) => **a == **b,
             (CmTypes::VecCmt(a), CmTypes::VecCmt(b)) => **a == **b,
             (CmTypes::Ref(a), CmTypes::Ref(b)) => a == b,
             (CmTypes::Res(a), CmTypes::Res(b)) => a == b,
-            (CmTypes::Barrier(a), CmTypes::Barrier(b)) => &**a == &**b,
+            (CmTypes::Barrier(a), CmTypes::Barrier(b)) => **a == **b,
             (CmTypes::Complex32(a), CmTypes::Complex32(b)) => **a == **b,
             (CmTypes::Complex64(a), CmTypes::Complex64(b)) => **a == **b,
             (CmTypes::None, CmTypes::None) => true,
@@ -1224,8 +1245,8 @@ impl fmt::Display for CmTypes {
                 }
                 write!(f, "]")
             }
-            CmTypes::Any(_) => write!(f, "{}", "CustomType"),
-            CmTypes::AnySliced(_) => write!(f, "{}", "CustomSlicedType"),
+            CmTypes::Any(_) => write!(f, "CustomType"),
+            CmTypes::AnySliced(_) => write!(f, "CustomSlicedType"),
             CmTypes::VecAny(lock) => {
                 if let Ok(guard) = lock.read() {
                     write!(f, "VecAny[{}]", guard.len())
@@ -1294,9 +1315,7 @@ fn parse_complex32(s: &str) -> Result<C32, CustomError> {
 
     // Try standard format: "3.5+2.5i" or "3.5-2.5i"
     // Find the position of 'i' at the end
-    if s.ends_with('i') {
-        let s = &s[..s.len() - 1]; // Remove the 'i'
-
+    if let Some(s) = s.strip_suffix('i') {
         // Find the last '+' or '-' that's not at the start
         let mut split_pos = None;
         for (i, c) in s.char_indices().skip(1) {
@@ -1339,9 +1358,7 @@ fn parse_complex64(s: &str) -> Result<C64, CustomError> {
 
     // Try standard format: "3.5+2.5i" or "3.5-2.5i"
     // Find the position of 'i' at the end
-    if s.ends_with('i') {
-        let s = &s[..s.len() - 1]; // Remove the 'i'
-
+    if let Some(s) = s.strip_suffix('i') {
         // Find the last '+' or '-' that's not at the start
         let mut split_pos = None;
         for (i, c) in s.char_indices().skip(1) {
@@ -1437,13 +1454,13 @@ pub fn string_to_cmtype(tp: String, arg: String) -> Result<CmTypes, CustomError>
             }
         }
         // Return the vector of CmTypes wrapped in Arc
-        return Ok(CmTypes::VecCmt(Arc::new(v)));
+        Ok(CmTypes::VecCmt(Arc::new(v)))
     } else {
         // Return error
-        return Err(CustomError::new(&format!(
+        Err(CustomError::new(&format!(
             "Unable to parse type '{}' with value '{}'",
             tp, arg
-        )));
+        )))
     }
 }
 

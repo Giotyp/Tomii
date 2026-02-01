@@ -92,8 +92,7 @@ impl<T> Receiver<T> {
             return Vec::new();
         }
 
-        let mut batch = Vec::new();
-        batch.reserve(max_items);
+        let mut batch = Vec::with_capacity(max_items);
 
         // Backoff for fair CAS contention handling
         let backoff = Backoff::new();
@@ -286,6 +285,7 @@ impl<T> Receiver<T> {
 
         // Phase 2: Wait with timeout for items to arrive
         let mut lock = self.inner.cv_lock.lock();
+        #[allow(clippy::never_loop)] // Intentional: condvar wait pattern with early returns
         while self.inner.head.load(Ordering::Relaxed).is_null() {
             if !self.inner.receiver_alive.load(Ordering::Acquire) {
                 return Vec::new();

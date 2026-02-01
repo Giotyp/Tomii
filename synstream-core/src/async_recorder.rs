@@ -20,7 +20,7 @@ use std::time::Duration;
 thread_local! {
     /// Per-worker channel sender for lock-free record submission
     static WORKER_RECORDER: std::cell::RefCell<Option<Sender<Record>>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Initialize the thread-local recorder sender for this worker
@@ -128,7 +128,7 @@ impl AsyncRecorder {
                 let slot = record.slot;
                 slot_records
                     .entry(slot)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(record);
                 collected += 1;
             }

@@ -16,65 +16,45 @@ use synstream_types::*;
 
 fn parse_arg(
     arg_json: &ArgJson,
-    init_objects: &Vec<Vec<CmTypes>>,
+    init_objects: &[Vec<CmTypes>],
     obj_id_map: &RapidHashMap<String, usize>,
     name_to_id: &RapidHashMap<String, IdType>,
 ) -> Arg {
     let arg_value_opt = arg_json.value.as_deref();
 
-    // Check if the argument has a condition
-    let condition: Option<InitCondition> = {
-        if let Some(condition_json) = &arg_json.condition {
-            Some(parse_condition(condition_json))
-        } else {
-            None
-        }
-    };
+    let condition: Option<InitCondition> = arg_json.condition.as_ref().map(parse_condition);
 
-    let predecessor: Option<Predecessor> = {
-        // Check if the argument has a predecessor
-        if let Some(pred_json) = &arg_json.predecessor {
-            Some(parse_predecessor(
-                pred_json,
-                init_objects,
-                obj_id_map,
-                &name_to_id,
-            ))
-        } else {
-            None
-        }
-    };
+    let predecessor: Option<Predecessor> = arg_json
+        .predecessor
+        .as_ref()
+        .map(|pred_json| parse_predecessor(pred_json, init_objects, obj_id_map, name_to_id));
 
     let arg_cmtype = {
         let type_json = &arg_json.type_;
-        if predecessor.is_some() {
-            let id = predecessor.as_ref().unwrap().id;
-            string_to_cmtype(type_json.to_string(), id.to_string()).unwrap()
-        } else {
-            if let Some(arg_value) = arg_value_opt {
-                if let Some(obj_id) = obj_id_map.get(arg_value) {
-                    string_to_cmtype(type_json.to_string(), obj_id.to_string()).unwrap()
-                } else {
-                    string_to_cmtype(type_json.to_string(), arg_value.to_string()).unwrap()
-                }
+        if let Some(ref pred) = predecessor {
+            string_to_cmtype(type_json.to_string(), pred.id.to_string()).unwrap()
+        } else if let Some(arg_value) = arg_value_opt {
+            if let Some(obj_id) = obj_id_map.get(arg_value) {
+                string_to_cmtype(type_json.to_string(), obj_id.to_string()).unwrap()
             } else {
-                // This should not happen
-                CmTypes::None
+                string_to_cmtype(type_json.to_string(), arg_value.to_string()).unwrap()
             }
+        } else {
+            // This should not happen
+            CmTypes::None
         }
     };
 
-    let arg = Arg {
+    Arg {
         type_: arg_cmtype,
         init_condition: condition,
         predecessor,
-    };
-    arg
+    }
 }
 
 fn parse_predecessor(
     pred_json: &PredJson,
-    init_objects: &Vec<Vec<CmTypes>>,
+    init_objects: &[Vec<CmTypes>],
     obj_id_map: &RapidHashMap<String, usize>,
     name_to_id: &RapidHashMap<String, IdType>,
 ) -> Predecessor {
@@ -125,14 +105,8 @@ fn parse_predecessor(
 }
 
 fn parse_condition(condition_json: &ConditionJson) -> InitCondition {
-    let operation = {
-        let op = CondOp::from_str(&condition_json.operation);
-        if op.is_some() {
-            op.unwrap()
-        } else {
-            panic!("Invalid operation: {}", condition_json.operation);
-        }
-    };
+    let operation = CondOp::from_str(&condition_json.operation)
+        .unwrap_or_else(|| panic!("Invalid operation: {}", condition_json.operation));
 
     let eval_value = string_to_cmtype(
         condition_json.value_type.to_string(),
@@ -291,30 +265,29 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             None => 1,
         };
 
-        let loop_ = {
-            if let Some(loop_json) = &node_json.loop_ {
-                Some(Loop {
-                    name: loop_json.name.clone(),
-                    factor: loop_json
-                        .factor
-                        .as_ref()
-                        .map_or(1, |f| f.resolve(&init_vec, &obj_id_map, workers)),
-                })
-            } else {
-                None
-            }
-        };
+        let loop_ = node_json.loop_.as_ref().map(|loop_json| Loop {
+            name: loop_json.name.clone(),
+            factor: loop_json
+                .factor
+                .as_ref()
+                .map_or(1, |f| f.resolve(&init_vec, &obj_id_map, workers)),
+        });
 
         // Parse node-level condition if present
         let condition = if let Some(cond_json) = &node_json.condition {
-            let cond_func_ptr = get_func(&cond_json.function)
-                .expect(&format!("Condition function '{}' not found", cond_json.function));
-            let cond_operation = CondOp::from_str(&cond_json.operation)
-                .expect(&format!("Invalid condition operation: {}", cond_json.operation));
+            let func_name = &cond_json.function;
+            let cond_func_ptr = get_func(func_name)
+                .unwrap_or_else(|| panic!("Condition function '{}' not found", func_name));
+            let op_str = &cond_json.operation;
+            let cond_operation = CondOp::from_str(op_str)
+                .unwrap_or_else(|| panic!("Invalid condition operation: {}", op_str));
 
             // Parse condition value
-            let cond_value = string_to_cmtype(cond_json.value_type.clone(), cond_json.value.clone())
-                .expect(&format!("Failed to parse condition value: {}", cond_json.value));
+            let cond_value =
+                string_to_cmtype(cond_json.value_type.clone(), cond_json.value.clone())
+                    .unwrap_or_else(|_| {
+                        panic!("Failed to parse condition value: {}", cond_json.value)
+                    });
 
             // Parse condition args
             let mut cond_args = Vec::new();
@@ -340,7 +313,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             args,
             id: node_count as IdType,
             loop_args,
-            factor: factor,
+            factor,
             func_ptr,
             loop_,
             condition,

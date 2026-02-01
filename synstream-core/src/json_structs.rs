@@ -108,7 +108,7 @@ pub enum Factor {
 impl Factor {
     pub fn resolve(
         &self,
-        init_objects: &Vec<Vec<CmTypes>>,
+        init_objects: &[Vec<CmTypes>],
         obj_id_map: &RapidHashMap<String, usize>,
         workers: usize,
     ) -> usize {
@@ -142,7 +142,7 @@ impl Factor {
 
     pub fn search(
         &self,
-        init_objects: &Vec<Vec<CmTypes>>,
+        init_objects: &[Vec<CmTypes>],
         obj_id_map: &RapidHashMap<String, usize>,
         workers: usize,
     ) -> usize {
@@ -165,7 +165,7 @@ impl Factor {
 
                 let usize_res = &init_objects[*obj_id][0].valid_number_to_usize();
                 if let Some(usize_val) = usize_res {
-                    return *usize_val;
+                    *usize_val
                 } else {
                     panic!(
                         "Variable '{}' found but does not contain a valid number",
