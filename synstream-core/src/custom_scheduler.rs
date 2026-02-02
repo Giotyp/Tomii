@@ -98,9 +98,18 @@ impl TaskQueue {
         }
     }
 
-    /// Push a task onto the queue (lock-free)
+    /// Push a task onto the queue (lock-free) with notification
     #[inline]
     pub fn push(&self, task: BoxedTask) {
+        self.push_no_notify(task);
+        // Wake one waiting worker
+        self.notify_condvar.notify_one();
+    }
+
+    /// Push a task onto the queue (lock-free) WITHOUT notification
+    /// Used when caller will handle notification (e.g., PriorityQueueSet)
+    #[inline]
+    pub fn push_no_notify(&self, task: BoxedTask) {
         let new_node = Box::into_raw(Box::new(TaskNode {
             task,
             next: ptr::null_mut(),
@@ -118,8 +127,6 @@ impl TaskQueue {
                 .is_ok()
             {
                 self.len.fetch_add(1, Ordering::Relaxed);
-                // Wake one waiting worker
-                self.notify_condvar.notify_one();
                 return;
             }
             // CAS failed, retry (no backoff needed for push - rare contention)
@@ -202,19 +209,28 @@ impl Drop for TaskQueue {
 /// Workers check High → Normal → Low in order
 pub struct PriorityQueueSet {
     queues: [TaskQueue; 3], // High, Normal, Low
+    // Shared notification mechanism for ALL priorities
+    // This ensures workers wake up regardless of which priority queue receives a task
+    notify_mutex: Mutex<()>,
+    notify_condvar: Condvar,
 }
 
 impl PriorityQueueSet {
     pub fn new() -> Self {
         Self {
             queues: [TaskQueue::new(), TaskQueue::new(), TaskQueue::new()],
+            notify_mutex: Mutex::new(()),
+            notify_condvar: Condvar::new(),
         }
     }
 
     /// Push a task with specified priority
+    /// Uses shared notification to wake ANY waiting worker
     #[inline]
     pub fn push(&self, priority: Priority, task: BoxedTask) {
-        self.queues[priority as usize].push(task);
+        self.queues[priority as usize].push_no_notify(task);
+        // Notify shared condvar - wakes workers waiting on ANY priority
+        self.notify_condvar.notify_one();
     }
 
     /// Try to pop from highest priority queue first
@@ -245,6 +261,9 @@ impl PriorityQueueSet {
 
     /// Wake workers waiting on any queue
     pub fn wake_all(&self) {
+        // Wake shared condvar
+        self.notify_condvar.notify_all();
+        // Also wake individual queue condvars for backwards compatibility
         for q in &self.queues {
             q.wake_all();
         }
@@ -253,6 +272,17 @@ impl PriorityQueueSet {
     /// Get reference to specific priority queue (for direct waiting)
     pub fn get_queue(&self, priority: Priority) -> &TaskQueue {
         &self.queues[priority as usize]
+    }
+
+    /// Wait for a task on ANY priority queue with timeout
+    /// This is the preferred method for workers to wait for tasks
+    pub fn wait_for_any_task(&self, timeout: Duration) -> bool {
+        let guard = self.notify_mutex.lock();
+        if !self.is_empty() {
+            return true; // Task available, no need to wait
+        }
+        self.notify_condvar.wait_for(&mut { guard }, timeout);
+        !self.is_empty()
     }
 }
 
@@ -300,7 +330,7 @@ struct WorkerGroup {
 // SECTION 4: Worker Thread Implementation
 // ============================================================================
 
-/// Per-worker state accessible via thread-local
+// Per-worker state accessible via thread-local
 thread_local! {
     static WORKER_STATE: Cell<WorkerState> = Cell::new(WorkerState::default());
 }
@@ -335,6 +365,8 @@ struct SharedWorkerState {
     record_stream: Option<usize>,
     /// Available stream slots for recording filter
     available_stream_slots: Arc<RwLock<Vec<usize>>>,
+    /// System core offset for recorder channel indexing (Bug 2 fix)
+    system_core_offset: usize,
 }
 
 /// Worker thread main loop
@@ -350,7 +382,11 @@ fn worker_loop(
     // Pin to core
     core_affinity::set_for_current(core_id);
 
-    // Set thread-local state
+    // Set thread-local state (Bug 3 fix: set both WORKER_ID and WORKER_INDEX)
+    crate::scheduler::set_current_worker_id(core_id.id);
+    crate::scheduler::set_current_worker_index(worker_id);
+
+    // Set internal thread-local state for group membership
     WORKER_STATE.with(|s| {
         s.set(WorkerState {
             worker_id,
@@ -360,9 +396,10 @@ fn worker_loop(
         });
     });
 
-    // Initialize async recorder channel if enabled
+    // Initialize async recorder channel if enabled (Bug 2 fix: use correct channel index)
     if let Some(ref recorder) = shared.async_recorder {
-        if let Some(tx) = recorder.get_worker_sender(worker_id) {
+        let channel_index = core_id.id - shared.system_core_offset;
+        if let Some(tx) = recorder.get_worker_sender(channel_index) {
             set_worker_recorder(tx);
         }
     }
@@ -423,9 +460,8 @@ fn worker_loop(
 
         // Phase 4: Park with short timeout (kernel-space, but bounded)
         // This is the key optimization: we park briefly instead of sleeping indefinitely
-        let _has_task = local_queues
-            .get_queue(Priority::Normal)
-            .wait_for_task(park_timeout);
+        // Use wait_for_any_task to wake on ANY priority queue task arrival
+        let _has_task = local_queues.wait_for_any_task(park_timeout);
 
         // After waking, immediately loop back to check queues
         // No explicit task extraction here - the loop handles it
@@ -433,21 +469,10 @@ fn worker_loop(
 }
 
 #[inline]
-fn execute_task_wrapper(shared: &Arc<SharedWorkerState>, task: BoxedTask) {
-    let start = shared.base_instant.elapsed().as_nanos();
-
-    // Execute the task
+fn execute_task_wrapper(_shared: &Arc<SharedWorkerState>, task: BoxedTask) {
+    // Pure pass-through: all metrics handling is in the task wrappers
+    // (spawn_with_priority, spawn_to_group, spawn_with_meta)
     task();
-
-    let end = shared.base_instant.elapsed().as_nanos();
-
-    // Update metrics
-    shared.pending_tasks.fetch_sub(1, Ordering::Relaxed);
-    shared.total_completed.fetch_add(1, Ordering::Relaxed);
-
-    // Record if enabled (done inside the task closure typically)
-    // This wrapper is for scheduler-level metrics only
-    let _ = (start, end); // Metrics can be extended here
 }
 
 // ============================================================================
@@ -468,6 +493,10 @@ pub struct CustomScheduler {
     receiver_threads: usize,
     /// Total workers across all groups
     total_workers: usize,
+    /// Optional reserved core for main/orchestrator thread (Bug 4 fix)
+    main_core: Option<CoreId>,
+    /// Worker affinity configuration for use_workers routing
+    worker_affinity: Option<crate::scheduler::WorkerAffinityConfig>,
 }
 
 /// Builder for CustomScheduler
@@ -481,6 +510,7 @@ pub struct CustomSchedulerBuilder {
     base_instant: Instant,
     record_stream: Option<usize>,
     available_stream_slots: Arc<RwLock<Vec<usize>>>,
+    worker_affinity: Option<crate::scheduler::WorkerAffinityConfig>,
 }
 
 impl CustomSchedulerBuilder {
@@ -495,6 +525,7 @@ impl CustomSchedulerBuilder {
             base_instant: Instant::now(),
             record_stream: None,
             available_stream_slots: Arc::new(RwLock::new(Vec::new())),
+            worker_affinity: None,
         }
     }
 
@@ -565,34 +596,46 @@ impl CustomSchedulerBuilder {
         self
     }
 
+    /// Set worker affinity configuration for use_workers routing
+    pub fn worker_affinity(mut self, affinity: Option<crate::scheduler::WorkerAffinityConfig>) -> Self {
+        self.worker_affinity = affinity;
+        self
+    }
+
     /// Build the scheduler
     pub fn build(self) -> CustomScheduler {
-        // Get available cores
-        let mut core_ids = core_affinity::get_core_ids().unwrap_or_default();
-        core_ids.sort();
-        let available_cores = core_ids.len();
-
         // Calculate total workers needed
         let total_workers: usize = self.groups.iter().map(|g| g.num_workers).sum();
 
-        // Allocate cores: [system][receivers][workers]
-        let system_core_offset = self.core_offset;
-        let receiver_core_offset = system_core_offset + self.system_threads;
-        let worker_core_offset = receiver_core_offset + self.receiver_threads;
+        // Use core allocation algorithm (Bug 4 fix)
+        let alloc = crate::core_alloc::allocate_cores(
+            self.core_offset,
+            self.system_threads,
+            self.receiver_threads,
+            total_workers,
+        );
+
+        let system_core_offset = alloc.system_core_offset;
+        let receiver_core_offset = alloc.receiver_offset;
+        let worker_core_offset = alloc.worker_offset;
+        let main_core = alloc.main_core.clone();
 
         println!("========== Custom Scheduler Core Allocation ==========");
-        println!("Available cores: {}", available_cores);
+        println!("Available cores: {}", alloc.all_core_ids.len());
+        if let Some(ref mc) = main_core {
+            println!("Main thread: pinned at core {:?}", mc);
+        }
         println!(
             "System threads: {} at cores {}..{}",
-            self.system_threads,
+            alloc.system_threads,
             system_core_offset,
-            system_core_offset + self.system_threads - 1
+            system_core_offset + alloc.system_threads - 1
         );
         println!(
             "Receiver threads: {} at cores {}..{}",
-            self.receiver_threads,
+            alloc.receiver_threads,
             receiver_core_offset,
-            receiver_core_offset + self.receiver_threads - 1
+            receiver_core_offset + alloc.receiver_threads - 1
         );
         println!(
             "Worker threads: {} at cores {}..{}",
@@ -602,7 +645,7 @@ impl CustomSchedulerBuilder {
         );
 
         // Create async recorder if needed
-        let total_recorders = total_workers + self.receiver_threads + self.system_threads;
+        let total_recorders = total_workers + alloc.receiver_threads + alloc.system_threads;
         let async_recorder = if self.record {
             self.external_recorder
                 .or_else(|| Some(Arc::new(AsyncRecorder::new(total_recorders, 100))))
@@ -618,7 +661,7 @@ impl CustomSchedulerBuilder {
             .map(|_| Arc::new(PriorityQueueSet::new()))
             .collect();
 
-        // Create shared state
+        // Create shared state (Bug 2 fix: add system_core_offset for recorder channel indexing)
         let shared = Arc::new(SharedWorkerState {
             global_queues: Arc::clone(&global_queues),
             group_queues: group_queues.clone(),
@@ -630,6 +673,7 @@ impl CustomSchedulerBuilder {
             base_instant: Arc::new(self.base_instant),
             record_stream: self.record_stream,
             available_stream_slots: self.available_stream_slots,
+            system_core_offset,
         });
 
         // Spawn worker groups
@@ -646,8 +690,8 @@ impl CustomSchedulerBuilder {
                 cores.clone()
             } else {
                 // Auto-assign cores
-                let end_idx = (next_core_idx + config.num_workers).min(available_cores);
-                let ids: Vec<CoreId> = core_ids[next_core_idx..end_idx].to_vec();
+                let end_idx = (next_core_idx + config.num_workers).min(alloc.all_core_ids.len());
+                let ids: Vec<CoreId> = alloc.all_core_ids[next_core_idx..end_idx].to_vec();
                 next_core_idx = end_idx;
                 ids
             };
@@ -703,10 +747,12 @@ impl CustomSchedulerBuilder {
             shared,
             groups,
             system_core_offset,
-            system_threads: self.system_threads,
+            system_threads: alloc.system_threads,
             receiver_core_offset,
-            receiver_threads: self.receiver_threads,
+            receiver_threads: alloc.receiver_threads,
             total_workers,
+            main_core,
+            worker_affinity: self.worker_affinity,
         }
     }
 }
@@ -730,9 +776,20 @@ impl CustomScheduler {
     where
         F: FnOnce() + Send + 'static,
     {
+        let shared = Arc::clone(&self.shared);
         self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
         self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
-        self.shared.global_queues.push(priority, Box::new(task));
+
+        // Wrap task with metrics (all tasks must be wrapped)
+        let wrapped_task = move || {
+            task();
+            shared.pending_tasks.fetch_sub(1, Ordering::Relaxed);
+            shared.total_completed.fetch_add(1, Ordering::Relaxed);
+        };
+
+        self.shared
+            .global_queues
+            .push(priority, Box::new(wrapped_task));
     }
 
     /// Spawn a task to a specific worker group's local queue
@@ -741,11 +798,20 @@ impl CustomScheduler {
         F: FnOnce() + Send + 'static,
     {
         if group_id < self.groups.len() {
+            let shared = Arc::clone(&self.shared);
             self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
             self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
+
+            // Wrap task with metrics
+            let wrapped_task = move || {
+                task();
+                shared.pending_tasks.fetch_sub(1, Ordering::Relaxed);
+                shared.total_completed.fetch_add(1, Ordering::Relaxed);
+            };
+
             self.groups[group_id]
                 .local_queues
-                .push(priority, Box::new(task));
+                .push(priority, Box::new(wrapped_task));
         } else {
             // Fallback to global queue
             self.spawn_with_priority(priority, task);
@@ -802,6 +868,121 @@ impl CustomScheduler {
             .push(Priority::Normal, Box::new(wrapped_task));
     }
 
+    /// Spawn a task with metadata and priority
+    pub fn spawn_with_meta_priority<F>(
+        &self,
+        priority: Priority,
+        meta: Option<(IdType, usize, usize)>,
+        task: F,
+    ) where
+        F: FnOnce() + Send + 'static,
+    {
+        let shared = Arc::clone(&self.shared);
+        let job_id = self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
+        self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
+
+        let (task_id, slot, index) = meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN));
+
+        let wrapped_task = move || {
+            let start = shared.base_instant.elapsed().as_nanos();
+            task();
+            let end = shared.base_instant.elapsed().as_nanos();
+
+            // Record if enabled
+            if shared.async_recorder.is_some() {
+                let should_record = match shared.record_stream {
+                    None => true,
+                    Some(target_stream) => {
+                        let slots_read = shared.available_stream_slots.read();
+                        let current_stream = slots_read.get(slot).copied().unwrap_or(usize::MAX);
+                        current_stream == target_stream
+                    }
+                };
+
+                if should_record {
+                    let worker = WORKER_STATE.with(|s| s.get().core_id);
+                    submit_record(Record {
+                        slot,
+                        job_id,
+                        start_ns: start,
+                        end_ns: end,
+                        worker,
+                        task_id,
+                        index,
+                    });
+                }
+            }
+
+            shared.pending_tasks.fetch_sub(1, Ordering::Relaxed);
+            shared.total_completed.fetch_add(1, Ordering::Relaxed);
+        };
+
+        self.shared
+            .global_queues
+            .push(priority, Box::new(wrapped_task));
+    }
+
+    /// Spawn a task to a specific worker group with metadata and priority
+    pub fn spawn_to_group_with_meta<F>(
+        &self,
+        group_id: usize,
+        priority: Priority,
+        meta: Option<(IdType, usize, usize)>,
+        task: F,
+    ) where
+        F: FnOnce() + Send + 'static,
+    {
+        if group_id < self.groups.len() {
+            let shared = Arc::clone(&self.shared);
+            let job_id = self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
+            self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
+
+            let (task_id, slot, index) = meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN));
+
+            let wrapped_task = move || {
+                let start = shared.base_instant.elapsed().as_nanos();
+                task();
+                let end = shared.base_instant.elapsed().as_nanos();
+
+                // Record if enabled
+                if shared.async_recorder.is_some() {
+                    let should_record = match shared.record_stream {
+                        None => true,
+                        Some(target_stream) => {
+                            let slots_read = shared.available_stream_slots.read();
+                            let current_stream =
+                                slots_read.get(slot).copied().unwrap_or(usize::MAX);
+                            current_stream == target_stream
+                        }
+                    };
+
+                    if should_record {
+                        let worker = WORKER_STATE.with(|s| s.get().core_id);
+                        submit_record(Record {
+                            slot,
+                            job_id,
+                            start_ns: start,
+                            end_ns: end,
+                            worker,
+                            task_id,
+                            index,
+                        });
+                    }
+                }
+
+                shared.pending_tasks.fetch_sub(1, Ordering::Relaxed);
+                shared.total_completed.fetch_add(1, Ordering::Relaxed);
+            };
+
+            self.groups[group_id]
+                .local_queues
+                .push(priority, Box::new(wrapped_task));
+        } else {
+            // Fallback to global queue with priority
+            self.spawn_with_meta_priority(priority, meta, task);
+        }
+    }
+
     /// Get number of pending tasks
     pub fn pending_tasks(&self) -> usize {
         self.shared.pending_tasks.load(Ordering::Relaxed)
@@ -852,6 +1033,25 @@ impl CustomScheduler {
         self.shared.async_recorder.clone()
     }
 
+    /// Get main/orchestrator core if reserved (Bug 4 fix)
+    pub fn main_core(&self) -> Option<CoreId> {
+        self.main_core.clone()
+    }
+
+    /// Get worker affinity configuration
+    pub fn get_worker_affinity(&self) -> &Option<crate::scheduler::WorkerAffinityConfig> {
+        &self.worker_affinity
+    }
+
+    /// Get group_id for a given use_workers value
+    /// Returns 0 for None (global) or the mapped group_id for specific worker counts
+    pub fn get_affinity_group(&self, use_workers: Option<usize>) -> usize {
+        match &self.worker_affinity {
+            Some(affinity) => affinity.get_group(use_workers),
+            None => 0, // No affinity config - always use global
+        }
+    }
+
     /// Write records to CSV
     pub fn write_record(&self, path: &str) {
         if let Some(ref recorder) = self.shared.async_recorder {
@@ -897,117 +1097,6 @@ impl Drop for CustomScheduler {
     fn drop(&mut self) {
         self.shutdown();
     }
-}
-
-// ============================================================================
-// SECTION 6: Batch Queue Integration for Task Completion
-// ============================================================================
-
-use crate::batch_queue::{Receiver as BatchReceiver, Sender as BatchSender};
-
-/// Extension trait for scheduler with batch queue support
-pub struct SchedulerWithBatchQueue {
-    scheduler: CustomScheduler,
-    batch_queue_tx: BatchSender<(NodeInfo, CmTypes)>,
-    batch_queue_rx: Arc<BatchReceiver<(NodeInfo, CmTypes)>>,
-}
-
-impl SchedulerWithBatchQueue {
-    pub fn new(scheduler: CustomScheduler) -> Self {
-        let (tx, rx) = crate::batch_queue::unbounded();
-        Self {
-            scheduler,
-            batch_queue_tx: tx,
-            batch_queue_rx: Arc::new(rx),
-        }
-    }
-
-    /// Get batch queue sender for workers to send completions
-    pub fn get_batch_queue_tx(&self) -> BatchSender<(NodeInfo, CmTypes)> {
-        self.batch_queue_tx.clone()
-    }
-
-    /// Get batch queue receiver for system thread to receive completions
-    pub fn get_batch_queue_rx(&self) -> Arc<BatchReceiver<(NodeInfo, CmTypes)>> {
-        Arc::clone(&self.batch_queue_rx)
-    }
-
-    /// Delegate to inner scheduler
-    pub fn spawn<F>(&self, task: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        self.scheduler.spawn(task);
-    }
-
-    pub fn spawn_with_priority<F>(&self, priority: Priority, task: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        self.scheduler.spawn_with_priority(priority, task);
-    }
-
-    pub fn spawn_to_group<F>(&self, group_id: usize, priority: Priority, task: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        self.scheduler.spawn_to_group(group_id, priority, task);
-    }
-
-    pub fn pending_tasks(&self) -> usize {
-        self.scheduler.pending_tasks()
-    }
-
-    pub fn workers(&self) -> usize {
-        self.scheduler.workers()
-    }
-
-    pub fn shutdown(&mut self) {
-        self.scheduler.shutdown();
-    }
-}
-
-// ============================================================================
-// SECTION 7: Convenience Functions
-// ============================================================================
-
-/// Create a simple scheduler with one worker group
-pub fn create_simple_scheduler(
-    num_workers: usize,
-    core_offset: usize,
-    system_threads: usize,
-    receiver_threads: usize,
-    record: bool,
-    base_instant: Instant,
-) -> CustomScheduler {
-    CustomScheduler::builder()
-        .add_workers(num_workers, 64) // Default 64 spin iterations
-        .core_offset(core_offset)
-        .system_threads(system_threads)
-        .receiver_threads(receiver_threads)
-        .record(record)
-        .base_instant(base_instant)
-        .build()
-}
-
-/// Create a scheduler with two worker groups (for queue isolation)
-pub fn create_dual_group_scheduler(
-    workers_per_group: usize,
-    core_offset: usize,
-    system_threads: usize,
-    receiver_threads: usize,
-    record: bool,
-    base_instant: Instant,
-) -> CustomScheduler {
-    CustomScheduler::builder()
-        .add_workers(workers_per_group, 64) // Group 0: default spinning
-        .add_workers(workers_per_group, 64) // Group 1: default spinning
-        .core_offset(core_offset)
-        .system_threads(system_threads)
-        .receiver_threads(receiver_threads)
-        .record(record)
-        .base_instant(base_instant)
-        .build()
 }
 
 #[cfg(test)]
@@ -1079,7 +1168,14 @@ mod tests {
 
     #[test]
     fn test_scheduler_basic() {
-        let scheduler = create_simple_scheduler(2, 0, 1, 0, false, Instant::now());
+        let scheduler = CustomScheduler::builder()
+            .add_workers(2, 64)
+            .core_offset(0)
+            .system_threads(1)
+            .receiver_threads(0)
+            .record(false)
+            .base_instant(Instant::now())
+            .build();
 
         let counter = Arc::new(AtomicUsize::new(0));
 

@@ -79,6 +79,10 @@ pub struct NodeJson {
     pub loop_args: Option<Vec<ArgJson>>,
     pub args: Vec<ArgJson>,
     pub condition: Option<NodeConditionJson>,
+    #[serde(default)]
+    pub priority: Option<String>,
+    #[serde(default)]
+    pub use_workers: Option<usize>,
 }
 
 // Initializations

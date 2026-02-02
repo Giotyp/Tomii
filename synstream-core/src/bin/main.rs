@@ -52,6 +52,8 @@ struct Args {
     output: String,
     #[clap(long, help = "Enable fifo scheduler")]
     fifo: bool,
+    #[clap(long, help = "Enable custom lock-free priority scheduler")]
+    custom: bool,
     #[clap(long, help = "Print Initializations to stdout")]
     inits: bool,
     #[clap(long, help = "Enable Debug Printing")]
@@ -134,6 +136,8 @@ fn main() {
 
     let scheduler_type = if args.fifo {
         SchedulerType::Fifo
+    } else if args.custom {
+        SchedulerType::Custom
     } else {
         SchedulerType::WorkStealing
     };
@@ -233,6 +237,41 @@ pub fn run_graph(
     use std::sync::Arc;
     let available_stream_slots = Arc::new(RwLock::new(vec![usize::MAX; slots]));
 
+    // Scan graph for unique use_workers values to create worker affinity configuration
+    let worker_affinity = {
+        use std::collections::HashSet;
+        use synstream_core::scheduler::WorkerAffinityConfig;
+        
+        let mut unique_worker_counts: HashSet<usize> = HashSet::new();
+        
+        // Scan regular nodes
+        for node in &graph.nodes {
+            if let Some(count) = node.use_workers {
+                if count > 0 && count < workers {
+                    unique_worker_counts.insert(count);
+                }
+            }
+        }
+        
+        // Scan post nodes if present
+        if let Some(ref post_nodes) = graph.post_nodes {
+            for node in post_nodes {
+                if let Some(count) = node.use_workers {
+                    if count > 0 && count < workers {
+                        unique_worker_counts.insert(count);
+                    }
+                }
+            }
+        }
+        
+        if !unique_worker_counts.is_empty() {
+            println!("Detected use_workers values: {:?}", unique_worker_counts);
+            Some(WorkerAffinityConfig::from_worker_counts(&unique_worker_counts, workers))
+        } else {
+            None
+        }
+    };
+
     let scheduler = create_scheduler(
         scheduler_type,
         core_offset,
@@ -246,6 +285,7 @@ pub fn run_graph(
         batching_limit,
         record_stream,
         Arc::clone(&available_stream_slots),
+        worker_affinity,
     );
 
     // Pin main thread to reserved core if scheduler reserved one

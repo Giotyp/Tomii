@@ -10,6 +10,8 @@
 pub mod async_recorder;
 pub mod batch_queue;
 pub mod buffers;
+pub mod core_alloc;
+pub mod custom_scheduler;
 pub mod debug;
 pub mod graph;
 pub mod graph_gen;

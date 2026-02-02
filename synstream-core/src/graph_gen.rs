@@ -232,6 +232,8 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             func_ptr: None,
             loop_: None,
             condition: None,
+            priority: NodePriority::default(),
+            use_workers: None,
         };
         graph.add_node(net_node);
     }
@@ -305,6 +307,16 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             None
         };
 
+        // Parse priority (default to Normal if not specified)
+        let priority = node_json
+            .priority
+            .as_deref()
+            .map(NodePriority::from_str)
+            .unwrap_or_default();
+
+        // use_workers: None means all workers, Some(N) restricts to N workers
+        let use_workers = node_json.use_workers;
+
         let node_count = NodeCount.fetch_add(1, SeqCst);
         name_to_id.insert(node_json.name.clone(), node_count);
 
@@ -317,6 +329,8 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             func_ptr,
             loop_,
             condition,
+            priority,
+            use_workers,
         };
 
         graph.add_node(node);
@@ -348,6 +362,8 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             func_ptr,
             loop_: None,
             condition: None,
+            priority: NodePriority::default(),
+            use_workers: None,
         };
 
         graph.add_post_node(node);

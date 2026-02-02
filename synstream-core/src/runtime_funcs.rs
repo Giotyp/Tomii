@@ -481,7 +481,7 @@ pub fn send_to_scheduler(
     custom_func_vec: &Vec<Option<CmPtr>>,
 ) {
     for (i, node_info) in nodes_to_schedule.iter().enumerate() {
-        let (func_ptr, node_name) = {
+        let (func_ptr, node_name, node_priority, node_use_workers) = {
             if node_info.post_node {
                 let nodes = &shared
                     .graph
@@ -500,18 +500,18 @@ pub fn send_to_scheduler(
                 };
 
                 let node_name = node.name.clone();
-                (func, node_name)
+                (func, node_name, node.priority, node.use_workers)
             } else {
-                let cache_entry = &shared.node_cache[node_info.id as usize];
+                let node = &shared.graph.nodes[node_info.id as usize];
                 let func = {
                     if custom_func_vec[i].is_some() {
                         custom_func_vec[i].unwrap()
                     } else {
-                        cache_entry.func_ptr
+                        shared.node_cache[node_info.id as usize].func_ptr
                     }
                 };
 
-                (func, cache_entry.name.clone())
+                (func, node.name.clone(), node.priority, node.use_workers)
             }
         };
 
@@ -525,19 +525,50 @@ pub fn send_to_scheduler(
         // Capture spawn timestamp before any processing
         let spawn_ns = shared.base_instant.elapsed().as_nanos();
 
-        shared
-            .scheduler
-            .spawn_task_with_meta(Some(meta_data), move || {
-                execute_task(
-                    &shared_clone,
-                    func_ptr,
-                    &node_info,
-                    &time_buf,
-                    &node_name,
-                    pre_built_args,
-                    spawn_ns,
-                )
-            });
+        // Convert NodePriority to scheduler Priority
+        use crate::custom_scheduler::Priority;
+        use crate::graph_struct::NodePriority;
+
+        let task_priority = match node_priority {
+            NodePriority::High => Priority::High,
+            NodePriority::Normal => Priority::Normal,
+            NodePriority::Low => Priority::Low,
+        };
+
+        // Create the task closure
+        let task = move || {
+            execute_task(
+                &shared_clone,
+                func_ptr,
+                &node_info,
+                &time_buf,
+                &node_name,
+                pre_built_args,
+                spawn_ns,
+            )
+        };
+
+        // Route task based on use_workers affinity
+        // - None: Use global queue (all workers can execute)
+        // - Some(N): Route to dedicated worker group with N workers
+        let affinity_group = shared.scheduler.get_affinity_group(node_use_workers);
+        
+        if affinity_group > 0 {
+            // Task has worker affinity - spawn to specific group
+            shared.scheduler.spawn_to_group_with_meta(
+                affinity_group,
+                task_priority,
+                Some(meta_data),
+                task,
+            );
+        } else {
+            // No affinity (global) - spawn with priority to global queue
+            shared.scheduler.spawn_task_with_meta_priority(
+                task_priority,
+                Some(meta_data),
+                task,
+            );
+        }
     }
 }
 

@@ -29,6 +29,30 @@ pub enum CondOp {
     Lt,
 }
 
+/// Task priority for scheduling
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodePriority {
+    High,
+    Normal,
+    Low,
+}
+
+impl NodePriority {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "high" => NodePriority::High,
+            "low" => NodePriority::Low,
+            _ => NodePriority::Normal,
+        }
+    }
+}
+
+impl Default for NodePriority {
+    fn default() -> Self {
+        NodePriority::Normal
+    }
+}
+
 impl CondOp {
     pub fn from_str(op: &str) -> Option<CondOp> {
         match op {
@@ -135,6 +159,10 @@ pub struct Node {
     pub loop_: Option<Loop>,
     // Optional node-level condition
     pub condition: Option<NodeCondition>,
+    // Task scheduling priority
+    pub priority: NodePriority,
+    // Worker affinity: None = all workers, Some(N) = restrict to N workers
+    pub use_workers: Option<usize>,
 }
 
 impl Node {

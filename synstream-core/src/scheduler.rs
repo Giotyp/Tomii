@@ -76,126 +76,24 @@ pub fn create_threadpool(
     usize,
     Option<core_affinity::CoreId>,
 ) {
-    // Create threadpool and pin workers to cores
-    let mut core_ids = core_affinity::get_core_ids().unwrap();
-    core_ids.sort();
+    // Use core allocation algorithm
+    let alloc =
+        crate::core_alloc::allocate_cores(core_offset, system_threads, receiver_threads, workers);
 
-    let available_cores = core_ids.len();
-
-    // CRITICAL: Allocate cores in sequential order: [system][receivers][workers]
-    // With core_offset=1, system=1, receivers=2, workers=10:
-    //   System: core 1
-    //   Receivers: cores 2-3 (allocated in runtime.rs, not here)
-    //   Workers: cores 4-13
-
-    let total_needed = system_threads + receiver_threads + workers;
-
-    let (
-        system_core_offset,
-        receiver_offset,
-        worker_offset,
-        actual_workers,
-        actual_receivers,
-        actual_system_threads,
-        main_core_opt,
-    ) = if available_cores < 2 {
-        panic!(
-            "Insufficient cores: need minimum 2 cores (1 system + 1 worker), found {}",
-            available_cores
-        );
-    } else if core_offset + total_needed < available_cores {
-        // We can reserve an extra core for the main thread at `core_offset`.
-        let main_idx = core_offset;
-        let sys_start = core_offset + 1;
-        let recv_start = sys_start + system_threads;
-        let worker_start = recv_start + receiver_threads;
-        (
-            sys_start,
-            recv_start,
-            worker_start,
-            workers,
-            receiver_threads,
-            system_threads,
-            Some(core_ids[main_idx].clone()),
-        )
-    } else if core_offset + total_needed <= available_cores {
-        // Can honor requested offset but no spare core for main
-        let sys_start = core_offset;
-        let recv_start = core_offset + system_threads;
-        let worker_start = recv_start + receiver_threads;
-        (
-            sys_start,
-            recv_start,
-            worker_start,
-            workers,
-            receiver_threads,
-            system_threads,
-            None,
-        )
-    } else if total_needed <= available_cores {
-        // Fit all threads but not with requested offset: use offset 0
-        eprintln!(
-            "Warning: Cannot honor core_offset {}. Using offset 0 instead.",
-            core_offset
-        );
-        let sys_start = 0;
-        let recv_start = system_threads;
-        let worker_start = recv_start + receiver_threads;
-        (
-            sys_start,
-            recv_start,
-            worker_start,
-            workers,
-            receiver_threads,
-            system_threads,
-            None,
-        )
-    } else {
-        // Not enough cores: reduce proportionally
-        let max_system = 1; // at least one system thread
-        let remaining = available_cores.saturating_sub(max_system);
-        let max_receivers = receiver_threads.min(remaining / 2).max(0);
-        let max_workers = remaining.saturating_sub(max_receivers).max(1);
-        eprintln!(
-                "Warning: Requested {} system + {} receivers + {} workers = {} total exceeds {} available cores.\nUsing {} system at core 0, {} receivers starting at core {}, {} workers starting at core {}.",
-                system_threads, receiver_threads, workers, total_needed, available_cores,
-                max_system, max_receivers, max_system, max_workers, max_system + max_receivers
-            );
-        (
-            0,
-            max_system,
-            max_system + max_receivers,
-            max_workers,
-            max_receivers,
-            max_system,
-            None,
-        )
-    };
-
-    // VERIFICATION: Ensure proper sequential allocation with no overlaps
-    assert!(
-        system_core_offset + actual_system_threads <= receiver_offset,
-        "Core allocation bug: system cores [{}..{}) overlap with receiver cores [{}..{})",
-        system_core_offset,
-        system_core_offset + actual_system_threads,
-        receiver_offset,
-        receiver_offset + actual_receivers
-    );
-    assert!(
-        receiver_offset + actual_receivers <= worker_offset,
-        "Core allocation bug: receiver cores [{}..{}) overlap with worker cores [{}..{})",
-        receiver_offset,
-        receiver_offset + actual_receivers,
-        worker_offset,
-        worker_offset + actual_workers
-    );
+    let system_core_offset = alloc.system_core_offset;
+    let receiver_offset = alloc.receiver_offset;
+    let worker_offset = alloc.worker_offset;
+    let actual_workers = alloc.worker_count;
+    let actual_receivers = alloc.receiver_threads;
+    let actual_system_threads = alloc.system_threads;
+    let main_core_opt = alloc.main_core.clone();
 
     let worker_cores_to_use: Vec<core_affinity::CoreId> =
-        core_ids[worker_offset..worker_offset + actual_workers].to_vec();
+        alloc.all_core_ids[worker_offset..worker_offset + actual_workers].to_vec();
 
     // Print core allocation
     println!("========== Core Allocation ==========");
-    println!("Available cores: {}", available_cores);
+    println!("Available cores: {}", alloc.all_core_ids.len());
     if let Some(main_core) = main_core_opt.clone() {
         println!("Main thread: pinned at core {:?}", main_core);
     }
@@ -675,6 +573,7 @@ impl WorkStealScheduler {
 pub enum SchedulerImpl {
     Fifo(FifoScheduler),
     WorkStealing(WorkStealScheduler),
+    Custom(crate::custom_scheduler::CustomScheduler),
 }
 
 impl SchedulerImpl {
@@ -685,6 +584,7 @@ impl SchedulerImpl {
         match self {
             SchedulerImpl::Fifo(scheduler) => scheduler.spawn_task(task),
             SchedulerImpl::WorkStealing(scheduler) => scheduler.spawn_task(task),
+            SchedulerImpl::Custom(scheduler) => scheduler.spawn(task),
         }
     }
 
@@ -695,6 +595,53 @@ impl SchedulerImpl {
         match self {
             SchedulerImpl::Fifo(scheduler) => scheduler.spawn_task_with_meta(meta, task),
             SchedulerImpl::WorkStealing(scheduler) => scheduler.spawn_task_with_meta(meta, task),
+            SchedulerImpl::Custom(scheduler) => scheduler.spawn_with_meta(meta, task),
+        }
+    }
+
+    /// Spawn task with metadata and priority (Custom scheduler respects priority, others ignore it)
+    pub fn spawn_task_with_meta_priority<F>(
+        &self,
+        priority: crate::custom_scheduler::Priority,
+        meta: Option<(IdType, usize, usize)>,
+        task: F,
+    ) where
+        F: FnOnce() + Send + 'static,
+    {
+        match self {
+            SchedulerImpl::Fifo(scheduler) => scheduler.spawn_task_with_meta(meta, task),
+            SchedulerImpl::WorkStealing(scheduler) => scheduler.spawn_task_with_meta(meta, task),
+            SchedulerImpl::Custom(scheduler) => {
+                scheduler.spawn_with_meta_priority(priority, meta, task)
+            }
+        }
+    }
+
+    /// Spawn task to specific worker group (Custom scheduler only, others fallback to normal spawn)
+    pub fn spawn_to_group_with_meta<F>(
+        &self,
+        group_id: usize,
+        priority: crate::custom_scheduler::Priority,
+        meta: Option<(IdType, usize, usize)>,
+        task: F,
+    ) where
+        F: FnOnce() + Send + 'static,
+    {
+        match self {
+            SchedulerImpl::Fifo(scheduler) => scheduler.spawn_task_with_meta(meta, task),
+            SchedulerImpl::WorkStealing(scheduler) => scheduler.spawn_task_with_meta(meta, task),
+            SchedulerImpl::Custom(scheduler) => {
+                scheduler.spawn_to_group_with_meta(group_id, priority, meta, task)
+            }
+        }
+    }
+
+    /// Get the affinity group for a given use_workers value (Custom scheduler only)
+    /// Returns 0 for Fifo/WorkStealing (single group), or mapped group_id for Custom
+    pub fn get_affinity_group(&self, use_workers: Option<usize>) -> usize {
+        match self {
+            SchedulerImpl::Fifo(_) | SchedulerImpl::WorkStealing(_) => 0,
+            SchedulerImpl::Custom(scheduler) => scheduler.get_affinity_group(use_workers),
         }
     }
 
@@ -702,6 +649,7 @@ impl SchedulerImpl {
         match self {
             SchedulerImpl::Fifo(scheduler) => scheduler.base.workers(),
             SchedulerImpl::WorkStealing(scheduler) => scheduler.base.workers(),
+            SchedulerImpl::Custom(scheduler) => scheduler.workers(),
         }
     }
 
@@ -709,6 +657,7 @@ impl SchedulerImpl {
         match self {
             SchedulerImpl::Fifo(scheduler) => scheduler.base.pending_jobs(),
             SchedulerImpl::WorkStealing(scheduler) => scheduler.base.pending_jobs(),
+            SchedulerImpl::Custom(scheduler) => scheduler.pending_tasks(),
         }
     }
 
@@ -716,6 +665,7 @@ impl SchedulerImpl {
         match self {
             SchedulerImpl::Fifo(scheduler) => scheduler.base.total_jobs_spawned(),
             SchedulerImpl::WorkStealing(scheduler) => scheduler.base.total_jobs_spawned(),
+            SchedulerImpl::Custom(scheduler) => scheduler.total_spawned(),
         }
     }
 
@@ -723,6 +673,7 @@ impl SchedulerImpl {
         match self {
             SchedulerImpl::Fifo(scheduler) => scheduler.base.total_jobs_completed(),
             SchedulerImpl::WorkStealing(scheduler) => scheduler.base.total_jobs_completed(),
+            SchedulerImpl::Custom(scheduler) => scheduler.total_completed(),
         }
     }
 
@@ -730,6 +681,7 @@ impl SchedulerImpl {
         match self {
             SchedulerImpl::Fifo(scheduler) => scheduler.base.core_offset(),
             SchedulerImpl::WorkStealing(scheduler) => scheduler.base.core_offset(),
+            SchedulerImpl::Custom(scheduler) => scheduler.core_offset(),
         }
     }
 
@@ -737,6 +689,7 @@ impl SchedulerImpl {
         match self {
             SchedulerImpl::Fifo(scheduler) => scheduler.base.system_threads(),
             SchedulerImpl::WorkStealing(scheduler) => scheduler.base.system_threads(),
+            SchedulerImpl::Custom(scheduler) => scheduler.system_threads(),
         }
     }
 
@@ -744,6 +697,7 @@ impl SchedulerImpl {
         match self {
             SchedulerImpl::Fifo(scheduler) => scheduler.base.receiver_core_offset(),
             SchedulerImpl::WorkStealing(scheduler) => scheduler.base.receiver_core_offset(),
+            SchedulerImpl::Custom(scheduler) => scheduler.receiver_core_offset(),
         }
     }
 
@@ -751,6 +705,7 @@ impl SchedulerImpl {
         match self {
             SchedulerImpl::Fifo(scheduler) => scheduler.base.receiver_threads(),
             SchedulerImpl::WorkStealing(scheduler) => scheduler.base.receiver_threads(),
+            SchedulerImpl::Custom(scheduler) => scheduler.receiver_threads(),
         }
     }
 
@@ -759,34 +714,7 @@ impl SchedulerImpl {
         match self {
             SchedulerImpl::Fifo(s) => s.base.write_records_to_csv(path),
             SchedulerImpl::WorkStealing(s) => s.base.write_records_to_csv(path),
-        }
-    }
-
-    pub fn get_batch_queue_tx(&self) -> BatchSender<(NodeInfo, CmTypes)> {
-        match self {
-            SchedulerImpl::Fifo(s) => s.base.get_batch_queue_tx(),
-            SchedulerImpl::WorkStealing(s) => s.base.get_batch_queue_tx(),
-        }
-    }
-
-    pub fn get_batch_queue_rx(&self) -> Arc<BatchReceiver<(NodeInfo, CmTypes)>> {
-        match self {
-            SchedulerImpl::Fifo(s) => s.base.get_batch_queue_rx(),
-            SchedulerImpl::WorkStealing(s) => s.base.get_batch_queue_rx(),
-        }
-    }
-
-    pub fn get_target_batch_size(&self) -> usize {
-        match self {
-            SchedulerImpl::Fifo(s) => s.base.get_target_batch_size(),
-            SchedulerImpl::WorkStealing(s) => s.base.get_target_batch_size(),
-        }
-    }
-
-    pub fn get_batch_timeout_us(&self) -> u64 {
-        match self {
-            SchedulerImpl::Fifo(s) => s.base.get_batch_timeout_us(),
-            SchedulerImpl::WorkStealing(s) => s.base.get_batch_timeout_us(),
+            SchedulerImpl::Custom(s) => s.write_record(path),
         }
     }
 
@@ -794,6 +722,7 @@ impl SchedulerImpl {
         match self {
             SchedulerImpl::Fifo(s) => s.base.get_async_recorder(),
             SchedulerImpl::WorkStealing(s) => s.base.get_async_recorder(),
+            SchedulerImpl::Custom(s) => s.get_async_recorder(),
         }
     }
 
@@ -801,22 +730,7 @@ impl SchedulerImpl {
         match self {
             SchedulerImpl::Fifo(s) => s.base.get_main_core(),
             SchedulerImpl::WorkStealing(s) => s.base.get_main_core(),
-        }
-    }
-
-    /// Phase 4: Print worker utilization statistics
-    pub fn print_worker_stats(&self) {
-        match self {
-            SchedulerImpl::Fifo(s) => {
-                if let Some(ref m) = s.base.worker_metrics {
-                    m.print_stats();
-                }
-            }
-            SchedulerImpl::WorkStealing(s) => {
-                if let Some(ref m) = s.base.worker_metrics {
-                    m.print_stats();
-                }
-            }
+            SchedulerImpl::Custom(s) => s.main_core(),
         }
     }
 }
@@ -825,6 +739,56 @@ impl SchedulerImpl {
 pub enum SchedulerType {
     Fifo,
     WorkStealing,
+    Custom,
+}
+
+/// Worker affinity configuration for nodes with use_workers
+/// Maps worker_count -> group_id for routing tasks to specific worker groups
+#[derive(Debug, Clone, Default)]
+pub struct WorkerAffinityConfig {
+    /// Maps use_workers count -> group_id (0 is always global/all workers)
+    pub affinity_map: std::collections::HashMap<usize, usize>,
+    /// List of (group_id, worker_count) for dedicated affinity groups
+    pub affinity_groups: Vec<(usize, usize)>,
+}
+
+impl WorkerAffinityConfig {
+    /// Create affinity config from a set of unique use_workers values
+    pub fn from_worker_counts(counts: &std::collections::HashSet<usize>, total_workers: usize) -> Self {
+        let mut affinity_map = std::collections::HashMap::new();
+        let mut affinity_groups = Vec::new();
+        
+        // Sort counts to ensure deterministic group assignment
+        let mut sorted_counts: Vec<usize> = counts.iter().copied().collect();
+        sorted_counts.sort();
+        
+        // Group 0 is reserved for global (all workers) - tasks with use_workers: None
+        // Groups 1..N are for specific worker counts
+        let mut group_id = 1;
+        for &count in &sorted_counts {
+            // Clamp to available workers
+            let actual_count = count.min(total_workers);
+            if actual_count > 0 && actual_count < total_workers {
+                affinity_map.insert(count, group_id);
+                affinity_groups.push((group_id, actual_count));
+                group_id += 1;
+            }
+            // If count >= total_workers, route to global group (0)
+        }
+        
+        Self {
+            affinity_map,
+            affinity_groups,
+        }
+    }
+    
+    /// Get group_id for a given use_workers value (None -> 0, Some(n) -> mapped group or 0)
+    pub fn get_group(&self, use_workers: Option<usize>) -> usize {
+        match use_workers {
+            None => 0, // Global group
+            Some(count) => *self.affinity_map.get(&count).unwrap_or(&0),
+        }
+    }
 }
 
 pub fn create_scheduler(
@@ -840,6 +804,7 @@ pub fn create_scheduler(
     batch_timeout_us: u64,
     record_stream: Option<usize>,
     available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
+    worker_affinity: Option<WorkerAffinityConfig>,
 ) -> SchedulerImpl {
     match scheduler_type {
         SchedulerType::Fifo => SchedulerImpl::Fifo(FifoScheduler::new(
@@ -868,5 +833,78 @@ pub fn create_scheduler(
             record_stream,
             available_stream_slots,
         )),
+        SchedulerType::Custom => {
+            let mut builder = crate::custom_scheduler::CustomScheduler::builder()
+                .core_offset(core_offset)
+                .system_threads(system_threads)
+                .receiver_threads(receiver_threads)
+                .record(record)
+                .base_instant(base_instant)
+                .record_stream(record_stream)
+                .available_stream_slots(available_stream_slots.clone());
+            
+            // Build worker groups based on affinity configuration
+            // 
+            // Architecture: ALL workers can process global tasks. Affinity groups define
+            // subsets of workers that ALSO process affinity-specific tasks.
+            //
+            // Example with 16 workers and use_workers: 8 for CSI:
+            //   - Group 0: 8 workers (global-only, process tasks with use_workers: None)
+            //   - Group 1: 8 workers (affinity + global, process CSI AND global tasks)
+            //
+            // CSI tasks → Group 1 local queue → only 8 affinity workers see them
+            // Global tasks → global queue → ALL 16 workers can process them
+            if let Some(ref affinity) = worker_affinity {
+                if !affinity.affinity_groups.is_empty() {
+                    // Calculate workers for global-only group (remaining after affinity groups)
+                    let affinity_workers: usize = affinity.affinity_groups.iter().map(|(_, c)| c).sum();
+                    let global_only_workers = num_workers.saturating_sub(affinity_workers);
+                    
+                    if global_only_workers > 0 {
+                        // Group 0: Global-only workers (no local affinity queue, only global)
+                        builder = builder.add_group(crate::custom_scheduler::WorkerGroupConfig {
+                            num_workers: global_only_workers,
+                            core_ids: None,
+                            group_id: 0,
+                            allow_global_steal: true,
+                            spin_iterations: 64,
+                        });
+                    }
+                    
+                    // Add affinity groups - these workers check their local queue first,
+                    // then help with global tasks (allow_global_steal = true)
+                    for &(group_id, worker_count) in &affinity.affinity_groups {
+                        builder = builder.add_group(crate::custom_scheduler::WorkerGroupConfig {
+                            num_workers: worker_count,
+                            core_ids: None,
+                            group_id,
+                            allow_global_steal: true, // Can also process global tasks when idle
+                            spin_iterations: 64,
+                        });
+                    }
+                    
+                    println!("Worker Affinity Configuration:");
+                    println!("  Global-only group (0): {} workers (process global tasks only)", global_only_workers);
+                    for &(group_id, worker_count) in &affinity.affinity_groups {
+                        println!("  Affinity group {}: {} workers (process affinity + global tasks)", group_id, worker_count);
+                    }
+                    println!("  Total workers: {} (all can process global tasks)", num_workers);
+                } else {
+                    // No affinity groups - single global group
+                    builder = builder.add_workers(num_workers, 64);
+                }
+            } else {
+                // No affinity config - single global group
+                builder = builder.add_workers(num_workers, 64);
+            }
+            
+            // Store affinity config in scheduler for runtime lookup
+            builder = builder.worker_affinity(worker_affinity);
+            
+            if let Some(rec) = external_recorder {
+                builder = builder.external_recorder(rec);
+            }
+            SchedulerImpl::Custom(builder.build())
+        }
     }
 }
