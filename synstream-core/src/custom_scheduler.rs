@@ -678,14 +678,17 @@ impl CustomSchedulerBuilder {
                 range.len()
             );
 
-            // If no global workers exist, range workers must handle global tasks too
-            let allow_steal = !has_global_workers;
+            // Range workers should always be able to steal from global queue when idle
+            // This ensures tasks without use_workers can utilize ALL workers, not just global group
+            // Semantics: "use_workers: 0-7" means "task MUST run on 0-7"
+            //            NOT "workers 0-7 can ONLY run these tasks"
+            let allow_steal = true;
 
             self = self.add_group(WorkerGroupConfig {
                 num_workers: range.len(),
                 core_ids: None, // Auto-assign during build()
                 group_id,
-                allow_global_steal: allow_steal, // Steal from global if no dedicated global workers
+                allow_global_steal: allow_steal, // Always allow stealing from global queue
                 spin_iterations: 64,
             });
         }
@@ -770,70 +773,133 @@ impl CustomSchedulerBuilder {
             system_core_offset,
         });
 
-        // Spawn worker groups
-        let mut groups = Vec::new();
-        let mut next_core_idx = worker_core_offset;
-        let mut global_worker_id = 0;
+        // ===================================================================
+        // WORKER AFFINITY BUG FIX: Index-Based Worker Assignment
+        // ===================================================================
+        // The fix changes from sequential worker creation (per-group) to
+        // index-based assignment where workers are created 0..total_workers
+        // and each is assigned to the correct group based on WorkerAffinityConfig
+        // ===================================================================
 
-        for (group_idx, config) in self.groups.into_iter().enumerate() {
-            let local_queues = Arc::clone(&group_queues[group_idx]);
-            let mut handles = Vec::with_capacity(config.num_workers);
+        // Step 1: Pre-allocate group structures
+        let group_configs: Vec<WorkerGroupConfig> = self.groups;
+        let num_groups = group_configs.len();
+        let mut group_worker_handles: Vec<Vec<JoinHandle<()>>> =
+            (0..num_groups).map(|_| Vec::new()).collect();
 
-            // Determine core IDs for this group
-            let group_core_ids: Vec<CoreId> = if let Some(ref cores) = config.core_ids {
-                cores.clone()
-            } else {
-                // Auto-assign cores
-                let end_idx = (next_core_idx + config.num_workers).min(alloc.all_core_ids.len());
-                let ids: Vec<CoreId> = alloc.all_core_ids[next_core_idx..end_idx].to_vec();
-                next_core_idx = end_idx;
-                ids
-            };
+        // Step 2: Build worker_id → group_idx mapping from WorkerAffinityConfig
+        // Default: all workers belong to global group (group 0)
+        let mut worker_to_group_idx: Vec<usize> = vec![0; total_workers];
 
-            println!(
-                "Worker Group {}: {} workers on cores {:?}",
-                group_idx,
-                config.num_workers,
-                group_core_ids.iter().map(|c| c.id).collect::<Vec<_>>()
-            );
-
-            for (local_idx, &core_id) in group_core_ids.iter().enumerate() {
-                if local_idx >= config.num_workers {
-                    break;
+        if let Some(ref affinity) = self.worker_affinity {
+            for worker_id in 0..total_workers {
+                let group_ids = affinity.get_worker_groups(worker_id);
+                if !group_ids.is_empty() {
+                    // Worker belongs to range group (use first group_id if overlapping ranges)
+                    worker_to_group_idx[worker_id] = group_ids[0];
                 }
+                // else: worker stays in global group (group_idx 0, already defaulted)
+            }
+        }
 
-                let shared_clone = Arc::clone(&shared);
-                let local_queues_clone = Arc::clone(&local_queues);
-                let spin_iterations = config.spin_iterations;
-                let allow_global_steal = config.allow_global_steal;
-                let worker_id = global_worker_id;
-                let group_id = group_idx;
+        // Step 3: Diagnostic output - show worker assignment before creation
+        println!("========== Worker to Group Assignment ==========");
+        for worker_id in 0..total_workers {
+            let group_idx = worker_to_group_idx[worker_id];
+            let core_id = alloc.all_core_ids[worker_core_offset + worker_id];
+            println!(
+                "  Worker {}: Group {} → Core {}",
+                worker_id, group_idx, core_id.id
+            );
+        }
+        println!("================================================");
 
-                let handle = thread::Builder::new()
-                    .name(format!("worker-{}-{}", group_idx, local_idx))
-                    .spawn(move || {
-                        worker_loop(
-                            worker_id,
-                            group_id,
-                            core_id,
-                            shared_clone,
-                            local_queues_clone,
-                            spin_iterations,
-                            allow_global_steal,
-                        );
-                    })
-                    .expect("Failed to spawn worker thread");
+        // Step 4: Create workers by index (0..total_workers), assigning to correct groups
+        for worker_id in 0..total_workers {
+            let group_idx = worker_to_group_idx[worker_id];
+            let core_id = alloc.all_core_ids[worker_core_offset + worker_id];
 
-                handles.push(handle);
-                global_worker_id += 1;
+            // Clone shared state for this worker
+            let shared_clone = Arc::clone(&shared);
+            let local_queues_clone = Arc::clone(&group_queues[group_idx]);
+
+            // Get group configuration
+            let config = &group_configs[group_idx];
+            let spin_iterations = config.spin_iterations;
+            let allow_global_steal = config.allow_global_steal;
+
+            // Spawn worker thread
+            let handle = thread::Builder::new()
+                .name(format!("worker-{}", worker_id))
+                .spawn(move || {
+                    worker_loop(
+                        worker_id,          // Global worker index (0..total_workers)
+                        group_idx,          // Group this worker belongs to
+                        core_id,            // Physical core to pin to
+                        shared_clone,
+                        local_queues_clone,
+                        spin_iterations,
+                        allow_global_steal,
+                    );
+                })
+                .expect("Failed to spawn worker thread");
+
+            // Add handle to the correct group's handle vector
+            group_worker_handles[group_idx].push(handle);
+        }
+
+        // Step 5: Diagnostic output and validation
+        for (group_idx, config) in group_configs.iter().enumerate() {
+            let actual_workers = group_worker_handles[group_idx].len();
+
+            // Validate: actual worker count matches config expectation
+            if actual_workers != config.num_workers {
+                println!(
+                    "Warning: Group {} expected {} workers but got {}",
+                    group_idx, config.num_workers, actual_workers
+                );
             }
 
+            // Collect worker IDs and core IDs for this group (for diagnostic output)
+            let worker_ids: Vec<usize> = worker_to_group_idx
+                .iter()
+                .enumerate()
+                .filter(|(_, &gid)| gid == group_idx)
+                .map(|(wid, _)| wid)
+                .collect();
+
+            let core_ids: Vec<usize> = worker_ids
+                .iter()
+                .map(|&worker_id| alloc.all_core_ids[worker_core_offset + worker_id].id)
+                .collect();
+
+            println!(
+                "Worker Group {}: {} workers (indices: {:?}) on cores {:?}",
+                group_idx, actual_workers, worker_ids, core_ids
+            );
+        }
+
+        // Step 6: Assemble WorkerGroup structs by pairing configs with handles
+        let mut groups = Vec::new();
+        for (group_idx, (config, handles)) in group_configs
+            .into_iter()
+            .zip(group_worker_handles.into_iter())
+            .enumerate()
+        {
             groups.push(WorkerGroup {
                 config,
-                local_queues,
+                local_queues: group_queues[group_idx].clone(),
                 handles,
             });
         }
+
+        // Step 7: Validate total worker assignment
+        let total_assigned: usize = groups.iter().map(|g| g.handles.len()).sum();
+        assert_eq!(
+            total_assigned, total_workers,
+            "Worker assignment mismatch: {} assigned, {} expected",
+            total_assigned, total_workers
+        );
 
         println!("======================================================");
 
