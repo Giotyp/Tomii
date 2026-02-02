@@ -448,7 +448,10 @@ impl SynRt {
                 }
 
                 if finish {
-                    // set exit signal
+                    // Signal all resolution threads to exit
+                    self.shared.shutdown_flag.store(true, Ordering::SeqCst);
+                    println!("Shutdown flag set - signaling resolution threads to exit");
+
                     // Process post-nodes if any
                     println!("Processing possible post-nodes...");
                     self.schedule_post_nodes();
@@ -638,10 +641,27 @@ impl SynRt {
         let receive_timeout = Duration::from_micros(shared.batch_timeout_us);
         let mut packets_received: bool = false;
 
+        // Track whether we've fully drained all packet channels after receive_finished
+        let mut packet_channels_drained = false;
+
         // Process completed nodes with dynamic batching from scheduler
         loop {
-            // Only poll if network_config is present and receivers were spawned
-            if !shared.receive_finished.load(Ordering::SeqCst) {
+            // Check shutdown flag first to exit immediately when signaled
+            if shared.shutdown_flag.load(Ordering::Relaxed) {
+                println!(
+                    "Thread {} detected shutdown signal, exiting resolution loop",
+                    thread_id
+                );
+                break;
+            }
+
+            // Poll packet channels if:
+            // 1. Receivers are still active (!receive_finished), OR
+            // 2. Receivers finished but channels may still have queued packets (!packet_channels_drained)
+            let should_poll_packets =
+                !shared.receive_finished.load(Ordering::SeqCst) || !packet_channels_drained;
+
+            if should_poll_packets {
                 if let Some(network_config) = network_config_opt.as_ref() {
                     let stream_packets = network_config.stream_packets;
                     let packet_process_func = network_config.extract_packet_func.unwrap();
@@ -652,6 +672,14 @@ impl SynRt {
                         packets.extend(
                             rx.recv_chunk_timeout(shared.target_batch_size, receive_timeout),
                         );
+                    }
+
+                    // If receive_finished and no packets found, channels are fully drained
+                    if shared.receive_finished.load(Ordering::SeqCst) && packets.is_empty() {
+                        packet_channels_drained = true;
+                        print_debug(|| {
+                            "Packet channels fully drained after receive_finished".to_string()
+                        });
                     }
 
                     for packet_msg in packets {
@@ -794,8 +822,7 @@ impl SynRt {
                                         "All {} streams received ({} packets each) - receivers will shutdown",
                                         shared.max_streams, stream_packets
                                     );
-                            // Signal shutdown
-                            shared.shutdown_flag.store(true, Ordering::SeqCst);
+                            // Signal receivers to stop, but NOT resolution threads (they still have work to process)
                             shared.receive_finished.store(true, Ordering::SeqCst);
                         }
                     }
@@ -809,6 +836,15 @@ impl SynRt {
             let batch = shared
                 .batch_queue_rx
                 .recv_chunk_timeout(shared.target_batch_size, receive_timeout);
+
+            // Check shutdown immediately after blocking call returns
+            if shared.shutdown_flag.load(Ordering::Relaxed) {
+                println!(
+                    "Thread {} detected shutdown after receive, exiting",
+                    thread_id
+                );
+                break;
+            }
 
             // If nothing arrived from network AND scheduler, mark start of wait period.
             // Otherwise, if we previously were waiting, record the idle interval now.
@@ -1191,15 +1227,16 @@ impl SynRt {
             }
 
             // Check if all nodes in this slot have been processed (O(1) lock-free)
-            // Phase 1.2 optimization: Use aggregated counter instead of O(N×F) scan
-            let all_nodes_processed =
-                shared.slot_pending_tasks[proc_slot].load(Ordering::Acquire) == 0;
+            // Phase 1.2 optimization: Use aggregated counters instead of O(N×F) scan
+            // Must check BOTH regular tasks AND condition tasks for complete slot processing
+            let pending_regular = shared.slot_pending_tasks[proc_slot].load(Ordering::Acquire);
+            let pending_cond = shared.slot_pending_cond_tasks[proc_slot].load(Ordering::Acquire);
+            let all_nodes_processed = pending_regular == 0 && pending_cond == 0;
 
             print_debug(|| {
-                let pending = shared.slot_pending_tasks[proc_slot].load(Ordering::Acquire);
                 format!(
-                    "Slot {} pending_tasks: {}, all_processed={}",
-                    proc_slot, pending, all_nodes_processed
+                    "Slot {} pending_tasks: {}, pending_cond: {}, all_processed={}",
+                    proc_slot, pending_regular, pending_cond, all_nodes_processed
                 )
             });
 
