@@ -597,9 +597,103 @@ impl CustomSchedulerBuilder {
     }
 
     /// Set worker affinity configuration for use_workers routing
-    pub fn worker_affinity(mut self, affinity: Option<crate::scheduler::WorkerAffinityConfig>) -> Self {
+    pub fn worker_affinity(
+        mut self,
+        affinity: Option<crate::scheduler::WorkerAffinityConfig>,
+    ) -> Self {
         self.worker_affinity = affinity;
         self
+    }
+
+    /// Automatically configure worker groups from WorkerAffinityConfig
+    /// This creates:
+    /// - Dedicated groups for each range-based spec (exclusive workers)
+    /// - A global group for remaining workers (handles count-based and unspecified tasks)
+    ///
+    /// IMPORTANT: Groups are added such that self.groups[group_id] matches the group_id
+    /// - self.groups[0] = global group (or dummy if no global workers)
+    /// - self.groups[1] = first range group (group_id 1)
+    /// - self.groups[2] = second range group (group_id 2)
+    /// - etc.
+    pub fn with_affinity_groups(
+        mut self,
+        affinity: crate::scheduler::WorkerAffinityConfig,
+        total_workers: usize,
+    ) -> Self {
+        use std::collections::HashSet;
+
+        // Track which worker indices are assigned to range groups
+        let mut assigned_workers = HashSet::new();
+
+        println!("========== Configuring Worker Affinity Groups ==========");
+
+        // Calculate remaining workers for global group first
+        for (_, range) in &affinity.affinity_groups {
+            for worker_idx in range.start..range.end {
+                assigned_workers.insert(worker_idx);
+            }
+        }
+
+        let global_worker_count = total_workers.saturating_sub(assigned_workers.len());
+        let has_global_workers = global_worker_count > 0;
+
+        // Add global group at index 0 FIRST (even if 0 workers)
+        // This ensures self.groups[0] is the global group
+        if has_global_workers {
+            println!(
+                "  Global Group 0: {} workers (handles count-based and unspecified tasks)",
+                global_worker_count
+            );
+            self = self.add_group(WorkerGroupConfig {
+                num_workers: global_worker_count,
+                core_ids: None,
+                group_id: 0,
+                allow_global_steal: true, // Can handle global tasks
+                spin_iterations: 64,
+            });
+        } else {
+            println!("  Warning: All workers assigned to ranges!");
+            println!("  Global tasks (count-based/unspecified) will be handled by range workers");
+            // Add dummy group with 0 workers to maintain indexing
+            self = self.add_group(WorkerGroupConfig {
+                num_workers: 0,
+                core_ids: None,
+                group_id: 0,
+                allow_global_steal: true,
+                spin_iterations: 64,
+            });
+        }
+
+        // Now add range groups in order of group_id
+        // This ensures self.groups[group_id] = correct group
+        let mut sorted_groups = affinity.affinity_groups.clone();
+        sorted_groups.sort_by_key(|(gid, _)| *gid);
+
+        for (group_id, range) in sorted_groups {
+            println!(
+                "  Range Group {}: workers {}-{} ({} workers)",
+                group_id,
+                range.start,
+                range.end - 1,
+                range.len()
+            );
+
+            // If no global workers exist, range workers must handle global tasks too
+            let allow_steal = !has_global_workers;
+
+            self = self.add_group(WorkerGroupConfig {
+                num_workers: range.len(),
+                core_ids: None, // Auto-assign during build()
+                group_id,
+                allow_global_steal: allow_steal, // Steal from global if no dedicated global workers
+                spin_iterations: 64,
+            });
+        }
+
+        println!("========================================================");
+
+        // Store the affinity config for routing
+        self.worker_affinity(Some(affinity))
     }
 
     /// Build the scheduler
@@ -1043,9 +1137,9 @@ impl CustomScheduler {
         &self.worker_affinity
     }
 
-    /// Get group_id for a given use_workers value
-    /// Returns 0 for None (global) or the mapped group_id for specific worker counts
-    pub fn get_affinity_group(&self, use_workers: Option<usize>) -> usize {
+    /// Get group_id for a given WorkerRangeSpec
+    /// Returns 0 for None (global) or the mapped group_id for specific worker specs
+    pub fn get_affinity_group(&self, use_workers: Option<&crate::WorkerRangeSpec>) -> usize {
         match &self.worker_affinity {
             Some(affinity) => affinity.get_group(use_workers),
             None => 0, // No affinity config - always use global

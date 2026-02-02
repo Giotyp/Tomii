@@ -82,7 +82,7 @@ pub struct NodeJson {
     #[serde(default)]
     pub priority: Option<String>,
     #[serde(default)]
-    pub use_workers: Option<usize>,
+    pub use_workers: Option<String>,
 }
 
 // Initializations

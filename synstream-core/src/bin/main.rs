@@ -237,36 +237,42 @@ pub fn run_graph(
     use std::sync::Arc;
     let available_stream_slots = Arc::new(RwLock::new(vec![usize::MAX; slots]));
 
-    // Scan graph for unique use_workers values to create worker affinity configuration
+    // Scan graph for unique use_workers specs to create worker affinity configuration
     let worker_affinity = {
         use std::collections::HashSet;
         use synstream_core::scheduler::WorkerAffinityConfig;
-        
-        let mut unique_worker_counts: HashSet<usize> = HashSet::new();
-        
+        use synstream_core::WorkerRangeSpec;
+
+        let mut unique_worker_specs: HashSet<WorkerRangeSpec> = HashSet::new();
+
         // Scan regular nodes
         for node in &graph.nodes {
-            if let Some(count) = node.use_workers {
-                if count > 0 && count < workers {
-                    unique_worker_counts.insert(count);
-                }
+            if let Some(ref spec) = node.use_workers {
+                unique_worker_specs.insert(spec.clone());
             }
         }
-        
+
         // Scan post nodes if present
         if let Some(ref post_nodes) = graph.post_nodes {
             for node in post_nodes {
-                if let Some(count) = node.use_workers {
-                    if count > 0 && count < workers {
-                        unique_worker_counts.insert(count);
-                    }
+                if let Some(ref spec) = node.use_workers {
+                    unique_worker_specs.insert(spec.clone());
                 }
             }
         }
-        
-        if !unique_worker_counts.is_empty() {
-            println!("Detected use_workers values: {:?}", unique_worker_counts);
-            Some(WorkerAffinityConfig::from_worker_counts(&unique_worker_counts, workers))
+
+        if !unique_worker_specs.is_empty() {
+            println!(
+                "Detected {} unique worker specs:",
+                unique_worker_specs.len()
+            );
+            for spec in &unique_worker_specs {
+                println!("  {}", spec);
+            }
+            Some(WorkerAffinityConfig::from_worker_specs(
+                &unique_worker_specs,
+                workers,
+            ))
         } else {
             None
         }

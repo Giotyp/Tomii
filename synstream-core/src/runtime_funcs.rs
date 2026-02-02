@@ -500,7 +500,7 @@ pub fn send_to_scheduler(
                 };
 
                 let node_name = node.name.clone();
-                (func, node_name, node.priority, node.use_workers)
+                (func, node_name, node.priority, node.use_workers.clone())
             } else {
                 let node = &shared.graph.nodes[node_info.id as usize];
                 let func = {
@@ -511,7 +511,12 @@ pub fn send_to_scheduler(
                     }
                 };
 
-                (func, node.name.clone(), node.priority, node.use_workers)
+                (
+                    func,
+                    node.name.clone(),
+                    node.priority,
+                    node.use_workers.clone(),
+                )
             }
         };
 
@@ -549,12 +554,16 @@ pub fn send_to_scheduler(
         };
 
         // Route task based on use_workers affinity
-        // - None: Use global queue (all workers can execute)
-        // - Some(N): Route to dedicated worker group with N workers
-        let affinity_group = shared.scheduler.get_affinity_group(node_use_workers);
-        
+        // - None: Use global queue (group 0 - any available workers)
+        // - Some(Count(N)): Use global queue (group 0 - any N available workers)
+        // - Some(Range(start-end)): Route to dedicated exclusive group for that range
+        let affinity_group = shared
+            .scheduler
+            .get_affinity_group(node_use_workers.as_ref());
+
         if affinity_group > 0 {
-            // Task has worker affinity - spawn to specific group
+            // Range-based affinity - spawn to dedicated exclusive group
+            // These workers ONLY handle tasks with this specific range
             shared.scheduler.spawn_to_group_with_meta(
                 affinity_group,
                 task_priority,
@@ -562,12 +571,11 @@ pub fn send_to_scheduler(
                 task,
             );
         } else {
-            // No affinity (global) - spawn with priority to global queue
-            shared.scheduler.spawn_task_with_meta_priority(
-                task_priority,
-                Some(meta_data),
-                task,
-            );
+            // No affinity OR count-based - spawn to global queue
+            // Global workers handle: None specs, Count specs, and any non-range tasks
+            shared
+                .scheduler
+                .spawn_task_with_meta_priority(task_priority, Some(meta_data), task);
         }
     }
 }

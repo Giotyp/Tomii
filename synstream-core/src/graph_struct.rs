@@ -161,8 +161,8 @@ pub struct Node {
     pub condition: Option<NodeCondition>,
     // Task scheduling priority
     pub priority: NodePriority,
-    // Worker affinity: None = all workers, Some(N) = restrict to N workers
-    pub use_workers: Option<usize>,
+    // Worker affinity spec: None = all workers, Some(spec) = count or range based allocation
+    pub use_workers: Option<crate::WorkerRangeSpec>,
 }
 
 impl Node {

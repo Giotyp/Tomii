@@ -636,12 +636,20 @@ impl SchedulerImpl {
         }
     }
 
-    /// Get the affinity group for a given use_workers value (Custom scheduler only)
-    /// Returns 0 for Fifo/WorkStealing (single group), or mapped group_id for Custom
-    pub fn get_affinity_group(&self, use_workers: Option<usize>) -> usize {
+    /// Get the affinity group for a given use_workers spec
+    /// Returns:
+    /// - 0 for None (no affinity), Count specs, or non-Custom schedulers
+    /// - group_id for Range specs in Custom scheduler
+    pub fn get_affinity_group(&self, use_workers: Option<&crate::WorkerRangeSpec>) -> usize {
         match self {
-            SchedulerImpl::Fifo(_) | SchedulerImpl::WorkStealing(_) => 0,
-            SchedulerImpl::Custom(scheduler) => scheduler.get_affinity_group(use_workers),
+            SchedulerImpl::Fifo(_) | SchedulerImpl::WorkStealing(_) => {
+                // Non-custom schedulers don't support affinity groups
+                0
+            }
+            SchedulerImpl::Custom(scheduler) => {
+                // Delegate to CustomScheduler's affinity logic
+                scheduler.get_affinity_group(use_workers)
+            }
         }
     }
 
@@ -743,51 +751,134 @@ pub enum SchedulerType {
 }
 
 /// Worker affinity configuration for nodes with use_workers
-/// Maps worker_count -> group_id for routing tasks to specific worker groups
+/// Maps WorkerRange -> group_id for routing tasks to specific worker ranges
 #[derive(Debug, Clone, Default)]
 pub struct WorkerAffinityConfig {
-    /// Maps use_workers count -> group_id (0 is always global/all workers)
-    pub affinity_map: std::collections::HashMap<usize, usize>,
-    /// List of (group_id, worker_count) for dedicated affinity groups
-    pub affinity_groups: Vec<(usize, usize)>,
+    /// Maps WorkerRange -> group_id (0 is always global/all workers)
+    pub range_to_group: std::collections::HashMap<crate::WorkerRange, usize>,
+    /// List of (group_id, WorkerRange) for affinity groups
+    pub affinity_groups: Vec<(usize, crate::WorkerRange)>,
+    /// Maps worker_index -> Vec<group_id> for multi-group membership
+    /// A worker can belong to multiple groups if ranges overlap
+    pub worker_to_groups: std::collections::HashMap<usize, Vec<usize>>,
 }
 
 impl WorkerAffinityConfig {
-    /// Create affinity config from a set of unique use_workers values
-    pub fn from_worker_counts(counts: &std::collections::HashSet<usize>, total_workers: usize) -> Self {
-        let mut affinity_map = std::collections::HashMap::new();
-        let mut affinity_groups = Vec::new();
-        
-        // Sort counts to ensure deterministic group assignment
-        let mut sorted_counts: Vec<usize> = counts.iter().copied().collect();
-        sorted_counts.sort();
-        
-        // Group 0 is reserved for global (all workers) - tasks with use_workers: None
-        // Groups 1..N are for specific worker counts
-        let mut group_id = 1;
-        for &count in &sorted_counts {
-            // Clamp to available workers
-            let actual_count = count.min(total_workers);
-            if actual_count > 0 && actual_count < total_workers {
-                affinity_map.insert(count, group_id);
-                affinity_groups.push((group_id, actual_count));
-                group_id += 1;
+    /// Create affinity config from a set of unique WorkerRangeSpec values
+    /// Only processes Range specs - Count specs always use the global queue (group 0)
+    pub fn from_worker_specs(
+        specs: &std::collections::HashSet<crate::WorkerRangeSpec>,
+        total_workers: usize,
+    ) -> Self {
+        // Extract only range-based specs - count-based specs use global queue
+        let mut ranges: std::collections::HashSet<crate::WorkerRange> =
+            std::collections::HashSet::new();
+
+        // Filter and sort range-based specs for deterministic ordering
+        let mut range_specs: Vec<_> = specs
+            .iter()
+            .filter_map(|s| match s {
+                crate::WorkerRangeSpec::Range(r) => Some(r),
+                crate::WorkerRangeSpec::Count(_) => None, // Ignore count specs
+            })
+            .collect();
+
+        range_specs.sort();
+
+        // Add range-based specs, validating bounds
+        for range in range_specs {
+            if range.end > total_workers {
+                panic!(
+                    "Worker range {:?} exceeds total workers {}",
+                    range, total_workers
+                );
             }
-            // If count >= total_workers, route to global group (0)
+            ranges.insert(range.clone());
         }
-        
+
+        // Build affinity config from concrete ranges only
+        Self::from_worker_ranges(&ranges, total_workers)
+    }
+
+    /// Create affinity config from a set of unique WorkerRange values
+    pub fn from_worker_ranges(
+        ranges: &std::collections::HashSet<crate::WorkerRange>,
+        total_workers: usize,
+    ) -> Self {
+        let mut range_to_group = std::collections::HashMap::new();
+        let mut affinity_groups = Vec::new();
+        let mut worker_to_groups: std::collections::HashMap<usize, Vec<usize>> =
+            std::collections::HashMap::new();
+
+        // Initialize all workers with empty group lists
+        for worker_idx in 0..total_workers {
+            worker_to_groups.insert(worker_idx, Vec::new());
+        }
+
+        let mut group_id = 1;
+
+        // Sort ranges for deterministic assignment
+        let mut sorted_ranges: Vec<&crate::WorkerRange> = ranges.iter().collect();
+        sorted_ranges.sort();
+
+        for range in sorted_ranges {
+            // Validate range bounds
+            if range.end > total_workers {
+                panic!(
+                    "Worker range {:?} exceeds total workers {}",
+                    range, total_workers
+                );
+            }
+
+            // Map range to group
+            range_to_group.insert(range.clone(), group_id);
+            affinity_groups.push((group_id, range.clone()));
+
+            // Add this group to all workers in the range
+            for worker_idx in range.start..range.end {
+                worker_to_groups
+                    .get_mut(&worker_idx)
+                    .unwrap()
+                    .push(group_id);
+            }
+
+            group_id += 1;
+        }
+
         Self {
-            affinity_map,
+            range_to_group,
             affinity_groups,
+            worker_to_groups,
         }
     }
-    
-    /// Get group_id for a given use_workers value (None -> 0, Some(n) -> mapped group or 0)
-    pub fn get_group(&self, use_workers: Option<usize>) -> usize {
+
+    /// Get group_id for a given WorkerRangeSpec value
+    /// Returns:
+    /// - 0 for None (no affinity - use global queue)
+    /// - 0 for Count specs (use global queue with any workers)
+    /// - group_id for Range specs (use dedicated worker group)
+    pub fn get_group(&self, use_workers: Option<&crate::WorkerRangeSpec>) -> usize {
         match use_workers {
-            None => 0, // Global group
-            Some(count) => *self.affinity_map.get(&count).unwrap_or(&0),
+            None => 0, // No spec → global queue
+            Some(spec) => match spec {
+                crate::WorkerRangeSpec::Range(r) => {
+                    // Range spec → dedicated group (if mapped)
+                    *self.range_to_group.get(r).unwrap_or(&0)
+                }
+                crate::WorkerRangeSpec::Count(_) => {
+                    // Count spec → always use global queue
+                    0
+                }
+            },
         }
+    }
+
+    /// Get list of group IDs for a specific worker index
+    pub fn get_worker_groups(&self, worker_idx: usize) -> &[usize] {
+        self.worker_to_groups
+            .get(&worker_idx)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 }
 
@@ -842,65 +933,36 @@ pub fn create_scheduler(
                 .base_instant(base_instant)
                 .record_stream(record_stream)
                 .available_stream_slots(available_stream_slots.clone());
-            
+
             // Build worker groups based on affinity configuration
-            // 
-            // Architecture: ALL workers can process global tasks. Affinity groups define
-            // subsets of workers that ALSO process affinity-specific tasks.
             //
-            // Example with 16 workers and use_workers: 8 for CSI:
-            //   - Group 0: 8 workers (global-only, process tasks with use_workers: None)
-            //   - Group 1: 8 workers (affinity + global, process CSI AND global tasks)
+            // New Architecture:
+            // - Range-based specs (e.g., "0-7") create EXCLUSIVE worker groups
+            //   These workers ONLY handle tasks with their specific range spec
+            // - Count-based specs (e.g., "3") and unspecified tasks use the GLOBAL pool
+            //   Remaining workers (not in any range) handle these tasks
             //
-            // CSI tasks → Group 1 local queue → only 8 affinity workers see them
-            // Global tasks → global queue → ALL 16 workers can process them
+            // Example with 16 workers:
+            //   - use_workers "0-7" → Group 1: workers 0-7 (exclusive, no global steal)
+            //   - use_workers "8-12" → Group 2: workers 8-12 (exclusive, no global steal)
+            //   - use_workers "3" → Global pool (any of remaining 3 workers)
+            //   - no use_workers → Global pool (any of remaining 3 workers)
             if let Some(ref affinity) = worker_affinity {
                 if !affinity.affinity_groups.is_empty() {
-                    // Calculate workers for global-only group (remaining after affinity groups)
-                    let affinity_workers: usize = affinity.affinity_groups.iter().map(|(_, c)| c).sum();
-                    let global_only_workers = num_workers.saturating_sub(affinity_workers);
-                    
-                    if global_only_workers > 0 {
-                        // Group 0: Global-only workers (no local affinity queue, only global)
-                        builder = builder.add_group(crate::custom_scheduler::WorkerGroupConfig {
-                            num_workers: global_only_workers,
-                            core_ids: None,
-                            group_id: 0,
-                            allow_global_steal: true,
-                            spin_iterations: 64,
-                        });
-                    }
-                    
-                    // Add affinity groups - these workers check their local queue first,
-                    // then help with global tasks (allow_global_steal = true)
-                    for &(group_id, worker_count) in &affinity.affinity_groups {
-                        builder = builder.add_group(crate::custom_scheduler::WorkerGroupConfig {
-                            num_workers: worker_count,
-                            core_ids: None,
-                            group_id,
-                            allow_global_steal: true, // Can also process global tasks when idle
-                            spin_iterations: 64,
-                        });
-                    }
-                    
-                    println!("Worker Affinity Configuration:");
-                    println!("  Global-only group (0): {} workers (process global tasks only)", global_only_workers);
-                    for &(group_id, worker_count) in &affinity.affinity_groups {
-                        println!("  Affinity group {}: {} workers (process affinity + global tasks)", group_id, worker_count);
-                    }
-                    println!("  Total workers: {} (all can process global tasks)", num_workers);
+                    // Use new with_affinity_groups to automatically create proper groups
+                    // Note: with_affinity_groups also calls worker_affinity() internally
+                    builder = builder.with_affinity_groups(affinity.clone(), num_workers);
                 } else {
                     // No affinity groups - single global group
-                    builder = builder.add_workers(num_workers, 64);
+                    builder = builder
+                        .add_workers(num_workers, 64)
+                        .worker_affinity(worker_affinity);
                 }
             } else {
                 // No affinity config - single global group
                 builder = builder.add_workers(num_workers, 64);
             }
-            
-            // Store affinity config in scheduler for runtime lookup
-            builder = builder.worker_affinity(worker_affinity);
-            
+
             if let Some(rec) = external_recorder {
                 builder = builder.external_recorder(rec);
             }

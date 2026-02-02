@@ -314,8 +314,11 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             .map(NodePriority::from_str)
             .unwrap_or_default();
 
-        // use_workers: None means all workers, Some(N) restricts to N workers
-        let use_workers = node_json.use_workers;
+        // Parse use_workers from JSON string (e.g., "0-7" or "4") to WorkerRangeSpec
+        let use_workers = node_json.use_workers.as_ref().map(|spec_str| {
+            crate::WorkerRangeSpec::parse(spec_str)
+                .unwrap_or_else(|e| panic!("Invalid use_workers spec '{}': {}", spec_str, e))
+        });
 
         let node_count = NodeCount.fetch_add(1, SeqCst);
         name_to_id.insert(node_json.name.clone(), node_count);
