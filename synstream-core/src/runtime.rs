@@ -933,6 +933,10 @@ impl SynRt {
                 )
             });
 
+            // Mark stream activity FIRST for all nodes (including network nodes id=0)
+            // This ensures check_slots() will examine this slot for completion
+            stream_slot_activity.insert(node_info.slot, true);
+
             if node_info.post_node {
                 // Store Result - lock-free atomic store
                 shared.node_results.set(&node_info, result);
@@ -962,9 +966,6 @@ impl SynRt {
 
             // store result - lock-free atomic store (no contention)
             shared.node_results.set(&node_info, result);
-
-            // Mark this slot as having activity (for persistent completion tracking)
-            stream_slot_activity.insert(node_info.slot, true);
 
             // Decrement remaining_nodes counter now that this task is confirmed completed
             // Using pre-computed node_id_is_cond flag for lock-free branch
