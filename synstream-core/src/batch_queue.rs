@@ -143,7 +143,7 @@ impl<T> Sender<T> {
             {
                 // Lazy-notify: Only wake if the receiver isn't already active
                 if !self.inner.has_items.swap(true, Ordering::Release) {
-                    self.inner.condvar.notify_one();
+                    self.inner.condvar.notify_all();
                 }
                 return Ok(());
             }

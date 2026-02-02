@@ -238,7 +238,10 @@ impl SynRt {
             receiver_core_offset,
             record_stream,
             node_cache,
-            node_results: Arc::new(RwLock::new(VecMap::new(CmTypes::Init))),
+            node_results: Arc::new(crate::buffers::LockFreeResultMap::new(
+                &app_graph.nodes,
+                slots,
+            )),
             stream_complete_counter: Arc::new(AtomicUsize::new(0)),
             available_stream_slots,
             time_buffer,
@@ -646,7 +649,9 @@ impl SynRt {
                     // Poll all per-thread packet channels (non-blocking)
                     let mut packets: Vec<PacketMessage> = Vec::new();
                     for rx in shared.packet_receivers.iter() {
-                        packets.extend(rx.recv_timeout_all(receive_timeout));
+                        packets.extend(
+                            rx.recv_chunk_timeout(shared.target_batch_size, receive_timeout),
+                        );
                     }
 
                     for packet_msg in packets {
@@ -929,8 +934,8 @@ impl SynRt {
             });
 
             if node_info.post_node {
-                // Store Result
-                shared.node_results.write().set(&node_info, result);
+                // Store Result - lock-free atomic store
+                shared.node_results.set(&node_info, result);
                 continue;
             }
 
@@ -955,8 +960,8 @@ impl SynRt {
                 node_info.slot = assign_stream_to_available_slot(&shared, new_stream);
             }
 
-            // store result - single lock acquisition (consumes result)
-            shared.node_results.write().set(&node_info, result);
+            // store result - lock-free atomic store (no contention)
+            shared.node_results.set(&node_info, result);
 
             // Mark this slot as having activity (for persistent completion tracking)
             stream_slot_activity.insert(node_info.slot, true);
@@ -1343,31 +1348,27 @@ impl SynRt {
                 while completed_count < post_node.factor {
                     sleep(Duration::from_millis(10));
                     completed_count = 0;
-                    let results_read = self.shared.node_results.read();
+                    // Lock-free check - no RwLock needed
                     for i in 0..post_node.factor {
                         let node_info = NodeInfo::new(post_node.id, stream_use, i, 0);
-                        if results_read.result_exists(&node_info) {
+                        if self.shared.node_results.result_exists(&node_info) {
                             completed_count += 1;
                         }
                     }
-                    drop(results_read);
                 }
             }
             print_debug(|| "All post-nodes completed".to_string());
         }
     }
 
-    fn init_results(&mut self, slots: usize) {
-        // Initialize node_results with factor entries
-        let nodes = &self.shared.graph.nodes;
-        let mut node_results_lock = self.shared.node_results.write();
-        node_results_lock.init_map(&nodes, slots, None);
+    fn init_results(&mut self, _slots: usize) {
+        // Lock-free result map is already initialized in constructor
+        // No initialization needed - atomic pointers start as null
 
-        // Initialize post_nodes if any
-        let post_nodes_opt = &self.shared.graph.post_nodes;
-        if let Some(post_nodes) = post_nodes_opt {
-            node_results_lock.extend_map(&post_nodes);
-        }
+        // Note: post_nodes slots are handled by extend_slot() calls if needed
+        let _nodes = &self.shared.graph.nodes;
+        let _post_nodes_opt = &self.shared.graph.post_nodes;
+        // The LockFreeResultMap is created with the right capacity upfront
     }
 
     pub fn print_statistics(&self, bench_name: &str, out_file: Option<&str>) {

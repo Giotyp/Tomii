@@ -313,8 +313,8 @@ pub struct SharedData {
     // Node cache for fast repeated access
     pub node_cache: Vec<NodeCacheEntry>,
 
-    // Internally synchronized data
-    pub node_results: Arc<RwLock<VecMap<CmTypes>>>,
+    // Internally synchronized data - LOCK-FREE result storage
+    pub node_results: Arc<crate::buffers::LockFreeResultMap>,
     pub stream_complete_counter: Arc<AtomicUsize>,
     pub available_stream_slots: Arc<RwLock<Vec<usize>>>,
     pub time_buffer: Option<Arc<TimeBufferManager>>,
@@ -644,10 +644,9 @@ pub fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
         // Release the slot
         release_slot(shared, slot);
 
-        // Clear completed nodes for this slot to allow restart
+        // Clear completed nodes for this slot to allow restart - lock-free atomic clear
         shared
             .node_results
-            .write()
             .reinit_slot(&shared.graph.nodes, slot, None);
 
         // In slot-priority mode: Keep slot Active if it's currently active (immediate restart)
@@ -956,8 +955,8 @@ pub fn collect_arg_result(
                 let res_factor = res_node.factor;
                 let node_info =
                     NodeInfo::new(*res_node_id as IdType, slot, pred_index % res_factor, 0);
-                let res_read = shared.node_results.read();
-                if let Some(result) = res_read.get(&node_info) {
+                // Lock-free atomic load
+                if let Some(result) = shared.node_results.get(&node_info) {
                     return Some(vec![result]);
                 } else {
                     panic!(
@@ -977,13 +976,13 @@ pub fn collect_arg_result(
                 indices.push(find_pred_index(node_index, pred_idx, pred_factor));
             }
 
-            let res_read = shared.node_results.read();
+            // Lock-free atomic loads - no RwLock contention
             let mut result_vec = Vec::with_capacity(indices.len());
 
             // Batch collect all results
             for dep_idx in indices.iter() {
                 let node_info = NodeInfo::new(*res_node_id as IdType, slot, *dep_idx, 0);
-                if let Some(result) = res_read.get(&node_info) {
+                if let Some(result) = shared.node_results.get(&node_info) {
                     result_vec.push(result);
                 } else {
                     panic!(
