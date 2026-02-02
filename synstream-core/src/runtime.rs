@@ -266,6 +266,7 @@ impl SynRt {
             slot_priority_enabled,
             slot_buffers,
             // Network fields (empty vecs when no network_config)
+            first_packet_received: Arc::new(AtomicBool::new(false)),
             receive_finished: Arc::new(AtomicBool::new(false)),
             packet_senders,
             packet_receivers,
@@ -636,8 +637,6 @@ impl SynRt {
         // Track start of idle/wait periods so we can record waiting time
         let mut wait_start_ns: Option<u128> = None;
 
-        let mut first_packet_received: bool = false;
-
         let receive_timeout = Duration::from_micros(shared.batch_timeout_us);
         let mut packets_received: bool = false;
 
@@ -800,9 +799,10 @@ impl SynRt {
                         }
                     }
 
-                    if !first_packet_received {
-                        first_packet_received = true;
+                    if !shared.first_packet_received.load(Ordering::Relaxed) {
+                        shared.first_packet_received.store(true, Ordering::Relaxed);
                     }
+
                     if shared.stream_packet_counter.load(Ordering::Relaxed) == stream_packets {
                         // Reset counter for next stream
                         shared.stream_packet_counter.store(0, Ordering::Relaxed);
@@ -828,7 +828,8 @@ impl SynRt {
                     }
                 }
             }
-            if !first_packet_received {
+
+            if !shared.first_packet_received.load(Ordering::Relaxed) {
                 continue;
             }
 
@@ -872,8 +873,10 @@ impl SynRt {
                 }
             }
 
+            let empty_batch = batch.is_empty();
+
             // Process the entire batch
-            if !batch.is_empty() {
+            if !empty_batch {
                 let start_ns_batch = shared.base_instant.elapsed().as_nanos();
                 let start_proc = if let Some(tb) = &shared.time_buffer {
                     tb.measure_time()
@@ -895,7 +898,9 @@ impl SynRt {
                     let dur = tb.measure_duration(start_proc, end_proc);
                     tb.add_task_time(thread_slot, "Batch Resolution", usize::MAX, dur);
                 }
+            }
 
+            if packets_received || !empty_batch {
                 let start_proc = if let Some(tb) = &shared.time_buffer {
                     tb.measure_time()
                 } else {
@@ -916,6 +921,7 @@ impl SynRt {
                 }
                 wait_start_ns = Some(shared.base_instant.elapsed().as_nanos());
             }
+
             packets_received = false;
 
             // Check for completion of all streams

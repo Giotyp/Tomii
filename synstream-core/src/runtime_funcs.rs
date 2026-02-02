@@ -358,6 +358,7 @@ pub struct SharedData {
     pub slot_buffers: Arc<RwLock<Vec<Vec<NodeInfo>>>>,
 
     // Network receiver infrastructure (optional - only present if network_config exists)
+    pub first_packet_received: Arc<AtomicBool>,
     pub receive_finished: Arc<AtomicBool>,
     /// One channel per receiver thread — eliminates CAS contention on a shared head pointer.
     pub packet_senders: Vec<BatchSender<PacketMessage>>,
