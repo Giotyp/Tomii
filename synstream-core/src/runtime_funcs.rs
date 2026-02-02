@@ -373,7 +373,9 @@ pub struct SharedData {
     pub packet_drop_counters: Vec<AtomicUsize>,
     pub shutdown_flag: Arc<AtomicBool>,
 
-    pub stream_packet_counter: Arc<AtomicUsize>,
+    /// Per-slot packet counters - each slot tracks its own packet index independently
+    /// This prevents index overflow when multiple streams are processed concurrently
+    pub slot_packet_counters: Arc<Vec<AtomicUsize>>,
     pub streams_receive_counter: Arc<AtomicUsize>,
 }
 

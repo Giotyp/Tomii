@@ -276,7 +276,7 @@ impl SynRt {
             receiver_sockets,
             packet_drop_counters,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
-            stream_packet_counter: Arc::new(AtomicUsize::new(0)),
+            slot_packet_counters: Arc::new((0..slots).map(|_| AtomicUsize::new(0)).collect()),
             streams_receive_counter: Arc::new(AtomicUsize::new(0)),
         });
 
@@ -709,11 +709,11 @@ impl SynRt {
                             tb.add_task_time(thread_slot, "Packet Processing", usize::MAX, dur);
                         }
 
-                        let counter = shared.stream_packet_counter.clone();
-                        let packet_index = counter.fetch_add(1, Ordering::Relaxed);
-                        let mut node_info = NodeInfo::new(0, 0, packet_index, 0); // assuming node_id 0 for network input
+                        // Create temporary node_info with index=0 for ID function call
+                        // The actual index will be set after slot assignment
+                        let mut node_info = NodeInfo::new(0, 0, 0, 0); // network node id=0
 
-                        // Call id_function and record
+                        // Call id_function to determine which stream this packet belongs to
                         let start_id = if let Some(tb) = &shared.time_buffer {
                             tb.measure_time()
                         } else {
@@ -729,7 +729,7 @@ impl SynRt {
                         }
 
                         if let Some(new_stream) = new_stream_opt {
-                            // Assign streams to an available stream slot
+                            // Assign stream to an available slot
                             let start_sa = if let Some(tb) = &shared.time_buffer {
                                 tb.measure_time()
                             } else {
@@ -743,6 +743,12 @@ impl SynRt {
                                 let dur = tb.measure_duration(start_sa, end_sa);
                                 tb.add_task_time(thread_slot, "Slot Assignment", usize::MAX, dur);
                             }
+
+                            // Use per-slot packet counter for correct indexing across multiple streams
+                            // Each slot tracks its own packet sequence independently
+                            let packet_index = shared.slot_packet_counters[node_info.slot]
+                                .fetch_add(1, Ordering::Relaxed);
+                            node_info.index = packet_index;
                         } else {
                             // ID function failed, skip processing this node
                             print_debug(|| {
@@ -753,7 +759,7 @@ impl SynRt {
                             continue;
                         }
 
-                        let info_res = (node_info, packet_cm);
+                        let info_res = (node_info.clone(), packet_cm);
 
                         let start_ns_pkt = shared.base_instant.elapsed().as_nanos();
                         let start_proc = if let Some(tb) = &shared.time_buffer {
@@ -794,37 +800,42 @@ impl SynRt {
                                 end_ns: packet_rcv + delta_ns,
                                 worker: receiver_core_id,
                                 task_id: 0,
-                                index: packet_index,
+                                index: node_info.index,
                             });
+                        }
+
+                        // Check if this slot has received all its packets (stream fully received)
+                        // Use fetch_add result to detect exact completion moment (avoids race)
+                        // Note: packet_index is the value BEFORE the increment, so +1 equals current count
+                        let packet_count = node_info.index + 1;
+                        if packet_count == stream_packets {
+                            print_debug(|| {
+                                format!(
+                                    "All {} packets received for slot {} stream",
+                                    stream_packets, node_info.slot
+                                )
+                            });
+
+                            // Increment total streams received counter
+                            let completed_streams = shared
+                                .streams_receive_counter
+                                .fetch_add(1, Ordering::SeqCst)
+                                + 1;
+
+                            // Check if all expected streams have been received
+                            if completed_streams >= shared.max_streams {
+                                println!(
+                                    "All {} streams received ({} packets each) - receivers will shutdown",
+                                    shared.max_streams, stream_packets
+                                );
+                                // Signal receivers to stop, but NOT resolution threads
+                                shared.receive_finished.store(true, Ordering::SeqCst);
+                            }
                         }
                     }
 
                     if !shared.first_packet_received.load(Ordering::Relaxed) {
                         shared.first_packet_received.store(true, Ordering::Relaxed);
-                    }
-
-                    if shared.stream_packet_counter.load(Ordering::Relaxed) == stream_packets {
-                        // Reset counter for next stream
-                        shared.stream_packet_counter.store(0, Ordering::Relaxed);
-                        print_debug(|| {
-                            format!("All {} packets for stream received", stream_packets)
-                        });
-                        // Increase total stream receive counter
-                        let completed_streams = shared
-                            .streams_receive_counter
-                            .fetch_add(1, Ordering::Relaxed)
-                            + 1; // +1 because fetch_add returns old value
-
-                        // Log when all expected streams have been received
-                        // Note: Receiver threads will continue running until main loop exits
-                        if completed_streams >= shared.max_streams {
-                            println!(
-                                        "All {} streams received ({} packets each) - receivers will shutdown",
-                                        shared.max_streams, stream_packets
-                                    );
-                            // Signal receivers to stop, but NOT resolution threads (they still have work to process)
-                            shared.receive_finished.store(true, Ordering::SeqCst);
-                        }
                     }
                 }
             }
@@ -1270,6 +1281,10 @@ impl SynRt {
                 shared
                     .resolution_state
                     .reinit_dependencies(&shared.graph.nodes, proc_slot);
+
+                // Reset per-slot packet counter for the next stream
+                // This ensures the network node index starts at 0 for the new stream
+                shared.slot_packet_counters[proc_slot].store(0, Ordering::Release);
 
                 // Reinit remaining_nodes for this slot using pre-computed init values (lock-free)
                 let slot_remaining = &shared.remaining_nodes[proc_slot];

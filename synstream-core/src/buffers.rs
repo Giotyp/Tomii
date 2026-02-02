@@ -851,6 +851,8 @@ mod tests {
                 func_ptr: None,
                 loop_: None,
                 condition: None,
+                use_workers: None,
+                priority: crate::graph_struct::NodePriority::Normal,
             },
             Node {
                 name: "node1".to_string(),
@@ -861,6 +863,8 @@ mod tests {
                 func_ptr: None,
                 loop_: None,
                 condition: None,
+                use_workers: None,
+                priority: crate::graph_struct::NodePriority::Normal,
             },
         ];
         let dep_counts = vec![4, 6];
