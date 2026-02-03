@@ -206,8 +206,9 @@ impl<T> Receiver<T> {
             backoff.spin();
         }
 
-        self.inner.has_items.store(false, Ordering::Release);
+        // Fix: Lock BEFORE clearing has_items to prevent lost wakeup
         let mut lock = self.inner.cv_lock.lock();
+        self.inner.has_items.store(false, Ordering::Release);
         while self.inner.head.load(Ordering::Relaxed).is_null() {
             if !self.inner.receiver_alive.load(Ordering::Acquire) {
                 return Vec::new();
@@ -225,8 +226,9 @@ impl<T> Receiver<T> {
             return items;
         }
 
-        self.inner.has_items.store(false, Ordering::Release);
+        // Fix: Lock BEFORE clearing has_items to prevent lost wakeup
         let mut lock = self.inner.cv_lock.lock();
+        self.inner.has_items.store(false, Ordering::Release);
         if self.inner.head.load(Ordering::Relaxed).is_null() {
             self.inner.condvar.wait_for(&mut lock, timeout);
         }
@@ -241,27 +243,27 @@ impl<T> Receiver<T> {
         }
 
         // 1. Phase 1: Try immediate non-blocking pull
-        let mut batch = self.internal_try_recv_chunk(max_items);
+        let batch = self.internal_try_recv_chunk(max_items);
         if !batch.is_empty() {
             return batch;
         }
 
-        // 2. Phase 2: Prepare for park
-        // Clear flag before sleeping so the first subsequent push re-arms the notification.
+        // 2. Phase 2: Lock and prepare for park
+        // Fix: Lock BEFORE clearing has_items to prevent lost wakeup race condition.
+        // This ensures atomicity between flag clearing, queue checking, and waiting.
+        let mut lock = self.inner.cv_lock.lock();
         self.inner.has_items.store(false, Ordering::Release);
 
-        // Re-check: a sender may have pushed between our drain and the flag clear.
-        batch = self.internal_try_recv_chunk(max_items);
-        if !batch.is_empty() {
-            return batch;
+        // Re-check queue while holding lock (prevents race with senders)
+        if !self.inner.head.load(Ordering::Relaxed).is_null() {
+            drop(lock);
+            return self.internal_try_recv_chunk(max_items);
         }
 
-        // 3. Phase 3: Wait with timeout
-        let mut lock = self.inner.cv_lock.lock();
-        if self.inner.head.load(Ordering::Relaxed).is_null() {
-            if self.inner.condvar.wait_for(&mut lock, timeout).timed_out() {
-                return Vec::new();
-            }
+        // 3. Phase 3: Wait with timeout (releases lock atomically)
+        if self.inner.condvar.wait_for(&mut lock, timeout).timed_out() {
+            drop(lock);
+            return Vec::new();
         }
         drop(lock);
 
