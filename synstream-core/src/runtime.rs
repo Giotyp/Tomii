@@ -223,7 +223,7 @@ impl SynRt {
         // Initialize per-slot buffering queues
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
-        let (receiver_sockets, packet_senders, packet_receivers, packet_drop_counters) =
+        let (receiver_sockets, packet_sender, packet_receiver, packet_drop_counters) =
             prepare_network_infrastructure(app_graph, receiver_threads);
 
         let shared = Arc::new(SharedData {
@@ -268,8 +268,8 @@ impl SynRt {
             // Network fields (empty vecs when no network_config)
             first_packet_received: Arc::new(AtomicBool::new(false)),
             receive_finished: Arc::new(AtomicBool::new(false)),
-            packet_senders,
-            packet_receivers,
+            packet_sender,
+            packet_receiver,
             packet_notify_lock: Mutex::new(()),
             packet_notify_cond: Condvar::new(),
             packet_has_items: AtomicBool::new(false),
@@ -666,12 +666,9 @@ impl SynRt {
                     let packet_process_func = network_config.extract_packet_func.unwrap();
 
                     // Poll all per-thread packet channels (non-blocking)
-                    let mut packets: Vec<PacketMessage> = Vec::new();
-                    for rx in shared.packet_receivers.iter() {
-                        packets.extend(
-                            rx.recv_chunk_timeout(shared.target_batch_size, receive_timeout),
-                        );
-                    }
+                    let packets = shared
+                        .packet_receiver
+                        .recv_chunk_timeout(shared.target_batch_size, receive_timeout);
 
                     // If receive_finished and no packets found, channels are fully drained
                     if shared.receive_finished.load(Ordering::SeqCst) && packets.is_empty() {
@@ -1457,27 +1454,13 @@ fn prepare_network_infrastructure(
     receiver_threads: usize,
 ) -> (
     Vec<NetworkSocket>,
-    Vec<BatchSender<PacketMessage>>,
-    Vec<BatchReceiver<PacketMessage>>,
+    BatchSender<PacketMessage>,
+    BatchReceiver<PacketMessage>,
     Vec<AtomicUsize>,
 ) {
+    let (packet_sender, packet_receiver) = batch_queue::unbounded();
     if let Some(config_spec) = graph.network_config() {
         let num_sockets = config_spec.num_sockets;
-        // Actual threads spawned: 1:1 mode uses num_sockets threads,
-        // round-robin mode uses receiver_threads.  One channel per thread.
-        let actual_receivers = if receiver_threads >= num_sockets {
-            num_sockets
-        } else {
-            receiver_threads
-        };
-
-        let mut packet_senders = Vec::with_capacity(actual_receivers);
-        let mut packet_receivers = Vec::with_capacity(actual_receivers);
-        for _ in 0..actual_receivers {
-            let (tx, rx) = batch_queue::unbounded();
-            packet_senders.push(tx);
-            packet_receivers.push(rx);
-        }
 
         let receiver_sockets =
             bind_udp_socket_range(&config_spec.address, config_spec.start_port, num_sockets);
@@ -1486,11 +1469,11 @@ fn prepare_network_infrastructure(
 
         (
             receiver_sockets,
-            packet_senders,
-            packet_receivers,
+            packet_sender,
+            packet_receiver,
             packet_drop_counters,
         )
     } else {
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        (Vec::new(), packet_sender, packet_receiver, Vec::new())
     }
 }

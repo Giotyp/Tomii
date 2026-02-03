@@ -361,8 +361,8 @@ pub struct SharedData {
     pub first_packet_received: Arc<AtomicBool>,
     pub receive_finished: Arc<AtomicBool>,
     /// One channel per receiver thread — eliminates CAS contention on a shared head pointer.
-    pub packet_senders: Vec<BatchSender<PacketMessage>>,
-    pub packet_receivers: Vec<BatchReceiver<PacketMessage>>,
+    pub packet_sender: BatchSender<PacketMessage>,
+    pub packet_receiver: BatchReceiver<PacketMessage>,
     /// Shared lazy-notification condvar.  Receiver threads notify here after
     /// pushing to their per-thread channel; the resolution thread sleeps here
     /// when all per-thread channels are empty.

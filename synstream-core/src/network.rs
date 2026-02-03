@@ -115,7 +115,7 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
     // Get socket and channel references
     let socket = &shared.receiver_sockets[socket_id];
     let _ = socket.set_read_timeout(Some(read_timeout));
-    let tx = &shared.packet_senders[socket_id];
+    let tx = &shared.packet_sender;
     let drop_counter = &shared.packet_drop_counters[socket_id];
     let shutdown = &shared.shutdown_flag;
 
@@ -241,7 +241,7 @@ pub fn multi_socket_receiver_loop(
         thread_id, socket_range, core_id
     );
 
-    let tx = &shared.packet_senders[thread_id];
+    let tx = &shared.packet_sender;
 
     // Buffer pool shared across all sockets assigned to this thread.
     // Each successful recv moves the current buffer via mem::take; the slot
