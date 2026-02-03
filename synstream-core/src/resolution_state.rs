@@ -45,6 +45,11 @@ pub trait ResolutionState: Send + Sync {
     // Remove slot from completed set (for new iteration)
     fn unmark_slot_completed(&self, slot: usize);
 
+    // Atomically check-and-mark a slot as completed in a single critical section.
+    // Returns true only for the one thread that wins the race — all others return false.
+    // This eliminates the TOCTOU window between is_slot_completed() and mark_slot_completed().
+    fn try_complete_slot(&self, slot: usize) -> bool;
+
     // Clear all sent flags for a slot
     fn clear_slot_sent_flags(&self, slot: usize);
 
@@ -150,6 +155,17 @@ impl ResolutionState for SingleThreadedState {
     #[inline]
     fn unmark_slot_completed(&self, slot: usize) {
         self.completed_slots.get_mut().remove(&slot);
+    }
+
+    #[inline]
+    fn try_complete_slot(&self, slot: usize) -> bool {
+        let completed = self.completed_slots.get_mut();
+        if completed.contains(&slot) {
+            false
+        } else {
+            completed.insert(slot);
+            true
+        }
     }
 
     #[inline]
@@ -278,6 +294,17 @@ impl ResolutionState for MultiThreadedState {
     #[inline]
     fn unmark_slot_completed(&self, slot: usize) {
         self.completed_slots.lock().remove(&slot);
+    }
+
+    #[inline]
+    fn try_complete_slot(&self, slot: usize) -> bool {
+        let mut guard = self.completed_slots.lock();
+        if guard.contains(&slot) {
+            false
+        } else {
+            guard.insert(slot);
+            true
+        }
     }
 
     #[inline]

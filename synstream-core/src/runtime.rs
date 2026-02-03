@@ -838,6 +838,7 @@ impl SynRt {
             }
 
             if !shared.first_packet_received.load(Ordering::Relaxed) {
+                std::hint::spin_loop();
                 continue;
             }
 
@@ -1230,11 +1231,6 @@ impl SynRt {
                 )
             });
 
-            // Skip slots already marked as completed
-            if shared.resolution_state.is_slot_completed(proc_slot) {
-                continue;
-            }
-
             // Skip buffering slots - they cannot complete until activated
             if shared.slot_priority_enabled && !is_slot_active(&shared, proc_slot) {
                 continue;
@@ -1255,15 +1251,23 @@ impl SynRt {
             });
 
             if all_nodes_processed {
+                // Atomically claim ownership of this slot's completion.
+                // try_complete_slot checks and marks in a single critical section,
+                // so exactly one thread wins when multiple threads race here.
+                // This replaces the previous is_slot_completed() + mark_slot_completed()
+                // pair which had a TOCTOU window: between the separate check and mark,
+                // another thread could complete the full reinit+restart cycle and unmark
+                // the slot, causing the losing thread to double-complete and corrupt state.
+                if !shared.resolution_state.try_complete_slot(proc_slot) {
+                    continue; // Another thread already owns this completion
+                }
+
                 print_debug(|| {
                     format!(
                         "Thread {:?} -- Completed iteration at slot {}",
                         thread_id, proc_slot
                     )
                 });
-
-                // Mark this slot as completed
-                shared.resolution_state.mark_slot_completed(proc_slot);
 
                 // CRITICAL: Reset ALL state BEFORE checking process_slot_completion
                 // This prevents race conditions where new nodes complete before state is clean
