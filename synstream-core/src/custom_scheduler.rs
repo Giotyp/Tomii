@@ -833,9 +833,9 @@ impl CustomSchedulerBuilder {
                 .name(format!("worker-{}", worker_id))
                 .spawn(move || {
                     worker_loop(
-                        worker_id,          // Global worker index (0..total_workers)
-                        group_idx,          // Group this worker belongs to
-                        core_id,            // Physical core to pin to
+                        worker_id, // Global worker index (0..total_workers)
+                        group_idx, // Group this worker belongs to
+                        core_id,   // Physical core to pin to
                         shared_clone,
                         local_queues_clone,
                         spin_iterations,

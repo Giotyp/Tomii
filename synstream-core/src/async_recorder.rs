@@ -126,10 +126,7 @@ impl AsyncRecorder {
         for rx in receivers {
             while let Ok(record) = rx.try_recv() {
                 let slot = record.slot;
-                slot_records
-                    .entry(slot)
-                    .or_default()
-                    .push(record);
+                slot_records.entry(slot).or_default().push(record);
                 collected += 1;
             }
         }
