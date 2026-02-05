@@ -224,7 +224,7 @@ impl SynRt {
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
         let (receiver_sockets, packet_sender, packet_receiver, packet_drop_counters) =
-            prepare_network_infrastructure(app_graph, receiver_threads);
+            prepare_network_infrastructure(app_graph);
 
         let shared = Arc::new(SharedData {
             graph: app_graph.clone(),
@@ -756,29 +756,40 @@ impl SynRt {
                             continue;
                         }
 
-                        let info_res = (node_info.clone(), packet_cm);
+                        // Continue to resolution if slot is active
+                        if is_slot_active(&shared, node_info.slot) {
+                            let info_res = (node_info.clone(), packet_cm);
 
-                        let start_ns_pkt = shared.base_instant.elapsed().as_nanos();
-                        let start_proc = if let Some(tb) = &shared.time_buffer {
-                            tb.measure_time()
+                            let start_ns_pkt = shared.base_instant.elapsed().as_nanos();
+                            let start_proc = if let Some(tb) = &shared.time_buffer {
+                                tb.measure_time()
+                            } else {
+                                TimingMethod::Instant(Instant::now())
+                            };
+                            Self::process_batch_resolution(
+                                &shared,
+                                vec![info_res],
+                                thread_core,
+                                thread_id,
+                                thread_slot,
+                                &cond_indexes,
+                                &mut stream_slot_activity,
+                                start_ns_pkt,
+                            );
+                            if let Some(tb) = &shared.time_buffer {
+                                let end_proc = tb.measure_time();
+                                let dur = tb.measure_duration(start_proc, end_proc);
+                                tb.add_task_time(thread_slot, "Batch Resolution", usize::MAX, dur);
+                            };
                         } else {
-                            TimingMethod::Instant(Instant::now())
-                        };
-                        Self::process_batch_resolution(
-                            &shared,
-                            vec![info_res],
-                            thread_core,
-                            thread_id,
-                            thread_slot,
-                            &cond_indexes,
-                            &mut stream_slot_activity,
-                            start_ns_pkt,
-                        );
-                        if let Some(tb) = &shared.time_buffer {
-                            let end_proc = tb.measure_time();
-                            let dur = tb.measure_duration(start_proc, end_proc);
-                            tb.add_task_time(thread_slot, "Batch Resolution", usize::MAX, dur);
-                        };
+                            println!(
+                                "Thread {:?} -- Slot {} is not active, buffering packet index {}",
+                                thread_id, node_info.slot, node_info.index
+                            );
+                            // Buffer the packet for later processing
+                            let mut slot_buffers = shared.slot_buffers.write();
+                            slot_buffers[node_info.slot].push(node_info.clone());
+                        }
                         packets_received = true;
 
                         if shared.async_recorder.is_some() {
@@ -1129,49 +1140,8 @@ impl SynRt {
                     }
                 }
             }
-
-            // Separate nodes by slot state: active slots → scheduler, buffering slots → buffer
-            let mut active_nodes = Vec::new();
-            let mut buffered_by_slot: Vec<Vec<NodeInfo>> = vec![Vec::new(); shared.slots];
-
-            for node_info in nodes_to_schedule {
-                if is_slot_active(&shared, node_info.slot) {
-                    active_nodes.push(node_info);
-                } else {
-                    buffered_by_slot[node_info.slot].push(node_info);
-                }
-            }
-
-            if !active_nodes.is_empty() {
-                // Increment nodes_sent for each active slot
-                for node_info in &active_nodes {
-                    *nodes_sent_in_slot.entry(node_info.slot).or_insert(0) += 1;
-                }
-                Self::preparation(&shared, &active_nodes, thread_core, thread_slot);
-            }
-
-            // Buffer nodes from inactive slots
-            if !buffered_by_slot.is_empty() {
-                let mut slot_buffers = shared.slot_buffers.write();
-                for (slot, nodes) in buffered_by_slot.iter().enumerate() {
-                    if nodes.is_empty() {
-                        continue;
-                    }
-                    slot_buffers[slot].extend(nodes.clone());
-                    // Mark that this slot had activity (for completion check) - both persistent and per-batch
-                    nodes_sent_in_slot.entry(slot).or_insert(0);
-                    stream_slot_activity.insert(slot, true);
-
-                    print_debug(|| {
-                        format!(
-                            "Thread {:?} -- Buffered {:?} nodes for slot {:?} ",
-                            thread_id,
-                            nodes.len(),
-                            slot
-                        )
-                    });
-                }
-            }
+            // Schedule all ready nodes collected from this completed node
+            Self::preparation(&shared, &nodes_to_schedule, thread_core, thread_slot);
         }
 
         // Only record timing/metrics when actual work was performed
@@ -1455,7 +1425,6 @@ impl SynRt {
 
 fn prepare_network_infrastructure(
     graph: &Graph,
-    receiver_threads: usize,
 ) -> (
     Vec<NetworkSocket>,
     BatchSender<PacketMessage>,

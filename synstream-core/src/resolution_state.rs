@@ -76,46 +76,139 @@ pub trait ResolutionState: Send + Sync {
     fn debug_info(&self) -> String;
 }
 
+/// Per-node dependency entry for single-threaded threshold-based spawning.
+/// Mirrors `NodeDependencyEntry` logic but without atomic overhead.
+struct StNodeDepEntry {
+    /// Single counter for all instances of this node in a slot
+    remaining_deps: usize,
+    /// Per-instance sent flag (prevents double-spawn)
+    instances_sent: Vec<bool>,
+    /// Node factor (number of instances)
+    factor: usize,
+    /// Dependencies per instance (total_deps / factor, integer division)
+    deps_per_instance: usize,
+    /// Whether this node has a barrier dependency
+    has_barrier: bool,
+    /// Initial total_deps value (for reinit)
+    _init_total_deps: usize,
+}
+
+impl StNodeDepEntry {
+    fn new(factor: usize, total_deps: usize, has_barrier: bool) -> Self {
+        let deps_per_instance = if factor > 0 { total_deps / factor } else { 0 };
+        Self {
+            remaining_deps: total_deps,
+            instances_sent: vec![false; factor],
+            factor,
+            deps_per_instance,
+            has_barrier,
+            _init_total_deps: total_deps,
+        }
+    }
+
+    /// Threshold: instance i is ready when remaining_deps <= (factor - i - 1) * deps_per_instance
+    #[inline]
+    fn threshold_for_instance(&self, idx: usize) -> usize {
+        (self.factor - idx - 1) * self.deps_per_instance
+    }
+
+    /// Decrement once and return all newly-ready instance indices
+    fn decrease_and_get_ready(&mut self) -> Vec<usize> {
+        if self.remaining_deps > 0 {
+            self.remaining_deps -= 1;
+        }
+        let new_remaining = self.remaining_deps;
+
+        if self.has_barrier {
+            if new_remaining == 0 {
+                let mut ready = Vec::new();
+                for idx in 0..self.factor {
+                    if !self.instances_sent[idx] {
+                        self.instances_sent[idx] = true;
+                        ready.push(idx);
+                    }
+                }
+                return ready;
+            }
+            return Vec::new();
+        }
+
+        // Fast path: still above all thresholds
+        let max_threshold = self.factor * self.deps_per_instance;
+        if new_remaining > max_threshold {
+            return Vec::new();
+        }
+
+        let mut ready = Vec::new();
+        for idx in 0..self.factor {
+            if new_remaining <= self.threshold_for_instance(idx) {
+                if !self.instances_sent[idx] {
+                    self.instances_sent[idx] = true;
+                    ready.push(idx);
+                }
+            }
+        }
+        ready
+    }
+
+    fn increment(&mut self) {
+        self.remaining_deps += 1;
+    }
+
+    fn reset_sent(&mut self, idx: usize) {
+        if idx < self.instances_sent.len() {
+            self.instances_sent[idx] = false;
+        }
+    }
+
+    fn clear_sent(&mut self) {
+        for flag in self.instances_sent.iter_mut() {
+            *flag = false;
+        }
+    }
+
+    fn reinit(&mut self, new_total_deps: usize) {
+        self.remaining_deps = new_total_deps;
+        for flag in self.instances_sent.iter_mut() {
+            *flag = false;
+        }
+    }
+}
+
 // Single-threaded resolution state - UnsafeCell for zero-overhead interior mutability
 pub struct SingleThreadedState {
-    dependency_map: SingleThreadedCell<VecMap<usize>>,
-    nodes_sent_to_queue: SingleThreadedCell<Vec<Vec<bool>>>,
+    /// Per-node dependency tracking: node_deps[slot][node_id]
+    node_deps: SingleThreadedCell<Vec<Vec<StNodeDepEntry>>>,
     completed_slots: SingleThreadedCell<HashSet<usize>>,
-    max_factor: usize,
-    node_offsets: Vec<usize>,
     dependency_count_vec: Arc<Vec<usize>>,
 }
 
 impl SingleThreadedState {
     pub fn new(
-        num_nodes: usize,
+        _num_nodes: usize,
         slots: usize,
-        max_factor: usize,
+        _max_factor: usize,
         dependency_count_vec: Vec<usize>,
         nodes: &Vec<crate::graph_struct::Node>,
     ) -> Self {
-        let mut dependency_map = VecMap::new(0);
-        dependency_map.init_map(nodes, slots, Some(&dependency_count_vec));
+        let num_nodes = nodes.len();
 
-        let mut nodes_sent = Vec::new();
+        // Build per-node dependency entries for each slot
+        let mut all_slots = Vec::with_capacity(slots);
         for _ in 0..slots {
-            nodes_sent.push(vec![false; num_nodes * max_factor]);
-        }
-
-        // Compute node_offsets for correct flat index calculation
-        let mut node_offsets = Vec::with_capacity(num_nodes);
-        let mut offset = 0;
-        for node in nodes.iter() {
-            node_offsets.push(offset);
-            offset += node.factor;
+            let mut slot_entries = Vec::with_capacity(num_nodes);
+            for node_id in 0..num_nodes {
+                let node = &nodes[node_id];
+                let total_deps = dependency_count_vec[node_id];
+                let has_barrier = node.args.iter().any(|arg| arg.is_barrier());
+                slot_entries.push(StNodeDepEntry::new(node.factor, total_deps, has_barrier));
+            }
+            all_slots.push(slot_entries);
         }
 
         Self {
-            dependency_map: SingleThreadedCell::new(dependency_map),
-            nodes_sent_to_queue: SingleThreadedCell::new(nodes_sent),
+            node_deps: SingleThreadedCell::new(all_slots),
             completed_slots: SingleThreadedCell::new(HashSet::new()),
-            max_factor,
-            node_offsets,
             dependency_count_vec: Arc::new(dependency_count_vec),
         }
     }
@@ -124,22 +217,22 @@ impl SingleThreadedState {
 impl ResolutionState for SingleThreadedState {
     #[inline]
     fn try_mark_sent(&self, slot: usize, node_id: usize, index: usize) -> bool {
-        // Direct mutable access - no synchronization overhead at all
-        let sent = self.nodes_sent_to_queue.get_mut();
-        let flat_idx = self.node_offsets[node_id] + index;
-        if !sent[slot][flat_idx] {
-            sent[slot][flat_idx] = true;
-            true
-        } else {
-            false
+        let deps = self.node_deps.get_mut();
+        if slot < deps.len() && node_id < deps[slot].len() && index < deps[slot][node_id].factor {
+            if !deps[slot][node_id].instances_sent[index] {
+                deps[slot][node_id].instances_sent[index] = true;
+                return true;
+            }
         }
+        false
     }
 
     #[inline]
     fn reset_sent(&self, slot: usize, node_id: usize, index: usize) {
-        let sent = self.nodes_sent_to_queue.get_mut();
-        let flat_idx = self.node_offsets[node_id] + index;
-        sent[slot][flat_idx] = false;
+        let deps = self.node_deps.get_mut();
+        if slot < deps.len() && node_id < deps[slot].len() {
+            deps[slot][node_id].reset_sent(index);
+        }
     }
 
     #[inline]
@@ -170,52 +263,62 @@ impl ResolutionState for SingleThreadedState {
 
     #[inline]
     fn clear_slot_sent_flags(&self, slot: usize) {
-        let sent = self.nodes_sent_to_queue.get_mut();
-        for flag in sent[slot].iter_mut() {
-            *flag = false;
+        let deps = self.node_deps.get_mut();
+        if slot < deps.len() {
+            for entry in deps[slot].iter_mut() {
+                entry.clear_sent();
+            }
         }
     }
 
     #[inline]
     fn decrease_dependency(&self, node_info: &NodeInfo) -> Option<usize> {
-        self.dependency_map.get_mut().decrease(node_info)
+        // Legacy per-instance method - no longer primary path but kept for compatibility
+        let deps = self.node_deps.get_mut();
+        let slot = node_info.slot;
+        let node_id = node_info.id as usize;
+        if slot < deps.len() && node_id < deps[slot].len() {
+            let entry = &mut deps[slot][node_id];
+            if entry.remaining_deps > 0 {
+                entry.remaining_deps -= 1;
+            }
+            return Some(entry.remaining_deps);
+        }
+        None
     }
 
     #[inline]
     fn increment_dependency(&self, node_info: &NodeInfo) -> Option<usize> {
-        self.dependency_map.get_mut().increment(node_info)
+        let deps = self.node_deps.get_mut();
+        let slot = node_info.slot;
+        let node_id = node_info.id as usize;
+        if slot < deps.len() && node_id < deps[slot].len() {
+            deps[slot][node_id].increment();
+            return Some(deps[slot][node_id].remaining_deps);
+        }
+        None
     }
 
     #[inline]
     fn reinit_dependencies(&self, nodes: &Vec<crate::graph_struct::Node>, slot: usize) {
-        self.dependency_map
-            .get_mut()
-            .reinit_slot(nodes, slot, Some(&self.dependency_count_vec));
+        let deps = self.node_deps.get_mut();
+        if slot < deps.len() {
+            for node_id in 0..nodes.len() {
+                if node_id < deps[slot].len() {
+                    let total_deps = self.dependency_count_vec[node_id];
+                    deps[slot][node_id].reinit(total_deps);
+                }
+            }
+        }
     }
 
     fn decrease_and_get_ready(&self, slot: usize, node_id: usize) -> Vec<usize> {
-        let mut ready_indices = Vec::new();
-        let dep_map = self.dependency_map.get_mut();
-
-        // Iterate through all possible instance indices up to max_factor
-        // VecMap::decrease will return None for indices that don't exist for this node
-        for index in 0..self.max_factor {
-            let node_info = NodeInfo::new(node_id as crate::IdType, slot, index, 0);
-
-            // Attempt to decrease the dependency count for this instance
-            if let Some(new_count) = dep_map.decrease(&node_info) {
-                // If dependency count reached zero, this instance is potentially ready
-                if new_count == 0 {
-                    // Check if already sent to avoid duplicate scheduling
-                    if self.try_mark_sent(slot, node_id, index) {
-                        ready_indices.push(index);
-                    }
-                }
-            }
-            // If decrease() returns None, this index doesn't exist for this node - skip it
+        let deps = self.node_deps.get_mut();
+        if slot < deps.len() && node_id < deps[slot].len() {
+            deps[slot][node_id].decrease_and_get_ready()
+        } else {
+            Vec::new()
         }
-
-        ready_indices
     }
 
     fn debug_info(&self) -> String {
@@ -226,14 +329,7 @@ impl ResolutionState for SingleThreadedState {
 impl fmt::Debug for SingleThreadedState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SingleThreadedState")
-            .field("dependency_map", self.dependency_map.get_mut())
-            .field(
-                "nodes_sent_to_queue",
-                &self.nodes_sent_to_queue.get_mut() as &Vec<Vec<bool>>,
-            )
             .field("completed_slots", self.completed_slots.get_mut())
-            .field("max_factor", &self.max_factor)
-            .field("node_offsets", &self.node_offsets)
             .field("dependency_count_vec", &self.dependency_count_vec)
             .finish()
     }
