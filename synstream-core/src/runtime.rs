@@ -1,4 +1,3 @@
-use core::panic;
 use core_affinity;
 use parking_lot::{Condvar, Mutex, RwLock};
 use std::collections::HashMap;
@@ -278,6 +277,14 @@ impl SynRt {
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             slot_packet_counters: Arc::new((0..slots).map(|_| AtomicUsize::new(0)).collect()),
             streams_receive_counter: Arc::new(AtomicUsize::new(0)),
+            // Initialize generation counters to 0 for all slots
+            slot_generation: Arc::new(
+                (0..slots)
+                    .map(|_| std::sync::atomic::AtomicU64::new(0))
+                    .collect(),
+            ),
+            // Initialize packet completion flags to false for all slots
+            slot_packet_complete: Arc::new((0..slots).map(|_| AtomicBool::new(false)).collect()),
             // Initialize to 0 - first assignment goes to slot 0
             slot_assign_idx: AtomicUsize::new(0),
         });
@@ -743,11 +750,54 @@ impl SynRt {
                                 tb.add_task_time(thread_slot, "Slot Assignment", usize::MAX, dur);
                             }
 
-                            // Use per-slot packet counter for correct indexing across multiple streams
-                            // Each slot tracks its own packet sequence independently
+                            // CRITICAL: Load generation BEFORE incrementing counter
+                            // This ensures we stamp the packet with the current epoch before any resets
+                            let current_generation =
+                                shared.slot_generation[node_info.slot].load(Ordering::Acquire);
+
+                            // Overflow protection: Check if we've already received enough packets
+                            let current_count =
+                                shared.slot_packet_counters[node_info.slot].load(Ordering::Acquire);
+
+                            if current_count >= stream_packets {
+                                print_debug(|| {
+                                    format!(
+                                        "Thread {:?} -- Dropping excess packet for slot {} (count {} >= expected {})",
+                                        thread_id, node_info.slot, current_count, stream_packets
+                                    )
+                                });
+
+                                // Track overflow as dropped packet
+                                shared.packet_drop_counters[receiver_core_id]
+                                    .fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
+
+                            // Use AcqRel ordering to synchronize with slot reset (Release store)
+                            // This prevents reordering on weakly-ordered architectures (ARM/POWER)
                             let packet_index = shared.slot_packet_counters[node_info.slot]
-                                .fetch_add(1, Ordering::Relaxed);
+                                .fetch_add(1, Ordering::AcqRel);
+
+                            // Double-check after fetch_add (handles rare race where count crossed threshold)
+                            if packet_index >= stream_packets {
+                                print_debug(|| {
+                                    format!(
+                                        "Thread {:?} -- Dropping excess packet for slot {} at index {}",
+                                        thread_id, node_info.slot, packet_index
+                                    )
+                                });
+
+                                // Undo the increment
+                                shared.slot_packet_counters[node_info.slot]
+                                    .fetch_sub(1, Ordering::Release);
+
+                                shared.packet_drop_counters[receiver_core_id]
+                                    .fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
+
                             node_info.index = packet_index;
+                            node_info.generation = current_generation;
                         } else {
                             // ID function failed, skip processing this node
                             print_debug(|| {
@@ -821,25 +871,40 @@ impl SynRt {
                         // Note: packet_index is the value BEFORE the increment, so +1 equals current count
                         let packet_count = node_info.index + 1;
                         if packet_count == stream_packets {
-                            println!(
-                                "All {} packets received for slot {} stream",
-                                stream_packets, node_info.slot
-                            );
+                            // Exactly-once semantics: atomically claim completion ownership
+                            // Uses swap to ensure only ONE thread marks this stream as complete
+                            // This prevents double-counting if multiple threads see the final packet
+                            let already_completed = shared.slot_packet_complete[node_info.slot]
+                                .swap(true, Ordering::AcqRel);
 
-                            // Increment total streams received counter
-                            let completed_streams = shared
-                                .streams_receive_counter
-                                .fetch_add(1, Ordering::SeqCst)
-                                + 1;
-
-                            // Check if all expected streams have been received
-                            if completed_streams >= shared.max_streams {
+                            if !already_completed {
                                 println!(
-                                    "All {} streams received ({} packets each) - receivers will shutdown",
-                                    shared.max_streams, stream_packets
+                                    "All {} packets received for slot {} stream",
+                                    stream_packets, node_info.slot
                                 );
-                                // Signal receivers to stop, but NOT resolution threads
-                                shared.receive_finished.store(true, Ordering::SeqCst);
+
+                                // Increment total streams received counter
+                                let completed_streams = shared
+                                    .streams_receive_counter
+                                    .fetch_add(1, Ordering::SeqCst)
+                                    + 1;
+
+                                // Check if all expected streams have been received
+                                if completed_streams >= shared.max_streams {
+                                    println!(
+                                        "All {} streams received ({} packets each) - receivers will shutdown",
+                                        shared.max_streams, stream_packets
+                                    );
+                                    // Signal receivers to stop, but NOT resolution threads
+                                    shared.receive_finished.store(true, Ordering::SeqCst);
+                                }
+                            } else {
+                                print_debug(|| {
+                                    format!(
+                                        "Thread {:?} -- Slot {} completion already claimed by another thread",
+                                        thread_id, node_info.slot
+                                    )
+                                });
                             }
                         }
                     }
@@ -996,13 +1061,28 @@ impl SynRt {
         let mut nodes_for_successor_processing = Vec::new();
 
         let mut succesor_updates = Vec::new();
-        for (mut node_info, result) in batch.into_iter() {
+        for (node_info, result) in batch.into_iter() {
             print_debug(|| {
                 format!(
                     "Thread {:?} -- Processing Completed {:?}",
                     thread_id, node_info
                 )
             });
+
+            // CRITICAL: Discard stale tasks from previous stream iterations
+            // Check generation for ALL nodes (network packets AND compute tasks)
+            // This prevents old tasks from corrupting freshly-reset slot state
+            let current_gen = shared.slot_generation[node_info.slot].load(Ordering::Acquire);
+
+            if node_info.generation != current_gen {
+                print_debug(|| {
+                    format!(
+                        "Thread {:?} -- Discarding stale task {:?} (gen {} != current {})",
+                        thread_id, node_info, node_info.generation, current_gen
+                    )
+                });
+                continue; // Skip this stale task entirely
+            }
 
             // Mark stream activity FIRST for all nodes (including network nodes id=0)
             // This ensures check_slots() will examine this slot for completion
@@ -1012,27 +1092,6 @@ impl SynRt {
                 // Store Result - lock-free atomic store
                 shared.node_results.set(&node_info, result);
                 continue;
-            }
-
-            // Get available or assigned slot
-            if node_info.id != 0 {
-                // find real stream belonging to this slot
-                let new_stream = {
-                    let available_slots = shared.available_stream_slots.read();
-                    if let Some(&real_stream) = available_slots.get(node_info.slot) {
-                        if real_stream == usize::MAX {
-                            node_info.slot
-                        } else {
-                            real_stream
-                        }
-                    } else {
-                        panic!(
-                            "No available stream slot found for node {:?} during resolution",
-                            node_info
-                        );
-                    }
-                };
-                node_info.slot = assign_stream_to_available_slot(&shared, new_stream);
             }
 
             // store result - lock-free atomic store (no contention)
@@ -1099,12 +1158,14 @@ impl SynRt {
 
                 // Schedule all newly ready instances
                 for ready_index in ready_indices {
-                    let succ_info = NodeInfo::new(
+                    let mut succ_info = NodeInfo::new(
                         succ_node_id as IdType,
                         node_info.slot,
                         ready_index,
                         node_info.index,
                     );
+                    // Inherit generation from parent node - maintains epoch consistency
+                    succ_info.generation = node_info.generation;
 
                     if !has_cond {
                         nodes_to_schedule.push(succ_info);
@@ -1263,6 +1324,16 @@ impl SynRt {
                     .resolution_state
                     .reinit_dependencies(&shared.graph.nodes, proc_slot);
 
+                // CRITICAL: Increment generation BEFORE resetting counter
+                // This creates a happens-before edge: any packet stamped with old generation
+                // is guaranteed to be stale after this point
+                // Using AcqRel ensures this increment is visible to all threads
+                shared.slot_generation[proc_slot].fetch_add(1, Ordering::AcqRel);
+
+                // Reset packet completion flag for the next stream
+                // Allows completion detection to work for the new iteration
+                shared.slot_packet_complete[proc_slot].store(false, Ordering::Release);
+
                 // Reset per-slot packet counter for the next stream
                 // This ensures the network node index starts at 0 for the new stream
                 shared.slot_packet_counters[proc_slot].store(0, Ordering::Release);
@@ -1395,6 +1466,10 @@ impl SynRt {
                 for index in 0..post_node.factor {
                     let mut node_info = NodeInfo::new(post_node.id, stream_use, index, 0);
                     node_info.set_post_node(true);
+                    // Post-nodes use stream_use slot, load its generation
+                    node_info.generation = self.shared.slot_generation
+                        [stream_use % self.shared.slots]
+                        .load(Ordering::Acquire);
 
                     let arg_vec =
                         parse_args(&self.shared, &post_node.args, index, stream_use, 0, None);

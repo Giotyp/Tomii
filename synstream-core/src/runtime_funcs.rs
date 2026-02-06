@@ -379,6 +379,15 @@ pub struct SharedData {
     pub slot_packet_counters: Arc<Vec<AtomicUsize>>,
     pub streams_receive_counter: Arc<AtomicUsize>,
 
+    /// Per-slot generation counter - incremented on each slot reset
+    /// Used to detect and discard stale tasks from previous stream iterations
+    /// Prevents race condition where old tasks interfere with new stream processing
+    pub slot_generation: Arc<Vec<std::sync::atomic::AtomicU64>>,
+
+    /// Per-slot packet completion flags - ensures exactly-once completion semantics
+    /// Prevents multiple threads from detecting completion for the same stream
+    pub slot_packet_complete: Arc<Vec<AtomicBool>>,
+
     /// Round-robin slot assignment counter - tracks next slot to assign stream to
     /// Coordinated with slot_busy_idx to ensure assignment order matches activation order
     /// This prevents slot-priority deadlocks where streams are assigned to slots that
@@ -1265,13 +1274,18 @@ pub fn ensure_at_least_one_active_slot(shared: &Arc<SharedData>) {
 pub fn initial_nodes(shared: &Arc<SharedData>, slots: Vec<usize>) -> Vec<NodeInfo> {
     let mut node_infos = Vec::new();
     for slot in slots {
+        // Load current generation for this slot
+        let current_generation = shared.slot_generation[slot].load(Ordering::Acquire);
+
         let initial_nodes = &shared.graph.initial_nodes;
         for node_id in initial_nodes {
             let node = &shared.graph.nodes[*node_id as usize];
             let node_factor = node.factor;
             let indexes: Vec<usize> = (0..node_factor).collect();
             for index in indexes {
-                let node_info = NodeInfo::new(*node_id, slot, index, 0);
+                let mut node_info = NodeInfo::new(*node_id, slot, index, 0);
+                // Stamp with current generation to enable stale-task detection
+                node_info.generation = current_generation;
                 node_infos.push(node_info);
             }
         }
@@ -1389,7 +1403,9 @@ pub fn collect_successors_for_node(
 
         // Add successor node info for each instance
         for succ_index in succ_indexes {
-            let succ_info = NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.index);
+            let mut succ_info = NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.index);
+            // Inherit generation from parent - maintains epoch consistency across the DAG
+            succ_info.generation = node_info.generation;
             succ_updates.push((succ_info, has_condition, succ_id));
         }
     }
