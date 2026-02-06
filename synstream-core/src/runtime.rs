@@ -1509,9 +1509,9 @@ impl SynRt {
         // The LockFreeResultMap is created with the right capacity upfront
     }
 
-    pub fn print_statistics(&self, bench_name: &str, out_file: Option<&str>) {
+    pub fn print_statistics(&self, bench_name: &str, out_file: Option<&str>, exclude_streams: usize) {
         if let Some(tb) = &self.shared.time_buffer {
-            tb.print_stats(bench_name, out_file);
+            tb.print_stats(bench_name, out_file, exclude_streams);
         }
     }
 

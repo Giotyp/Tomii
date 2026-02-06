@@ -101,6 +101,14 @@ struct Args {
         help = "Enable slot-priority processing (process slots sequentially with automatic round-robin for better cache locality)"
     )]
     slot_priority: bool,
+    #[clap(
+        long,
+        value_name = "EXCLUDE_STREAMS",
+        required = false,
+        default_value = "0",
+        help = "Number of initial streams to exclude from timing statistics (for steady-state measurement)"
+    )]
+    exclude_streams: usize,
 }
 
 fn main() {
@@ -179,7 +187,7 @@ fn main() {
     let time_file = args.timing;
     if let Some(time_file) = &time_file {
         let time_name = time_file.split('/').last().unwrap_or_default();
-        synrt.print_statistics(&time_name, Some(&time_file));
+        synrt.print_statistics(&time_name, Some(&time_file), args.exclude_streams);
 
         if args.record {
             // remove  extension if present

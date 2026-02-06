@@ -100,6 +100,7 @@ pub enum TimingRequest {
     PrintStats {
         bench_name: String,
         out_file: Option<String>,
+        exclude_streams: usize,
         response_tx: mpsc::Sender<()>,
     },
     Shutdown,
@@ -205,10 +206,11 @@ impl AsyncTimeBuffer {
                     TimingRequest::PrintStats {
                         bench_name,
                         out_file,
+                        exclude_streams,
                         response_tx,
                     } => {
                         if let Ok(buf) = time_buffer.lock() {
-                            buf.print_stats(&bench_name, out_file.as_deref());
+                            buf.print_stats(&bench_name, out_file.as_deref(), exclude_streams);
                             let _ = response_tx.send(());
                         }
                     }
@@ -364,10 +366,11 @@ impl AsyncTimeBuffer {
         &self,
         bench_name: &str,
         out_file: Option<&str>,
+        exclude_streams: usize,
     ) -> Result<(), &'static str> {
         // Direct access to TimeBuffer - no channel needed
         if let Ok(buf) = self.time_buffer.lock() {
-            buf.print_stats(bench_name, out_file);
+            buf.print_stats(bench_name, out_file, exclude_streams);
             Ok(())
         } else {
             Err("Failed to acquire lock on time buffer")
@@ -613,7 +616,8 @@ impl TimeBuffer {
     }
 
     /// Print comprehensive statistics for all slots with aggregated per-task analysis
-    pub fn print_stats(&self, bench_name: &str, out_file: Option<&str>) {
+    /// `exclude_streams` - Number of initial streams to exclude from average calculations (for steady-state measurement)
+    pub fn print_stats(&self, bench_name: &str, out_file: Option<&str>, exclude_streams: usize) {
         let filler = "****************";
         let mut output_buffer = format!("Time Statistics for {}\n", bench_name);
         output_buffer.push_str(&format!("Total Slots: {}\n", self.slots));
@@ -633,16 +637,8 @@ impl TimeBuffer {
 
         // Statistics from worker slots only (excluding system thread slots)
         let mut global_total_times: Vec<Duration> = Vec::new();
-        let mut global_task_data: std::collections::HashMap<String, Vec<Duration>> =
-            std::collections::HashMap::new();
-        let mut global_per_worker_counts: std::collections::HashMap<
-            String,
-            std::collections::HashMap<usize, usize>,
-        > = std::collections::HashMap::new();
-        let mut global_per_worker_totals: std::collections::HashMap<
-            String,
-            std::collections::HashMap<usize, Duration>,
-        > = std::collections::HashMap::new();
+        // Track task data per stream for proper exclusion support
+        let mut per_stream_task_data: Vec<std::collections::HashMap<String, Vec<(usize, Duration)>>> = Vec::new();
 
         // Separate storage for system thread task data - track by slot for per-thread reporting
         let mut system_task_data_by_slot: std::collections::HashMap<
@@ -680,29 +676,59 @@ impl TimeBuffer {
 
             total_streams += slot_stats.len();
 
-            // Collect total times from all streams in this slot
+            // Collect total times and task data per stream
             for stats in slot_stats {
                 global_total_times.push(stats.total_time);
 
-                // Collect task data from all streams in this slot
+                // Store task data for this stream
+                let mut stream_tasks: std::collections::HashMap<String, Vec<(usize, Duration)>> =
+                    std::collections::HashMap::new();
+
                 for (task_name, times) in &stats.task_times {
-                    let task_durations = global_task_data
+                    stream_tasks.insert(task_name.clone(), times.clone());
+                }
+
+                per_stream_task_data.push(stream_tasks);
+            }
+        }
+
+        // Now aggregate task data excluding the first exclude_streams streams
+        let excluded_count = exclude_streams.min(per_stream_task_data.len());
+        let streams_to_analyze: Vec<_> = if excluded_count > 0 {
+            per_stream_task_data.iter().skip(excluded_count).collect()
+        } else {
+            per_stream_task_data.iter().collect()
+        };
+
+        let mut global_task_data: std::collections::HashMap<String, Vec<Duration>> =
+            std::collections::HashMap::new();
+        let mut global_per_worker_counts: std::collections::HashMap<
+            String,
+            std::collections::HashMap<usize, usize>,
+        > = std::collections::HashMap::new();
+        let mut global_per_worker_totals: std::collections::HashMap<
+            String,
+            std::collections::HashMap<usize, Duration>,
+        > = std::collections::HashMap::new();
+
+        for stream_tasks in streams_to_analyze {
+            for (task_name, times) in stream_tasks {
+                let task_durations = global_task_data
+                    .entry(task_name.clone())
+                    .or_insert_with(Vec::new);
+
+                for (worker_id, duration) in times {
+                    task_durations.push(*duration);
+
+                    let worker_counts = global_per_worker_counts
                         .entry(task_name.clone())
-                        .or_insert_with(Vec::new);
+                        .or_insert_with(std::collections::HashMap::new);
+                    *worker_counts.entry(*worker_id).or_insert(0) += 1;
 
-                    for (worker_id, duration) in times {
-                        task_durations.push(*duration);
-
-                        let worker_counts = global_per_worker_counts
-                            .entry(task_name.clone())
-                            .or_insert_with(std::collections::HashMap::new);
-                        *worker_counts.entry(*worker_id).or_insert(0) += 1;
-
-                        let worker_totals = global_per_worker_totals
-                            .entry(task_name.clone())
-                            .or_insert_with(std::collections::HashMap::new);
-                        *worker_totals.entry(*worker_id).or_insert(Duration::ZERO) += *duration;
-                    }
+                    let worker_totals = global_per_worker_totals
+                        .entry(task_name.clone())
+                        .or_insert_with(std::collections::HashMap::new);
+                    *worker_totals.entry(*worker_id).or_insert(Duration::ZERO) += *duration;
                 }
             }
         }
@@ -721,21 +747,60 @@ impl TimeBuffer {
         }
         output_buffer.push_str(&format!("{}\n", slot_stream_items.join(", ")));
 
+        // Determine which streams to use for average calculations (steady-state)
+        let excluded_count = exclude_streams.min(total_streams);
+        let steady_state_count = total_streams.saturating_sub(excluded_count);
+
         // Calculate statistics for total times
         if !global_total_times.is_empty() {
             let global_total: Duration = global_total_times.iter().sum();
-            let avg_total_time = global_total / global_total_times.len() as u32;
-            let min_total_time = global_total_times.iter().min().unwrap();
-            let max_total_time = global_total_times.iter().max().unwrap();
 
-            let total_compute_time = global_task_data
+            if excluded_count > 0 {
+                output_buffer.push_str(&format!(
+                    "  Excluded Streams (warm-up): {} (Steady-state: {} streams)\n",
+                    excluded_count, steady_state_count
+                ));
+            }
+
+            // For averages, use only steady-state streams (skip first exclude_streams)
+            let steady_state_times: Vec<Duration> = if excluded_count > 0 && steady_state_count > 0 {
+                global_total_times.iter().skip(excluded_count).copied().collect()
+            } else {
+                global_total_times.clone()
+            };
+
+            let avg_total_time = if !steady_state_times.is_empty() {
+                steady_state_times.iter().sum::<Duration>() / steady_state_times.len() as u32
+            } else {
+                Duration::ZERO
+            };
+
+            let min_total_time = if !steady_state_times.is_empty() {
+                steady_state_times.iter().min().unwrap()
+            } else {
+                global_total_times.iter().min().unwrap()
+            };
+
+            let max_total_time = if !steady_state_times.is_empty() {
+                steady_state_times.iter().max().unwrap()
+            } else {
+                global_total_times.iter().max().unwrap()
+            };
+
+            // For compute time stats, also apply exclusion to task data
+            let total_compute_time_all = global_task_data
                 .iter()
                 .map(|(_, times)| {
                     let total: Duration = times.iter().sum();
                     total
                 })
                 .sum::<Duration>();
-            let avg_compute_time = total_compute_time / total_streams as u32;
+
+            let avg_compute_time = if steady_state_count > 0 {
+                total_compute_time_all / steady_state_count as u32
+            } else {
+                total_compute_time_all / total_streams as u32
+            };
 
             output_buffer.push_str(&format!("  Total Runtime: {:.4?}\n", global_total));
             output_buffer.push_str(&format!("  Avg Time Per Stream: {:.4?}\n", avg_total_time));
@@ -745,7 +810,7 @@ impl TimeBuffer {
             ));
             output_buffer.push_str(&format!(
                 "  Total Compute Time: {:.4?}\n",
-                total_compute_time
+                total_compute_time_all
             ));
             output_buffer.push_str(&format!(
                 "  Avg Compute Time Per Stream: {:.4?}\n",
@@ -770,8 +835,8 @@ impl TimeBuffer {
                 let total_executions = task_times.len();
                 let total_time: Duration = task_times.iter().sum();
 
-                let avg_time = if total_streams > 0 {
-                    total_time / total_streams as u32
+                let avg_time = if steady_state_count > 0 {
+                    total_time / steady_state_count as u32
                 } else {
                     Duration::ZERO
                 };
@@ -1006,17 +1071,17 @@ impl TimeBufferManager {
     }
 
     /// Print stats with worker accounting - blocking in both async and sync modes
-    pub fn print_stats(&self, bench_name: &str, out_file: Option<&str>) {
+    pub fn print_stats(&self, bench_name: &str, out_file: Option<&str>, exclude_streams: usize) {
         if self.is_async {
             if let Some(ref async_buf) = self.async_buffer {
-                if let Err(e) = async_buf.print_stats(bench_name, out_file) {
+                if let Err(e) = async_buf.print_stats(bench_name, out_file, exclude_streams) {
                     eprintln!("Failed to print stats: {}", e);
                 }
             }
         } else {
             if let Some(ref sync_buf) = self.sync_buffer {
                 if let Ok(buf) = sync_buf.lock() {
-                    buf.print_stats(bench_name, out_file);
+                    buf.print_stats(bench_name, out_file, exclude_streams);
                 }
             }
         }
