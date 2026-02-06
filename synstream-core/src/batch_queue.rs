@@ -170,13 +170,13 @@ impl<T> Receiver<T> {
         self.drain_to_vec()
     }
 
-    pub fn recv_chunk_timeout(&self, _max_items: usize, timeout: Duration) -> Vec<T> {
-        // Use atomic-swap drain (safe for multiple consumers) instead of CAS-based
-        // segment snipping which has use-after-free with concurrent consumers.
-        // One consumer atomically takes the entire list; others get empty.
+    pub fn recv_chunk_timeout(&self, max_items: usize, timeout: Duration) -> Vec<T> {
+        // Use atomic-swap drain (safe for multiple consumers), but respect max_items
+        // to enable fair work distribution across multiple resolution threads.
+        // If we get more than max_items, re-inject the excess back into the queue.
         let batch = self.try_recv_all();
         if !batch.is_empty() {
-            return batch;
+            return self.limit_and_requeue(batch, max_items);
         }
 
         // Lock BEFORE clearing has_items to prevent lost wakeup race condition.
@@ -186,7 +186,8 @@ impl<T> Receiver<T> {
         // Re-check queue while holding lock (prevents race with senders)
         if !self.inner.head.load(Ordering::Relaxed).is_null() {
             drop(lock);
-            return self.try_recv_all();
+            let batch = self.try_recv_all();
+            return self.limit_and_requeue(batch, max_items);
         }
 
         // Wait with timeout (releases lock atomically)
@@ -196,7 +197,52 @@ impl<T> Receiver<T> {
         }
         drop(lock);
 
-        self.try_recv_all()
+        let batch = self.try_recv_all();
+        self.limit_and_requeue(batch, max_items)
+    }
+
+    /// Helper: Limit batch to max_items and re-inject excess back into queue.
+    /// This enables fair work distribution without CAS-based list walking.
+    fn limit_and_requeue(&self, mut batch: Vec<T>, max_items: usize) -> Vec<T> {
+        if batch.len() <= max_items {
+            return batch;
+        }
+
+        // Take only max_items, put the rest back
+        let excess: Vec<T> = batch.drain(max_items..).collect();
+
+        // Re-inject excess items back into the queue for other consumers
+        // Using reverse order to maintain original FIFO ordering
+        for item in excess.into_iter().rev() {
+            // Allocate a fresh node (safe, no ABA problem)
+            let new_node = Box::into_raw(Box::new(Node {
+                data: Some(item),
+                next: ptr::null_mut(),
+            }));
+
+            loop {
+                let current_head = self.inner.head.load(Ordering::Relaxed);
+                unsafe {
+                    (*new_node).next = current_head;
+                }
+
+                if self
+                    .inner
+                    .head
+                    .compare_exchange_weak(current_head, new_node, Ordering::Release, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+        }
+
+        // Wake other threads since we just put items back
+        if !self.inner.has_items.swap(true, Ordering::Release) {
+            self.inner.condvar.notify_all();
+        }
+
+        batch
     }
 
 }
