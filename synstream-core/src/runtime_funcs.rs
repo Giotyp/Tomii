@@ -354,8 +354,9 @@ pub struct SharedData {
     // Slot priority processing state
     pub slot_states: Arc<RwLock<Vec<SlotState>>>,
     pub slot_priority_enabled: bool,
-    // Per-slot buffering: holds ready nodes waiting for slot activation
-    pub slot_buffers: Arc<RwLock<Vec<Vec<NodeInfo>>>>,
+    // Per-slot buffering: holds ready nodes with their packet data waiting for slot activation
+    // CRITICAL: Must store (NodeInfo, CmTypes) to preserve network packet data
+    pub slot_buffers: Arc<RwLock<Vec<Vec<(NodeInfo, CmTypes)>>>>,
 
     // Network receiver infrastructure (optional - only present if network_config exists)
     pub first_packet_received: Arc<AtomicBool>,
@@ -377,6 +378,12 @@ pub struct SharedData {
     /// This prevents index overflow when multiple streams are processed concurrently
     pub slot_packet_counters: Arc<Vec<AtomicUsize>>,
     pub streams_receive_counter: Arc<AtomicUsize>,
+
+    /// Round-robin slot assignment counter - tracks next slot to assign stream to
+    /// Coordinated with slot_busy_idx to ensure assignment order matches activation order
+    /// This prevents slot-priority deadlocks where streams are assigned to slots that
+    /// will never be activated (see out.txt analysis)
+    pub slot_assign_idx: AtomicUsize,
 }
 
 #[inline(always)]
@@ -712,56 +719,64 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
     let mut available_slots = shared.available_stream_slots.write();
 
     // Check if this stream is already mapped to a slot
-    let mut av_slot_id: usize = usize::MAX;
     for (slot_id, &real_stream) in available_slots.iter().enumerate() {
         if real_stream == stream {
             print_debug(|| format!("Stream: {} is already assigned to slot {}", stream, slot_id));
             return slot_id;
-        } else if real_stream == std::usize::MAX && av_slot_id == std::usize::MAX {
-            av_slot_id = slot_id;
         }
     }
 
-    // If no available slot found, try again (in case of race condition)
-    if av_slot_id == std::usize::MAX {
-        // Find first available slot
-        for (slot_id, &real_stream) in available_slots.iter().enumerate() {
-            if real_stream == std::usize::MAX {
-                av_slot_id = slot_id;
-                break;
+    // Round-robin slot assignment coordinated with activation order
+    // Use fetch_add for lock-free atomic assignment counter
+    let num_slots = available_slots.len();
+    let mut attempts = 0;
+    let max_attempts = num_slots * 2; // Allow wrap-around for full search
+
+    loop {
+        // Get next slot in round-robin order (Relaxed ordering sufficient for counter)
+        let assign_counter = shared.slot_assign_idx.fetch_add(1, Ordering::Relaxed);
+        let candidate_slot = assign_counter % num_slots;
+
+        // Check if this slot is available
+        if available_slots[candidate_slot] == usize::MAX {
+            // Claim this slot
+            available_slots[candidate_slot] = stream;
+            println!(
+                "Assigned stream {} to slot {} (round-robin, counter={})",
+                stream, candidate_slot, assign_counter
+            );
+
+            // Start slot timing
+            if let Some(tb) = &shared.time_buffer {
+                tb.start_slot_processing(candidate_slot);
             }
+
+            // CRITICAL FIX: If slot-priority enabled, check if we need to activate this slot
+            // This handles the race where streams arrive AFTER the previous slot completed
+            // and transitioned to buffering, but before any slot was activated.
+            if shared.slot_priority_enabled {
+                // Drop write lock before checking activation (avoid deadlock with slot_states)
+                drop(available_slots);
+
+                // Check if we need to activate this newly assigned slot
+                try_activate_on_assignment(shared, candidate_slot);
+
+                return candidate_slot;
+            }
+
+            return candidate_slot;
+        }
+
+        // Slot was busy, try next
+        attempts += 1;
+        if attempts >= max_attempts {
+            // All slots are full - this should not happen with proper max_streams limit
+            panic!(
+                "No available slots for stream {} after {} attempts (slots={}, max_streams={})",
+                stream, attempts, num_slots, shared.max_streams
+            );
         }
     }
-
-    if av_slot_id == std::usize::MAX {
-        panic!("No available stream slots for stream: {}", stream);
-    }
-
-    // For slot-priority: assign stream N to slot N when possible
-    // This ensures streams map to specific slots in slot-priority mode
-    let preferred_slot = stream % shared.slots;
-    if shared.slot_priority_enabled && available_slots[preferred_slot] == std::usize::MAX {
-        av_slot_id = preferred_slot;
-        print_debug(|| {
-            format!(
-                "Slot-priority: Assigning stream {} to preferred slot {}",
-                stream, preferred_slot
-            )
-        });
-    }
-
-    available_slots[av_slot_id] = stream; // Mark as busy
-    print_debug(|| {
-        format!(
-            "Assigned stream: {} to available slot {}",
-            stream, av_slot_id
-        )
-    });
-    // Start Slot Timing
-    if let Some(tb) = &shared.time_buffer {
-        tb.start_slot_processing(av_slot_id);
-    }
-    return av_slot_id;
 }
 
 pub fn release_slot(shared: &Arc<SharedData>, slot: usize) {
@@ -1054,73 +1069,197 @@ pub fn is_slot_active(shared: &Arc<SharedData>, slot: usize) -> bool {
     states[slot] == SlotState::Active
 }
 
+/// Process buffered nodes correctly: Push to batch queue for routing by resolution thread
+/// Network packets (id=0) will be detected and routed specially in process_batch_resolution()
+fn process_buffered_nodes(
+    shared: &Arc<SharedData>,
+    buffered_nodes: Vec<(NodeInfo, CmTypes)>,
+    activation_context: &str,
+) {
+    if buffered_nodes.is_empty() {
+        return;
+    }
+
+    println!(
+        "Slot-Priority: Flushing {} buffered nodes ({})",
+        buffered_nodes.len(),
+        activation_context
+    );
+
+    // Push all buffered nodes to batch queue
+    // process_batch_resolution() will detect network packets (id=0) and route them specially
+    for (node_info, data) in buffered_nodes {
+        let _ = shared.batch_queue_tx.try_send((node_info, data));
+    }
+}
+
+/// Check if a newly assigned slot should be activated (handles late stream arrival)
+/// This prevents deadlock when streams arrive after all slots have transitioned to buffering
+/// CRITICAL: Acquires both slot_states and slot_buffers locks to prevent race with activate_next_slot()
+fn try_activate_on_assignment(shared: &Arc<SharedData>, assigned_slot: usize) {
+    // CRITICAL FIX: Hold slot_states lock while also acquiring slot_buffers lock
+    // This prevents race condition where activate_next_slot() could activate the same slot
+    // and take its buffered nodes between our state change and buffer flush
+    let mut states = shared.slot_states.write();
+
+    // Only activate if:
+    // 1. The assigned slot is currently buffering
+    // 2. No other slot is currently active
+    if states[assigned_slot] == SlotState::Buffering {
+        let any_active = states.iter().any(|s| *s == SlotState::Active);
+
+        if !any_active {
+            states[assigned_slot] = SlotState::Active;
+            println!(
+                "Slot-Priority: Activated slot {} immediately on stream assignment (no active slots)",
+                assigned_slot
+            );
+
+            // ATOMIC OPERATION: Flush buffer BEFORE dropping slot_states lock
+            // This ensures activate_next_slot() cannot race - it will see slot already Active
+            let mut slot_buffers = shared.slot_buffers.write();
+            let buffered_nodes = std::mem::take(&mut slot_buffers[assigned_slot]);
+
+            // Drop locks in LIFO order (reverse of acquisition)
+            drop(slot_buffers);
+            drop(states);
+
+            // Process buffered nodes outside locks to avoid holding locks during I/O
+            process_buffered_nodes(
+                shared,
+                buffered_nodes,
+                &format!("newly activated slot {}", assigned_slot),
+            );
+        }
+    }
+}
+
 /// Activate the next buffering slot (if any) and return its buffered nodes
 /// Transition a slot from Active to Buffering state (for round-robin rotation)
 pub fn transition_slot_to_buffering(shared: &Arc<SharedData>, slot: usize) {
     let mut states = shared.slot_states.write();
     if states[slot] == SlotState::Active {
         states[slot] = SlotState::Buffering;
-        print_debug(|| format!("Round-Robin: Slot {} transitioned to Buffering state", slot));
+        println!("Round-Robin: Slot {} transitioned to Buffering state", slot);
     }
 }
 
 /// Activate the next buffering slot in round-robin order
-/// Returns the slot ID that was activated and its buffered nodes
+/// Returns the buffered nodes with their packet data for processing
 /// When slot-priority is enabled, automatically uses round-robin activation
 pub fn activate_next_slot(
     shared: &Arc<SharedData>,
     completing_slot: Option<usize>,
-) -> Option<Vec<NodeInfo>> {
+) -> Option<Vec<(NodeInfo, CmTypes)>> {
     if !shared.slot_priority_enabled {
         return None;
     }
-    print_debug(|| format!("Activating next slot"));
+
+    let available_slots = shared.available_stream_slots.read();
+
+    // CRITICAL: Hold slot_states lock while also acquiring slot_buffers lock
+    // This prevents race with try_activate_on_assignment()
+    let mut states = shared.slot_states.write();
 
     // Find and activate next buffering slot in round-robin order
-    let activated_slot = {
-        let mut states = shared.slot_states.write();
-
-        // Round-robin: find next buffering slot in circular order after completing_slot
-        if let Some(completed) = completing_slot {
-            let num_slots = states.len();
-            // Search for next Buffering slot starting from (completed + 1)
-            let mut found_slot = None;
-            for offset in 1..=num_slots {
-                let candidate = (completed + offset) % num_slots;
-                if states[candidate] == SlotState::Buffering {
-                    states[candidate] = SlotState::Active;
-                    print_debug(|| {
-                        format!(
-                            "Slot-Priority: Activated slot {} for processing (after slot {})",
-                            candidate, completed
-                        )
-                    });
-                    found_slot = Some(candidate);
-                    break;
-                }
+    let activated_slot = if let Some(completed) = completing_slot {
+        // Search for next Buffering slot starting from (completed + 1)
+        // With round-robin assignment, the next stream should be in the next slot
+        let num_slots = states.len();
+        let mut found_slot = None;
+        for offset in 1..=num_slots {
+            let candidate = (completed + offset) % num_slots;
+            if states[candidate] == SlotState::Buffering
+                && available_slots[candidate] != usize::MAX
+            {
+                states[candidate] = SlotState::Active;
+                println!(
+                    "Slot-Priority: Activated slot {} for processing (after slot {})",
+                    candidate, completed
+                );
+                found_slot = Some(candidate);
+                break;
             }
-            found_slot
-        } else {
-            // Fallback: find first buffering slot
-            states
-                .iter_mut()
-                .enumerate()
-                .find(|(_, state)| **state == SlotState::Buffering)
-                .map(|(slot_id, state)| {
-                    *state = SlotState::Active;
-                    print_debug(|| {
-                        format!("Slot-Priority: Activated slot {} for processing", slot_id)
-                    });
-                    slot_id
-                })
         }
+        found_slot
+    } else {
+        // Fallback: find first buffering slot
+        states
+            .iter_mut()
+            .enumerate()
+            .find(|(slot_id, state)| {
+                **state == SlotState::Buffering && available_slots[*slot_id] != usize::MAX
+            })
+            .map(|(slot_id, state)| {
+                *state = SlotState::Active;
+                println!("Slot-Priority: Activated slot {} for processing", slot_id);
+                slot_id
+            })
     };
 
-    // Retrieve and clear buffered nodes for this slot
-    activated_slot.map(|slot_id| {
+    // ATOMIC OPERATION: Retrieve buffered nodes while still holding slot_states lock
+    // This prevents race with try_activate_on_assignment()
+    if let Some(slot_id) = activated_slot {
         let mut slot_buffers = shared.slot_buffers.write();
-        std::mem::take(&mut slot_buffers[slot_id])
-    })
+        let buffered = std::mem::take(&mut slot_buffers[slot_id]);
+
+        // Drop locks in LIFO order
+        drop(slot_buffers);
+        drop(states);
+        drop(available_slots);
+
+        Some(buffered)
+    } else {
+        drop(states);
+        drop(available_slots);
+        None
+    }
+}
+
+/// Fallback safety check: Ensure at least one slot is active when streams are pending
+/// This prevents deadlock in case the activation-on-assignment logic misses an edge case
+/// CRITICAL: Uses proper lock ordering to prevent race conditions
+pub fn ensure_at_least_one_active_slot(shared: &Arc<SharedData>) {
+    if !shared.slot_priority_enabled {
+        return;
+    }
+
+    let available_slots = shared.available_stream_slots.read();
+    let mut states = shared.slot_states.write();
+
+    // Check if any slot is currently active
+    let any_active = states.iter().any(|s| *s == SlotState::Active);
+
+    if !any_active {
+        // No active slots - find first buffering slot with assigned stream
+        for (slot_id, state) in states.iter_mut().enumerate() {
+            if *state == SlotState::Buffering && available_slots[slot_id] != usize::MAX {
+                *state = SlotState::Active;
+                println!(
+                    "Slot-Priority: FALLBACK activation of slot {} (detected no active slots)",
+                    slot_id
+                );
+
+                // ATOMIC OPERATION: Flush buffer while still holding slot_states lock
+                drop(available_slots);  // Don't need this anymore
+
+                let mut slot_buffers = shared.slot_buffers.write();
+                let buffered_nodes = std::mem::take(&mut slot_buffers[slot_id]);
+
+                // Drop locks in LIFO order
+                drop(slot_buffers);
+                drop(states);
+
+                // Process buffered nodes outside locks
+                process_buffered_nodes(
+                    shared,
+                    buffered_nodes,
+                    &format!("fallback-activated slot {}", slot_id),
+                );
+                return;
+            }
+        }
+    }
 }
 
 pub fn initial_nodes(shared: &Arc<SharedData>, slots: Vec<usize>) -> Vec<NodeInfo> {

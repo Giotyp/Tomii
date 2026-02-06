@@ -220,7 +220,7 @@ impl SynRt {
             }
         }
 
-        // Initialize per-slot buffering queues
+        // Initialize per-slot buffering queues (stores NodeInfo + packet data)
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
         let (receiver_sockets, packet_sender, packet_receiver, packet_drop_counters) =
@@ -278,6 +278,8 @@ impl SynRt {
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             slot_packet_counters: Arc::new((0..slots).map(|_| AtomicUsize::new(0)).collect()),
             streams_receive_counter: Arc::new(AtomicUsize::new(0)),
+            // Initialize to 0 - first assignment goes to slot 0
+            slot_assign_idx: AtomicUsize::new(0),
         });
 
         SynRt { shared }
@@ -782,13 +784,15 @@ impl SynRt {
                                 tb.add_task_time(thread_slot, "Batch Resolution", usize::MAX, dur);
                             };
                         } else {
-                            println!(
-                                "Thread {:?} -- Slot {} is not active, buffering packet index {}",
-                                thread_id, node_info.slot, node_info.index
-                            );
-                            // Buffer the packet for later processing
+                            // println!(
+                            //     "Thread {:?} -- Slot {} is not active, buffering packet index {}",
+                            //     thread_id, node_info.slot, node_info.index
+                            // );
+                            // Buffer the packet WITH its data for later processing
+                            // CRITICAL: Must preserve packet_cm so buffered nodes can be processed
                             let mut slot_buffers = shared.slot_buffers.write();
-                            slot_buffers[node_info.slot].push(node_info.clone());
+                            slot_buffers[node_info.slot]
+                                .push((node_info.clone(), packet_cm.clone()));
                         }
                         packets_received = true;
 
@@ -817,12 +821,10 @@ impl SynRt {
                         // Note: packet_index is the value BEFORE the increment, so +1 equals current count
                         let packet_count = node_info.index + 1;
                         if packet_count == stream_packets {
-                            print_debug(|| {
-                                format!(
-                                    "All {} packets received for slot {} stream",
-                                    stream_packets, node_info.slot
-                                )
-                            });
+                            println!(
+                                "All {} packets received for slot {} stream",
+                                stream_packets, node_info.slot
+                            );
 
                             // Increment total streams received counter
                             let completed_streams = shared
@@ -933,6 +935,7 @@ impl SynRt {
                     thread_id,
                     thread_core,
                     thread_slot,
+                    &cond_indexes,
                 );
                 if let Some(tb) = &shared.time_buffer {
                     let end_proc = tb.measure_time();
@@ -940,6 +943,12 @@ impl SynRt {
                     tb.add_task_time(thread_slot, "Slot Check", usize::MAX, dur);
                 }
                 wait_start_ns = Some(shared.base_instant.elapsed().as_nanos());
+
+                // FALLBACK SAFETY: Ensure at least one slot is active if streams are pending
+                // This catches any edge cases where the activation-on-assignment logic missed
+                if shared.slot_priority_enabled && packets_received {
+                    ensure_at_least_one_active_slot(&shared);
+                }
             }
 
             packets_received = false;
@@ -1184,6 +1193,7 @@ impl SynRt {
         thread_id: usize,
         thread_core: usize,
         thread_slot: usize,
+        cond_indexes: &[Vec<usize>],
     ) {
         let slots_to_check: Vec<usize> = stream_slot_activity.keys().copied().collect();
 
@@ -1294,24 +1304,44 @@ impl SynRt {
                     )
                 });
 
+                // Check if we should start a new iteration and release the slot
+                // IMPORTANT: Must call this BEFORE activate_next_slot() so the slot is released
+                // and activate_next_slot() sees available_slots[proc_slot] == usize::MAX
+                let can_restart = process_slot_completion(&shared, proc_slot);
+
                 // In slot-priority mode: rotate active slot and activate next buffered slot
+                // This must happen AFTER process_slot_completion() so the completing slot is released
                 let buffered_nodes = if shared.slot_priority_enabled {
                     transition_slot_to_buffering(&shared, proc_slot);
-                    print_debug(|| format!("Calling activate_next_slot()"));
                     activate_next_slot(&shared, Some(proc_slot))
                 } else {
                     None
                 };
 
-                // Flush buffered nodes from newly activated slot (if any)
-                if let Some(nodes) = buffered_nodes {
-                    if !nodes.is_empty() {
-                        Self::preparation(&shared, &nodes, thread_core, thread_slot);
+                // Process buffered nodes from newly activated slot (if any)
+                // These are network packets that arrived while the slot was buffering
+                if let Some(buffered_batch) = buffered_nodes {
+                    if !buffered_batch.is_empty() {
+                        println!(
+                            "Processing {} buffered nodes for activated slot {}",
+                            buffered_batch.len(),
+                            proc_slot
+                        );
+                        let start_ns_batch = shared.base_instant.elapsed().as_nanos();
+                        Self::process_batch_resolution(
+                            &shared,
+                            buffered_batch,
+                            thread_core,
+                            thread_id,
+                            thread_slot,
+                            &cond_indexes,
+                            stream_slot_activity,
+                            start_ns_batch,
+                        );
                     }
                 }
 
-                // Check if we should start a new iteration
-                if process_slot_completion(&shared, proc_slot) {
+                if can_restart {
                     print_debug(|| {
                         format!(
                             "Starting new iteration for slot {} - spawning initial nodes",
@@ -1341,7 +1371,10 @@ impl SynRt {
                     if !compute_nodes.is_empty() {
                         if shared.slot_priority_enabled && !is_slot_active(&shared, proc_slot) {
                             let mut slot_buffers = shared.slot_buffers.write();
-                            slot_buffers[proc_slot].extend(compute_nodes);
+                            // Compute nodes don't have packet data (not network nodes)
+                            // Buffer with None as placeholder for consistency
+                            slot_buffers[proc_slot]
+                                .extend(compute_nodes.iter().map(|n| (n.clone(), CmTypes::None)));
                         } else {
                             Self::preparation(&shared, &compute_nodes, thread_core, thread_slot);
                         }
