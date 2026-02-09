@@ -1195,12 +1195,10 @@ impl SynRt {
                     continue; // Another thread already owns this completion
                 }
 
-                print_debug(|| {
-                    format!(
-                        "Thread {:?} -- Completed iteration at slot {}",
-                        thread_id, proc_slot
-                    )
-                });
+                println!(
+                    "Thread {:?} -- Completed iteration at slot {}",
+                    thread_id, proc_slot
+                );
 
                 // CRITICAL: Reset ALL state BEFORE checking process_slot_completion
                 // This prevents race conditions where new nodes complete before state is clean
@@ -1265,11 +1263,11 @@ impl SynRt {
                 // IMPORTANT: Must call this BEFORE activate_next_slot() so the slot is released
                 // and activate_next_slot() sees available_slots[proc_slot] == usize::MAX
                 let can_restart = process_slot_completion(&shared, proc_slot);
+                stream_slot_activity.remove(&proc_slot);
 
                 // In slot-priority mode: rotate active slot and activate next buffered slot
                 // This must happen AFTER process_slot_completion() so the completing slot is released
                 let buffered_nodes = if shared.slot_priority_enabled {
-                    transition_slot_to_buffering(&shared, proc_slot);
                     activate_next_slot(&shared, Some(proc_slot))
                 } else {
                     None
@@ -1309,23 +1307,13 @@ impl SynRt {
                     // Remove from completed set since we're starting again
                     shared.resolution_state.unmark_slot_completed(proc_slot);
 
-                    // Network nodes are managed by receiver threads; no per-slot network tracking here
-
-                    // Clear activity tracking for this slot's new stream iteration
-                    stream_slot_activity.remove(&proc_slot);
-                    print_debug(|| {
-                        format!(
-                                "Cleared stream_slot_activity for slot {} to start new stream iteration",
-                                proc_slot
-                            )
-                    });
-
                     // Spawn initial compute nodes for the restarting slot
                     // (network nodes are handled by receivers, not scheduled)
                     let compute_nodes = initial_nodes(&shared, vec![proc_slot]);
 
                     // Apply slot-priority buffering for compute nodes
                     if !compute_nodes.is_empty() {
+                        // fix when this slot is the only one active
                         if shared.slot_priority_enabled && !is_slot_active(&shared, proc_slot) {
                             let mut slot_buffers = shared.slot_buffers.write();
                             // Compute nodes don't have packet data (not network nodes)
