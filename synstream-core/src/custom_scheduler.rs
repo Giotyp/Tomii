@@ -363,8 +363,6 @@ struct SharedWorkerState {
     base_instant: Arc<Instant>,
     /// Stream filter for recording
     record_stream: Option<usize>,
-    /// Available stream slots for recording filter
-    available_stream_slots: Arc<RwLock<Vec<usize>>>,
     /// System core offset for recorder channel indexing (Bug 2 fix)
     system_core_offset: usize,
 }
@@ -509,7 +507,6 @@ pub struct CustomSchedulerBuilder {
     external_recorder: Option<Arc<AsyncRecorder>>,
     base_instant: Instant,
     record_stream: Option<usize>,
-    available_stream_slots: Arc<RwLock<Vec<usize>>>,
     worker_affinity: Option<crate::scheduler::WorkerAffinityConfig>,
 }
 
@@ -524,7 +521,6 @@ impl CustomSchedulerBuilder {
             external_recorder: None,
             base_instant: Instant::now(),
             record_stream: None,
-            available_stream_slots: Arc::new(RwLock::new(Vec::new())),
             worker_affinity: None,
         }
     }
@@ -587,12 +583,6 @@ impl CustomSchedulerBuilder {
     /// Set stream filter for recording
     pub fn record_stream(mut self, stream: Option<usize>) -> Self {
         self.record_stream = stream;
-        self
-    }
-
-    /// Set available stream slots reference
-    pub fn available_stream_slots(mut self, slots: Arc<RwLock<Vec<usize>>>) -> Self {
-        self.available_stream_slots = slots;
         self
     }
 
@@ -769,7 +759,6 @@ impl CustomSchedulerBuilder {
             async_recorder,
             base_instant: Arc::new(self.base_instant),
             record_stream: self.record_stream,
-            available_stream_slots: self.available_stream_slots,
             system_core_offset,
         });
 
@@ -998,11 +987,7 @@ impl CustomScheduler {
             if shared.async_recorder.is_some() {
                 let should_record = match shared.record_stream {
                     None => true,
-                    Some(target_stream) => {
-                        let slots_read = shared.available_stream_slots.read();
-                        let current_stream = slots_read.get(slot).copied().unwrap_or(usize::MAX);
-                        current_stream == target_stream
-                    }
+                    Some(target_stream) => true,
                 };
 
                 if should_record {
@@ -1052,11 +1037,7 @@ impl CustomScheduler {
             if shared.async_recorder.is_some() {
                 let should_record = match shared.record_stream {
                     None => true,
-                    Some(target_stream) => {
-                        let slots_read = shared.available_stream_slots.read();
-                        let current_stream = slots_read.get(slot).copied().unwrap_or(usize::MAX);
-                        current_stream == target_stream
-                    }
+                    Some(target_stream) => true,
                 };
 
                 if should_record {
@@ -1108,12 +1089,7 @@ impl CustomScheduler {
                 if shared.async_recorder.is_some() {
                     let should_record = match shared.record_stream {
                         None => true,
-                        Some(target_stream) => {
-                            let slots_read = shared.available_stream_slots.read();
-                            let current_stream =
-                                slots_read.get(slot).copied().unwrap_or(usize::MAX);
-                            current_stream == target_stream
-                        }
+                        Some(target_stream) => true,
                     };
 
                     if should_record {

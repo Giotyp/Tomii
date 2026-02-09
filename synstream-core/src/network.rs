@@ -173,14 +173,7 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
                 };
 
                 // Push to this thread's dedicated channel (no cross-thread CAS)
-                if tx.try_send(msg).is_ok() {
-                    // Shared lazy notification: only wake resolution on the
-                    // false→true transition.  Collapses bursts of packets into
-                    // a single futex wake.
-                    if !shared.packet_has_items.swap(true, Ordering::Release) {
-                        shared.packet_notify_cond.notify_one();
-                    }
-                } else {
+                if tx.try_send(msg).is_err() {
                     drop_counter.fetch_add(1, Ordering::Relaxed);
                     eprintln!("Receiver {}: channel full, packet dropped", socket_id);
                 }
@@ -307,12 +300,7 @@ pub fn multi_socket_receiver_loop(
                         receiver_core_id: core_id,
                     };
 
-                    if tx.try_send(msg).is_ok() {
-                        // Shared lazy notification
-                        if !shared.packet_has_items.swap(true, Ordering::Release) {
-                            shared.packet_notify_cond.notify_one();
-                        }
-                    } else {
+                    if tx.try_send(msg).is_err() {
                         drop_counter.fetch_add(1, Ordering::Relaxed);
                         eprintln!(
                             "Receiver thread {} socket {}: channel full, packet dropped",

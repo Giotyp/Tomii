@@ -13,9 +13,6 @@ pub struct NodeInfo {
     pub index: usize,
     pub pred_index: usize,
     pub post_node: bool,
-    /// Generation counter for stale-task detection
-    /// Incremented each time a slot is reset - prevents old tasks from corrupting new iterations
-    pub generation: u64,
 }
 
 impl NodeInfo {
@@ -26,7 +23,6 @@ impl NodeInfo {
             index,
             pred_index,
             post_node: false,
-            generation: 0,
         }
     }
 
@@ -39,8 +35,8 @@ impl std::fmt::Debug for NodeInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "NodeID {{ id: {}, index: {}, slot: {}, gen: {}, post_node: {} }}",
-            self.id, self.index, self.slot, self.generation, self.post_node
+            "NodeID {{ id: {}, index: {}, slot: {}, post_node: {} }}",
+            self.id, self.index, self.slot, self.post_node
         )
     }
 }

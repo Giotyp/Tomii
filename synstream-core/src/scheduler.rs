@@ -248,7 +248,6 @@ struct SchedulerBase {
     batch_timeout_us: u64,
     // Stream-specific recording filter
     record_stream: Option<usize>,
-    available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
     // Phase 4: Worker utilization metrics (optional)
     worker_metrics: Option<Arc<WorkerMetrics>>,
 }
@@ -265,7 +264,6 @@ impl SchedulerBase {
         target_batch_size: usize,
         batch_timeout_us: u64,
         record_stream: Option<usize>,
-        available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
     ) -> Self {
         let total_recorders = workers + receiver_threads + system_threads;
         let async_recorder = if record {
@@ -321,7 +319,6 @@ impl SchedulerBase {
             target_batch_size,
             batch_timeout_us,
             record_stream,
-            available_stream_slots,
             worker_metrics,
         }
     }
@@ -399,7 +396,6 @@ impl SchedulerBase {
         let base = Arc::clone(&self.base_instant);
         let recorder_enabled = self.async_recorder.is_some();
         let record_stream = self.record_stream;
-        let available_stream_slots = Arc::clone(&self.available_stream_slots);
         let metrics = self.worker_metrics.clone(); // Phase 4
 
         let (task_id, slot, index) = meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN));
@@ -432,9 +428,7 @@ impl SchedulerBase {
                 None => true, // Record all streams
                 Some(target_stream) => {
                     // Get current stream for this slot
-                    let slots_read = available_stream_slots.read();
-                    let current_stream = slots_read.get(slot).copied().unwrap_or(usize::MAX);
-                    current_stream == target_stream
+                    true
                 }
             };
 
@@ -483,7 +477,6 @@ impl FifoScheduler {
         target_batch_size: usize,
         batch_timeout_us: u64,
         record_stream: Option<usize>,
-        available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
     ) -> Self {
         Self {
             base: SchedulerBase::new(
@@ -497,7 +490,6 @@ impl FifoScheduler {
                 target_batch_size,
                 batch_timeout_us,
                 record_stream,
-                available_stream_slots,
             ),
         }
     }
@@ -535,7 +527,6 @@ impl WorkStealScheduler {
         target_batch_size: usize,
         batch_timeout_us: u64,
         record_stream: Option<usize>,
-        available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
     ) -> Self {
         Self {
             base: SchedulerBase::new(
@@ -549,7 +540,6 @@ impl WorkStealScheduler {
                 target_batch_size,
                 batch_timeout_us,
                 record_stream,
-                available_stream_slots,
             ),
         }
     }
@@ -894,7 +884,6 @@ pub fn create_scheduler(
     target_batch_size: usize,
     batch_timeout_us: u64,
     record_stream: Option<usize>,
-    available_stream_slots: Arc<parking_lot::RwLock<Vec<usize>>>,
     worker_affinity: Option<WorkerAffinityConfig>,
 ) -> SchedulerImpl {
     match scheduler_type {
@@ -909,7 +898,6 @@ pub fn create_scheduler(
             target_batch_size,
             batch_timeout_us,
             record_stream,
-            available_stream_slots,
         )),
         SchedulerType::WorkStealing => SchedulerImpl::WorkStealing(WorkStealScheduler::new(
             core_offset,
@@ -922,7 +910,6 @@ pub fn create_scheduler(
             target_batch_size,
             batch_timeout_us,
             record_stream,
-            available_stream_slots,
         )),
         SchedulerType::Custom => {
             let mut builder = crate::custom_scheduler::CustomScheduler::builder()
@@ -931,8 +918,7 @@ pub fn create_scheduler(
                 .receiver_threads(receiver_threads)
                 .record(record)
                 .base_instant(base_instant)
-                .record_stream(record_stream)
-                .available_stream_slots(available_stream_slots.clone());
+                .record_stream(record_stream);
 
             // Build worker groups based on affinity configuration
             //

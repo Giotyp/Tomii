@@ -1,5 +1,5 @@
 use core_affinity;
-use parking_lot::{Condvar, Mutex, RwLock};
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -44,7 +44,6 @@ impl SynRt {
         base_instant: Instant,
         slot_priority_enabled: bool,
         async_recorder: Option<Arc<AsyncRecorder>>, // Optional shared recorder from caller
-        available_stream_slots: Arc<RwLock<Vec<usize>>>, // Shared with scheduler for recording filter
         target_batch_size: usize,
         batch_timeout_us: u64,
     ) -> SynRt {
@@ -201,24 +200,6 @@ impl SynRt {
             slot_pending_cond_tasks.push(AtomicUsize::new(total_cond_tasks));
         }
 
-        // Initialize slot states for priority processing
-        let slot_states = Arc::new(RwLock::new(Vec::new()));
-        {
-            let mut states = slot_states.write();
-            for slot_id in 0..slots {
-                if slot_priority_enabled && slot_id == 0 {
-                    // Only slot 0 is active initially
-                    states.push(SlotState::Active);
-                } else if slot_priority_enabled {
-                    // All other slots start buffering
-                    states.push(SlotState::Buffering);
-                } else {
-                    // When disabled, all slots are active
-                    states.push(SlotState::Active);
-                }
-            }
-        }
-
         // Initialize per-slot buffering queues (stores NodeInfo + packet data)
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
@@ -242,7 +223,7 @@ impl SynRt {
                 slots,
             )),
             stream_complete_counter: Arc::new(AtomicUsize::new(0)),
-            available_stream_slots,
+            running_streams: Arc::new(RwLock::new(Vec::new())),
             time_buffer,
             scheduler: Arc::new(scheduler),
             async_recorder,
@@ -261,7 +242,7 @@ impl SynRt {
             initial_prep_done: Arc::new(AtomicUsize::new(0)),
             slot_pending_tasks: Arc::new(slot_pending_tasks),
             slot_pending_cond_tasks: Arc::new(slot_pending_cond_tasks),
-            slot_states,
+            slot_states: Arc::new(RwLock::new(vec![SlotState::Inactive; slots])),
             slot_priority_enabled,
             slot_buffers,
             // Network fields (empty vecs when no network_config)
@@ -269,24 +250,13 @@ impl SynRt {
             receive_finished: Arc::new(AtomicBool::new(false)),
             packet_sender,
             packet_receiver,
-            packet_notify_lock: Mutex::new(()),
-            packet_notify_cond: Condvar::new(),
-            packet_has_items: AtomicBool::new(false),
             receiver_sockets,
             packet_drop_counters,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             slot_packet_counters: Arc::new((0..slots).map(|_| AtomicUsize::new(0)).collect()),
             streams_receive_counter: Arc::new(AtomicUsize::new(0)),
-            // Initialize generation counters to 0 for all slots
-            slot_generation: Arc::new(
-                (0..slots)
-                    .map(|_| std::sync::atomic::AtomicU64::new(0))
-                    .collect(),
-            ),
             // Initialize packet completion flags to false for all slots
             slot_packet_complete: Arc::new((0..slots).map(|_| AtomicBool::new(false)).collect()),
-            // Initialize to 0 - first assignment goes to slot 0
-            slot_assign_idx: AtomicUsize::new(0),
         });
 
         SynRt { shared }
@@ -608,32 +578,28 @@ impl SynRt {
                     )
                 });
 
-                // Compute nodes (nx=false) follow slot-priority - only active slots
-                // Network nodes are handled by dedicated receiver threads (see inject_network_packet)
-                let active_slots: Vec<usize> = (0..shared.slots)
-                    .filter(|&slot| is_slot_active(&shared, slot))
+                let activate_streams: Vec<usize> = {
+                    if shared.slot_priority_enabled {
+                        // activate first stream
+                        vec![0]
+                    } else {
+                        // activate all streams
+                        (0..shared.slots).collect()
+                    }
+                };
+
+                // run assign_stream_to_available_slot for each stream to set slot state to Active
+                let assigned_slots: Vec<usize> = activate_streams
+                    .iter()
+                    .map(|&stream_id| assign_stream_to_available_slot(&shared, stream_id))
                     .collect();
 
-                if shared.slot_priority_enabled {
-                    print_debug(|| {
-                        format!(
-                            "Slot-Priority: Starting compute nodes for active slots: {:?}",
-                            active_slots
-                        )
-                    });
-                }
-
-                let compute_nodes = initial_nodes(&shared, active_slots);
-
-                // Send compute nodes to regular scheduler (only active slots)
+                let compute_nodes = initial_nodes(&shared, assigned_slots);
                 if !compute_nodes.is_empty() {
                     Self::preparation(&shared, &compute_nodes, thread_core, thread_slot);
                 }
             }
         }
-
-        // Network nodes are handled by dedicated receiver threads, not scheduled
-        // (see inject_network_packet implementation)
 
         // prefetch cond indexes for efficiency
         let cond_indexes = shared.graph.get_condition_indexes();
@@ -750,54 +716,12 @@ impl SynRt {
                                 tb.add_task_time(thread_slot, "Slot Assignment", usize::MAX, dur);
                             }
 
-                            // CRITICAL: Load generation BEFORE incrementing counter
-                            // This ensures we stamp the packet with the current epoch before any resets
-                            let current_generation =
-                                shared.slot_generation[node_info.slot].load(Ordering::Acquire);
-
-                            // Overflow protection: Check if we've already received enough packets
-                            let current_count =
-                                shared.slot_packet_counters[node_info.slot].load(Ordering::Acquire);
-
-                            if current_count >= stream_packets {
-                                print_debug(|| {
-                                    format!(
-                                        "Thread {:?} -- Dropping excess packet for slot {} (count {} >= expected {})",
-                                        thread_id, node_info.slot, current_count, stream_packets
-                                    )
-                                });
-
-                                // Track overflow as dropped packet
-                                shared.packet_drop_counters[receiver_core_id]
-                                    .fetch_add(1, Ordering::Relaxed);
-                                continue;
-                            }
-
                             // Use AcqRel ordering to synchronize with slot reset (Release store)
                             // This prevents reordering on weakly-ordered architectures (ARM/POWER)
                             let packet_index = shared.slot_packet_counters[node_info.slot]
                                 .fetch_add(1, Ordering::AcqRel);
 
-                            // Double-check after fetch_add (handles rare race where count crossed threshold)
-                            if packet_index >= stream_packets {
-                                print_debug(|| {
-                                    format!(
-                                        "Thread {:?} -- Dropping excess packet for slot {} at index {}",
-                                        thread_id, node_info.slot, packet_index
-                                    )
-                                });
-
-                                // Undo the increment
-                                shared.slot_packet_counters[node_info.slot]
-                                    .fetch_sub(1, Ordering::Release);
-
-                                shared.packet_drop_counters[receiver_core_id]
-                                    .fetch_add(1, Ordering::Relaxed);
-                                continue;
-                            }
-
                             node_info.index = packet_index;
-                            node_info.generation = current_generation;
                         } else {
                             // ID function failed, skip processing this node
                             print_debug(|| {
@@ -834,12 +758,6 @@ impl SynRt {
                                 tb.add_task_time(thread_slot, "Batch Resolution", usize::MAX, dur);
                             };
                         } else {
-                            // println!(
-                            //     "Thread {:?} -- Slot {} is not active, buffering packet index {}",
-                            //     thread_id, node_info.slot, node_info.index
-                            // );
-                            // Buffer the packet WITH its data for later processing
-                            // CRITICAL: Must preserve packet_cm so buffered nodes can be processed
                             let mut slot_buffers = shared.slot_buffers.write();
                             slot_buffers[node_info.slot]
                                 .push((node_info.clone(), packet_cm.clone()));
@@ -1008,12 +926,6 @@ impl SynRt {
                     tb.add_task_time(thread_slot, "Slot Check", usize::MAX, dur);
                 }
                 wait_start_ns = Some(shared.base_instant.elapsed().as_nanos());
-
-                // FALLBACK SAFETY: Ensure at least one slot is active if streams are pending
-                // This catches any edge cases where the activation-on-assignment logic missed
-                if shared.slot_priority_enabled && packets_received {
-                    ensure_at_least_one_active_slot(&shared);
-                }
             }
 
             packets_received = false;
@@ -1068,21 +980,6 @@ impl SynRt {
                     thread_id, node_info
                 )
             });
-
-            // CRITICAL: Discard stale tasks from previous stream iterations
-            // Check generation for ALL nodes (network packets AND compute tasks)
-            // This prevents old tasks from corrupting freshly-reset slot state
-            let current_gen = shared.slot_generation[node_info.slot].load(Ordering::Acquire);
-
-            if node_info.generation != current_gen {
-                print_debug(|| {
-                    format!(
-                        "Thread {:?} -- Discarding stale task {:?} (gen {} != current {})",
-                        thread_id, node_info, node_info.generation, current_gen
-                    )
-                });
-                continue; // Skip this stale task entirely
-            }
 
             // Mark stream activity FIRST for all nodes (including network nodes id=0)
             // This ensures check_slots() will examine this slot for completion
@@ -1158,14 +1055,12 @@ impl SynRt {
 
                 // Schedule all newly ready instances
                 for ready_index in ready_indices {
-                    let mut succ_info = NodeInfo::new(
+                    let succ_info = NodeInfo::new(
                         succ_node_id as IdType,
                         node_info.slot,
                         ready_index,
                         node_info.index,
                     );
-                    // Inherit generation from parent node - maintains epoch consistency
-                    succ_info.generation = node_info.generation;
 
                     if !has_cond {
                         nodes_to_schedule.push(succ_info);
@@ -1264,11 +1159,7 @@ impl SynRt {
                     "Checking slot {} for completion (completed={}, active={})",
                     proc_slot,
                     shared.resolution_state.is_slot_completed(proc_slot),
-                    if shared.slot_priority_enabled {
-                        is_slot_active(&shared, proc_slot).to_string()
-                    } else {
-                        "N/A".to_string()
-                    }
+                    is_slot_active(&shared, proc_slot).to_string()
                 )
             });
 
@@ -1323,12 +1214,6 @@ impl SynRt {
                 shared
                     .resolution_state
                     .reinit_dependencies(&shared.graph.nodes, proc_slot);
-
-                // CRITICAL: Increment generation BEFORE resetting counter
-                // This creates a happens-before edge: any packet stamped with old generation
-                // is guaranteed to be stale after this point
-                // Using AcqRel ensures this increment is visible to all threads
-                shared.slot_generation[proc_slot].fetch_add(1, Ordering::AcqRel);
 
                 // Reset packet completion flag for the next stream
                 // Allows completion detection to work for the new iteration
@@ -1466,10 +1351,6 @@ impl SynRt {
                 for index in 0..post_node.factor {
                     let mut node_info = NodeInfo::new(post_node.id, stream_use, index, 0);
                     node_info.set_post_node(true);
-                    // Post-nodes use stream_use slot, load its generation
-                    node_info.generation = self.shared.slot_generation
-                        [stream_use % self.shared.slots]
-                        .load(Ordering::Acquire);
 
                     let arg_vec =
                         parse_args(&self.shared, &post_node.args, index, stream_use, 0, None);
@@ -1509,7 +1390,12 @@ impl SynRt {
         // The LockFreeResultMap is created with the right capacity upfront
     }
 
-    pub fn print_statistics(&self, bench_name: &str, out_file: Option<&str>, exclude_streams: usize) {
+    pub fn print_statistics(
+        &self,
+        bench_name: &str,
+        out_file: Option<&str>,
+        exclude_streams: usize,
+    ) {
         if let Some(tb) = &self.shared.time_buffer {
             tb.print_stats(bench_name, out_file, exclude_streams);
         }

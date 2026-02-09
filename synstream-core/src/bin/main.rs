@@ -240,11 +240,6 @@ pub fn run_graph(
 
     let base_instant = Instant::now();
 
-    // Create available_stream_slots early so it can be shared with scheduler
-    use parking_lot::RwLock;
-    use std::sync::Arc;
-    let available_stream_slots = Arc::new(RwLock::new(vec![usize::MAX; slots]));
-
     // Scan graph for unique use_workers specs to create worker affinity configuration
     let worker_affinity = {
         use std::collections::HashSet;
@@ -298,7 +293,6 @@ pub fn run_graph(
         batching_size,
         batching_limit,
         record_stream,
-        Arc::clone(&available_stream_slots),
         worker_affinity,
     );
 
@@ -322,7 +316,6 @@ pub fn run_graph(
         base_instant,
         slot_priority_enabled,
         shared_recorder,
-        available_stream_slots,
         batching_size,
         batching_limit,
     );
