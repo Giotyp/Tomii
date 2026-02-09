@@ -356,6 +356,7 @@ pub struct SharedData {
 
     // Slot priority processing state
     pub slot_states: Arc<RwLock<Vec<SlotState>>>,
+    pub last_slot_assigned: Arc<AtomicUsize>,
     pub slot_priority_enabled: bool,
     // Per-slot buffering: holds ready nodes with their packet data waiting for slot activation
     // CRITICAL: Must store (NodeInfo, CmTypes) to preserve network packet data
@@ -717,14 +718,40 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
         }
     }
 
-    // without slot priority, assign to the first Inactive slot
+    let last_slot_assigned = shared.last_slot_assigned.load(Ordering::SeqCst);
     let mut slot_states = shared.slot_states.write();
-    for (slot_id, state) in slot_states.iter_mut().enumerate() {
+
+    // Check last assigned first
+    if slot_states[last_slot_assigned] == SlotState::Inactive {
+        slot_states[last_slot_assigned] = SlotState::Active; // Mark slot as active immediately
+        running_streams.push((stream, last_slot_assigned));
+        println!(
+            "Assigned stream {} to slot {} (Inactive)",
+            stream, last_slot_assigned
+        );
+        drop(running_streams); // Release lock before returning
+
+        // Start timing for the slot immediately upon assignment
+        if let Some(tb) = &shared.time_buffer {
+            tb.start_slot_processing(last_slot_assigned);
+        }
+
+        return last_slot_assigned;
+    }
+
+    for slot_id in last_slot_assigned + 1..shared.slots {
+        let state = slot_states.get_mut(slot_id % shared.slots).unwrap();
         if *state == SlotState::Inactive {
-            *state = SlotState::Active; // Mark slot as active immediately
+            *state = SlotState::Buffering; // Mark slot as Buffering
             running_streams.push((stream, slot_id));
+            shared.last_slot_assigned.store(slot_id, Ordering::SeqCst);
             println!("Assigned stream {} to slot {} (Inactive)", stream, slot_id);
             drop(running_streams); // Release lock before returning
+
+            // Start timing for the slot immediately upon assignment
+            if let Some(tb) = &shared.time_buffer {
+                tb.start_slot_processing(slot_id);
+            }
             return slot_id;
         }
     }

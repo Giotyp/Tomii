@@ -243,6 +243,7 @@ impl SynRt {
             slot_pending_tasks: Arc::new(slot_pending_tasks),
             slot_pending_cond_tasks: Arc::new(slot_pending_cond_tasks),
             slot_states: Arc::new(RwLock::new(vec![SlotState::Inactive; slots])),
+            last_slot_assigned: Arc::new(AtomicUsize::new(0)),
             slot_priority_enabled,
             slot_buffers,
             // Network fields (empty vecs when no network_config)
