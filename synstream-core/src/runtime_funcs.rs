@@ -711,15 +711,14 @@ pub fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
 }
 
 #[inline]
-pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) -> usize {
+pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) -> (usize, bool) {
     // Get write access to have updated view of running streams
     let mut running_streams = shared.running_streams.write();
 
     // Check if this stream is already mapped to a slot
     for (stream_id, slot_id) in running_streams.iter() {
         if *stream_id == stream {
-            print_debug(|| format!("Stream: {} is already assigned to slot {}", stream, slot_id));
-            return *slot_id;
+            return (*slot_id, false); // Already assigned, not newly activated
         }
     }
 
@@ -741,7 +740,7 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
             tb.start_slot_processing(last_slot_assigned);
         }
 
-        return last_slot_assigned;
+        return (last_slot_assigned, true); // Newly activated from Inactive → Active
     }
 
     for slot_id in last_slot_assigned + 1..shared.slots {
@@ -755,7 +754,7 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
                 stream, slot_id
             );
             drop(running_streams); // Release lock before returning
-            return slot_id;
+            return (slot_id, false); // Assigned but Buffering, not Active
         }
     }
 
@@ -772,13 +771,22 @@ pub fn release_slot(shared: &Arc<SharedData>, slot: usize) {
     // Remove from running streams
     if let Some(pos) = running_streams.iter().position(|&(_, s_id)| s_id == slot) {
         let (stream_id, _) = running_streams.remove(pos);
-        print_debug(|| format!("Released slot {} from stream {}", slot, stream_id));
+        print_debug(|| {
+            format!(
+                "Released slot {} from stream {} (had state: {:?})",
+                slot, stream_id, old_state
+            )
+        });
     } else {
-        print_debug(|| format!("Released slot {} with no assigned stream", slot));
+        print_debug(|| {
+            format!(
+                "Released slot {} with no assigned stream (had state: {:?})",
+                slot, old_state
+            )
+        });
     }
     drop(running_streams);
     drop(slot_states);
-    println!("Released slot {} (had state: {:?})", slot, old_state);
 }
 
 #[inline]
@@ -807,12 +815,6 @@ pub fn process_id_function(
                             );
                 return None;
             }
-            print_debug(|| {
-                format!(
-                    "ID function determined stream {} for {:?}",
-                    new_stream, node_info
-                )
-            });
             return Some(new_stream);
         } else {
             panic!("ID function did not return a valid number for stream");
@@ -1061,12 +1063,12 @@ pub fn is_slot_active(shared: &Arc<SharedData>, slot: usize) -> bool {
 }
 
 /// Activate the next buffering slot in round-robin order
-/// Returns the buffered nodes with their packet data for processing
+/// Returns (activated_slot_id, buffered_nodes) for processing
 /// When slot-priority is enabled, automatically uses round-robin activation
 pub fn activate_next_slot(
     shared: &Arc<SharedData>,
     completing_slot: Option<usize>,
-) -> Option<Vec<(NodeInfo, CmTypes)>> {
+) -> Option<(usize, Vec<(NodeInfo, CmTypes)>)> {
     if !shared.slot_priority_enabled {
         return None;
     }
@@ -1076,17 +1078,21 @@ pub fn activate_next_slot(
     let mut states = shared.slot_states.write();
 
     // Find and activate next buffering slot in round-robin order
+    // CRITICAL: Activate only ONE slot at a time (strict round-robin)
     let activated_slot = if let Some(completed) = completing_slot {
         let running_streams = shared.running_streams.read();
         let mut found_slot = None;
         for (stream, slot) in running_streams.iter() {
             if states[*slot] == SlotState::Buffering {
                 states[*slot] = SlotState::Active;
+                // set last_assigned and running_streams
+                shared.last_slot_assigned.store(*slot, Ordering::SeqCst);
                 println!(
                     "Round-Robin: Activated slot {} for stream {} after completing slot {}",
                     slot, stream, completed
                 );
                 found_slot = Some(*slot);
+                break; // Activate only ONE slot per completion (Issue C fix)
             }
         }
         found_slot
@@ -1109,7 +1115,7 @@ pub fn activate_next_slot(
             tb.start_slot_processing(slot_id);
         }
 
-        Some(buffered)
+        Some((slot_id, buffered)) // Return (slot_id, buffered_nodes) for caller to spawn initial nodes
     } else {
         drop(states);
         None
