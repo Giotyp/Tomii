@@ -18,15 +18,15 @@
 //! 4. Resolution injects packets and triggers downstream processing
 
 use std::net::UdpSocket;
+use std::os::unix::io::AsRawFd;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Pre-allocated buffer pool depth per receiver thread.
-/// Buffers are moved into PacketMessage via mem::take; empty slots are lazily
-/// refilled on the next recv.  Sized to cover the expected number of packets
-/// in flight between receiver pushes and resolution drains.
-const PACKET_BUFFER_POOL_DEPTH: usize = 1024;
+/// Socket receive buffer size (16 MB).
+/// Prevents kernel from dropping UDP packets when bursts exceed the default ~208 KB buffer.
+/// Requires: sudo sysctl -w net.core.rmem_max=16777216
+const SOCKET_RECV_BUF_SIZE: usize = 16 * 1024 * 1024;
 
 use crate::runtime_funcs::SharedData;
 
@@ -72,6 +72,29 @@ impl NetworkSocket {
     }
 }
 
+/// Set the SO_RCVBUF size on a raw socket fd.
+/// The kernel may cap this at net.core.rmem_max.
+fn set_socket_recv_buffer(socket: &UdpSocket, size: usize) {
+    let fd = socket.as_raw_fd();
+    let buf_size = size as libc::c_int;
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &buf_size as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        eprintln!(
+            "Warning: failed to set SO_RCVBUF to {}: {}",
+            size,
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
 pub fn bind_udp_socket_range(address: &str, start_port: usize, count: usize) -> Vec<NetworkSocket> {
     let mut sockets = Vec::with_capacity(count);
     for i in 0..count {
@@ -85,13 +108,17 @@ pub fn bind_udp_socket_range(address: &str, start_port: usize, count: usize) -> 
             .set_nonblocking(false)
             .expect("Failed to set blocking mode");
 
+        // Increase kernel receive buffer to absorb packet bursts
+        set_socket_recv_buffer(&socket, SOCKET_RECV_BUF_SIZE);
+
         sockets.push(NetworkSocket::Udp(socket));
     }
     println!(
-        "Successfully bound UDP sockets {}-{} on address {}",
+        "Successfully bound UDP sockets {}-{} on address {} (recv_buf={}MB)",
         start_port,
         start_port + count - 1,
-        address
+        address,
+        SOCKET_RECV_BUF_SIZE / (1024 * 1024)
     );
     sockets
 }
@@ -125,15 +152,6 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
         .expect("Network config must be present for receiver threads");
     let packet_length = network_config_arc.packet_length;
 
-    // Buffer pool: pre-allocate PACKET_BUFFER_POOL_DEPTH buffers.  Each recv
-    // moves the current buffer into the PacketMessage via mem::take (a 3-word
-    // pointer swap, no copy).  The vacated slot is lazily refilled on the next
-    // iteration only when it has been consumed.
-    let mut buffer_pool: Vec<Vec<u8>> = (0..PACKET_BUFFER_POOL_DEPTH)
-        .map(|_| vec![0u8; packet_length])
-        .collect();
-    let mut pool_head: usize = 0;
-
     println!("Receiver thread {} started on core {}", socket_id, core_id);
 
     loop {
@@ -144,13 +162,11 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
             break;
         }
 
-        // Lazily refill the current pool slot if it was consumed
-        if buffer_pool[pool_head].len() != packet_length {
-            buffer_pool[pool_head] = vec![0u8; packet_length];
-        }
+        // Allocate fresh buffer per packet — simple, no pool management overhead
+        let mut packet_bytes = vec![0u8; packet_length];
 
         // Receive packet (blocking with read_timeout)
-        match socket.recv(&mut buffer_pool[pool_head]) {
+        match socket.recv(&mut packet_bytes) {
             Ok(size) => {
                 if size != packet_length {
                     eprintln!(
@@ -159,10 +175,6 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
                     );
                     continue;
                 }
-
-                // Move buffer out of pool — O(1) pointer move, no memcpy.
-                let packet_bytes = std::mem::take(&mut buffer_pool[pool_head]);
-                pool_head = (pool_head + 1) % PACKET_BUFFER_POOL_DEPTH;
 
                 let msg = PacketMessage {
                     packet_bytes,
@@ -236,14 +248,6 @@ pub fn multi_socket_receiver_loop(
 
     let tx = &shared.packet_sender;
 
-    // Buffer pool shared across all sockets assigned to this thread.
-    // Each successful recv moves the current buffer via mem::take; the slot
-    // is lazily refilled on the next pass through that position.
-    let mut buffer_pool: Vec<Vec<u8>> = (0..PACKET_BUFFER_POOL_DEPTH)
-        .map(|_| vec![0u8; packet_length])
-        .collect();
-    let mut pool_head: usize = 0;
-
     let mut first_packet_received: bool = false;
     let mut first_packet_timestamp: Instant = Instant::now();
     let mut last_packet_timestamp: Instant = Instant::now();
@@ -265,12 +269,10 @@ pub fn multi_socket_receiver_loop(
             let socket = &shared.receiver_sockets[socket_id];
             let drop_counter = &shared.packet_drop_counters[socket_id];
 
-            // Lazily refill pool slot if it was consumed
-            if buffer_pool[pool_head].len() != packet_length {
-                buffer_pool[pool_head] = vec![0u8; packet_length];
-            }
+            // Allocate fresh buffer per packet — simple, no pool management overhead
+            let mut packet_bytes = vec![0u8; packet_length];
 
-            match socket.recv(&mut buffer_pool[pool_head]) {
+            match socket.recv(&mut packet_bytes) {
                 Ok(size) => {
                     if size != packet_length {
                         eprintln!(
@@ -287,10 +289,6 @@ pub fn multi_socket_receiver_loop(
                     } else {
                         last_packet_timestamp = packet_timestamp;
                     }
-
-                    // Move buffer out — O(1) pointer move
-                    let packet_bytes = std::mem::take(&mut buffer_pool[pool_head]);
-                    pool_head = (pool_head + 1) % PACKET_BUFFER_POOL_DEPTH;
 
                     let msg = PacketMessage {
                         packet_bytes,

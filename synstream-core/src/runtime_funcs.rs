@@ -1,4 +1,4 @@
-use crate::batch_queue::{Receiver as BatchReceiver, Sender as BatchSender};
+use crossbeam_channel::{Receiver as BatchReceiver, Sender as BatchSender};
 use crate::debug::print_debug;
 use crate::network::{NetworkSocket, PacketMessage};
 use crate::resolution_state::ResolutionState;
@@ -328,9 +328,9 @@ pub struct SharedData {
     pub base_instant: Arc<Instant>,
     pub job_counter: Arc<AtomicUsize>,
 
-    // Batch queue infrastructure for lock-free task completion delivery
+    // Crossbeam channel for lock-free task completion delivery
     pub batch_queue_tx: BatchSender<(NodeInfo, CmTypes)>,
-    pub batch_queue_rx: Arc<BatchReceiver<(NodeInfo, CmTypes)>>,
+    pub batch_queue_rx: BatchReceiver<(NodeInfo, CmTypes)>,
     pub target_batch_size: usize,
     pub batch_timeout_us: u64,
 
@@ -743,8 +743,9 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
         return (last_slot_assigned, true); // Newly activated from Inactive → Active
     }
 
-    for slot_id in last_slot_assigned + 1..shared.slots {
-        let state = slot_states.get_mut(slot_id % shared.slots).unwrap();
+    for i in 1..shared.slots {
+        let slot_id = (last_slot_assigned + i) % shared.slots;
+        let state = slot_states.get_mut(slot_id).unwrap();
         if *state == SlotState::Inactive {
             *state = SlotState::Buffering; // Mark slot as Buffering
             running_streams.push((stream, slot_id));
@@ -762,8 +763,8 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
 }
 
 pub fn release_slot(shared: &Arc<SharedData>, slot: usize) {
-    let mut slot_states = shared.slot_states.write();
     let mut running_streams = shared.running_streams.write();
+    let mut slot_states = shared.slot_states.write();
 
     let old_state = slot_states[slot];
     slot_states[slot] = SlotState::Inactive; // Mark as inactive
@@ -785,16 +786,12 @@ pub fn release_slot(shared: &Arc<SharedData>, slot: usize) {
             )
         });
     }
-    drop(running_streams);
     drop(slot_states);
+    drop(running_streams);
 }
 
 #[inline]
-pub fn process_id_function(
-    shared: &Arc<SharedData>,
-    node_info: &NodeInfo,
-    result: &CmTypes,
-) -> Option<usize> {
+pub fn process_id_function(shared: &Arc<SharedData>, result: &CmTypes) -> Option<usize> {
     let network_config_opt = shared.graph.network_config();
 
     if let Some(network_config) = network_config_opt {

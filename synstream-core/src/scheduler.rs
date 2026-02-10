@@ -1,7 +1,6 @@
 #![allow(unused_imports)]
 #![allow(dead_code)]
 use core_affinity;
-use crossbeam_channel::Sender;
 use rayon::{prelude::*, vec};
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::cell::Cell;
@@ -16,8 +15,6 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use crate::async_recorder::{set_worker_recorder, submit_record, AsyncRecorder};
-use crate::batch_queue::{Receiver as BatchReceiver, Sender as BatchSender};
-use crate::buffers::NodeInfo;
 use crate::debug::print_debug;
 use crate::{IdType, Record};
 use synstream_types::CmTypes;
@@ -241,9 +238,6 @@ struct SchedulerBase {
     total_completed: Arc<AtomicUsize>,
     async_recorder: Option<Arc<AsyncRecorder>>,
     base_instant: Arc<Instant>,
-    // Batch queue for lock-free task completion delivery
-    batch_queue_tx: BatchSender<(NodeInfo, CmTypes)>,
-    batch_queue_rx: Arc<BatchReceiver<(NodeInfo, CmTypes)>>,
     target_batch_size: usize,
     batch_timeout_us: u64,
     // Stream-specific recording filter
@@ -291,9 +285,6 @@ impl SchedulerBase {
             async_recorder.clone(),
         );
 
-        // Create batch_queue for lock-free task completion delivery
-        let (batch_queue_tx, batch_queue_rx) = crate::batch_queue::unbounded();
-
         // Phase 4: Initialize worker metrics (only when recording enabled)
         let worker_metrics = if record {
             Some(Arc::new(WorkerMetrics::new(workers)))
@@ -314,8 +305,6 @@ impl SchedulerBase {
             total_completed: Arc::new(AtomicUsize::new(0)),
             async_recorder,
             base_instant: Arc::new(base_instant),
-            batch_queue_tx,
-            batch_queue_rx: Arc::new(batch_queue_rx),
             target_batch_size,
             batch_timeout_us,
             record_stream,
@@ -364,14 +353,6 @@ impl SchedulerBase {
 
     fn total_jobs_completed(&self) -> usize {
         self.total_completed.load(Ordering::SeqCst)
-    }
-
-    fn get_batch_queue_tx(&self) -> BatchSender<(NodeInfo, CmTypes)> {
-        self.batch_queue_tx.clone()
-    }
-
-    fn get_batch_queue_rx(&self) -> Arc<BatchReceiver<(NodeInfo, CmTypes)>> {
-        Arc::clone(&self.batch_queue_rx)
     }
 
     fn get_target_batch_size(&self) -> usize {
@@ -426,7 +407,7 @@ impl SchedulerBase {
             // Check if we should record this slot based on stream filter
             let should_record = match record_stream {
                 None => true, // Record all streams
-                Some(target_stream) => {
+                Some(_target_stream) => {
                     // Get current stream for this slot
                     true
                 }

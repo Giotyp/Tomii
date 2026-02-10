@@ -31,12 +31,11 @@
 #![allow(dead_code)]
 
 use core_affinity::{self, CoreId};
-use crossbeam_utils::Backoff;
+use crossbeam_channel::{self, Receiver, Sender};
 use parking_lot::{Condvar, Mutex, RwLock};
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -47,20 +46,11 @@ use crate::{IdType, Record};
 use synstream_types::CmTypes;
 
 // ============================================================================
-// SECTION 1: Lock-Free Task Queue (Treiber Stack with Priority)
+// SECTION 1: Priority Types and Task Definition
 // ============================================================================
 
 /// A boxed task that can be sent across threads
 pub type BoxedTask = Box<dyn FnOnce() + Send + 'static>;
-
-/// Node in the lock-free task queue
-struct TaskNode {
-    task: BoxedTask,
-    next: *mut TaskNode,
-}
-
-// Safety: TaskNode contains a Send task and raw pointer used only within atomic ops
-unsafe impl Send for TaskNode {}
 
 /// Priority levels for task scheduling
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -77,212 +67,109 @@ impl Default for Priority {
     }
 }
 
-/// Lock-free MPMC task queue using Treiber stack
-/// Optimized for low contention with adaptive backoff
-#[derive(Debug)]
-pub struct TaskQueue {
-    head: AtomicPtr<TaskNode>,
-    len: AtomicUsize,
-    // Notification mechanism for sleeping workers
-    notify_mutex: Mutex<()>,
-    notify_condvar: Condvar,
-}
-
-impl TaskQueue {
-    pub fn new() -> Self {
-        Self {
-            head: AtomicPtr::new(ptr::null_mut()),
-            len: AtomicUsize::new(0),
-            notify_mutex: Mutex::new(()),
-            notify_condvar: Condvar::new(),
-        }
-    }
-
-    /// Push a task onto the queue (lock-free) with notification
-    #[inline]
-    pub fn push(&self, task: BoxedTask) {
-        self.push_no_notify(task);
-        // Wake one waiting worker
-        self.notify_condvar.notify_one();
-    }
-
-    /// Push a task onto the queue (lock-free) WITHOUT notification
-    /// Used when caller will handle notification (e.g., PriorityQueueSet)
-    #[inline]
-    pub fn push_no_notify(&self, task: BoxedTask) {
-        let new_node = Box::into_raw(Box::new(TaskNode {
-            task,
-            next: ptr::null_mut(),
-        }));
-
-        loop {
-            let current_head = self.head.load(Ordering::Relaxed);
-            unsafe {
-                (*new_node).next = current_head;
-            }
-
-            if self
-                .head
-                .compare_exchange_weak(current_head, new_node, Ordering::Release, Ordering::Relaxed)
-                .is_ok()
-            {
-                self.len.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-            // CAS failed, retry (no backoff needed for push - rare contention)
-        }
-    }
-
-    /// Try to pop a task from the queue (lock-free, non-blocking)
-    #[inline]
-    pub fn try_pop(&self) -> Option<BoxedTask> {
-        let backoff = Backoff::new();
-
-        loop {
-            let current_head = self.head.load(Ordering::Acquire);
-            if current_head.is_null() {
-                return None;
-            }
-
-            let next = unsafe { (*current_head).next };
-
-            if self
-                .head
-                .compare_exchange_weak(current_head, next, Ordering::Release, Ordering::Relaxed)
-                .is_ok()
-            {
-                self.len.fetch_sub(1, Ordering::Relaxed);
-                let node = unsafe { Box::from_raw(current_head) };
-                return Some(node.task);
-            }
-
-            // Backoff on contention
-            if backoff.is_completed() {
-                return None; // Give up after too many retries
-            }
-            backoff.spin();
-        }
-    }
-
-    /// Check if queue is empty (relaxed, may be stale)
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.head.load(Ordering::Relaxed).is_null()
-    }
-
-    /// Approximate length (relaxed ordering)
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.len.load(Ordering::Relaxed)
-    }
-
-    /// Wait for a task with timeout (for idle workers)
-    pub fn wait_for_task(&self, timeout: Duration) -> bool {
-        let lock = self.notify_mutex.lock();
-        if !self.is_empty() {
-            return true; // Task available, no need to wait
-        }
-        self.notify_condvar.wait_for(&mut { lock }, timeout);
-        !self.is_empty()
-    }
-
-    /// Wake all waiting workers (for shutdown)
-    pub fn wake_all(&self) {
-        self.notify_condvar.notify_all();
-    }
-}
-
-impl Drop for TaskQueue {
-    fn drop(&mut self) {
-        // Drain remaining tasks
-        while let Some(_task) = self.try_pop() {
-            // Tasks are dropped here
-        }
-    }
-}
-
 // ============================================================================
-// SECTION 2: Priority Queue Set (Multiple Priorities)
+// SECTION 2: Priority Queue Set (Crossbeam Channels)
 // ============================================================================
 
 /// A set of queues with different priority levels
 /// Workers check High → Normal → Low in order
+/// Replaces Treiber stack with crossbeam channels for ABA-free operation
 pub struct PriorityQueueSet {
-    queues: [TaskQueue; 3], // High, Normal, Low
-    // Shared notification mechanism for ALL priorities
-    // This ensures workers wake up regardless of which priority queue receives a task
-    notify_mutex: Mutex<()>,
-    notify_condvar: Condvar,
+    /// Three unbounded channels for High, Normal, Low priorities
+    high: Sender<BoxedTask>,
+    normal: Sender<BoxedTask>,
+    low: Sender<BoxedTask>,
+    high_rx: Receiver<BoxedTask>,
+    normal_rx: Receiver<BoxedTask>,
+    low_rx: Receiver<BoxedTask>,
+    /// Approximate task count (for metrics)
+    len: AtomicUsize,
 }
 
 impl PriorityQueueSet {
     pub fn new() -> Self {
+        let (high_tx, high_rx) = crossbeam_channel::unbounded();
+        let (normal_tx, normal_rx) = crossbeam_channel::unbounded();
+        let (low_tx, low_rx) = crossbeam_channel::unbounded();
+
         Self {
-            queues: [TaskQueue::new(), TaskQueue::new(), TaskQueue::new()],
-            notify_mutex: Mutex::new(()),
-            notify_condvar: Condvar::new(),
+            high: high_tx,
+            normal: normal_tx,
+            low: low_tx,
+            high_rx,
+            normal_rx,
+            low_rx,
+            len: AtomicUsize::new(0),
         }
     }
 
     /// Push a task with specified priority
-    /// Uses shared notification to wake ANY waiting worker
     #[inline]
     pub fn push(&self, priority: Priority, task: BoxedTask) {
-        self.queues[priority as usize].push_no_notify(task);
-        // Notify shared condvar - wakes workers waiting on ANY priority
-        self.notify_condvar.notify_one();
+        self.len.fetch_add(1, Ordering::Relaxed);
+        let _ = match priority {
+            Priority::High => self.high.send(task),
+            Priority::Normal => self.normal.send(task),
+            Priority::Low => self.low.send(task),
+        };
     }
 
     /// Try to pop from highest priority queue first
     #[inline]
     pub fn try_pop(&self) -> Option<BoxedTask> {
         // Check High priority first
-        if let Some(task) = self.queues[Priority::High as usize].try_pop() {
+        if let Ok(task) = self.high_rx.try_recv() {
+            self.len.fetch_sub(1, Ordering::Relaxed);
             return Some(task);
         }
         // Then Normal
-        if let Some(task) = self.queues[Priority::Normal as usize].try_pop() {
+        if let Ok(task) = self.normal_rx.try_recv() {
+            self.len.fetch_sub(1, Ordering::Relaxed);
             return Some(task);
         }
         // Finally Low
-        self.queues[Priority::Low as usize].try_pop()
+        if let Ok(task) = self.low_rx.try_recv() {
+            self.len.fetch_sub(1, Ordering::Relaxed);
+            return Some(task);
+        }
+        None
     }
 
     /// Check if all queues are empty
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.queues.iter().all(|q| q.is_empty())
+        self.high_rx.is_empty() && self.normal_rx.is_empty() && self.low_rx.is_empty()
     }
 
-    /// Total pending tasks across all priorities
+    /// Total pending tasks across all priorities (approximate)
     pub fn total_len(&self) -> usize {
-        self.queues.iter().map(|q| q.len()).sum()
+        self.len.load(Ordering::Relaxed)
     }
 
-    /// Wake workers waiting on any queue
+    /// Wake workers waiting on any queue (no-op for crossbeam channels)
     pub fn wake_all(&self) {
-        // Wake shared condvar
-        self.notify_condvar.notify_all();
-        // Also wake individual queue condvars for backwards compatibility
-        for q in &self.queues {
-            q.wake_all();
-        }
-    }
-
-    /// Get reference to specific priority queue (for direct waiting)
-    pub fn get_queue(&self, priority: Priority) -> &TaskQueue {
-        &self.queues[priority as usize]
+        // No-op: crossbeam channels handle notifications internally
     }
 
     /// Wait for a task on ANY priority queue with timeout
-    /// This is the preferred method for workers to wait for tasks
-    pub fn wait_for_any_task(&self, timeout: Duration) -> bool {
-        let guard = self.notify_mutex.lock();
-        if !self.is_empty() {
-            return true; // Task available, no need to wait
+    /// Uses select! to efficiently wait on all three channels
+    /// Returns the received task (if any) to avoid consuming and dropping it
+    pub fn wait_for_any_task(&self, timeout: Duration) -> Option<BoxedTask> {
+        crossbeam_channel::select! {
+            recv(self.high_rx) -> msg => {
+                self.len.fetch_sub(1, Ordering::Relaxed);
+                msg.ok()
+            },
+            recv(self.normal_rx) -> msg => {
+                self.len.fetch_sub(1, Ordering::Relaxed);
+                msg.ok()
+            },
+            recv(self.low_rx) -> msg => {
+                self.len.fetch_sub(1, Ordering::Relaxed);
+                msg.ok()
+            },
+            default(timeout) => None,
         }
-        self.notify_condvar.wait_for(&mut { guard }, timeout);
-        !self.is_empty()
     }
 }
 
@@ -457,12 +344,11 @@ fn worker_loop(
         }
 
         // Phase 4: Park with short timeout (kernel-space, but bounded)
-        // This is the key optimization: we park briefly instead of sleeping indefinitely
-        // Use wait_for_any_task to wake on ANY priority queue task arrival
-        let _has_task = local_queues.wait_for_any_task(park_timeout);
-
-        // After waking, immediately loop back to check queues
-        // No explicit task extraction here - the loop handles it
+        // wait_for_any_task returns the task directly to avoid consuming+dropping it
+        // If select! fires, we execute the task immediately; otherwise loop back
+        if let Some(task) = local_queues.wait_for_any_task(park_timeout) {
+            execute_task_wrapper(&shared, task);
+        }
     }
 }
 
@@ -987,7 +873,7 @@ impl CustomScheduler {
             if shared.async_recorder.is_some() {
                 let should_record = match shared.record_stream {
                     None => true,
-                    Some(target_stream) => true,
+                    Some(_target_stream) => true,
                 };
 
                 if should_record {
@@ -1037,7 +923,7 @@ impl CustomScheduler {
             if shared.async_recorder.is_some() {
                 let should_record = match shared.record_stream {
                     None => true,
-                    Some(target_stream) => true,
+                    Some(_target_stream) => true,
                 };
 
                 if should_record {
@@ -1089,7 +975,7 @@ impl CustomScheduler {
                 if shared.async_recorder.is_some() {
                     let should_record = match shared.record_stream {
                         None => true,
-                        Some(target_stream) => true,
+                        Some(_target_stream) => true,
                     };
 
                     if should_record {

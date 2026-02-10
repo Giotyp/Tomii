@@ -8,7 +8,6 @@
 #![allow(clippy::new_without_default)]
 
 pub mod async_recorder;
-pub mod batch_queue;
 pub mod buffers;
 pub mod core_alloc;
 pub mod custom_scheduler;

@@ -7,8 +7,6 @@ use std::thread::{self, sleep, spawn, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::async_recorder::{set_worker_recorder, submit_record, AsyncRecorder};
-use crate::batch_queue;
-use crate::batch_queue::{Receiver as BatchReceiver, Sender as BatchSender};
 use crate::debug::print_debug;
 use crate::graph::*;
 use crate::graph_struct::*;
@@ -21,9 +19,47 @@ use crate::runtime_funcs::*;
 use crate::scheduler::SchedulerImpl;
 use crate::time_buffer::{TimeBufferManager, TimingMethod};
 use crate::{buffers::*, IdType, Record};
+use crossbeam_channel::{Receiver as BatchReceiver, Sender as BatchSender};
 use synstream_types::*;
 
 pub const RUN_SLEEP: Duration = Duration::from_secs(10);
+
+/// Drain up to `max_items` from a crossbeam channel, waiting up to `timeout` for the first item.
+/// Returns immediately with available items if any are ready (non-blocking fast path).
+/// If no items ready, blocks for up to `timeout` for the first item, then drains remaining.
+fn recv_batch<T>(
+    rx: &crossbeam_channel::Receiver<T>,
+    max_items: usize,
+    timeout: Duration,
+) -> Vec<T> {
+    let mut batch = Vec::new();
+
+    // Fast path: drain all immediately available items (non-blocking)
+    while batch.len() < max_items {
+        match rx.try_recv() {
+            Ok(item) => batch.push(item),
+            Err(_) => break,
+        }
+    }
+    if !batch.is_empty() {
+        return batch;
+    }
+
+    // Slow path: wait for first item with timeout
+    match rx.recv_timeout(timeout) {
+        Ok(item) => batch.push(item),
+        Err(_) => return batch, // timeout or disconnected
+    }
+
+    // Drain remaining available items up to max
+    while batch.len() < max_items {
+        match rx.try_recv() {
+            Ok(item) => batch.push(item),
+            Err(_) => break,
+        }
+    }
+    batch
+}
 
 // Main SynStream Runtime struct with shared context
 pub struct SynRt {
@@ -111,8 +147,8 @@ impl SynRt {
 
         let job_counter = Arc::new(AtomicUsize::new(0));
 
-        // Create batch_queue for lock-free task completion delivery
-        let (batch_queue_tx, batch_queue_rx) = crate::batch_queue::unbounded();
+        // Create crossbeam channel for lock-free task completion delivery
+        let (batch_queue_tx, batch_queue_rx) = crossbeam_channel::unbounded();
 
         // Initialize shared dependency tracking structures
         let dependency_count_vec: Vec<usize> = app_graph.dependency_count_vec();
@@ -230,7 +266,7 @@ impl SynRt {
             base_instant: Arc::new(base_instant),
             job_counter,
             batch_queue_tx,
-            batch_queue_rx: Arc::new(batch_queue_rx),
+            batch_queue_rx,
             target_batch_size,
             batch_timeout_us,
             resolution_state,
@@ -588,15 +624,17 @@ impl SynRt {
                     }
                 };
 
-                // run assign_stream_to_available_slot for each stream to set slot state to Active
-                let assigned_slots: Vec<usize> = activate_streams
-                    .iter()
-                    .map(|&stream_id| assign_stream_to_available_slot(&shared, stream_id).0) // Extract slot_id from (slot_id, activated) tuple
-                    .collect();
+                if !shared.graph.initial_nodes.is_empty() {
+                    // run assign_stream_to_available_slot for each stream to set slot state to Active
+                    let assigned_slots: Vec<usize> = activate_streams
+                        .iter()
+                        .map(|&stream_id| assign_stream_to_available_slot(&shared, stream_id).0) // Extract slot_id from (slot_id, activated) tuple
+                        .collect();
 
-                let compute_nodes = initial_nodes(&shared, assigned_slots);
-                if !compute_nodes.is_empty() {
-                    Self::preparation(&shared, &compute_nodes, thread_core, thread_slot);
+                    let compute_nodes = initial_nodes(&shared, assigned_slots);
+                    if !compute_nodes.is_empty() {
+                        Self::preparation(&shared, &compute_nodes, thread_core, thread_slot);
+                    }
                 }
             }
         }
@@ -641,9 +679,11 @@ impl SynRt {
                     let packet_process_func = network_config.extract_packet_func.unwrap();
 
                     // Poll all per-thread packet channels (non-blocking)
-                    let packets = shared
-                        .packet_receiver
-                        .recv_chunk_timeout(shared.target_batch_size, receive_timeout);
+                    let packets = recv_batch(
+                        &shared.packet_receiver,
+                        shared.target_batch_size,
+                        receive_timeout,
+                    );
 
                     // If receive_finished and no packets found, channels are fully drained
                     if shared.receive_finished.load(Ordering::SeqCst) && packets.is_empty() {
@@ -689,7 +729,7 @@ impl SynRt {
                             TimingMethod::Instant(Instant::now())
                         };
 
-                        let new_stream_opt = process_id_function(&shared, &node_info, &packet_cm);
+                        let new_stream_opt = process_id_function(&shared, &packet_cm);
 
                         if let Some(tb) = &shared.time_buffer {
                             let end_id = tb.measure_time();
@@ -739,7 +779,6 @@ impl SynRt {
                             }
 
                             // Use AcqRel ordering to synchronize with slot reset (Release store)
-                            // This prevents reordering on weakly-ordered architectures (ARM/POWER)
                             let packet_index = shared.slot_packet_counters[node_info.slot]
                                 .fetch_add(1, Ordering::AcqRel);
 
@@ -756,6 +795,12 @@ impl SynRt {
 
                         // Continue to resolution if slot is active
                         if is_slot_active(&shared, node_info.slot) {
+                            print_debug(|| {
+                                format!(
+                                    "Thread {:?} -- Processing packet for slot {} (stream {}) with packet index {}",
+                                    thread_id, node_info.slot, new_stream_opt.unwrap(), node_info.index
+                                )
+                            });
                             let info_res = (node_info.clone(), packet_cm);
 
                             let start_ns_pkt = shared.base_instant.elapsed().as_nanos();
@@ -780,10 +825,18 @@ impl SynRt {
                                 tb.add_task_time(thread_slot, "Batch Resolution", usize::MAX, dur);
                             };
                         } else {
+                            print_debug(|| {
+                                format!(
+                                    "Thread {:?} --Received packet for slot {} (stream {}) with packet index {} -- Buffering",
+                                    thread_id, node_info.slot, new_stream_opt.unwrap(), node_info.index
+                                )
+                            });
                             let mut slot_buffers = shared.slot_buffers.write();
                             slot_buffers[node_info.slot]
                                 .push((node_info.clone(), packet_cm.clone()));
+                            drop(slot_buffers); // Release write lock immediately
                         }
+
                         packets_received = true;
 
                         if shared.async_recorder.is_some() {
@@ -807,9 +860,8 @@ impl SynRt {
                         }
 
                         // Check if this slot has received all its packets (stream fully received)
-                        // Use fetch_add result to detect exact completion moment (avoids race)
-                        // Note: packet_index is the value BEFORE the increment, so +1 equals current count
-                        let packet_count = node_info.index + 1;
+                        let packet_count =
+                            shared.slot_packet_counters[node_info.slot].load(Ordering::Acquire);
                         if packet_count == stream_packets {
                             // Exactly-once semantics: atomically claim completion ownership
                             // Uses swap to ensure only ONE thread marks this stream as complete
@@ -818,10 +870,13 @@ impl SynRt {
                                 .swap(true, Ordering::AcqRel);
 
                             if !already_completed {
+                                // DEBUG: Check counter values when all packets received
+                                let pending_tasks = shared.slot_pending_tasks[node_info.slot].load(Ordering::Acquire);
+                                let pending_cond = shared.slot_pending_cond_tasks[node_info.slot].load(Ordering::Acquire);
                                 print_debug(|| {
                                     format!(
-                                        "All {} packets received for slot {} stream",
-                                        stream_packets, node_info.slot
+                                        "Thread {:?} -- All {} packets received for slot {} stream | pending_tasks={}, pending_cond={}",
+                                        thread_id, stream_packets, node_info.slot, pending_tasks, pending_cond
                                     )
                                 });
 
@@ -863,9 +918,11 @@ impl SynRt {
             }
 
             // Pull batch from lock-free queue with timeout
-            let batch = shared
-                .batch_queue_rx
-                .recv_chunk_timeout(shared.target_batch_size, receive_timeout);
+            let batch = recv_batch(
+                &shared.batch_queue_rx,
+                shared.target_batch_size,
+                receive_timeout,
+            );
 
             // Check shutdown immediately after blocking call returns
             if shared.shutdown_flag.load(Ordering::Relaxed) {
@@ -1020,17 +1077,45 @@ impl SynRt {
             // Lock-free access using pre-computed is_condition flag
             if node_cache_entry.is_condition {
                 shared.remaining_cond_nodes[node_info.slot][node_id_to_rem_idx]
-                    .fetch_sub(1, Ordering::Release);
+                    .fetch_sub(1, Ordering::AcqRel);
 
                 // Phase 1.2: Also decrement slot-wide condition counter
-                shared.slot_pending_cond_tasks[node_info.slot].fetch_sub(1, Ordering::Release);
+                let prev_cond = shared.slot_pending_cond_tasks[node_info.slot].fetch_sub(1, Ordering::AcqRel);
+
+                // DEBUG: Track condition task completions
+                if prev_cond <= 10 || prev_cond % 100 == 0 {
+                    print_debug(|| {
+                        format!(
+                            "COND task completed: slot={}, node_id={} ({}), prev_pending_cond={}, new={}",
+                            node_info.slot, node_id_usize, node_cache_entry.name, prev_cond, prev_cond - 1
+                        )
+                    });
+                }
             } else if !node_cache_entry.is_initial {
                 shared.remaining_nodes[node_info.slot][node_id_to_rem_idx]
-                    .fetch_sub(1, Ordering::Release);
+                    .fetch_sub(1, Ordering::AcqRel);
 
                 // Phase 1.2: Also decrement slot-wide task counter for O(1) completion check
                 // This maintains synchronization with per-node remaining_nodes atomics
-                shared.slot_pending_tasks[node_info.slot].fetch_sub(1, Ordering::Release);
+                let prev_tasks = shared.slot_pending_tasks[node_info.slot].fetch_sub(1, Ordering::AcqRel);
+
+                // DEBUG: Track task completions (log frequently for network node, sparsely for others)
+                let is_network = node_id_usize == 0;
+                if is_network && (prev_tasks <= 10 || prev_tasks % 100 == 0) {
+                    print_debug(|| {
+                        format!(
+                            "NETWORK packet processed: slot={}, prev_pending_tasks={}, new={}",
+                            node_info.slot, prev_tasks, prev_tasks - 1
+                        )
+                    });
+                } else if !is_network && (prev_tasks <= 10 || prev_tasks % 50 == 0) {
+                    print_debug(|| {
+                        format!(
+                            "COMPUTE task completed: slot={}, node_id={} ({}), prev_pending_tasks={}, new={}",
+                            node_info.slot, node_id_usize, node_cache_entry.name, prev_tasks, prev_tasks - 1
+                        )
+                    });
+                }
             }
             nodes_for_successor_processing.push(node_info.clone());
             succesor_updates.push(collect_successors_for_node(&shared, &node_info))
@@ -1220,6 +1305,14 @@ impl SynRt {
                 let total_tasks: usize = slot_init.iter().sum();
                 shared.slot_pending_tasks[proc_slot].store(total_tasks, Ordering::Release);
 
+                // DEBUG: Track counter reset values
+                print_debug(|| {
+                    format!(
+                        "RESET slot {} counters: slot_pending_tasks={}, slot_pending_cond_tasks will be set next",
+                        proc_slot, total_tasks
+                    )
+                });
+
                 // Reinit remaining_cond_nodes for this slot (reset to factor values)
                 let slot_cond_remaining = &shared.remaining_cond_nodes[proc_slot];
                 let mut total_cond_tasks = 0;
@@ -1236,8 +1329,23 @@ impl SynRt {
                 shared.slot_pending_cond_tasks[proc_slot]
                     .store(total_cond_tasks, Ordering::Release);
 
+                // DEBUG: Track condition counter reset
+                print_debug(|| {
+                    format!(
+                        "RESET slot {} cond counter: slot_pending_cond_tasks={}",
+                        proc_slot, total_cond_tasks
+                    )
+                });
+
                 // Clear nodes_sent_to_queue for this slot - MUST happen before new nodes spawn
                 shared.resolution_state.clear_slot_sent_flags(proc_slot);
+
+                // CRITICAL FIX (Bug #21): Unmark slot completion flag so it can complete again
+                // for the next stream. This MUST happen after state reset but before new stream
+                // is assigned. Without this, when slot_priority is enabled, the slot remains
+                // marked as completed and try_complete_slot() returns false for all subsequent
+                // streams, causing them to hang forever.
+                shared.resolution_state.unmark_slot_completed(proc_slot);
 
                 print_debug(|| {
                     format!(
@@ -1319,15 +1427,11 @@ impl SynRt {
                 }
 
                 // CRITICAL: When slot-priority is enabled, only ONE slot should be Active at a time
-                // If we activated a buffering slot, do NOT restart the completing slot
-                // The completing slot stays Inactive and will be assigned a new stream when packets arrive
-                let should_restart_completing_slot =
-                    can_restart && (!shared.slot_priority_enabled || !buffering_slot_was_activated);
+                // Never restart the completing slot in slot-priority mode; wait for packet arrival
+                // to trigger assignment via assign_stream_to_available_slot
+                let should_restart_completing_slot = can_restart && !shared.slot_priority_enabled;
 
                 if should_restart_completing_slot {
-                    // Remove from completed set since we're starting again
-                    shared.resolution_state.unmark_slot_completed(proc_slot);
-
                     // Spawn initial compute nodes for the restarting slot
                     // (network nodes are handled by receivers, not scheduled)
                     let compute_nodes = initial_nodes(&shared, vec![proc_slot]);
@@ -1433,7 +1537,7 @@ fn prepare_network_infrastructure(
     BatchReceiver<PacketMessage>,
     Vec<AtomicUsize>,
 ) {
-    let (packet_sender, packet_receiver) = batch_queue::unbounded();
+    let (packet_sender, packet_receiver) = crossbeam_channel::unbounded();
     if let Some(config_spec) = graph.network_config() {
         let num_sockets = config_spec.num_sockets;
 
