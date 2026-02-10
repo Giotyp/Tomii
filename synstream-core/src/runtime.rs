@@ -231,7 +231,7 @@ impl SynRt {
             // Sum all condition node factors for this slot
             let total_cond_tasks: usize = remaining_cond_nodes[slot]
                 .iter()
-                .map(|atomic| atomic.load(Ordering::Relaxed))
+                .map(|atomic| atomic.load(Ordering::SeqCst))
                 .sum();
             slot_pending_cond_tasks.push(AtomicUsize::new(total_cond_tasks));
         }
@@ -509,7 +509,7 @@ impl SynRt {
                 let mut total_drops = 0;
                 println!("\nPacket Drop Statistics:");
                 for socket_id in 0..num_sockets {
-                    let drops = self.shared.packet_drop_counters[socket_id].load(Ordering::Relaxed);
+                    let drops = self.shared.packet_drop_counters[socket_id].load(Ordering::SeqCst);
                     total_drops += drops;
                     if drops > 0 {
                         println!("  Socket {}: {} packets dropped", socket_id, drops);
@@ -568,7 +568,7 @@ impl SynRt {
         }
 
         // Lock-free recording via per-worker channel
-        let current_stream = shared.stream_complete_counter.load(Ordering::Relaxed);
+        let current_stream = shared.stream_complete_counter.load(Ordering::SeqCst);
         if shared.async_recorder.is_some() && should_record_slot(&shared, current_stream) {
             let end_ns = shared.base_instant.elapsed().as_nanos();
             let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
@@ -659,7 +659,7 @@ impl SynRt {
         // Process completed nodes with dynamic batching from scheduler
         loop {
             // Check shutdown flag first to exit immediately when signaled
-            if shared.shutdown_flag.load(Ordering::Relaxed) {
+            if shared.shutdown_flag.load(Ordering::SeqCst) {
                 println!(
                     "Thread {} detected shutdown signal, exiting resolution loop",
                     thread_id
@@ -780,7 +780,7 @@ impl SynRt {
 
                             // Use AcqRel ordering to synchronize with slot reset (Release store)
                             let packet_index = shared.slot_packet_counters[node_info.slot]
-                                .fetch_add(1, Ordering::AcqRel);
+                                .fetch_add(1, Ordering::SeqCst);
 
                             node_info.index = packet_index;
                         } else {
@@ -861,18 +861,20 @@ impl SynRt {
 
                         // Check if this slot has received all its packets (stream fully received)
                         let packet_count =
-                            shared.slot_packet_counters[node_info.slot].load(Ordering::Acquire);
+                            shared.slot_packet_counters[node_info.slot].load(Ordering::SeqCst);
                         if packet_count == stream_packets {
                             // Exactly-once semantics: atomically claim completion ownership
                             // Uses swap to ensure only ONE thread marks this stream as complete
                             // This prevents double-counting if multiple threads see the final packet
                             let already_completed = shared.slot_packet_complete[node_info.slot]
-                                .swap(true, Ordering::AcqRel);
+                                .swap(true, Ordering::SeqCst);
 
                             if !already_completed {
                                 // DEBUG: Check counter values when all packets received
-                                let pending_tasks = shared.slot_pending_tasks[node_info.slot].load(Ordering::Acquire);
-                                let pending_cond = shared.slot_pending_cond_tasks[node_info.slot].load(Ordering::Acquire);
+                                let pending_tasks = shared.slot_pending_tasks[node_info.slot]
+                                    .load(Ordering::SeqCst);
+                                let pending_cond = shared.slot_pending_cond_tasks[node_info.slot]
+                                    .load(Ordering::SeqCst);
                                 print_debug(|| {
                                     format!(
                                         "Thread {:?} -- All {} packets received for slot {} stream | pending_tasks={}, pending_cond={}",
@@ -906,13 +908,13 @@ impl SynRt {
                         }
                     }
 
-                    if !shared.first_packet_received.load(Ordering::Relaxed) {
-                        shared.first_packet_received.store(true, Ordering::Relaxed);
+                    if !shared.first_packet_received.load(Ordering::SeqCst) {
+                        shared.first_packet_received.store(true, Ordering::SeqCst);
                     }
                 }
             }
 
-            if !shared.first_packet_received.load(Ordering::Relaxed) {
+            if !shared.first_packet_received.load(Ordering::SeqCst) {
                 std::hint::spin_loop();
                 continue;
             }
@@ -925,7 +927,7 @@ impl SynRt {
             );
 
             // Check shutdown immediately after blocking call returns
-            if shared.shutdown_flag.load(Ordering::Relaxed) {
+            if shared.shutdown_flag.load(Ordering::SeqCst) {
                 println!(
                     "Thread {} detected shutdown after receive, exiting",
                     thread_id
@@ -941,7 +943,7 @@ impl SynRt {
                 if let Some(start_ns_wait) = wait_start_ns.take() {
                     // Only record if recorder enabled and slot chosen for recording
                     if shared.async_recorder.is_some() {
-                        let current_stream = shared.stream_complete_counter.load(Ordering::Relaxed);
+                        let current_stream = shared.stream_complete_counter.load(Ordering::SeqCst);
                         if should_record_slot(&shared, current_stream) {
                             let end_ns = shared.base_instant.elapsed().as_nanos();
                             let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
@@ -1077,10 +1079,11 @@ impl SynRt {
             // Lock-free access using pre-computed is_condition flag
             if node_cache_entry.is_condition {
                 shared.remaining_cond_nodes[node_info.slot][node_id_to_rem_idx]
-                    .fetch_sub(1, Ordering::AcqRel);
+                    .fetch_sub(1, Ordering::SeqCst);
 
                 // Phase 1.2: Also decrement slot-wide condition counter
-                let prev_cond = shared.slot_pending_cond_tasks[node_info.slot].fetch_sub(1, Ordering::AcqRel);
+                let prev_cond =
+                    shared.slot_pending_cond_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
 
                 // DEBUG: Track condition task completions
                 if prev_cond <= 10 || prev_cond % 100 == 0 {
@@ -1093,11 +1096,12 @@ impl SynRt {
                 }
             } else if !node_cache_entry.is_initial {
                 shared.remaining_nodes[node_info.slot][node_id_to_rem_idx]
-                    .fetch_sub(1, Ordering::AcqRel);
+                    .fetch_sub(1, Ordering::SeqCst);
 
                 // Phase 1.2: Also decrement slot-wide task counter for O(1) completion check
                 // This maintains synchronization with per-node remaining_nodes atomics
-                let prev_tasks = shared.slot_pending_tasks[node_info.slot].fetch_sub(1, Ordering::AcqRel);
+                let prev_tasks =
+                    shared.slot_pending_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
 
                 // DEBUG: Track task completions (log frequently for network node, sparsely for others)
                 let is_network = node_id_usize == 0;
@@ -1105,7 +1109,9 @@ impl SynRt {
                     print_debug(|| {
                         format!(
                             "NETWORK packet processed: slot={}, prev_pending_tasks={}, new={}",
-                            node_info.slot, prev_tasks, prev_tasks - 1
+                            node_info.slot,
+                            prev_tasks,
+                            prev_tasks - 1
                         )
                     });
                 } else if !is_network && (prev_tasks <= 10 || prev_tasks % 50 == 0) {
@@ -1212,7 +1218,7 @@ impl SynRt {
         }
 
         // Lock-free recording via per-worker channel
-        let current_stream = shared.stream_complete_counter.load(Ordering::Relaxed);
+        let current_stream = shared.stream_complete_counter.load(Ordering::SeqCst);
         if shared.async_recorder.is_some() && should_record_slot(&shared, current_stream) {
             let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
             let end_ns = shared.base_instant.elapsed().as_nanos();
@@ -1257,8 +1263,8 @@ impl SynRt {
             // Check if all nodes in this slot have been processed (O(1) lock-free)
             // Phase 1.2 optimization: Use aggregated counters instead of O(N×F) scan
             // Must check BOTH regular tasks AND condition tasks for complete slot processing
-            let pending_regular = shared.slot_pending_tasks[proc_slot].load(Ordering::Acquire);
-            let pending_cond = shared.slot_pending_cond_tasks[proc_slot].load(Ordering::Acquire);
+            let pending_regular = shared.slot_pending_tasks[proc_slot].load(Ordering::SeqCst);
+            let pending_cond = shared.slot_pending_cond_tasks[proc_slot].load(Ordering::SeqCst);
 
             let all_nodes_processed = pending_regular == 0 && pending_cond == 0;
 
@@ -1288,22 +1294,22 @@ impl SynRt {
 
                 // Reset packet completion flag for the next stream
                 // Allows completion detection to work for the new iteration
-                shared.slot_packet_complete[proc_slot].store(false, Ordering::Release);
+                shared.slot_packet_complete[proc_slot].store(false, Ordering::SeqCst);
 
                 // Reset per-slot packet counter for the next stream
                 // This ensures the network node index starts at 0 for the new stream
-                shared.slot_packet_counters[proc_slot].store(0, Ordering::Release);
+                shared.slot_packet_counters[proc_slot].store(0, Ordering::SeqCst);
 
                 // Reinit remaining_nodes for this slot using pre-computed init values (lock-free)
                 let slot_remaining = &shared.remaining_nodes[proc_slot];
                 let slot_init = &shared.remaining_init[proc_slot];
                 for (node_rem_idx, init_val) in slot_init.iter().enumerate() {
-                    slot_remaining[node_rem_idx].store(*init_val, Ordering::Release);
+                    slot_remaining[node_rem_idx].store(*init_val, Ordering::SeqCst);
                 }
 
                 // Phase 1.2: Reinit slot-wide counters for O(1) completion check
                 let total_tasks: usize = slot_init.iter().sum();
-                shared.slot_pending_tasks[proc_slot].store(total_tasks, Ordering::Release);
+                shared.slot_pending_tasks[proc_slot].store(total_tasks, Ordering::SeqCst);
 
                 // DEBUG: Track counter reset values
                 print_debug(|| {
@@ -1320,14 +1326,13 @@ impl SynRt {
                     if shared.node_id_is_cond[node_id] {
                         let node_id_to_rem_idx = shared.node_id_to_rem[node_id];
                         let factor = shared.node_cache[node_id].factor;
-                        slot_cond_remaining[node_id_to_rem_idx].store(factor, Ordering::Release);
+                        slot_cond_remaining[node_id_to_rem_idx].store(factor, Ordering::SeqCst);
                         total_cond_tasks += factor;
                     }
                 }
 
                 // Phase 1.2: Reinit slot-wide condition counter
-                shared.slot_pending_cond_tasks[proc_slot]
-                    .store(total_cond_tasks, Ordering::Release);
+                shared.slot_pending_cond_tasks[proc_slot].store(total_cond_tasks, Ordering::SeqCst);
 
                 // DEBUG: Track condition counter reset
                 print_debug(|| {

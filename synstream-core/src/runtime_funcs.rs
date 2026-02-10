@@ -1,10 +1,10 @@
-use crossbeam_channel::{Receiver as BatchReceiver, Sender as BatchSender};
 use crate::debug::print_debug;
 use crate::network::{NetworkSocket, PacketMessage};
 use crate::resolution_state::ResolutionState;
 use crate::time_buffer::{TimeBufferManager, TimingMethod};
 use crate::{buffers::*, graph::*, graph_struct::*, scheduler::*, IdType};
 use core::panic;
+use crossbeam_channel::{Receiver as BatchReceiver, Sender as BatchSender};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -1212,9 +1212,9 @@ pub fn collect_successors_for_node(
             let succ_id_to_rem_idx = shared.node_id_to_rem[succ_id as usize];
             if has_condition {
                 shared.remaining_cond_nodes[node_info.slot][succ_id_to_rem_idx]
-                    .load(Ordering::Acquire)
+                    .load(Ordering::SeqCst)
             } else {
-                shared.remaining_nodes[node_info.slot][succ_id_to_rem_idx].load(Ordering::Acquire)
+                shared.remaining_nodes[node_info.slot][succ_id_to_rem_idx].load(Ordering::SeqCst)
             }
         };
 
