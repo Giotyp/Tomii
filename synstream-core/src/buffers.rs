@@ -366,8 +366,9 @@ impl AtomicVecMap {
             if node_info.index < factor {
                 let idx = self.compute_flat_index(node_info);
                 // Use fetch_update for saturating decrement - prevents underflow
+                // SeqCst ordering ensures visibility across all threads (prevents stale reads after slot reset)
                 let result =
-                    self.buffer[idx].fetch_update(Ordering::AcqRel, Ordering::Acquire, |val| {
+                    self.buffer[idx].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |val| {
                         if val > 0 {
                             Some(val - 1)
                         } else {
@@ -395,7 +396,8 @@ impl AtomicVecMap {
             let factor = self.node_factors[node_id];
             if node_info.index < factor {
                 let idx = self.compute_flat_index(node_info);
-                let prev = self.buffer[idx].fetch_add(1, Ordering::AcqRel);
+                // SeqCst ordering ensures visibility across all threads
+                let prev = self.buffer[idx].fetch_add(1, Ordering::SeqCst);
                 return Some(prev + 1);
             }
         }
@@ -410,7 +412,8 @@ impl AtomicVecMap {
             let factor = self.node_factors[node_id];
             if node_info.index < factor {
                 let idx = self.compute_flat_index(node_info);
-                return Some(self.buffer[idx].load(Ordering::Acquire));
+                // SeqCst ordering ensures visibility across all threads
+                return Some(self.buffer[idx].load(Ordering::SeqCst));
             }
         }
         None
@@ -424,7 +427,8 @@ impl AtomicVecMap {
             let factor = self.node_factors[node_id];
             if node_info.index < factor {
                 let idx = self.compute_flat_index(node_info);
-                self.buffer[idx].store(value, Ordering::Release);
+                // SeqCst ordering ensures visibility across all threads
+                self.buffer[idx].store(value, Ordering::SeqCst);
                 return;
             } else {
                 panic!(
@@ -454,7 +458,7 @@ impl AtomicVecMap {
                 let factor = self.node_factors[node_id];
                 let offset = self.node_offsets[node_id];
                 for i in 0..factor {
-                    self.buffer[start + offset + i].store(val, Ordering::Release);
+                    self.buffer[start + offset + i].store(val, Ordering::SeqCst);
                 }
             }
         } else {
@@ -536,9 +540,13 @@ impl NodeDependencyEntry {
     /// Returns vector of instance indices that are now ready to spawn
     pub fn decrease_and_get_ready(&self) -> Vec<usize> {
         // Use fetch_update to safely handle zero dependencies (prevents underflow)
+        // SeqCst ordering provides total ordering across all threads, preventing stale reads
+        // after slot reset. With 8 resolution threads racing on reset/packet-processing,
+        // weaker orderings (AcqRel/Acquire) allowed threads to read stale counter values
+        // from previous stream, causing threshold calculations to fail (Bug #26).
         let result = self
             .remaining_deps
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |val| {
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |val| {
                 if val > 0 {
                     Some(val - 1)
                 } else {
@@ -557,10 +565,11 @@ impl NodeDependencyEntry {
             // Barrier nodes: spawn all instances when dependencies reach 0
             if new_remaining == 0 {
                 // Atomic: spawn all unsent instances
+                // SeqCst ordering ensures sent flags are synchronized across all threads
                 let mut ready = Vec::new();
                 for idx in 0..self.factor {
                     if self.instances_sent[idx]
-                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                         .is_ok()
                     {
                         ready.push(idx);
@@ -585,8 +594,9 @@ impl NodeDependencyEntry {
             // Instance idx is ready if: new_remaining <= threshold(idx)
             if new_remaining <= self.threshold_for_instance(idx) {
                 // Try to mark as sent (CAS to prevent double-spawn)
+                // SeqCst ordering ensures sent flags are synchronized across all threads
                 if self.instances_sent[idx]
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
                     ready.push(idx);
@@ -600,28 +610,30 @@ impl NodeDependencyEntry {
     /// Increment dependency counter (used when condition fails and dependency needs to be restored)
     /// Returns the new dependency count
     pub fn increment_dependency(&self) -> usize {
-        self.remaining_deps.fetch_add(1, Ordering::AcqRel) + 1
+        // SeqCst ordering ensures visibility across all threads
+        self.remaining_deps.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     /// Reset the sent flag for a specific instance (used when conditions not met)
     pub fn reset_sent_flag(&self, instance_idx: usize) {
         if instance_idx < self.instances_sent.len() {
-            self.instances_sent[instance_idx].store(false, Ordering::Release);
+            // SeqCst ordering ensures visibility across all threads
+            self.instances_sent[instance_idx].store(false, Ordering::SeqCst);
         }
     }
 
     /// Clear all sent flags for this entry
     pub fn clear_sent_flags(&self) {
         for flag in &self.instances_sent {
-            flag.store(false, Ordering::Release);
+            flag.store(false, Ordering::SeqCst);
         }
     }
 
     /// Reset this entry for a new slot iteration
     pub fn reset(&self, new_total_deps: usize) {
-        self.remaining_deps.store(new_total_deps, Ordering::Release);
+        self.remaining_deps.store(new_total_deps, Ordering::SeqCst);
         for flag in &self.instances_sent {
-            flag.store(false, Ordering::Release);
+            flag.store(false, Ordering::SeqCst);
         }
     }
 }
@@ -1014,7 +1026,7 @@ impl LockFreeResultMap {
 
         // Free all pointers in this slot
         for idx in start..end {
-            let old_ptr = self.buffer[idx].swap(std::ptr::null_mut(), Ordering::Release);
+            let old_ptr = self.buffer[idx].swap(std::ptr::null_mut(), Ordering::SeqCst);
             if !old_ptr.is_null() {
                 unsafe {
                     drop(Box::from_raw(old_ptr));
