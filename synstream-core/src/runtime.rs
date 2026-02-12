@@ -236,6 +236,23 @@ impl SynRt {
             slot_pending_cond_tasks.push(AtomicUsize::new(total_cond_tasks));
         }
 
+        // Initialize condition spawn counters - tracks remaining instances to spawn per condition node
+        // Used to skip condition evaluation once all instances have been spawned
+        let cond_instances_to_spawn: Vec<Vec<AtomicUsize>> = (0..slots)
+            .map(|_| {
+                node_cache
+                    .iter()
+                    .map(|nc| {
+                        if nc.is_condition {
+                            AtomicUsize::new(nc.factor) // Start with factor count
+                        } else {
+                            AtomicUsize::new(0) // Non-condition nodes: not used
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+
         // Initialize per-slot buffering queues (stores NodeInfo + packet data)
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
@@ -278,6 +295,7 @@ impl SynRt {
             initial_prep_done: Arc::new(AtomicUsize::new(0)),
             slot_pending_tasks: Arc::new(slot_pending_tasks),
             slot_pending_cond_tasks: Arc::new(slot_pending_cond_tasks),
+            cond_instances_to_spawn: Arc::new(cond_instances_to_spawn),
             slot_states: Arc::new(RwLock::new(vec![SlotState::Inactive; slots])),
             last_slot_assigned: Arc::new(AtomicUsize::new(0)),
             slot_priority_enabled,
@@ -294,6 +312,8 @@ impl SynRt {
             streams_receive_counter: Arc::new(AtomicUsize::new(0)),
             // Initialize packet completion flags to false for all slots
             slot_packet_complete: Arc::new((0..slots).map(|_| AtomicBool::new(false)).collect()),
+            // Initialize in-flight batch processing counter to 0 for all slots
+            slot_processing_count: Arc::new((0..slots).map(|_| AtomicUsize::new(0)).collect()),
         });
 
         SynRt { shared }
@@ -670,8 +690,8 @@ impl SynRt {
             // Poll packet channels if:
             // 1. Receivers are still active (!receive_finished), OR
             // 2. Receivers finished but channels may still have queued packets (!packet_channels_drained)
-            let should_poll_packets =
-                !shared.receive_finished.load(Ordering::SeqCst) || !packet_channels_drained;
+            let should_poll_packets = thread_id == 0
+                && (!shared.receive_finished.load(Ordering::SeqCst) || !packet_channels_drained);
 
             if should_poll_packets {
                 if let Some(network_config) = network_config_opt.as_ref() {
@@ -793,14 +813,14 @@ impl SynRt {
                             continue;
                         }
 
-                        // Continue to resolution if slot is active
-                        if is_slot_active(&shared, node_info.slot) {
-                            print_debug(|| {
-                                format!(
-                                    "Thread {:?} -- Processing packet for slot {} (stream {}) with packet index {}",
-                                    thread_id, node_info.slot, new_stream_opt.unwrap(), node_info.index
-                                )
-                            });
+                        // CRITICAL FIX #3: Double-checked locking to prevent TOCTOU race
+                        // Check slot state atomically while holding lock to ensure decision is valid
+                        let slot_is_active = {
+                            let states = shared.slot_states.read();
+                            states[node_info.slot] == SlotState::Active
+                        };
+
+                        if slot_is_active {
                             let info_res = (node_info.clone(), packet_cm);
 
                             let start_ns_pkt = shared.base_instant.elapsed().as_nanos();
@@ -825,12 +845,6 @@ impl SynRt {
                                 tb.add_task_time(thread_slot, "Batch Resolution", usize::MAX, dur);
                             };
                         } else {
-                            print_debug(|| {
-                                format!(
-                                    "Thread {:?} --Received packet for slot {} (stream {}) with packet index {} -- Buffering",
-                                    thread_id, node_info.slot, new_stream_opt.unwrap(), node_info.index
-                                )
-                            });
                             let mut slot_buffers = shared.slot_buffers.write();
                             slot_buffers[node_info.slot]
                                 .push((node_info.clone(), packet_cm.clone()));
@@ -914,8 +928,7 @@ impl SynRt {
                 }
             }
 
-            if !shared.first_packet_received.load(Ordering::SeqCst) {
-                std::hint::spin_loop();
+            if should_poll_packets {
                 continue;
             }
 
@@ -988,28 +1001,26 @@ impl SynRt {
                 }
             }
 
-            if packets_received || !empty_batch {
-                let start_proc = if let Some(tb) = &shared.time_buffer {
-                    tb.measure_time()
-                } else {
-                    TimingMethod::Instant(Instant::now())
-                };
-                // Check slots for completion
-                Self::check_slots(
-                    &shared,
-                    &mut stream_slot_activity,
-                    thread_id,
-                    thread_core,
-                    thread_slot,
-                    &cond_indexes,
-                );
-                if let Some(tb) = &shared.time_buffer {
-                    let end_proc = tb.measure_time();
-                    let dur = tb.measure_duration(start_proc, end_proc);
-                    tb.add_task_time(thread_slot, "Slot Check", usize::MAX, dur);
-                }
-                wait_start_ns = Some(shared.base_instant.elapsed().as_nanos());
+            let start_proc = if let Some(tb) = &shared.time_buffer {
+                tb.measure_time()
+            } else {
+                TimingMethod::Instant(Instant::now())
+            };
+            // Check slots for completion
+            Self::check_slots(
+                &shared,
+                &mut stream_slot_activity,
+                thread_id,
+                thread_core,
+                thread_slot,
+                &cond_indexes,
+            );
+            if let Some(tb) = &shared.time_buffer {
+                let end_proc = tb.measure_time();
+                let dur = tb.measure_duration(start_proc, end_proc);
+                tb.add_task_time(thread_slot, "Slot Check", usize::MAX, dur);
             }
+            wait_start_ns = Some(shared.base_instant.elapsed().as_nanos());
 
             packets_received = false;
 
@@ -1049,6 +1060,19 @@ impl SynRt {
         } else {
             TimingMethod::Instant(Instant::now())
         };
+
+        // CRITICAL FIX #2: Track which slots are being processed to increment processing_count
+        // This prevents completion detection from triggering while we're still processing tasks
+        let mut slots_in_batch: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for (node_info, _) in &batch {
+            slots_in_batch.insert(node_info.slot);
+        }
+
+        // Increment processing_count for all slots in this batch BEFORE any processing
+        // This ensures completion check sees processing_count > 0 and waits
+        for &slot in &slots_in_batch {
+            shared.slot_processing_count[slot].fetch_add(1, Ordering::SeqCst);
+        }
 
         // Store results and decrement atomics
         // This phase must be sequential due to ID function side effects
@@ -1147,6 +1171,19 @@ impl SynRt {
 
             // Process each unique successor ONCE using optimized per-node decrements
             for (succ_node_id, has_cond) in unique_successors {
+                // Optimization: Skip condition evaluation if all instances already spawned
+                if has_cond {
+                    let remaining_spawns = shared.cond_instances_to_spawn[node_info.slot]
+                        [succ_node_id]
+                        .load(Ordering::SeqCst);
+
+                    if remaining_spawns == 0 {
+                        // All instances already spawned, skip condition evaluation entirely
+                        let succ_cache = &shared.node_cache[succ_node_id];
+                        continue; // Skip to next successor
+                    }
+                }
+
                 // Call the new optimized method that decrements once and returns all ready indices
                 let ready_indices = shared
                     .resolution_state
@@ -1183,6 +1220,18 @@ impl SynRt {
                         if condition_passed {
                             nodes_to_schedule.push(succ_info.clone());
                             *nodes_sent += 1;
+
+                            // Decrement spawn counter - one less instance to spawn for this node
+                            let prev_spawns = shared.cond_instances_to_spawn[node_info.slot]
+                                [succ_id]
+                                .fetch_sub(1, Ordering::Release);
+
+                            print_debug(|| {
+                                format!(
+                                    "Condition passed for node {} ({}) index {}: remaining spawns {} -> {}",
+                                    succ_id, succ_cache.name, succ_info.index, prev_spawns, prev_spawns - 1
+                                )
+                            });
                         } else {
                             // Condition failed - restore dependency to prevent zombie state
                             shared.resolution_state.increment_dependency(&succ_info);
@@ -1233,6 +1282,13 @@ impl SynRt {
                 index: 0,
             });
         }
+
+        // CRITICAL FIX #2 (continued): Decrement processing_count AFTER all successor processing
+        // This allows completion detection to proceed once this thread has finished all work
+        // MUST use SeqCst to ensure ordering: successors processed → count decremented → completion check sees 0
+        for &slot in &slots_in_batch {
+            shared.slot_processing_count[slot].fetch_sub(1, Ordering::SeqCst);
+        }
     }
 
     fn check_slots(
@@ -1263,10 +1319,13 @@ impl SynRt {
             // Check if all nodes in this slot have been processed (O(1) lock-free)
             // Phase 1.2 optimization: Use aggregated counters instead of O(N×F) scan
             // Must check BOTH regular tasks AND condition tasks for complete slot processing
+            // CRITICAL FIX #2: Also require processing_count == 0 to ensure no threads are mid-processing
             let pending_regular = shared.slot_pending_tasks[proc_slot].load(Ordering::SeqCst);
             let pending_cond = shared.slot_pending_cond_tasks[proc_slot].load(Ordering::SeqCst);
+            let processing_count = shared.slot_processing_count[proc_slot].load(Ordering::SeqCst);
 
-            let all_nodes_processed = pending_regular == 0 && pending_cond == 0;
+            let all_nodes_processed =
+                pending_regular == 0 && pending_cond == 0 && processing_count == 0;
 
             if all_nodes_processed {
                 // Atomically claim ownership of this slot's completion.
@@ -1342,6 +1401,19 @@ impl SynRt {
                     )
                 });
 
+                // CRITICAL FIX #2 (continued): Reset in-flight processing counter for next stream
+                // Must be 0 before new stream starts processing, otherwise completion detection will wait forever
+                shared.slot_processing_count[proc_slot].store(0, Ordering::SeqCst);
+
+                // Phase 1.3: Reset condition spawn counters for next stream
+                // Each condition node starts with its full factor count available to spawn
+                for (node_idx, node_cache_entry) in shared.node_cache.iter().enumerate() {
+                    if node_cache_entry.is_condition {
+                        shared.cond_instances_to_spawn[proc_slot][node_idx]
+                            .store(node_cache_entry.factor, Ordering::SeqCst);
+                    }
+                }
+
                 // Clear nodes_sent_to_queue for this slot - MUST happen before new nodes spawn
                 shared.resolution_state.clear_slot_sent_flags(proc_slot);
 
@@ -1374,7 +1446,7 @@ impl SynRt {
                 };
 
                 // Track whether we activated a buffering slot (for restart decision below)
-                let buffering_slot_was_activated = activated_slot_info.is_some();
+                let _buffering_slot_was_activated = activated_slot_info.is_some();
 
                 // Process activated slot: spawn initial nodes AND process buffered packets
                 // CRITICAL: Initial nodes must be spawned BEFORE processing buffered packets

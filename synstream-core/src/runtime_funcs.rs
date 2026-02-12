@@ -354,6 +354,11 @@ pub struct SharedData {
     // slot_pending_cond_tasks[slot] tracks total pending condition tasks for the slot
     pub slot_pending_cond_tasks: Arc<Vec<AtomicUsize>>,
 
+    // Condition node spawn tracking - optimization to skip evaluation when all instances spawned
+    // cond_instances_to_spawn[slot][node_id] tracks remaining instances to spawn per condition node
+    // Decremented when condition passes and task is spawned. When reaches 0, skip further evaluation.
+    pub cond_instances_to_spawn: Arc<Vec<Vec<AtomicUsize>>>,
+
     // Slot priority processing state
     pub slot_states: Arc<RwLock<Vec<SlotState>>>,
     pub last_slot_assigned: Arc<AtomicUsize>,
@@ -380,6 +385,12 @@ pub struct SharedData {
     /// Per-slot packet completion flags - ensures exactly-once completion semantics
     /// Prevents multiple threads from detecting completion for the same stream
     pub slot_packet_complete: Arc<Vec<AtomicBool>>,
+
+    /// Per-slot in-flight batch processing counter - prevents premature slot completion
+    /// Incremented when batch processing starts for a slot, decremented after ALL successor processing
+    /// Completion requires: pending_tasks==0 AND pending_cond==0 AND processing_count==0
+    /// CRITICAL: Must decrement LAST (after successor processing) to prevent state reset during processing
+    pub slot_processing_count: Arc<Vec<AtomicUsize>>,
 }
 
 #[inline(always)]
@@ -729,10 +740,12 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
     if slot_states[last_slot_assigned] == SlotState::Inactive {
         slot_states[last_slot_assigned] = SlotState::Active; // Mark slot as active immediately
         running_streams.push((stream, last_slot_assigned));
-        println!(
-            "Assigned stream {} to slot {} (Inactive) -> Active (last assigned)",
-            stream, last_slot_assigned
-        );
+        print_debug(|| {
+            format!(
+                "Assigned stream {} to slot {} (Inactive) -> Active (last assigned)",
+                stream, last_slot_assigned
+            )
+        });
         drop(running_streams); // Release lock before returning
 
         // Start timing for the slot immediately upon assignment
@@ -750,10 +763,12 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
             *state = SlotState::Buffering; // Mark slot as Buffering
             running_streams.push((stream, slot_id));
             shared.last_slot_assigned.store(slot_id, Ordering::SeqCst);
-            println!(
-                "Assigned stream {} to slot {} (Inactive) -> Buffering",
-                stream, slot_id
-            );
+            print_debug(|| {
+                format!(
+                    "Assigned stream {} to slot {} (Inactive) -> Buffering",
+                    stream, slot_id
+                )
+            });
             drop(running_streams); // Release lock before returning
             return (slot_id, false); // Assigned but Buffering, not Active
         }
@@ -1070,26 +1085,29 @@ pub fn activate_next_slot(
         return None;
     }
 
-    // CRITICAL: Hold slot_states lock while also acquiring slot_buffers lock
-    // This prevents race with try_activate_on_assignment()
+    // FIX: Acquire locks in the correct order (A -> B) to avoid deadlock
+    // 1. Acquire running_streams (Read) FIRST
+    let running_streams = shared.running_streams.read();
+
+    // 2. Then acquire slot_states (Write)
     let mut states = shared.slot_states.write();
 
     // Find and activate next buffering slot in round-robin order
-    // CRITICAL: Activate only ONE slot at a time (strict round-robin)
     let activated_slot = if let Some(completed) = completing_slot {
-        let running_streams = shared.running_streams.read();
         let mut found_slot = None;
+        // We can safely iterate running_streams while holding the lock
         for (stream, slot) in running_streams.iter() {
             if states[*slot] == SlotState::Buffering {
                 states[*slot] = SlotState::Active;
-                // set last_assigned and running_streams
                 shared.last_slot_assigned.store(*slot, Ordering::SeqCst);
-                println!(
-                    "Round-Robin: Activated slot {} for stream {} after completing slot {}",
-                    slot, stream, completed
-                );
+                print_debug(|| {
+                    format!(
+                        "Round-Robin: Activated slot {} for stream {} after completing slot {}",
+                        slot, stream, completed
+                    )
+                });
                 found_slot = Some(*slot);
-                break; // Activate only ONE slot per completion (Issue C fix)
+                break; // Activate only ONE slot per completion
             }
         }
         found_slot
@@ -1098,7 +1116,6 @@ pub fn activate_next_slot(
     };
 
     // ATOMIC OPERATION: Retrieve buffered nodes while still holding slot_states lock
-    // This prevents race with try_activate_on_assignment()
     if let Some(slot_id) = activated_slot {
         let mut slot_buffers = shared.slot_buffers.write();
         let buffered = std::mem::take(&mut slot_buffers[slot_id]);
@@ -1106,15 +1123,17 @@ pub fn activate_next_slot(
         // Drop locks in LIFO order
         drop(slot_buffers);
         drop(states);
+        drop(running_streams); // Release the first lock last
 
-        // Start timing for the slot immediately upon assignment
+        // Start timing for the slot
         if let Some(tb) = &shared.time_buffer {
             tb.start_slot_processing(slot_id);
         }
 
-        Some((slot_id, buffered)) // Return (slot_id, buffered_nodes) for caller to spawn initial nodes
+        Some((slot_id, buffered))
     } else {
         drop(states);
+        drop(running_streams);
         None
     }
 }
@@ -1217,11 +1236,6 @@ pub fn collect_successors_for_node(
                 shared.remaining_nodes[node_info.slot][succ_id_to_rem_idx].load(Ordering::SeqCst)
             }
         };
-
-        // Skip successors that already have no remaining dependencies
-        if remaining == 0 {
-            continue;
-        }
 
         let succ_factor = succ_cache.factor;
         let node_factor = node_cache_entry.factor;
