@@ -669,12 +669,12 @@ impl SynRt {
         let network_config_opt = shared.graph.network_config();
         // Track start of idle/wait periods so we can record waiting time
         let mut wait_start_ns: Option<u128> = None;
+        // Minimum wait duration (in nanoseconds) to record - reduces record spam
+        // Only record wait periods longer than 100μs to avoid thousands of tiny records
+        const MIN_WAIT_RECORD_NS: u128 = 100_000; // 100μs
 
         let receive_timeout = Duration::from_micros(shared.batch_timeout_us);
         let mut packets_received: bool = false;
-
-        // Track whether we've fully drained all packet channels after receive_finished
-        let mut packet_channels_drained = false;
 
         // Process completed nodes with dynamic batching from scheduler
         loop {
@@ -689,26 +689,17 @@ impl SynRt {
 
             // Poll packet channels if:
             // 1. Receivers are still active (!receive_finished), OR
-            // 2. Receivers finished but channels may still have queued packets (!packet_channels_drained)
-            let should_poll_packets = thread_id == 0
-                && (!shared.receive_finished.load(Ordering::SeqCst) || !packet_channels_drained);
+            let should_poll_packets =
+                thread_id == 0 && !shared.receive_finished.load(Ordering::SeqCst);
 
             if should_poll_packets {
                 if let Some(network_config) = network_config_opt.as_ref() {
                     let stream_packets = network_config.stream_packets;
                     let packet_process_func = network_config.extract_packet_func.unwrap();
 
-                    // Poll all per-thread packet channels (non-blocking)
-                    let packets = recv_batch(
-                        &shared.packet_receiver,
-                        shared.target_batch_size,
-                        receive_timeout,
-                    );
-
-                    // If receive_finished and no packets found, channels are fully drained
-                    if shared.receive_finished.load(Ordering::SeqCst) && packets.is_empty() {
-                        packet_channels_drained = true;
-                    }
+                    // Drain all available packets from channel (non-blocking)
+                    // Using try_iter() to get all immediately available packets without batching limit
+                    let packets: Vec<PacketMessage> = shared.packet_receiver.try_iter().collect();
 
                     for packet_msg in packets {
                         let receiver_core_id = packet_msg.receiver_core_id;
@@ -959,16 +950,25 @@ impl SynRt {
                         let current_stream = shared.stream_complete_counter.load(Ordering::SeqCst);
                         if should_record_slot(&shared, current_stream) {
                             let end_ns = shared.base_instant.elapsed().as_nanos();
-                            let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
-                            submit_record(Record {
-                                slot: thread_slot,
-                                job_id,
-                                start_ns: start_ns_wait,
-                                end_ns,
-                                worker: thread_core,
-                                task_id: IdType::MAX - 2,
-                                index: 0,
-                            });
+                            let wait_duration = end_ns.saturating_sub(start_ns_wait);
+
+                            // Only submit record if wait time exceeds minimum threshold
+                            // This prevents thousands of tiny records for short idle periods
+                            if wait_duration >= MIN_WAIT_RECORD_NS {
+                                let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
+                                submit_record(Record {
+                                    slot: thread_slot,
+                                    job_id,
+                                    start_ns: start_ns_wait,
+                                    end_ns,
+                                    worker: thread_core,
+                                    task_id: IdType::MAX - 2,
+                                    index: 0,
+                                });
+                            } else {
+                                // Wait period too short - put the start time back to continue accumulating
+                                wait_start_ns = Some(start_ns_wait);
+                            }
                         }
                     }
                 }
