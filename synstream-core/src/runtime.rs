@@ -1050,11 +1050,6 @@ impl SynRt {
         if batch.is_empty() {
             return;
         }
-        let start_time = if let Some(tb) = &shared.time_buffer {
-            tb.measure_time()
-        } else {
-            TimingMethod::Instant(Instant::now())
-        };
 
         // CRITICAL FIX #2: Track which slots are being processed to increment processing_count
         // This prevents completion detection from triggering while we're still processing tasks
@@ -1243,17 +1238,6 @@ impl SynRt {
             }
             // Schedule all ready nodes collected from this completed node
             Self::preparation(&shared, &nodes_to_schedule, thread_core, thread_slot);
-        }
-
-        // Only record timing/metrics when actual work was performed
-        if let Some(tb) = &shared.time_buffer {
-            let end_time = if let Some(tb) = &shared.time_buffer {
-                tb.measure_time()
-            } else {
-                TimingMethod::Instant(Instant::now())
-            };
-            let duration = tb.measure_duration(start_time, end_time);
-            tb.add_task_time(thread_slot, &format!("Resolution"), usize::MAX, duration);
         }
 
         // Lock-free recording via per-worker channel

@@ -1247,17 +1247,12 @@ pub fn collect_successors_for_node(
 
         // Determine which indices of the successor to create
         let succ_indexes = {
-            if succ_factor == node_factor && pred_count <= 1 {
+            if succ_factor == node_factor || pred_count <= 1 {
                 // Single instance case: exact index mapping
                 vec![node_info.index]
-            } else if !has_condition {
-                // Non-condition nodes: use max of succ_factor and remaining
+            } else {
                 let num_indexes = std::cmp::max(succ_factor, remaining);
                 (0..num_indexes).collect::<Vec<_>>()
-            } else {
-                // Condition nodes: create all successor instances
-                // Conditions will filter correctly later
-                (0..succ_factor).collect::<Vec<_>>()
             }
         };
 
