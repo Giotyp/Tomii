@@ -301,7 +301,6 @@ impl SynRt {
             slot_priority_enabled,
             slot_buffers,
             // Network fields (empty vecs when no network_config)
-            first_packet_received: Arc::new(AtomicBool::new(false)),
             receive_finished: Arc::new(AtomicBool::new(false)),
             packet_sender,
             packet_receiver,
@@ -584,7 +583,7 @@ impl SynRt {
         if let Some(tb) = &shared.time_buffer {
             let end_time = tb.measure_time();
             let duration = tb.measure_duration(start_time, end_time);
-            tb.add_task_time(thread_slot, "Preparation Thread", usize::MAX, duration);
+            tb.add_task_time(thread_slot, "Preparation", usize::MAX, duration);
         }
 
         // Lock-free recording via per-worker channel
@@ -689,10 +688,10 @@ impl SynRt {
 
             // Poll packet channels if:
             // 1. Receivers are still active (!receive_finished), OR
-            let should_poll_packets =
+            let mut should_poll_packets =
                 thread_id == 0 && !shared.receive_finished.load(Ordering::SeqCst);
 
-            if should_poll_packets {
+            while should_poll_packets {
                 if let Some(network_config) = network_config_opt.as_ref() {
                     let stream_packets = network_config.stream_packets;
                     let packet_process_func = network_config.extract_packet_func.unwrap();
@@ -700,12 +699,16 @@ impl SynRt {
                     // Drain all available packets from channel (non-blocking)
                     // Using try_iter() to get all immediately available packets without batching limit
                     let packets: Vec<PacketMessage> = shared.packet_receiver.try_iter().collect();
+                    let packet_rcv = if let Some(tb) = &shared.time_buffer {
+                        tb.measure_time()
+                    } else {
+                        TimingMethod::Instant(Instant::now())
+                    };
 
                     for packet_msg in packets {
                         let receiver_core_id = packet_msg.receiver_core_id;
                         let packet_timestamp = packet_msg.timestamp;
                         if let Some(tb) = &shared.time_buffer {
-                            let packet_rcv = tb.measure_time();
                             let dur = tb.measure_duration(
                                 TimingMethod::Instant(packet_msg.timestamp),
                                 packet_rcv.clone(),
@@ -789,7 +792,6 @@ impl SynRt {
                                 }
                             }
 
-                            // Use AcqRel ordering to synchronize with slot reset (Release store)
                             let packet_index = shared.slot_packet_counters[node_info.slot]
                                 .fetch_add(1, Ordering::SeqCst);
 
@@ -912,15 +914,8 @@ impl SynRt {
                             }
                         }
                     }
-
-                    if !shared.first_packet_received.load(Ordering::SeqCst) {
-                        shared.first_packet_received.store(true, Ordering::SeqCst);
-                    }
                 }
-            }
-
-            if should_poll_packets {
-                continue;
+                should_poll_packets = !shared.receive_finished.load(Ordering::SeqCst);
             }
 
             // Pull batch from lock-free queue with timeout
@@ -1258,12 +1253,7 @@ impl SynRt {
                 TimingMethod::Instant(Instant::now())
             };
             let duration = tb.measure_duration(start_time, end_time);
-            tb.add_task_time(
-                thread_slot,
-                &format!("Resolution Thread {}", thread_id),
-                usize::MAX,
-                duration,
-            );
+            tb.add_task_time(thread_slot, &format!("Resolution"), usize::MAX, duration);
         }
 
         // Lock-free recording via per-worker channel
