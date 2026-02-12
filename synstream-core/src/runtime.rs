@@ -587,8 +587,9 @@ impl SynRt {
         }
 
         // Lock-free recording via per-worker channel
-        let current_stream = shared.stream_complete_counter.load(Ordering::SeqCst);
-        if shared.async_recorder.is_some() && should_record_slot(&shared, current_stream) {
+        let should_record = shared.async_recorder.is_some() &&
+            nodes_to_schedule.iter().any(|n| should_record_slot(&shared, n.slot));
+        if should_record {
             let end_ns = shared.base_instant.elapsed().as_nanos();
             let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
             submit_record(Record {
@@ -846,7 +847,7 @@ impl SynRt {
 
                         packets_received = true;
 
-                        if shared.async_recorder.is_some() {
+                        if shared.async_recorder.is_some() && should_record_slot(&shared, node_info.slot) {
                             let receiver_slot = shared.slots + shared.system_threads;
                             let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
 
@@ -940,30 +941,27 @@ impl SynRt {
             let has_work = packets_received || !batch.is_empty();
             if !has_work {
                 if let Some(start_ns_wait) = wait_start_ns.take() {
-                    // Only record if recorder enabled and slot chosen for recording
+                    // Record all wait time regardless of stream filter (system overhead)
                     if shared.async_recorder.is_some() {
-                        let current_stream = shared.stream_complete_counter.load(Ordering::SeqCst);
-                        if should_record_slot(&shared, current_stream) {
-                            let end_ns = shared.base_instant.elapsed().as_nanos();
-                            let wait_duration = end_ns.saturating_sub(start_ns_wait);
+                        let end_ns = shared.base_instant.elapsed().as_nanos();
+                        let wait_duration = end_ns.saturating_sub(start_ns_wait);
 
-                            // Only submit record if wait time exceeds minimum threshold
-                            // This prevents thousands of tiny records for short idle periods
-                            if wait_duration >= MIN_WAIT_RECORD_NS {
-                                let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
-                                submit_record(Record {
-                                    slot: thread_slot,
-                                    job_id,
-                                    start_ns: start_ns_wait,
-                                    end_ns,
-                                    worker: thread_core,
-                                    task_id: IdType::MAX - 2,
-                                    index: 0,
-                                });
-                            } else {
-                                // Wait period too short - put the start time back to continue accumulating
-                                wait_start_ns = Some(start_ns_wait);
-                            }
+                        // Only submit record if wait time exceeds minimum threshold
+                        // This prevents thousands of tiny records for short idle periods
+                        if wait_duration >= MIN_WAIT_RECORD_NS {
+                            let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
+                            submit_record(Record {
+                                slot: thread_slot,
+                                job_id,
+                                start_ns: start_ns_wait,
+                                end_ns,
+                                worker: thread_core,
+                                task_id: IdType::MAX - 2,
+                                index: 0,
+                            });
+                        } else {
+                            // Wait period too short - put the start time back to continue accumulating
+                            wait_start_ns = Some(start_ns_wait);
                         }
                     }
                 }
@@ -1241,8 +1239,9 @@ impl SynRt {
         }
 
         // Lock-free recording via per-worker channel
-        let current_stream = shared.stream_complete_counter.load(Ordering::SeqCst);
-        if shared.async_recorder.is_some() && should_record_slot(&shared, current_stream) {
+        let should_record = shared.async_recorder.is_some() &&
+            slots_in_batch.iter().any(|&slot| should_record_slot(&shared, slot));
+        if should_record {
             let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
             let end_ns = shared.base_instant.elapsed().as_nanos();
             submit_record(Record {
