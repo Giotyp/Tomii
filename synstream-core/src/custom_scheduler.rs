@@ -248,8 +248,6 @@ struct SharedWorkerState {
     async_recorder: Option<Arc<AsyncRecorder>>,
     /// Base instant for timing
     base_instant: Arc<Instant>,
-    /// Stream filter for recording
-    record_stream: Option<usize>,
     /// System core offset for recorder channel indexing (Bug 2 fix)
     system_core_offset: usize,
 }
@@ -392,7 +390,6 @@ pub struct CustomSchedulerBuilder {
     record: bool,
     external_recorder: Option<Arc<AsyncRecorder>>,
     base_instant: Instant,
-    record_stream: Option<usize>,
     worker_affinity: Option<crate::scheduler::WorkerAffinityConfig>,
 }
 
@@ -406,7 +403,6 @@ impl CustomSchedulerBuilder {
             record: false,
             external_recorder: None,
             base_instant: Instant::now(),
-            record_stream: None,
             worker_affinity: None,
         }
     }
@@ -463,12 +459,6 @@ impl CustomSchedulerBuilder {
     /// Set base instant for timing
     pub fn base_instant(mut self, instant: Instant) -> Self {
         self.base_instant = instant;
-        self
-    }
-
-    /// Set stream filter for recording
-    pub fn record_stream(mut self, stream: Option<usize>) -> Self {
-        self.record_stream = stream;
         self
     }
 
@@ -644,7 +634,6 @@ impl CustomSchedulerBuilder {
             pending_tasks: AtomicUsize::new(0),
             async_recorder,
             base_instant: Arc::new(self.base_instant),
-            record_stream: self.record_stream,
             system_core_offset,
         });
 
@@ -854,7 +843,7 @@ impl CustomScheduler {
     }
 
     /// Spawn a task with metadata for recording
-    pub fn spawn_with_meta<F>(&self, meta: Option<(IdType, usize, usize)>, task: F)
+    pub fn spawn_with_meta<F>(&self, meta: Option<crate::TaskMeta>, task: F)
     where
         F: FnOnce() + Send + 'static,
     {
@@ -862,32 +851,26 @@ impl CustomScheduler {
         let job_id = self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
         self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
 
-        let (task_id, slot, index) = meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN));
+        let (task_id, slot, index, should_record) =
+            meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN, false));
 
         let wrapped_task = move || {
             let start = shared.base_instant.elapsed().as_nanos();
             task();
             let end = shared.base_instant.elapsed().as_nanos();
 
-            // Record if enabled
-            if shared.async_recorder.is_some() {
-                let should_record = match shared.record_stream {
-                    None => true,
-                    Some(_target_stream) => true,
-                };
-
-                if should_record {
-                    let worker = WORKER_STATE.with(|s| s.get().core_id);
-                    submit_record(Record {
-                        slot,
-                        job_id,
-                        start_ns: start,
-                        end_ns: end,
-                        worker,
-                        task_id,
-                        index,
-                    });
-                }
+            // Record if enabled - should_record was pre-computed at spawn time
+            if shared.async_recorder.is_some() && should_record {
+                let worker = WORKER_STATE.with(|s| s.get().core_id);
+                submit_record(Record {
+                    slot,
+                    job_id,
+                    start_ns: start,
+                    end_ns: end,
+                    worker,
+                    task_id,
+                    index,
+                });
             }
 
             shared.pending_tasks.fetch_sub(1, Ordering::Relaxed);
@@ -903,7 +886,7 @@ impl CustomScheduler {
     pub fn spawn_with_meta_priority<F>(
         &self,
         priority: Priority,
-        meta: Option<(IdType, usize, usize)>,
+        meta: Option<crate::TaskMeta>,
         task: F,
     ) where
         F: FnOnce() + Send + 'static,
@@ -912,32 +895,26 @@ impl CustomScheduler {
         let job_id = self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
         self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
 
-        let (task_id, slot, index) = meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN));
+        let (task_id, slot, index, should_record) =
+            meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN, false));
 
         let wrapped_task = move || {
             let start = shared.base_instant.elapsed().as_nanos();
             task();
             let end = shared.base_instant.elapsed().as_nanos();
 
-            // Record if enabled
-            if shared.async_recorder.is_some() {
-                let should_record = match shared.record_stream {
-                    None => true,
-                    Some(_target_stream) => true,
-                };
-
-                if should_record {
-                    let worker = WORKER_STATE.with(|s| s.get().core_id);
-                    submit_record(Record {
-                        slot,
-                        job_id,
-                        start_ns: start,
-                        end_ns: end,
-                        worker,
-                        task_id,
-                        index,
-                    });
-                }
+            // Record if enabled - should_record was pre-computed at spawn time
+            if shared.async_recorder.is_some() && should_record {
+                let worker = WORKER_STATE.with(|s| s.get().core_id);
+                submit_record(Record {
+                    slot,
+                    job_id,
+                    start_ns: start,
+                    end_ns: end,
+                    worker,
+                    task_id,
+                    index,
+                });
             }
 
             shared.pending_tasks.fetch_sub(1, Ordering::Relaxed);
@@ -954,7 +931,7 @@ impl CustomScheduler {
         &self,
         group_id: usize,
         priority: Priority,
-        meta: Option<(IdType, usize, usize)>,
+        meta: Option<crate::TaskMeta>,
         task: F,
     ) where
         F: FnOnce() + Send + 'static,
@@ -964,32 +941,26 @@ impl CustomScheduler {
             let job_id = self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
             self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
 
-            let (task_id, slot, index) = meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN));
+            let (task_id, slot, index, should_record) =
+                meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN, false));
 
             let wrapped_task = move || {
                 let start = shared.base_instant.elapsed().as_nanos();
                 task();
                 let end = shared.base_instant.elapsed().as_nanos();
 
-                // Record if enabled
-                if shared.async_recorder.is_some() {
-                    let should_record = match shared.record_stream {
-                        None => true,
-                        Some(_target_stream) => true,
-                    };
-
-                    if should_record {
-                        let worker = WORKER_STATE.with(|s| s.get().core_id);
-                        submit_record(Record {
-                            slot,
-                            job_id,
-                            start_ns: start,
-                            end_ns: end,
-                            worker,
-                            task_id,
-                            index,
-                        });
-                    }
+                // Record if enabled - should_record was pre-computed at spawn time
+                if shared.async_recorder.is_some() && should_record {
+                    let worker = WORKER_STATE.with(|s| s.get().core_id);
+                    submit_record(Record {
+                        slot,
+                        job_id,
+                        start_ns: start,
+                        end_ns: end,
+                        worker,
+                        task_id,
+                        index,
+                    });
                 }
 
                 shared.pending_tasks.fetch_sub(1, Ordering::Relaxed);

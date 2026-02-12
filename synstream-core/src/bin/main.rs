@@ -292,7 +292,6 @@ pub fn run_graph(
         receiver_threads,
         batching_size,
         batching_limit,
-        record_stream,
         worker_affinity,
     );
 

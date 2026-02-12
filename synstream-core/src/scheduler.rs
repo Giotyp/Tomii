@@ -240,8 +240,6 @@ struct SchedulerBase {
     base_instant: Arc<Instant>,
     target_batch_size: usize,
     batch_timeout_us: u64,
-    // Stream-specific recording filter
-    record_stream: Option<usize>,
     // Phase 4: Worker utilization metrics (optional)
     worker_metrics: Option<Arc<WorkerMetrics>>,
 }
@@ -257,7 +255,6 @@ impl SchedulerBase {
         receiver_threads: usize,
         target_batch_size: usize,
         batch_timeout_us: u64,
-        record_stream: Option<usize>,
     ) -> Self {
         let total_recorders = workers + receiver_threads + system_threads;
         let async_recorder = if record {
@@ -307,7 +304,6 @@ impl SchedulerBase {
             base_instant: Arc::new(base_instant),
             target_batch_size,
             batch_timeout_us,
-            record_stream,
             worker_metrics,
         }
     }
@@ -364,7 +360,7 @@ impl SchedulerBase {
     }
 
     /// Common task spawning logic. `spawn_fn` handles the specific spawning (e.g., FIFO or work-stealing).
-    fn spawn_task_common<F, S>(&self, meta: Option<(IdType, usize, usize)>, task: F, spawn_fn: S)
+    fn spawn_task_common<F, S>(&self, meta: Option<crate::TaskMeta>, task: F, spawn_fn: S)
     where
         F: FnOnce() + Send + 'static,
         S: FnOnce(Box<dyn FnOnce() + Send + 'static>),
@@ -376,10 +372,10 @@ impl SchedulerBase {
         let completed = Arc::clone(&self.total_completed);
         let base = Arc::clone(&self.base_instant);
         let recorder_enabled = self.async_recorder.is_some();
-        let record_stream = self.record_stream;
         let metrics = self.worker_metrics.clone(); // Phase 4
 
-        let (task_id, slot, index) = meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN));
+        let (task_id, slot, index, should_record) =
+            meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN, false));
 
         let wrapped_task = move || {
             let worker = get_current_worker_id().unwrap_or(usize::MAX);
@@ -404,15 +400,7 @@ impl SchedulerBase {
             }
 
             // Lock-free recording via per-worker channel
-            // Check if we should record this slot based on stream filter
-            let should_record = match record_stream {
-                None => true, // Record all streams
-                Some(_target_stream) => {
-                    // Get current stream for this slot
-                    true
-                }
-            };
-
+            // should_record flag was pre-computed at spawn time based on stream filter
             if recorder_enabled && should_record {
                 submit_record(Record {
                     slot,
@@ -457,7 +445,6 @@ impl FifoScheduler {
         receiver_threads: usize,
         target_batch_size: usize,
         batch_timeout_us: u64,
-        record_stream: Option<usize>,
     ) -> Self {
         Self {
             base: SchedulerBase::new(
@@ -470,7 +457,6 @@ impl FifoScheduler {
                 receiver_threads,
                 target_batch_size,
                 batch_timeout_us,
-                record_stream,
             ),
         }
     }
@@ -482,7 +468,7 @@ impl FifoScheduler {
         self.spawn_task_with_meta(None, task)
     }
 
-    fn spawn_task_with_meta<F>(&self, meta: Option<(IdType, usize, usize)>, task: F)
+    fn spawn_task_with_meta<F>(&self, meta: Option<crate::TaskMeta>, task: F)
     where
         F: FnOnce() + Send + 'static,
     {
@@ -507,7 +493,6 @@ impl WorkStealScheduler {
         receiver_threads: usize,
         target_batch_size: usize,
         batch_timeout_us: u64,
-        record_stream: Option<usize>,
     ) -> Self {
         Self {
             base: SchedulerBase::new(
@@ -520,7 +505,6 @@ impl WorkStealScheduler {
                 receiver_threads,
                 target_batch_size,
                 batch_timeout_us,
-                record_stream,
             ),
         }
     }
@@ -532,7 +516,7 @@ impl WorkStealScheduler {
         self.spawn_task_with_meta(None, task)
     }
 
-    fn spawn_task_with_meta<F>(&self, meta: Option<(IdType, usize, usize)>, task: F)
+    fn spawn_task_with_meta<F>(&self, meta: Option<crate::TaskMeta>, task: F)
     where
         F: FnOnce() + Send + 'static,
     {
@@ -559,7 +543,7 @@ impl SchedulerImpl {
         }
     }
 
-    pub fn spawn_task_with_meta<F>(&self, meta: Option<(IdType, usize, usize)>, task: F)
+    pub fn spawn_task_with_meta<F>(&self, meta: Option<crate::TaskMeta>, task: F)
     where
         F: FnOnce() + Send + 'static,
     {
@@ -574,7 +558,7 @@ impl SchedulerImpl {
     pub fn spawn_task_with_meta_priority<F>(
         &self,
         priority: crate::custom_scheduler::Priority,
-        meta: Option<(IdType, usize, usize)>,
+        meta: Option<crate::TaskMeta>,
         task: F,
     ) where
         F: FnOnce() + Send + 'static,
@@ -593,7 +577,7 @@ impl SchedulerImpl {
         &self,
         group_id: usize,
         priority: crate::custom_scheduler::Priority,
-        meta: Option<(IdType, usize, usize)>,
+        meta: Option<crate::TaskMeta>,
         task: F,
     ) where
         F: FnOnce() + Send + 'static,
@@ -864,7 +848,6 @@ pub fn create_scheduler(
     receiver_threads: usize,
     target_batch_size: usize,
     batch_timeout_us: u64,
-    record_stream: Option<usize>,
     worker_affinity: Option<WorkerAffinityConfig>,
 ) -> SchedulerImpl {
     match scheduler_type {
@@ -878,7 +861,6 @@ pub fn create_scheduler(
             receiver_threads,
             target_batch_size,
             batch_timeout_us,
-            record_stream,
         )),
         SchedulerType::WorkStealing => SchedulerImpl::WorkStealing(WorkStealScheduler::new(
             core_offset,
@@ -890,7 +872,6 @@ pub fn create_scheduler(
             receiver_threads,
             target_batch_size,
             batch_timeout_us,
-            record_stream,
         )),
         SchedulerType::Custom => {
             let mut builder = crate::custom_scheduler::CustomScheduler::builder()
@@ -898,8 +879,7 @@ pub fn create_scheduler(
                 .system_threads(system_threads)
                 .receiver_threads(receiver_threads)
                 .record(record)
-                .base_instant(base_instant)
-                .record_stream(record_stream);
+                .base_instant(base_instant);
 
             // Build worker groups based on affinity configuration
             //

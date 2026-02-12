@@ -539,8 +539,11 @@ pub fn send_to_scheduler(
         let time_buf = shared.time_buffer.clone();
         let shared_clone = Arc::clone(shared);
 
+        // Determine if we should record this task based on stream filter
+        let should_record = should_record_slot(shared, node_info.slot);
+
         // Spawn task - route to network pool if requested
-        let meta_data = (node_info.id, node_info.slot, node_info.index);
+        let meta_data = (node_info.id, node_info.slot, node_info.index, should_record);
         let node_info = node_info.clone();
         let pre_built_args = pre_built_args_vec[i].clone();
         // Capture spawn timestamp before any processing
