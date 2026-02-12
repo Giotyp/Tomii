@@ -91,20 +91,31 @@ impl GraphStruct for Graph {
 
     fn dependency_count_vec(&self) -> Vec<usize> {
         // Return a vector with the dependency count for each node
+        // For nodes with group_size, global predecessors (no group_by) have their
+        // contribution multiplied by num_groups, since each group counter needs
+        // the full set of decrements from global predecessors.
         let mut dep_count_vec: Vec<usize> = Vec::new();
 
         for node in &self.nodes {
             let mut dep_count = 0;
-            // Phase 1.3: Use HashSet for O(1) duplicate checking instead of O(A×P) Vec::contains
             let mut preds_seen = HashSet::new();
+
+            let num_groups = match node.group_size {
+                Some(gs) if gs > 0 && gs < node.factor => node.factor / gs,
+                _ => 1,
+            };
 
             // First check barriers - they take precedence for dependency counting
             for arg in &node.args {
                 if arg.type_.is_barrier() {
                     if let Some(pred) = &arg.predecessor {
-                        // O(1) insert returns true if newly inserted
                         if preds_seen.insert(pred.id) {
-                            dep_count += pred.indexes.len();
+                            if num_groups > 1 && pred.group_by.is_none() {
+                                // Global barrier: each group needs all deps
+                                dep_count += pred.indexes.len() * num_groups;
+                            } else {
+                                dep_count += pred.indexes.len();
+                            }
                         }
                     }
                 }
@@ -114,7 +125,6 @@ impl GraphStruct for Graph {
             for arg in &node.args {
                 if !arg.type_.is_barrier() {
                     if let Some(pred) = &arg.predecessor {
-                        // O(1) insert returns true if newly inserted
                         if preds_seen.insert(pred.id) {
                             dep_count += pred.indexes.len();
                         }

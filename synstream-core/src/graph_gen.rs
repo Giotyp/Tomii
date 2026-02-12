@@ -19,6 +19,7 @@ fn parse_arg(
     init_objects: &[Vec<CmTypes>],
     obj_id_map: &RapidHashMap<String, usize>,
     name_to_id: &RapidHashMap<String, IdType>,
+    workers: usize,
 ) -> Arg {
     let arg_value_opt = arg_json.value.as_deref();
 
@@ -27,7 +28,7 @@ fn parse_arg(
     let predecessor: Option<Predecessor> = arg_json
         .predecessor
         .as_ref()
-        .map(|pred_json| parse_predecessor(pred_json, init_objects, obj_id_map, name_to_id));
+        .map(|pred_json| parse_predecessor(pred_json, init_objects, obj_id_map, name_to_id, workers));
 
     let arg_cmtype = {
         let type_json = &arg_json.type_;
@@ -57,6 +58,7 @@ fn parse_predecessor(
     init_objects: &[Vec<CmTypes>],
     obj_id_map: &RapidHashMap<String, usize>,
     name_to_id: &RapidHashMap<String, IdType>,
+    workers: usize,
 ) -> Predecessor {
     let pred_name = &pred_json.name;
     let pred_id = *name_to_id.get(pred_name).unwrap();
@@ -75,7 +77,19 @@ fn parse_predecessor(
     // 2nd case: range indexes '-' separated
     else if indexes.contains('-') {
         let range: Vec<&str> = indexes.split("-").collect();
-        let start = range[0].parse::<isize>().unwrap();
+        let start = {
+            match range[0].parse::<isize>() {
+                Ok(val) => val,
+                Err(_) => {
+                    if let Some(obj_id) = obj_id_map.get(range[0]) {
+                        let ref_val = &init_objects[*obj_id];
+                        ref_val[0].valid_number_to_usize().unwrap() as isize
+                    } else {
+                        panic!("Invalid range start in predecessor: {}", indexes);
+                    }
+                }
+            }
+        };
         let end = {
             match range[1].parse::<isize>() {
                 Ok(end) => end + 1,
@@ -94,13 +108,29 @@ fn parse_predecessor(
             index_vec.push(i);
         }
     } else {
-        // single predecessor
-        index_vec.push(indexes.parse::<isize>().unwrap());
+        // single predecessor - try literal integer, then reference
+        match indexes.parse::<isize>() {
+            Ok(val) => index_vec.push(val),
+            Err(_) => {
+                if let Some(obj_id) = obj_id_map.get(indexes) {
+                    let ref_val = &init_objects[*obj_id];
+                    index_vec.push(ref_val[0].valid_number_to_usize().unwrap() as isize);
+                } else {
+                    panic!("Invalid single index in predecessor: {}", indexes);
+                }
+            }
+        }
     }
+
+    // Resolve group_by if present
+    let group_by = pred_json.group_by.as_ref().map(|gb| {
+        gb.resolve(init_objects, obj_id_map, workers)
+    });
 
     Predecessor {
         id: pred_id,
         indexes: index_vec,
+        group_by,
     }
 }
 
@@ -186,6 +216,11 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
         let extract_packet_func = get_func(&network_config_json.extract_packet_func);
         // Resolve id_function to function pointer
         let id_function = get_func(&network_config_json.id_function);
+        // Resolve optional index_function to function pointer
+        let index_function = network_config_json
+            .index_function
+            .as_ref()
+            .and_then(|name| get_func(name));
 
         let graph_network_config = GraphNetworkConfig {
             socket_type,
@@ -197,6 +232,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             start_port,
             extract_packet_func,
             id_function,
+            index_function,
         };
 
         println!("Network configuration parsed:");
@@ -229,6 +265,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             id: node_count as IdType,
             loop_args: None,
             factor: network_config.stream_packets,
+            group_size: None,
             func_ptr: None,
             loop_: None,
             condition: None,
@@ -243,12 +280,12 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
         let mut loop_args_vec = Vec::new();
 
         for arg_json in &node_json.args {
-            args.push(parse_arg(arg_json, &init_vec, &obj_id_map, &name_to_id));
+            args.push(parse_arg(arg_json, &init_vec, &obj_id_map, &name_to_id, workers));
         }
 
         if let Some(loop_args_json) = &node_json.loop_args {
             for arg_json in loop_args_json {
-                loop_args_vec.push(parse_arg(arg_json, &init_vec, &obj_id_map, &name_to_id));
+                loop_args_vec.push(parse_arg(arg_json, &init_vec, &obj_id_map, &name_to_id, workers));
             }
         }
 
@@ -266,6 +303,10 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             Some(factor) => factor.resolve(&init_vec, &obj_id_map, workers),
             None => 1,
         };
+
+        let group_size = node_json.group_size.as_ref().map(|gs| {
+            gs.resolve(&init_vec, &obj_id_map, workers)
+        });
 
         let loop_ = node_json.loop_.as_ref().map(|loop_json| Loop {
             name: loop_json.name.clone(),
@@ -294,7 +335,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             // Parse condition args
             let mut cond_args = Vec::new();
             for arg_json in &cond_json.args {
-                cond_args.push(parse_arg(arg_json, &init_vec, &obj_id_map, &name_to_id));
+                cond_args.push(parse_arg(arg_json, &init_vec, &obj_id_map, &name_to_id, workers));
             }
 
             Some(NodeCondition {
@@ -329,6 +370,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             id: node_count as IdType,
             loop_args,
             factor,
+            group_size,
             func_ptr,
             loop_,
             condition,
@@ -342,7 +384,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
     for post_node_json in graph_parsed.post_nodes.unwrap_or_default().iter() {
         let mut args = Vec::new();
         for arg_json in &post_node_json.args {
-            args.push(parse_arg(arg_json, &init_vec, &obj_id_map, &name_to_id));
+            args.push(parse_arg(arg_json, &init_vec, &obj_id_map, &name_to_id, workers));
         }
 
         let func_ptr = get_func(&post_node_json.function_name);
@@ -362,6 +404,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             id: post_node_count,
             loop_args: None,
             factor,
+            group_size: None,
             func_ptr,
             loop_: None,
             condition: None,

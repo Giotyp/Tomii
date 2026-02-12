@@ -24,6 +24,7 @@ pub struct NetworkConfigJson {
     pub start_port: Factor,
     pub extract_packet_func: String,
     pub id_function: String,
+    pub index_function: Option<String>,
 }
 
 fn default_buffer_depth() -> usize {
@@ -52,6 +53,7 @@ pub struct NodeConditionJson {
 pub struct PredJson {
     pub name: String,
     pub indexes: String,
+    pub group_by: Option<Factor>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,6 +80,7 @@ pub struct NodeJson {
     pub loop_: Option<LoopJson>,
     pub loop_args: Option<Vec<ArgJson>>,
     pub args: Vec<ArgJson>,
+    pub group_size: Option<Factor>,
     pub condition: Option<NodeConditionJson>,
     #[serde(default)]
     pub priority: Option<String>,

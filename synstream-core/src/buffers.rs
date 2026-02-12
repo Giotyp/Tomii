@@ -488,11 +488,13 @@ impl Debug for AtomicVecMap {
 }
 
 /// Per-node dependency entry for threshold-based spawning
-/// Replaces per-instance tracking with unified per-node tracking
+/// Supports per-group counters for fine-grained barrier dependencies.
+/// When num_groups == 1, behavior is identical to the original single-counter design.
 #[derive(Debug)]
 pub struct NodeDependencyEntry {
-    /// Single atomic counter for all instances of this node
-    remaining_deps: AtomicUsize,
+    /// Per-group atomic counters (length = num_groups)
+    /// For nodes without group_size, num_groups=1 → single counter (backward compatible)
+    remaining_deps: Vec<AtomicUsize>,
 
     /// Bitmap for sent tracking (prevents double-spawn)
     instances_sent: Vec<AtomicBool>,
@@ -500,7 +502,16 @@ pub struct NodeDependencyEntry {
     /// Cached metadata (avoid lookups)
     factor: usize,
 
-    /// Dependencies per instance
+    /// Instances per group
+    group_size: usize,
+
+    /// Number of groups (= factor / group_size, 1 if no groups)
+    num_groups: usize,
+
+    /// Dependencies per group counter
+    deps_per_group: usize,
+
+    /// Dependencies per instance (within a group for grouped nodes)
     deps_per_instance: usize,
 
     /// Whether this node has a barrier dependency
@@ -509,8 +520,21 @@ pub struct NodeDependencyEntry {
 
 impl NodeDependencyEntry {
     /// Create a new dependency entry for a node in a slot
-    pub fn new(factor: usize, total_deps: usize, has_barrier: bool) -> Self {
-        let deps_per_instance = if factor > 0 { total_deps / factor } else { 0 };
+    /// group_size_opt: None or Some(factor) → single group (backward compatible)
+    ///                 Some(gs) where gs < factor → multiple groups
+    pub fn new(factor: usize, total_deps: usize, has_barrier: bool, group_size_opt: Option<usize>) -> Self {
+        let (group_size, num_groups) = match group_size_opt {
+            Some(gs) if gs > 0 && gs < factor => (gs, factor / gs),
+            _ => (factor, 1), // No grouping or full-factor group
+        };
+
+        let deps_per_group = if num_groups > 0 { total_deps / num_groups } else { 0 };
+        let deps_per_instance = if group_size > 0 { deps_per_group / group_size } else { 0 };
+
+        let mut remaining_deps = Vec::with_capacity(num_groups);
+        for _ in 0..num_groups {
+            remaining_deps.push(AtomicUsize::new(deps_per_group));
+        }
 
         let mut instances_sent = Vec::with_capacity(factor);
         for _ in 0..factor {
@@ -518,88 +542,83 @@ impl NodeDependencyEntry {
         }
 
         Self {
-            remaining_deps: AtomicUsize::new(total_deps),
+            remaining_deps,
             instances_sent,
             factor,
+            group_size,
+            num_groups,
+            deps_per_group,
             deps_per_instance,
             has_barrier,
         }
     }
 
-    /// Get the threshold for a specific instance to become ready
-    /// Instance i is ready when: remaining_deps <= (factor - i - 1) × deps_per_instance
+    /// Get the threshold for a specific instance within its group to become ready
+    /// Instance at position idx_in_group is ready when:
+    ///   remaining_deps[group] <= (group_size - idx_in_group - 1) × deps_per_instance
     #[inline]
-    fn threshold_for_instance(&self, instance_idx: usize) -> usize {
-        if instance_idx >= self.factor {
-            return usize::MAX; // Invalid instance
+    fn threshold_for_instance_in_group(&self, idx_in_group: usize) -> usize {
+        if idx_in_group >= self.group_size {
+            return usize::MAX;
         }
-        (self.factor - instance_idx - 1) * self.deps_per_instance
+        (self.group_size - idx_in_group - 1) * self.deps_per_instance
     }
 
-    /// Atomically decrease dependency and return indices of newly ready instances
-    /// Returns vector of instance indices that are now ready to spawn
-    pub fn decrease_and_get_ready(&self) -> Vec<usize> {
-        // Use fetch_update to safely handle zero dependencies (prevents underflow)
-        // SeqCst ordering provides total ordering across all threads, preventing stale reads
-        // after slot reset. With 8 resolution threads racing on reset/packet-processing,
-        // weaker orderings (AcqRel/Acquire) allowed threads to read stale counter values
-        // from previous stream, causing threshold calculations to fail (Bug #26).
-        let result = self
-            .remaining_deps
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |val| {
-                if val > 0 {
-                    Some(val - 1)
-                } else {
-                    None // Don't update if already 0
-                }
-            });
-
-        // Determine the current remaining dependency count
-        let new_remaining = match result {
-            Ok(prev) => prev - 1,    // Successfully decremented
-            Err(current) => current, // Already at 0
+    /// Atomically decrease dependency and return indices of newly ready instances.
+    /// group: None → decrement ALL group counters (global barrier, e.g., beam→demul)
+    ///        Some(g) → decrement only group g's counter
+    pub fn decrease_and_get_ready(&self, group: Option<usize>) -> Vec<usize> {
+        let groups_to_decrement: Vec<usize> = match group {
+            Some(g) if g < self.num_groups => vec![g],
+            None => (0..self.num_groups).collect(),
+            _ => return Vec::new(), // Invalid group
         };
 
-        // Check for ready instances (works for both 0-dependency and regular nodes)
-        if self.has_barrier {
-            // Barrier nodes: spawn all instances when dependencies reach 0
-            if new_remaining == 0 {
-                // Atomic: spawn all unsent instances
-                // SeqCst ordering ensures sent flags are synchronized across all threads
-                let mut ready = Vec::new();
-                for idx in 0..self.factor {
-                    if self.instances_sent[idx]
-                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                        .is_ok()
-                    {
-                        ready.push(idx);
+        let mut ready = Vec::new();
+
+        for &g in &groups_to_decrement {
+            // Atomically decrement this group's counter
+            let result = self.remaining_deps[g]
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |val| {
+                    if val > 0 { Some(val - 1) } else { None }
+                });
+
+            let new_remaining = match result {
+                Ok(prev) => prev - 1,
+                Err(current) => current,
+            };
+
+            // Determine instance range for this group
+            let start = g * self.group_size;
+            let end = std::cmp::min(start + self.group_size, self.factor);
+
+            if self.has_barrier {
+                // Barrier: spawn all instances in group when counter reaches 0
+                if new_remaining == 0 {
+                    for idx in start..end {
+                        if self.instances_sent[idx]
+                            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                        {
+                            ready.push(idx);
+                        }
                     }
                 }
-                return ready;
             } else {
-                return Vec::new(); // Barrier not yet ready
-            }
-        }
-
-        // Fast path for normal (non-barrier) nodes: check if we're still above threshold
-        // If remaining_deps > factor × deps_per_instance, no instances can be ready
-        let max_threshold = self.factor * self.deps_per_instance;
-        if new_remaining > max_threshold {
-            return Vec::new();
-        }
-
-        // Slow path: check each instance to see if it's now ready
-        let mut ready = Vec::new();
-        for idx in 0..self.factor {
-            // Instance idx is ready if: new_remaining <= threshold(idx)
-            if new_remaining <= self.threshold_for_instance(idx) {
-                // Try to mark as sent (CAS to prevent double-spawn)
-                // SeqCst ordering ensures sent flags are synchronized across all threads
-                if self.instances_sent[idx]
-                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-                {
-                    ready.push(idx);
+                // Threshold-based: check instances in this group
+                let max_threshold = self.group_size * self.deps_per_instance;
+                if new_remaining <= max_threshold {
+                    for idx in start..end {
+                        let idx_in_group = idx - start;
+                        if new_remaining <= self.threshold_for_instance_in_group(idx_in_group) {
+                            if self.instances_sent[idx]
+                                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                                .is_ok()
+                            {
+                                ready.push(idx);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -608,16 +627,19 @@ impl NodeDependencyEntry {
     }
 
     /// Increment dependency counter (used when condition fails and dependency needs to be restored)
-    /// Returns the new dependency count
-    pub fn increment_dependency(&self) -> usize {
-        // SeqCst ordering ensures visibility across all threads
-        self.remaining_deps.fetch_add(1, Ordering::SeqCst) + 1
+    /// Increments the counter for the group that contains the given instance.
+    pub fn increment_dependency(&self, instance_idx: Option<usize>) -> usize {
+        let g = match instance_idx {
+            Some(idx) => idx / self.group_size,
+            None => 0, // Default to first group
+        };
+        let g = std::cmp::min(g, self.num_groups - 1);
+        self.remaining_deps[g].fetch_add(1, Ordering::SeqCst) + 1
     }
 
     /// Reset the sent flag for a specific instance (used when conditions not met)
     pub fn reset_sent_flag(&self, instance_idx: usize) {
         if instance_idx < self.instances_sent.len() {
-            // SeqCst ordering ensures visibility across all threads
             self.instances_sent[instance_idx].store(false, Ordering::SeqCst);
         }
     }
@@ -631,7 +653,10 @@ impl NodeDependencyEntry {
 
     /// Reset this entry for a new slot iteration
     pub fn reset(&self, new_total_deps: usize) {
-        self.remaining_deps.store(new_total_deps, Ordering::SeqCst);
+        let deps_per_group = if self.num_groups > 0 { new_total_deps / self.num_groups } else { 0 };
+        for counter in &self.remaining_deps {
+            counter.store(deps_per_group, Ordering::SeqCst);
+        }
         for flag in &self.instances_sent {
             flag.store(false, Ordering::SeqCst);
         }
@@ -660,7 +685,7 @@ impl NodeDepMap {
                 let total_deps = dep_counts[node_id];
                 let has_barrier = node.args.iter().any(|arg| arg.is_barrier());
 
-                let entry = NodeDependencyEntry::new(node.factor, total_deps, has_barrier);
+                let entry = NodeDependencyEntry::new(node.factor, total_deps, has_barrier, node.group_size);
                 slot_entries.push(entry);
             }
 
@@ -671,10 +696,11 @@ impl NodeDepMap {
     }
 
     /// Get ready instances for a node in a slot by decrementing dependencies once
+    /// group: None → global decrement, Some(g) → decrement group g only
     #[inline]
-    pub fn decrease_and_get_ready(&self, slot: usize, node_id: usize) -> Vec<usize> {
+    pub fn decrease_and_get_ready(&self, slot: usize, node_id: usize, group: Option<usize>) -> Vec<usize> {
         if slot < self.slots.len() && node_id < self.slots[slot].len() {
-            self.slots[slot][node_id].decrease_and_get_ready()
+            self.slots[slot][node_id].decrease_and_get_ready(group)
         } else {
             Vec::new()
         }
@@ -683,9 +709,9 @@ impl NodeDepMap {
     /// Increment dependency for a specific node (used when condition fails)
     /// Returns the new dependency count
     #[inline]
-    pub fn increment_dependency(&self, slot: usize, node_id: usize) -> Option<usize> {
+    pub fn increment_dependency(&self, slot: usize, node_id: usize, instance_idx: Option<usize>) -> Option<usize> {
         if slot < self.slots.len() && node_id < self.slots[slot].len() {
-            Some(self.slots[slot][node_id].increment_dependency())
+            Some(self.slots[slot][node_id].increment_dependency(instance_idx))
         } else {
             None
         }
@@ -727,78 +753,79 @@ mod tests {
 
     #[test]
     fn test_node_dependency_entry_creation() {
-        // factor=4, total_deps=8 (2 per instance)
-        let entry = NodeDependencyEntry::new(4, 8, false);
+        // factor=4, total_deps=8 (2 per instance), no groups
+        let entry = NodeDependencyEntry::new(4, 8, false, None);
         assert_eq!(entry.factor, 4);
         assert_eq!(entry.deps_per_instance, 2);
+        assert_eq!(entry.num_groups, 1);
         assert!(!entry.has_barrier);
     }
 
     #[test]
     fn test_threshold_calculation() {
-        // factor=4, deps_per_inst=2
-        let entry = NodeDependencyEntry::new(4, 8, false);
+        // factor=4, deps_per_inst=2, no groups
+        let entry = NodeDependencyEntry::new(4, 8, false, None);
         // Instance 0: (4-0-1)*2 = 6
         // Instance 1: (4-1-1)*2 = 4
         // Instance 2: (4-2-1)*2 = 2
         // Instance 3: (4-3-1)*2 = 0
-        assert_eq!(entry.threshold_for_instance(0), 6);
-        assert_eq!(entry.threshold_for_instance(1), 4);
-        assert_eq!(entry.threshold_for_instance(2), 2);
-        assert_eq!(entry.threshold_for_instance(3), 0);
+        assert_eq!(entry.threshold_for_instance_in_group(0), 6);
+        assert_eq!(entry.threshold_for_instance_in_group(1), 4);
+        assert_eq!(entry.threshold_for_instance_in_group(2), 2);
+        assert_eq!(entry.threshold_for_instance_in_group(3), 0);
     }
 
     #[test]
     fn test_threshold_spawning_factor_4() {
-        // factor=4, deps_per_inst=2, total_deps=8
-        let entry = NodeDependencyEntry::new(4, 8, false);
+        // factor=4, deps_per_inst=2, total_deps=8, no groups
+        let entry = NodeDependencyEntry::new(4, 8, false, None);
 
         // Call 1: 8->7, instance 0 threshold=6, not ready (7 > 6)
-        let ready = entry.decrease_and_get_ready();
+        let ready = entry.decrease_and_get_ready(None);
         assert!(ready.is_empty());
 
         // Call 2: 7->6, instance 0 threshold=6, ready! (6 <= 6)
-        let ready = entry.decrease_and_get_ready();
+        let ready = entry.decrease_and_get_ready(None);
         assert_eq!(ready, vec![0]);
 
         // Call 3: 6->5, instance 1 threshold=4, not ready (5 > 4)
-        let ready = entry.decrease_and_get_ready();
+        let ready = entry.decrease_and_get_ready(None);
         assert!(ready.is_empty());
 
         // Call 4: 5->4, instance 1 threshold=4, ready! (4 <= 4)
-        let ready = entry.decrease_and_get_ready();
+        let ready = entry.decrease_and_get_ready(None);
         assert_eq!(ready, vec![1]);
 
         // Call 5: 4->3, instance 2 threshold=2, not ready (3 > 2)
-        let ready = entry.decrease_and_get_ready();
+        let ready = entry.decrease_and_get_ready(None);
         assert!(ready.is_empty());
 
         // Call 6: 3->2, instance 2 threshold=2, ready! (2 <= 2)
-        let ready = entry.decrease_and_get_ready();
+        let ready = entry.decrease_and_get_ready(None);
         assert_eq!(ready, vec![2]);
 
         // Call 7: 2->1, instance 3 threshold=0, not ready (1 > 0)
-        let ready = entry.decrease_and_get_ready();
+        let ready = entry.decrease_and_get_ready(None);
         assert!(ready.is_empty());
 
         // Call 8: 1->0, instance 3 threshold=0, ready! (0 <= 0)
-        let ready = entry.decrease_and_get_ready();
+        let ready = entry.decrease_and_get_ready(None);
         assert_eq!(ready, vec![3]);
     }
 
     #[test]
     fn test_barrier_spawns_all_at_once() {
-        // Barrier node with factor=3, total_deps=3
-        let entry = NodeDependencyEntry::new(3, 3, true);
+        // Barrier node with factor=3, total_deps=3, no groups
+        let entry = NodeDependencyEntry::new(3, 3, true, None);
 
         // Decrease until deps reach 0
         for _ in 0..2 {
-            let ready = entry.decrease_and_get_ready();
+            let ready = entry.decrease_and_get_ready(None);
             assert!(ready.is_empty()); // Barrier not ready yet
         }
 
         // Final decrease brings deps to 0, barrier spawns all
-        let ready = entry.decrease_and_get_ready();
+        let ready = entry.decrease_and_get_ready(None);
         assert_eq!(ready.len(), 3);
         assert!(ready.contains(&0));
         assert!(ready.contains(&1));
@@ -807,48 +834,83 @@ mod tests {
 
     #[test]
     fn test_no_double_spawn() {
-        let entry = NodeDependencyEntry::new(2, 4, false);
+        let entry = NodeDependencyEntry::new(2, 4, false, None);
 
         // factor=2, total_deps=4, deps_per_instance=2
         // Instance 0 threshold = (2-0-1)*2 = 2
         // Instance 1 threshold = (2-1-1)*2 = 0
 
         // Call 1: 4->3, instance 0 threshold=2, not ready (3 > 2)
-        let ready = entry.decrease_and_get_ready();
+        let ready = entry.decrease_and_get_ready(None);
         assert!(ready.is_empty());
 
         // Call 2: 3->2, instance 0 threshold=2, ready! (2 <= 2)
-        let ready = entry.decrease_and_get_ready();
+        let ready = entry.decrease_and_get_ready(None);
         assert_eq!(ready, vec![0]);
 
         // Call 3: 2->1, instance 1 threshold=0, not ready (1 > 0)
-        let ready = entry.decrease_and_get_ready();
+        let ready = entry.decrease_and_get_ready(None);
         assert!(ready.is_empty());
 
         // Call 4: 1->0, instance 1 threshold=0, ready! (0 <= 0)
-        let ready = entry.decrease_and_get_ready();
+        let ready = entry.decrease_and_get_ready(None);
         assert_eq!(ready, vec![1]);
 
         // Call 5: try another decrement (would underflow)
         // No more deps to satisfy, nothing ready
-        let ready = entry.decrease_and_get_ready();
+        let ready = entry.decrease_and_get_ready(None);
         assert!(ready.is_empty());
     }
 
     #[test]
     fn test_entry_reset() {
-        let entry = NodeDependencyEntry::new(2, 4, false);
+        let entry = NodeDependencyEntry::new(2, 4, false, None);
 
         // Decrease twice
-        let _ = entry.decrease_and_get_ready();
-        let _ = entry.decrease_and_get_ready();
+        let _ = entry.decrease_and_get_ready(None);
+        let _ = entry.decrease_and_get_ready(None);
 
         // Reset for new slot
         entry.reset(4);
 
         // Should behave like new
-        let ready = entry.decrease_and_get_ready();
+        let ready = entry.decrease_and_get_ready(None);
         assert!(ready.is_empty());
+    }
+
+    #[test]
+    fn test_per_group_barrier() {
+        // factor=6, group_size=3, 2 groups. total_deps=6 (3 per group)
+        // Each group has 3 deps. Barrier fires per-group when group counter reaches 0.
+        let entry = NodeDependencyEntry::new(6, 6, true, Some(3));
+        assert_eq!(entry.num_groups, 2);
+        assert_eq!(entry.deps_per_group, 3);
+
+        // Decrement group 0 twice → not ready yet
+        let ready = entry.decrease_and_get_ready(Some(0));
+        assert!(ready.is_empty());
+        let ready = entry.decrease_and_get_ready(Some(0));
+        assert!(ready.is_empty());
+
+        // Decrement group 0 third time → group 0 instances (0,1,2) spawn
+        let ready = entry.decrease_and_get_ready(Some(0));
+        assert_eq!(ready.len(), 3);
+        assert!(ready.contains(&0));
+        assert!(ready.contains(&1));
+        assert!(ready.contains(&2));
+
+        // Group 1 still blocked
+        let ready = entry.decrease_and_get_ready(Some(1));
+        assert!(ready.is_empty());
+        let ready = entry.decrease_and_get_ready(Some(1));
+        assert!(ready.is_empty());
+
+        // Decrement group 1 third time → group 1 instances (3,4,5) spawn
+        let ready = entry.decrease_and_get_ready(Some(1));
+        assert_eq!(ready.len(), 3);
+        assert!(ready.contains(&3));
+        assert!(ready.contains(&4));
+        assert!(ready.contains(&5));
     }
 
     #[test]
@@ -860,6 +922,7 @@ mod tests {
                 id: 0,
                 loop_args: None,
                 factor: 2,
+                group_size: None,
                 func_ptr: None,
                 loop_: None,
                 condition: None,
@@ -872,6 +935,7 @@ mod tests {
                 id: 1,
                 loop_args: None,
                 factor: 3,
+                group_size: None,
                 func_ptr: None,
                 loop_: None,
                 condition: None,

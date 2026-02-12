@@ -390,6 +390,16 @@ pub struct SharedData {
     /// Completion requires: pending_tasks==0 AND pending_cond==0 AND processing_count==0
     /// CRITICAL: Must decrement LAST (after successor processing) to prevent state reset during processing
     pub slot_processing_count: Arc<Vec<AtomicUsize>>,
+
+    /// Per-group dependency support:
+    /// pred_index_filter[succ_id][pred_id] = Some((start, end)) means only predecessor instances
+    /// with index in [start, end) should trigger dependency decrements for this successor.
+    /// None means no filtering (full range). Outer vec indexed by successor node_id.
+    pub pred_index_filter: Arc<Vec<Vec<Option<(usize, usize)>>>>,
+
+    /// pred_group_by[succ_id][pred_id] = Some(group_size) means predecessor instances are grouped
+    /// by group_size for per-group barrier tracking. None means global (all groups decremented).
+    pub pred_group_by: Arc<Vec<Vec<Option<usize>>>>,
 }
 
 #[inline(always)]
@@ -1200,11 +1210,14 @@ pub fn should_record_slot(shared: &Arc<SharedData>, slot: usize) -> bool {
 /// 2. `shared.node_cache` - immutable, pre-computed, safe concurrent reads
 /// 3. Atomic load operations use Acquire ordering - ensures visibility of prior writes
 /// 4. No concurrent writes during this phase - parallel threads only read
+///
+/// Returns: Vec of (successor_node_info, has_condition, successor_id, pred_group)
+/// where pred_group is Some(group_idx) for per-group barriers, None for global decrements.
 #[inline]
 pub fn collect_successors_for_node(
     shared: &Arc<SharedData>,
     node_info: &NodeInfo,
-) -> Vec<(NodeInfo, bool, IdType)> {
+) -> Vec<(NodeInfo, bool, IdType, Option<usize>)> {
     let node_id_usize = node_info.id as usize;
 
     // Get successor list for this node (immutable, pre-computed)
@@ -1222,7 +1235,19 @@ pub fn collect_successors_for_node(
     // Collect info for each successor without locks
     for succ_id in successors {
         let succ_id = *succ_id;
-        let succ_cache = &shared.node_cache[succ_id as usize];
+        let succ_id_usize = succ_id as usize;
+
+        // Predecessor index range filter: skip if this predecessor instance is outside
+        // the declared index range for this successor
+        if let Some(Some((start, end))) = shared.pred_index_filter.get(succ_id_usize)
+            .and_then(|v| v.get(node_id_usize))
+        {
+            if node_info.index < *start || node_info.index >= *end {
+                continue; // Predecessor instance outside declared range
+            }
+        }
+
+        let succ_cache = &shared.node_cache[succ_id_usize];
 
         // Use pre-computed flag for lock-free check
         let has_condition = succ_cache.is_condition;
@@ -1248,9 +1273,31 @@ pub fn collect_successors_for_node(
             .cloned()
             .unwrap_or(0);
 
+        // Compute predecessor group for group_by barriers
+        let pred_group: Option<usize> = {
+            if let Some(Some(gb)) = shared.pred_group_by.get(succ_id_usize)
+                .and_then(|v| v.get(node_id_usize))
+            {
+                // Compute relative index within the declared range
+                let range_start = shared.pred_index_filter.get(succ_id_usize)
+                    .and_then(|v| v.get(node_id_usize))
+                    .and_then(|f| f.map(|(s, _)| s))
+                    .unwrap_or(0);
+                let relative_idx = node_info.index - range_start;
+                Some(relative_idx / gb)
+            } else {
+                None // No group_by → global decrement
+            }
+        };
+
         // Determine which indices of the successor to create
         let succ_indexes = {
-            if succ_factor == node_factor || pred_count <= 1 {
+            if pred_group.is_some() {
+                // Group-based dependency: create a placeholder entry (index 0) for decrement
+                // The actual ready instances will be determined by decrease_and_get_ready()
+                // based on the group's dependency counter reaching threshold
+                vec![0]
+            } else if succ_factor == node_factor || pred_count <= 1 {
                 // Single instance case: exact index mapping
                 vec![node_info.index]
             } else {
@@ -1262,7 +1309,7 @@ pub fn collect_successors_for_node(
         // Add successor node info for each instance
         for succ_index in succ_indexes {
             let succ_info = NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.index);
-            succ_updates.push((succ_info, has_condition, succ_id));
+            succ_updates.push((succ_info, has_condition, succ_id, pred_group));
         }
     }
 

@@ -66,7 +66,8 @@ pub trait ResolutionState: Send + Sync {
     // Decrements the dependency counter for a node in a slot once and returns
     // all instance indices that are now ready to spawn. This replaces N per-instance
     // decrements with a single per-node decrement, enabling threshold-based spawning.
-    fn decrease_and_get_ready(&self, _slot: usize, _node_id: usize) -> Vec<usize> {
+    // group: None → global decrement (all groups), Some(g) → decrement group g only
+    fn decrease_and_get_ready(&self, _slot: usize, _node_id: usize, _group: Option<usize>) -> Vec<usize> {
         // Default implementation for backward compatibility: return empty
         // This allows implementations that don't override it to continue working
         Vec::new()
@@ -78,14 +79,21 @@ pub trait ResolutionState: Send + Sync {
 
 /// Per-node dependency entry for single-threaded threshold-based spawning.
 /// Mirrors `NodeDependencyEntry` logic but without atomic overhead.
+/// Supports per-group counters for fine-grained barrier dependencies.
 struct StNodeDepEntry {
-    /// Single counter for all instances of this node in a slot
-    remaining_deps: usize,
+    /// Per-group counters (length = num_groups)
+    remaining_deps: Vec<usize>,
     /// Per-instance sent flag (prevents double-spawn)
     instances_sent: Vec<bool>,
     /// Node factor (number of instances)
     factor: usize,
-    /// Dependencies per instance (total_deps / factor, integer division)
+    /// Instances per group
+    group_size: usize,
+    /// Number of groups
+    num_groups: usize,
+    /// Dependencies per group counter
+    deps_per_group: usize,
+    /// Dependencies per instance (within a group)
     deps_per_instance: usize,
     /// Whether this node has a barrier dependency
     has_barrier: bool,
@@ -94,65 +102,87 @@ struct StNodeDepEntry {
 }
 
 impl StNodeDepEntry {
-    fn new(factor: usize, total_deps: usize, has_barrier: bool) -> Self {
-        let deps_per_instance = if factor > 0 { total_deps / factor } else { 0 };
+    fn new(factor: usize, total_deps: usize, has_barrier: bool, group_size_opt: Option<usize>) -> Self {
+        let (group_size, num_groups) = match group_size_opt {
+            Some(gs) if gs > 0 && gs < factor => (gs, factor / gs),
+            _ => (factor, 1),
+        };
+        let deps_per_group = if num_groups > 0 { total_deps / num_groups } else { 0 };
+        let deps_per_instance = if group_size > 0 { deps_per_group / group_size } else { 0 };
+
         Self {
-            remaining_deps: total_deps,
+            remaining_deps: vec![deps_per_group; num_groups],
             instances_sent: vec![false; factor],
             factor,
+            group_size,
+            num_groups,
+            deps_per_group,
             deps_per_instance,
             has_barrier,
             _init_total_deps: total_deps,
         }
     }
 
-    /// Threshold: instance i is ready when remaining_deps <= (factor - i - 1) * deps_per_instance
     #[inline]
-    fn threshold_for_instance(&self, idx: usize) -> usize {
-        (self.factor - idx - 1) * self.deps_per_instance
+    fn threshold_for_instance_in_group(&self, idx_in_group: usize) -> usize {
+        if idx_in_group >= self.group_size {
+            return usize::MAX;
+        }
+        (self.group_size - idx_in_group - 1) * self.deps_per_instance
     }
 
     /// Decrement once and return all newly-ready instance indices
-    fn decrease_and_get_ready(&mut self) -> Vec<usize> {
-        if self.remaining_deps > 0 {
-            self.remaining_deps -= 1;
-        }
-        let new_remaining = self.remaining_deps;
-
-        if self.has_barrier {
-            if new_remaining == 0 {
-                let mut ready = Vec::new();
-                for idx in 0..self.factor {
-                    if !self.instances_sent[idx] {
-                        self.instances_sent[idx] = true;
-                        ready.push(idx);
-                    }
-                }
-                return ready;
-            }
-            return Vec::new();
-        }
-
-        // Fast path: still above all thresholds
-        let max_threshold = self.factor * self.deps_per_instance;
-        if new_remaining > max_threshold {
-            return Vec::new();
-        }
+    fn decrease_and_get_ready(&mut self, group: Option<usize>) -> Vec<usize> {
+        let groups_to_decrement: Vec<usize> = match group {
+            Some(g) if g < self.num_groups => vec![g],
+            None => (0..self.num_groups).collect(),
+            _ => return Vec::new(),
+        };
 
         let mut ready = Vec::new();
-        for idx in 0..self.factor {
-            if new_remaining <= self.threshold_for_instance(idx) {
-                if !self.instances_sent[idx] {
-                    self.instances_sent[idx] = true;
-                    ready.push(idx);
+
+        for &g in &groups_to_decrement {
+            if self.remaining_deps[g] > 0 {
+                self.remaining_deps[g] -= 1;
+            }
+            let new_remaining = self.remaining_deps[g];
+
+            let start = g * self.group_size;
+            let end = std::cmp::min(start + self.group_size, self.factor);
+
+            if self.has_barrier {
+                if new_remaining == 0 {
+                    for idx in start..end {
+                        if !self.instances_sent[idx] {
+                            self.instances_sent[idx] = true;
+                            ready.push(idx);
+                        }
+                    }
+                }
+            } else {
+                let max_threshold = self.group_size * self.deps_per_instance;
+                if new_remaining <= max_threshold {
+                    for idx in start..end {
+                        let idx_in_group = idx - start;
+                        if new_remaining <= self.threshold_for_instance_in_group(idx_in_group) {
+                            if !self.instances_sent[idx] {
+                                self.instances_sent[idx] = true;
+                                ready.push(idx);
+                            }
+                        }
+                    }
                 }
             }
         }
         ready
     }
 
-    fn increment(&mut self) {
-        self.remaining_deps += 1;
+    fn increment(&mut self, instance_idx: Option<usize>) {
+        let g = match instance_idx {
+            Some(idx) => std::cmp::min(idx / self.group_size, self.num_groups - 1),
+            None => 0,
+        };
+        self.remaining_deps[g] += 1;
     }
 
     fn reset_sent(&mut self, idx: usize) {
@@ -168,7 +198,10 @@ impl StNodeDepEntry {
     }
 
     fn reinit(&mut self, new_total_deps: usize) {
-        self.remaining_deps = new_total_deps;
+        let deps_per_group = if self.num_groups > 0 { new_total_deps / self.num_groups } else { 0 };
+        for counter in self.remaining_deps.iter_mut() {
+            *counter = deps_per_group;
+        }
         for flag in self.instances_sent.iter_mut() {
             *flag = false;
         }
@@ -201,7 +234,7 @@ impl SingleThreadedState {
                 let node = &nodes[node_id];
                 let total_deps = dependency_count_vec[node_id];
                 let has_barrier = node.args.iter().any(|arg| arg.is_barrier());
-                slot_entries.push(StNodeDepEntry::new(node.factor, total_deps, has_barrier));
+                slot_entries.push(StNodeDepEntry::new(node.factor, total_deps, has_barrier, node.group_size));
             }
             all_slots.push(slot_entries);
         }
@@ -279,10 +312,11 @@ impl ResolutionState for SingleThreadedState {
         let node_id = node_info.id as usize;
         if slot < deps.len() && node_id < deps[slot].len() {
             let entry = &mut deps[slot][node_id];
-            if entry.remaining_deps > 0 {
-                entry.remaining_deps -= 1;
+            let g = std::cmp::min(node_info.index / entry.group_size, entry.num_groups - 1);
+            if entry.remaining_deps[g] > 0 {
+                entry.remaining_deps[g] -= 1;
             }
-            return Some(entry.remaining_deps);
+            return Some(entry.remaining_deps[g]);
         }
         None
     }
@@ -293,8 +327,8 @@ impl ResolutionState for SingleThreadedState {
         let slot = node_info.slot;
         let node_id = node_info.id as usize;
         if slot < deps.len() && node_id < deps[slot].len() {
-            deps[slot][node_id].increment();
-            return Some(deps[slot][node_id].remaining_deps);
+            deps[slot][node_id].increment(Some(node_info.index));
+            return Some(deps[slot][node_id].remaining_deps[0]);
         }
         None
     }
@@ -312,10 +346,10 @@ impl ResolutionState for SingleThreadedState {
         }
     }
 
-    fn decrease_and_get_ready(&self, slot: usize, node_id: usize) -> Vec<usize> {
+    fn decrease_and_get_ready(&self, slot: usize, node_id: usize, group: Option<usize>) -> Vec<usize> {
         let deps = self.node_deps.get_mut();
         if slot < deps.len() && node_id < deps[slot].len() {
-            deps[slot][node_id].decrease_and_get_ready()
+            deps[slot][node_id].decrease_and_get_ready(group)
         } else {
             Vec::new()
         }
@@ -420,7 +454,7 @@ impl ResolutionState for MultiThreadedState {
     fn increment_dependency(&self, node_info: &NodeInfo) -> Option<usize> {
         // Delegate to NodeDepMap
         self.node_dep_map
-            .increment_dependency(node_info.slot, node_info.id as usize)
+            .increment_dependency(node_info.slot, node_info.id as usize, Some(node_info.index))
     }
 
     #[inline]
@@ -431,9 +465,9 @@ impl ResolutionState for MultiThreadedState {
     }
 
     #[inline]
-    fn decrease_and_get_ready(&self, slot: usize, node_id: usize) -> Vec<usize> {
+    fn decrease_and_get_ready(&self, slot: usize, node_id: usize, group: Option<usize>) -> Vec<usize> {
         // Use the optimized per-node dependency tracking from NodeDepMap
-        self.node_dep_map.decrease_and_get_ready(slot, node_id)
+        self.node_dep_map.decrease_and_get_ready(slot, node_id, group)
     }
 
     fn debug_info(&self) -> String {

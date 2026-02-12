@@ -119,6 +119,7 @@ impl NodeCondition {
 pub struct Predecessor {
     pub id: IdType,
     pub indexes: Vec<isize>,
+    pub group_by: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -154,6 +155,7 @@ pub struct Node {
     // Variable that defines the number of times
     // the node is initiated
     pub factor: usize,
+    pub group_size: Option<usize>,
     pub func_ptr: Option<CmPtr>,
     // Optional node to loop after execution
     pub loop_: Option<Loop>,
@@ -195,4 +197,5 @@ pub struct GraphNetworkConfig {
     pub start_port: usize,
     pub extract_packet_func: Option<CmPtr>,
     pub id_function: Option<CmPtr>,
+    pub index_function: Option<CmPtr>,
 }

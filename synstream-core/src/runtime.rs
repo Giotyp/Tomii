@@ -259,6 +259,57 @@ impl SynRt {
         let (receiver_sockets, packet_sender, packet_receiver, packet_drop_counters) =
             prepare_network_infrastructure(app_graph);
 
+        // Precompute pred_index_filter and pred_group_by for per-group dependency support
+        let num_nodes = app_graph.nodes.len();
+        let (pred_index_filter, pred_group_by) = {
+            let mut filter: Vec<Vec<Option<(usize, usize)>>> =
+                vec![vec![None; num_nodes]; num_nodes];
+            let mut group_by: Vec<Vec<Option<usize>>> = vec![vec![None; num_nodes]; num_nodes];
+
+            for succ_node in &app_graph.nodes {
+                let succ_id = succ_node.id as usize;
+                for arg in &succ_node.args {
+                    if let Some(pred) = &arg.predecessor {
+                        let pred_id = pred.id as usize;
+                        let pred_factor = app_graph.nodes[pred_id].factor;
+
+                        // Check if indexes form a contiguous subrange of [0, pred_factor)
+                        // Create filter for:
+                        // 1. Grouped predecessors (group_by present): allows many-to-few mapping via groups
+                        // 2. 1:1 mapping (range_len == succ_factor): direct instance correspondence
+                        // Single-index refs like indexes="0" are data references, not filters.
+                        if !pred.indexes.is_empty() {
+                            let min_idx = *pred.indexes.iter().min().unwrap() as usize;
+                            let max_idx = *pred.indexes.iter().max().unwrap() as usize;
+                            let range_len = max_idx - min_idx + 1;
+                            let succ_factor = succ_node.factor;
+
+                            // Determine if we should create a filter
+                            let should_filter = if range_len < pred_factor
+                                && range_len == pred.indexes.len()
+                            {
+                                // With group_by: many predecessor instances map to few successor groups
+                                // Without group_by: require 1:1 instance mapping
+                                pred.group_by.is_some() || range_len == succ_factor
+                            } else {
+                                false
+                            };
+
+                            if should_filter {
+                                filter[succ_id][pred_id] = Some((min_idx, max_idx + 1));
+                            }
+                        }
+
+                        // Store group_by if present
+                        if let Some(gb) = pred.group_by {
+                            group_by[succ_id][pred_id] = Some(gb);
+                        }
+                    }
+                }
+            }
+            (filter, group_by)
+        };
+
         let shared = Arc::new(SharedData {
             graph: app_graph.clone(),
             slots,
@@ -313,6 +364,9 @@ impl SynRt {
             slot_packet_complete: Arc::new((0..slots).map(|_| AtomicBool::new(false)).collect()),
             // Initialize in-flight batch processing counter to 0 for all slots
             slot_processing_count: Arc::new((0..slots).map(|_| AtomicUsize::new(0)).collect()),
+            // Per-group dependency support
+            pred_index_filter: Arc::new(pred_index_filter),
+            pred_group_by: Arc::new(pred_group_by),
         });
 
         SynRt { shared }
@@ -587,8 +641,10 @@ impl SynRt {
         }
 
         // Lock-free recording via per-worker channel
-        let should_record = shared.async_recorder.is_some() &&
-            nodes_to_schedule.iter().any(|n| should_record_slot(&shared, n.slot));
+        let should_record = shared.async_recorder.is_some()
+            && nodes_to_schedule
+                .iter()
+                .any(|n| should_record_slot(&shared, n.slot));
         if should_record {
             let end_ns = shared.base_instant.elapsed().as_nanos();
             let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
@@ -793,8 +849,25 @@ impl SynRt {
                                 }
                             }
 
-                            let packet_index = shared.slot_packet_counters[node_info.slot]
-                                .fetch_add(1, Ordering::SeqCst);
+                            // Use deterministic index_function if available, otherwise sequential counter
+                            let packet_index =
+                                if let Some(ref net_cfg) = shared.graph.network_config() {
+                                    if let Some(idx_fn) = net_cfg.index_function {
+                                        let idx_result = idx_fn(vec![packet_cm.clone()]);
+                                        // Still increment packet counter for receive-completion detection
+                                        shared.slot_packet_counters[node_info.slot]
+                                            .fetch_add(1, Ordering::SeqCst);
+                                        idx_result
+                                            .valid_number_to_usize()
+                                            .expect("index_function must return usize")
+                                    } else {
+                                        shared.slot_packet_counters[node_info.slot]
+                                            .fetch_add(1, Ordering::SeqCst)
+                                    }
+                                } else {
+                                    shared.slot_packet_counters[node_info.slot]
+                                        .fetch_add(1, Ordering::SeqCst)
+                                };
 
                             node_info.index = packet_index;
                         } else {
@@ -847,7 +920,9 @@ impl SynRt {
 
                         packets_received = true;
 
-                        if shared.async_recorder.is_some() && should_record_slot(&shared, node_info.slot) {
+                        if shared.async_recorder.is_some()
+                            && should_record_slot(&shared, node_info.slot)
+                        {
                             let receiver_slot = shared.slots + shared.system_threads;
                             let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
 
@@ -935,6 +1010,19 @@ impl SynRt {
                 break;
             }
 
+            // Also check stream completion here (before processing batch)
+            // This ensures threads exit promptly even if shutdown_flag hasn't been set yet
+            {
+                let completed_streams = shared.stream_complete_counter.load(Ordering::SeqCst);
+                if completed_streams >= shared.max_streams {
+                    println!(
+                        "Thread {} detected all streams completed (after recv_batch), exiting",
+                        thread_id
+                    );
+                    break;
+                }
+            }
+
             // If nothing arrived from network AND scheduler, mark start of wait period.
             // Otherwise, if we previously were waiting, record the idle interval now.
             // Treat "work" as either network activity (packets_received) OR a non-empty batch.
@@ -1020,7 +1108,7 @@ impl SynRt {
             // Check for completion of all streams
             let completed_streams = shared.stream_complete_counter.load(Ordering::SeqCst);
 
-            if completed_streams == shared.max_streams {
+            if completed_streams >= shared.max_streams {
                 println!(
                     "Thread {} detected all streams completed, exiting resolution loop",
                     thread_id
@@ -1112,28 +1200,7 @@ impl SynRt {
 
                 // Phase 1.2: Also decrement slot-wide task counter for O(1) completion check
                 // This maintains synchronization with per-node remaining_nodes atomics
-                let prev_tasks =
-                    shared.slot_pending_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
-
-                // DEBUG: Track task completions (log frequently for network node, sparsely for others)
-                let is_network = node_id_usize == 0;
-                if is_network && (prev_tasks <= 10 || prev_tasks % 100 == 0) {
-                    print_debug(|| {
-                        format!(
-                            "NETWORK packet processed: slot={}, prev_pending_tasks={}, new={}",
-                            node_info.slot,
-                            prev_tasks,
-                            prev_tasks - 1
-                        )
-                    });
-                } else if !is_network && (prev_tasks <= 10 || prev_tasks % 50 == 0) {
-                    print_debug(|| {
-                        format!(
-                            "COMPUTE task completed: slot={}, node_id={} ({}), prev_pending_tasks={}, new={}",
-                            node_info.slot, node_id_usize, node_cache_entry.name, prev_tasks, prev_tasks - 1
-                        )
-                    });
-                }
+                let _ = shared.slot_pending_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
             }
             nodes_for_successor_processing.push(node_info.clone());
             succesor_updates.push(collect_successors_for_node(&shared, &node_info))
@@ -1149,16 +1216,16 @@ impl SynRt {
             // if not exist, init nodes_sent for slot to 0
             let nodes_sent: &mut usize = nodes_sent_in_slot.entry(node_info.slot).or_insert(0);
 
-            // NEW: Collect unique successor node_ids with their has_cond flag
-            // This allows us to call decrease_and_get_ready() once per node instead of once per instance
+            // NEW: Collect unique successor (node_id, group) pairs with their has_cond flag
+            // This allows us to call decrease_and_get_ready() once per (node, group) instead of once per instance
             use std::collections::HashMap;
-            let mut unique_successors: HashMap<usize, bool> = HashMap::new();
-            for (_, has_cond, succ_id) in &succ_updates {
-                unique_successors.insert(*succ_id as usize, *has_cond);
+            let mut unique_successors: HashMap<(usize, Option<usize>), bool> = HashMap::new();
+            for (_, has_cond, succ_id, pred_group) in &succ_updates {
+                unique_successors.insert((*succ_id as usize, *pred_group), *has_cond);
             }
 
             // Process each unique successor ONCE using optimized per-node decrements
-            for (succ_node_id, has_cond) in unique_successors {
+            for ((succ_node_id, pred_group), has_cond) in unique_successors {
                 // Optimization: Skip condition evaluation if all instances already spawned
                 if has_cond {
                     let remaining_spawns = shared.cond_instances_to_spawn[node_info.slot]
@@ -1173,9 +1240,12 @@ impl SynRt {
                 }
 
                 // Call the new optimized method that decrements once and returns all ready indices
-                let ready_indices = shared
-                    .resolution_state
-                    .decrease_and_get_ready(node_info.slot, succ_node_id);
+                // pred_group: None → global decrement, Some(g) → decrement group g only
+                let ready_indices = shared.resolution_state.decrease_and_get_ready(
+                    node_info.slot,
+                    succ_node_id,
+                    pred_group,
+                );
 
                 // Schedule all newly ready instances
                 for ready_index in ready_indices {
@@ -1236,11 +1306,25 @@ impl SynRt {
             }
             // Schedule all ready nodes collected from this completed node
             Self::preparation(&shared, &nodes_to_schedule, thread_core, thread_slot);
+            print_debug(|| {
+                format!(
+                    "Thread {:?} -- Processed node {} in slot {}, scheduled: {:?}",
+                    thread_id,
+                    node_info.id,
+                    node_info.slot,
+                    nodes_to_schedule
+                        .iter()
+                        .map(|n| (n.id, n.index))
+                        .collect::<Vec<(IdType, usize)>>()
+                )
+            });
         }
 
         // Lock-free recording via per-worker channel
-        let should_record = shared.async_recorder.is_some() &&
-            slots_in_batch.iter().any(|&slot| should_record_slot(&shared, slot));
+        let should_record = shared.async_recorder.is_some()
+            && slots_in_batch
+                .iter()
+                .any(|&slot| should_record_slot(&shared, slot));
         if should_record {
             let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
             let end_ns = shared.base_instant.elapsed().as_nanos();
