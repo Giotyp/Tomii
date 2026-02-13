@@ -375,7 +375,7 @@ def extract_function_signatures(content, mode="rust"):
         # ^ in the begginig disregards indentation meaning that
         # stucture and impl blocks are not considered
         # get function name, arguments, arrow, and return type
-        # pub fn function_name(arg1: type1, arg2: type2) -> return_type
+        # pub fn function(arg1: type1, arg2: type2) -> return_type
         pattern = re.compile(
             r"(?m)^pub\s+fn\s+(\w+)\s*\(([^)]*)\)\s*(?:->\s*([^ {]+))?"
         )
@@ -383,7 +383,7 @@ def extract_function_signatures(content, mode="rust"):
         struct_funcs_pat = r"pub fn (\w+)\s*\(([^)]*)\)\s*(->\s*([^ \{]+))?"
     elif mode == "cpp":
         # get function name, arguments, and return type
-        # return_type function_name(arg1: type1, arg2: type2)
+        # return_type function(arg1: type1, arg2: type2)
         pattern = re.compile(r"(\w+)\s+(\w+)\s*\(([^)]*)\)\s*;")
 
     function_signatures = []

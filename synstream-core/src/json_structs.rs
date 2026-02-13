@@ -24,7 +24,13 @@ pub struct NetworkConfigJson {
     pub start_port: Factor,
     pub extract_packet_func: String,
     pub id_function: String,
-    pub index_function: Option<String>,
+    pub index_function: IndexFunctionJson,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IndexFunctionJson {
+    pub function: String,
+    pub args: Vec<ArgJson>,
 }
 
 fn default_buffer_depth() -> usize {
@@ -75,7 +81,7 @@ pub struct LoopJson {
 pub struct NodeJson {
     pub name: String,
     pub factor: Option<Factor>,
-    pub function_name: String,
+    pub function: String,
     #[serde(rename = "loop")]
     pub loop_: Option<LoopJson>,
     pub loop_args: Option<Vec<ArgJson>>,
@@ -101,7 +107,7 @@ pub struct InitJson {
     pub name: String,
     pub factor: Option<Factor>,
     pub args: Vec<ArgInit>,
-    pub function_name: Option<String>,
+    pub function: Option<String>,
 }
 
 // Factor struct

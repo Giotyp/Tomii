@@ -32,7 +32,7 @@ pub fn init_objects(
         };
         let args_json: &Vec<ArgInit> = &init.args;
 
-        if init.function_name.is_none() {
+        if init.function.is_none() {
             // direct variable initialization
             let type_str = &args_json[0].type_;
             let value_str = &args_json[0].value;
@@ -60,7 +60,7 @@ pub fn init_objects(
             init_objects.push(value_vec);
         } else {
             // function call needed
-            let func_name = init.function_name.as_ref().unwrap();
+            let func_name = init.function.as_ref().unwrap();
             let func_ptr = get_func(func_name).unwrap();
 
             let mut value_vec: Vec<CmTypes> = Vec::new();

@@ -163,10 +163,12 @@ impl GraphStruct for Graph {
             } else {
                 0
             };
-            eprintln!(
-                "DEPCOUNT FINAL: node={}, factor={}, total_dep_count={}, threshold={}",
-                node.name, node.factor, dep_count, threshold
-            );
+            print_debug(|| {
+                format!(
+                    "DEPCOUNT FINAL: node={}, factor={}, total_dep_count={}, threshold={}",
+                    node.name, node.factor, dep_count, threshold
+                )
+            });
 
             dep_count_vec.push(dep_count);
         }

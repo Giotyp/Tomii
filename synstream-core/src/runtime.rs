@@ -285,12 +285,12 @@ impl SynRt {
                             let succ_factor = succ_node.factor;
 
                             // Determine if we should create a filter
-                            let should_filter = if range_len < pred_factor
-                                && range_len == pred.indexes.len()
-                            {
-                                // With group_by: many predecessor instances map to few successor groups
-                                // Without group_by: require 1:1 instance mapping
-                                pred.group_by.is_some() || range_len == succ_factor
+                            let should_filter = if pred.group_by.is_some() {
+                                // Always create filter when group_by present - needed for offset calculation
+                                true
+                            } else if range_len < pred_factor && range_len == pred.indexes.len() {
+                                // Non-group_by case: create filter only for partial ranges
+                                range_len == succ_factor
                             } else {
                                 false
                             };
@@ -852,14 +852,33 @@ impl SynRt {
                             // Use deterministic index_function if available, otherwise sequential counter
                             let packet_index =
                                 if let Some(ref net_cfg) = shared.graph.network_config() {
-                                    if let Some(idx_fn) = net_cfg.index_function {
-                                        let idx_result = idx_fn(vec![packet_cm.clone()]);
-                                        // Still increment packet counter for receive-completion detection
-                                        shared.slot_packet_counters[node_info.slot]
-                                            .fetch_add(1, Ordering::SeqCst);
-                                        idx_result
-                                            .valid_number_to_usize()
-                                            .expect("index_function must return usize")
+                                    if let Some(ref idx_func) = net_cfg.index_function {
+                                        if let Some(idx_fn) = idx_func.func_ptr {
+                                            // Parse additional arguments for index_function
+                                            let additional_args = parse_args(
+                                                &shared,
+                                                &idx_func.args,
+                                                0,  // node_index (network node)
+                                                node_info.slot,
+                                                0,  // pred_index
+                                                None,
+                                            );
+                                            // Build full arg vector: packet first, then additional args
+                                            let mut full_args = vec![packet_cm.clone()];
+                                            full_args.extend(additional_args);
+
+                                            let idx_result = idx_fn(full_args);
+                                            // Still increment packet counter for receive-completion detection
+                                            shared.slot_packet_counters[node_info.slot]
+                                                .fetch_add(1, Ordering::SeqCst);
+                                            idx_result
+                                                .valid_number_to_usize()
+                                                .expect("index_function must return usize")
+                                        } else {
+                                            // No function pointer, fall back to counter
+                                            shared.slot_packet_counters[node_info.slot]
+                                                .fetch_add(1, Ordering::SeqCst)
+                                        }
                                     } else {
                                         shared.slot_packet_counters[node_info.slot]
                                             .fetch_add(1, Ordering::SeqCst)
