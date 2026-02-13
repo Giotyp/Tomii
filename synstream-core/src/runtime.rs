@@ -1207,25 +1207,20 @@ impl SynRt {
         }
 
         // Process dependency updates using pre-collected successor data
+        // NO deduplication - each successor update calls decrease_and_get_ready separately
+        // Atomic operations in decrease_and_get_ready handle concurrent decrements correctly
         for (idx, node_info) in nodes_for_successor_processing.into_iter().enumerate() {
             let succ_updates = succesor_updates.get(idx).cloned().unwrap_or_default();
 
             let mut nodes_to_schedule: Vec<NodeInfo> = Vec::new();
 
-            // Batch process dependency decrements using resolution state
             // if not exist, init nodes_sent for slot to 0
             let nodes_sent: &mut usize = nodes_sent_in_slot.entry(node_info.slot).or_insert(0);
 
-            // NEW: Collect unique successor (node_id, group) pairs with their has_cond flag
-            // This allows us to call decrease_and_get_ready() once per (node, group) instead of once per instance
-            use std::collections::HashMap;
-            let mut unique_successors: HashMap<(usize, Option<usize>), bool> = HashMap::new();
-            for (_, has_cond, succ_id, pred_group) in &succ_updates {
-                unique_successors.insert((*succ_id as usize, *pred_group), *has_cond);
-            }
+            // Process each successor update directly without deduplication
+            for (succ_info, has_cond, succ_id, pred_group) in succ_updates {
+                let succ_node_id = succ_id as usize;
 
-            // Process each unique successor ONCE using optimized per-node decrements
-            for ((succ_node_id, pred_group), has_cond) in unique_successors {
                 // Optimization: Skip condition evaluation if all instances already spawned
                 if has_cond {
                     let remaining_spawns = shared.cond_instances_to_spawn[node_info.slot]
@@ -1233,77 +1228,71 @@ impl SynRt {
                         .load(Ordering::SeqCst);
 
                     if remaining_spawns == 0 {
-                        // All instances already spawned, skip condition evaluation entirely
-                        let succ_cache = &shared.node_cache[succ_node_id];
-                        continue; // Skip to next successor
+                        continue; // All instances already spawned, skip
                     }
                 }
 
-                // Call the new optimized method that decrements once and returns all ready indices
-                // pred_group: None → global decrement, Some(g) → decrement group g only
+                // Call decrease_and_get_ready with count=1 for this predecessor
+                // Multiple concurrent calls will properly aggregate via atomic operations
                 let ready_indices = shared.resolution_state.decrease_and_get_ready(
                     node_info.slot,
                     succ_node_id,
                     pred_group,
+                    1, // Single decrement per predecessor
                 );
 
-                // Schedule all newly ready instances
+                // Schedule all newly ready instances returned by this call
                 for ready_index in ready_indices {
-                    let succ_info = NodeInfo::new(
+                    // Create successor with correct pred_index from completing predecessor
+                    let scheduled_succ_info = NodeInfo::new(
                         succ_node_id as IdType,
                         node_info.slot,
                         ready_index,
-                        node_info.index,
+                        node_info.index, // Use completing predecessor's index
                     );
 
                     if !has_cond {
-                        nodes_to_schedule.push(succ_info);
+                        nodes_to_schedule.push(scheduled_succ_info);
                         *nodes_sent += 1;
                     } else {
-                        // Collect condition nodes - will evaluate outside lock
+                        // Evaluate condition for this successor instance
                         let cond_idx = shared.node_cache[succ_node_id].cond_index;
-                        let succ_id = succ_info.id as usize;
-                        let succ_cache = &shared.node_cache[succ_id];
+                        let succ_cache = &shared.node_cache[succ_node_id];
 
-                        // Check for node-level condition (new format)
                         let condition_passed = if let Some(cond_cache) = &succ_cache.node_condition
                         {
-                            let node_cond = shared.graph.nodes[succ_id].condition.as_ref().unwrap();
-                            evaluate_node_condition(&shared, &succ_info, cond_cache, node_cond)
+                            let node_cond = shared.graph.nodes[succ_node_id].condition.as_ref().unwrap();
+                            evaluate_node_condition(&shared, &scheduled_succ_info, cond_cache, node_cond)
                         } else {
-                            // Fall back to arg-based condition (old format)
-                            conditions_met(&shared, &succ_info, &cond_indexes[cond_idx])
+                            conditions_met(&shared, &scheduled_succ_info, &cond_indexes[cond_idx])
                         };
 
                         if condition_passed {
-                            nodes_to_schedule.push(succ_info.clone());
+                            nodes_to_schedule.push(scheduled_succ_info.clone());
                             *nodes_sent += 1;
 
-                            // Decrement spawn counter - one less instance to spawn for this node
                             let prev_spawns = shared.cond_instances_to_spawn[node_info.slot]
-                                [succ_id]
+                                [succ_node_id]
                                 .fetch_sub(1, Ordering::Release);
 
                             print_debug(|| {
                                 format!(
                                     "Condition passed for node {} ({}) index {}: remaining spawns {} -> {}",
-                                    succ_id, succ_cache.name, succ_info.index, prev_spawns, prev_spawns - 1
+                                    succ_node_id, succ_cache.name, scheduled_succ_info.index, prev_spawns, prev_spawns - 1
                                 )
                             });
                         } else {
-                            // Condition failed - restore dependency to prevent zombie state
-                            shared.resolution_state.increment_dependency(&succ_info);
-
-                            // Reset sent flag so it can be marked later
+                            shared.resolution_state.increment_dependency(&scheduled_succ_info);
                             shared.resolution_state.reset_sent(
                                 node_info.slot,
-                                succ_info.id as usize,
-                                succ_info.index,
+                                scheduled_succ_info.id as usize,
+                                scheduled_succ_info.index,
                             );
                         }
                     }
                 }
             }
+
             // Schedule all ready nodes collected from this completed node
             Self::preparation(&shared, &nodes_to_schedule, thread_core, thread_slot);
             print_debug(|| {

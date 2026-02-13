@@ -63,11 +63,12 @@ pub trait ResolutionState: Send + Sync {
     fn reinit_dependencies(&self, nodes: &Vec<crate::graph_struct::Node>, slot: usize);
 
     // NEW: Optimized per-node decrements returning batch of ready instances
-    // Decrements the dependency counter for a node in a slot once and returns
+    // Decrements the dependency counter for a node in a slot by `count` and returns
     // all instance indices that are now ready to spawn. This replaces N per-instance
-    // decrements with a single per-node decrement, enabling threshold-based spawning.
+    // decrements with aggregated decrements, enabling threshold-based spawning.
     // group: None → global decrement (all groups), Some(g) → decrement group g only
-    fn decrease_and_get_ready(&self, _slot: usize, _node_id: usize, _group: Option<usize>) -> Vec<usize> {
+    // count: number of decrements to apply (when multiple predecessors complete in same batch)
+    fn decrease_and_get_ready(&self, _slot: usize, _node_id: usize, _group: Option<usize>, _count: usize) -> Vec<usize> {
         // Default implementation for backward compatibility: return empty
         // This allows implementations that don't override it to continue working
         Vec::new()
@@ -131,8 +132,8 @@ impl StNodeDepEntry {
         (self.group_size - idx_in_group - 1) * self.deps_per_instance
     }
 
-    /// Decrement once and return all newly-ready instance indices
-    fn decrease_and_get_ready(&mut self, group: Option<usize>) -> Vec<usize> {
+    /// Decrement by count and return all newly-ready instance indices
+    fn decrease_and_get_ready(&mut self, group: Option<usize>, count: usize) -> Vec<usize> {
         let groups_to_decrement: Vec<usize> = match group {
             Some(g) if g < self.num_groups => vec![g],
             None => (0..self.num_groups).collect(),
@@ -143,7 +144,7 @@ impl StNodeDepEntry {
 
         for &g in &groups_to_decrement {
             if self.remaining_deps[g] > 0 {
-                self.remaining_deps[g] -= 1;
+                self.remaining_deps[g] = self.remaining_deps[g].saturating_sub(count);
             }
             let new_remaining = self.remaining_deps[g];
 
@@ -346,10 +347,10 @@ impl ResolutionState for SingleThreadedState {
         }
     }
 
-    fn decrease_and_get_ready(&self, slot: usize, node_id: usize, group: Option<usize>) -> Vec<usize> {
+    fn decrease_and_get_ready(&self, slot: usize, node_id: usize, group: Option<usize>, count: usize) -> Vec<usize> {
         let deps = self.node_deps.get_mut();
         if slot < deps.len() && node_id < deps[slot].len() {
-            deps[slot][node_id].decrease_and_get_ready(group)
+            deps[slot][node_id].decrease_and_get_ready(group, count)
         } else {
             Vec::new()
         }
@@ -465,9 +466,9 @@ impl ResolutionState for MultiThreadedState {
     }
 
     #[inline]
-    fn decrease_and_get_ready(&self, slot: usize, node_id: usize, group: Option<usize>) -> Vec<usize> {
+    fn decrease_and_get_ready(&self, slot: usize, node_id: usize, group: Option<usize>, count: usize) -> Vec<usize> {
         // Use the optimized per-node dependency tracking from NodeDepMap
-        self.node_dep_map.decrease_and_get_ready(slot, node_id, group)
+        self.node_dep_map.decrease_and_get_ready(slot, node_id, group, count)
     }
 
     fn debug_info(&self) -> String {

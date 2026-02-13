@@ -110,10 +110,35 @@ impl GraphStruct for Graph {
                 if arg.type_.is_barrier() {
                     if let Some(pred) = &arg.predecessor {
                         if preds_seen.insert(pred.id) {
-                            if num_groups > 1 && pred.group_by.is_none() {
-                                // Global barrier: each group needs all deps
+                            if let Some(group_by_size) = pred.group_by {
+                                // Per-group barrier: dependencies based on BARRIER groups, not instance groups
+                                // num_barrier_groups = how many packet groups exist (indexes / group_by)
+                                // Example CSI: 64 packets / 64 group_by = 1 barrier group needing 64 deps
+                                // Example FFT: 832 packets / 64 group_by = 13 barrier groups, each needing 64 deps
+                                let num_barrier_groups = if group_by_size > 0 {
+                                    pred.indexes.len() / group_by_size
+                                } else {
+                                    1
+                                };
+
+                                let barrier_deps = num_barrier_groups * group_by_size;
+                                print_debug(|| {
+                                    format!("DEPCOUNT: node={}, factor={}, group_size={:?}, num_barrier_groups={}, group_by={}, indexes.len()={}, dep_count_before={}, adding={}",
+                                    node.name, node.factor, node.group_size, num_barrier_groups, group_by_size, pred.indexes.len(), dep_count, barrier_deps)
+                                });
+                                dep_count += barrier_deps;
+                            } else if num_groups > 1 {
+                                // Global barrier: each instance group needs all deps
+                                print_debug(|| {
+                                    format!("DEPCOUNT: node={}, factor={}, group_size={:?}, num_groups={}, group_by=None, indexes.len()={}, dep_count_before={}, adding={}",
+                                    node.name, node.factor, node.group_size, num_groups, pred.indexes.len(), dep_count, pred.indexes.len() * num_groups)
+                                });
                                 dep_count += pred.indexes.len() * num_groups;
                             } else {
+                                print_debug(|| {
+                                    format!("DEPCOUNT: node={}, factor={}, group_size={:?}, num_groups={} (<=1), indexes.len()={}, dep_count_before={}, adding={}",
+                                    node.name, node.factor, node.group_size, num_groups, pred.indexes.len(), dep_count, pred.indexes.len())
+                                });
                                 dep_count += pred.indexes.len();
                             }
                         }
@@ -131,6 +156,18 @@ impl GraphStruct for Graph {
                     }
                 }
             }
+
+            // Final summary for this node
+            let threshold = if node.factor > 0 {
+                dep_count / node.factor
+            } else {
+                0
+            };
+            eprintln!(
+                "DEPCOUNT FINAL: node={}, factor={}, total_dep_count={}, threshold={}",
+                node.name, node.factor, dep_count, threshold
+            );
+
             dep_count_vec.push(dep_count);
         }
         dep_count_vec

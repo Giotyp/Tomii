@@ -564,10 +564,11 @@ impl NodeDependencyEntry {
         (self.group_size - idx_in_group - 1) * self.deps_per_instance
     }
 
-    /// Atomically decrease dependency and return indices of newly ready instances.
+    /// Atomically decrease dependency by count and return indices of newly ready instances.
     /// group: None → decrement ALL group counters (global barrier, e.g., beam→demul)
     ///        Some(g) → decrement only group g's counter
-    pub fn decrease_and_get_ready(&self, group: Option<usize>) -> Vec<usize> {
+    /// count: number of decrements to apply (when multiple predecessors complete in same batch)
+    pub fn decrease_and_get_ready(&self, group: Option<usize>, count: usize) -> Vec<usize> {
         let groups_to_decrement: Vec<usize> = match group {
             Some(g) if g < self.num_groups => vec![g],
             None => (0..self.num_groups).collect(),
@@ -577,14 +578,14 @@ impl NodeDependencyEntry {
         let mut ready = Vec::new();
 
         for &g in &groups_to_decrement {
-            // Atomically decrement this group's counter
+            // Atomically decrement this group's counter by count
             let result = self.remaining_deps[g]
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |val| {
-                    if val > 0 { Some(val - 1) } else { None }
+                    Some(val.saturating_sub(count))
                 });
 
             let new_remaining = match result {
-                Ok(prev) => prev - 1,
+                Ok(prev) => prev.saturating_sub(count),
                 Err(current) => current,
             };
 
@@ -685,7 +686,62 @@ impl NodeDepMap {
                 let total_deps = dep_counts[node_id];
                 let has_barrier = node.args.iter().any(|arg| arg.is_barrier());
 
-                let entry = NodeDependencyEntry::new(node.factor, total_deps, has_barrier, node.group_size);
+                // Calculate barrier-based grouping for per-group barriers
+                let effective_group_size = if has_barrier {
+                    // For barrier nodes, compute instances per barrier group
+                    // by finding the group_by value from barrier args
+                    let mut max_group_by = None;
+                    for arg in &node.args {
+                        if arg.is_barrier() {
+                            if let Some(pred) = &arg.predecessor {
+                                if let Some(gb) = pred.group_by {
+                                    max_group_by = Some(max_group_by.unwrap_or(0).max(gb));
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(gb) = max_group_by {
+                        // Calculate instances per barrier group based on packet grouping
+                        // For FFT: 832 packets / 64 group_by = 13 barrier groups
+                        // instances_per_group = 832 instances / 13 groups = 64
+
+                        // Find the number of predecessor packets from barrier args
+                        let mut num_pred_packets = 0;
+                        for arg in &node.args {
+                            if arg.is_barrier() {
+                                if let Some(pred) = &arg.predecessor {
+                                    if pred.group_by.is_some() {
+                                        num_pred_packets = num_pred_packets.max(pred.indexes.len());
+                                    }
+                                }
+                            }
+                        }
+
+                        let num_barrier_groups = if num_pred_packets > 0 && gb > 0 {
+                            num_pred_packets / gb
+                        } else {
+                            1
+                        };
+
+                        let instances_per_barrier_group = if num_barrier_groups > 0 {
+                            node.factor / num_barrier_groups
+                        } else {
+                            node.factor
+                        };
+
+                        eprintln!("DB: BARRIER GROUPING: node={}, factor={}, total_deps={}, group_by={}, num_pred_packets={}, num_barrier_groups={}, instances_per_group={}",
+                                  node.name, node.factor, total_deps, gb, num_pred_packets, num_barrier_groups, instances_per_barrier_group);
+
+                        Some(instances_per_barrier_group)
+                    } else {
+                        node.group_size
+                    }
+                } else {
+                    node.group_size
+                };
+
+                let entry = NodeDependencyEntry::new(node.factor, total_deps, has_barrier, effective_group_size);
                 slot_entries.push(entry);
             }
 
@@ -695,12 +751,13 @@ impl NodeDepMap {
         Self { slots: map_slots }
     }
 
-    /// Get ready instances for a node in a slot by decrementing dependencies once
+    /// Get ready instances for a node in a slot by decrementing dependencies by count
     /// group: None → global decrement, Some(g) → decrement group g only
+    /// count: number of decrements to apply
     #[inline]
-    pub fn decrease_and_get_ready(&self, slot: usize, node_id: usize, group: Option<usize>) -> Vec<usize> {
+    pub fn decrease_and_get_ready(&self, slot: usize, node_id: usize, group: Option<usize>, count: usize) -> Vec<usize> {
         if slot < self.slots.len() && node_id < self.slots[slot].len() {
-            self.slots[slot][node_id].decrease_and_get_ready(group)
+            self.slots[slot][node_id].decrease_and_get_ready(group, count)
         } else {
             Vec::new()
         }
