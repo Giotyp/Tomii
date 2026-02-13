@@ -625,6 +625,7 @@ pub fn conditions_met(
         let node_factor = shared.graph.nodes[node_info.id as usize].factor;
         let result = &collect_arg_result(
             arg,
+            node_info.id,
             node_info.index,
             node_factor,
             node_info.slot,
@@ -943,7 +944,7 @@ pub fn parse_cached_args(
             .expect("Argument index out of bounds");
 
         let node_factor = shared.graph.nodes[node_id as usize].factor;
-        let result_opt = collect_arg_result(arg, node_index, node_factor, slot, pred_index, custom_res, shared);
+        let result_opt = collect_arg_result(arg, node_id, node_index, node_factor, slot, pred_index, custom_res, shared);
         if let Some(mut result) = result_opt {
             if result.len() == 1 {
                 arg_vec[*res_idx] = result.remove(0);
@@ -973,7 +974,7 @@ pub fn parse_args(
             continue;
         }
 
-        let result_opt = collect_arg_result(arg, node_index, 0, slot, pred_index, custom_res, shared);
+        let result_opt = collect_arg_result(arg, 0, node_index, 0, slot, pred_index, custom_res, shared);
         if let Some(result) = result_opt {
             arg_vec.extend(result);
         }
@@ -1002,6 +1003,7 @@ fn get_object_value(obj_vec: &[CmTypes], node_index: usize) -> CmTypes {
 #[inline]
 pub fn collect_arg_result(
     arg: &Arg,
+    node_id: IdType,
     node_index: usize,
     node_factor: usize,
     slot: usize,
@@ -1036,7 +1038,24 @@ pub fn collect_arg_result(
             if predecessor.indexes.len() == 1 {
                 let res_node = &shared.graph.nodes[*res_node_id as usize];
                 let res_factor = res_node.factor;
-                let dep_idx = find_pred_index(node_index, predecessor.indexes[0], res_factor);
+                let current_node = &shared.graph.nodes[node_id as usize];
+
+                let dep_idx = if let Some(ngs) = current_node.group_size {
+                    // Current node is grouped: map through symbol level.
+                    // symbol = which group/symbol this instance belongs to
+                    let symbol = node_index / ngs;
+                    // Predecessor's effective group size: its own group_size,
+                    // or the barrier's group_by, or fall back to full factor
+                    let pred_eff_gs = res_node.group_size.unwrap_or_else(|| {
+                        shared.pred_group_by[node_id as usize][*res_node_id as usize]
+                            .unwrap_or(res_factor)
+                    });
+                    let offset = predecessor.indexes[0] as usize;
+                    symbol * pred_eff_gs + offset
+                } else {
+                    find_pred_index(node_index, predecessor.indexes[0], res_factor)
+                };
+
                 let node_info =
                     NodeInfo::new(*res_node_id as IdType, slot, dep_idx, 0);
                 if let Some(result) = shared.node_results.get(&node_info) {
