@@ -622,9 +622,11 @@ pub fn conditions_met(
         let arg = &node.args[*arg_idx];
         let init_condition: &InitCondition = &arg.init_condition.as_ref().unwrap();
         // We assume condition has a single predecessor
+        let node_factor = shared.graph.nodes[node_info.id as usize].factor;
         let result = &collect_arg_result(
             arg,
             node_info.index,
+            node_factor,
             node_info.slot,
             node_info.pred_index,
             None,
@@ -940,7 +942,8 @@ pub fn parse_cached_args(
             .get(*real_idx)
             .expect("Argument index out of bounds");
 
-        let result_opt = collect_arg_result(arg, node_index, slot, pred_index, custom_res, shared);
+        let node_factor = shared.graph.nodes[node_id as usize].factor;
+        let result_opt = collect_arg_result(arg, node_index, node_factor, slot, pred_index, custom_res, shared);
         if let Some(mut result) = result_opt {
             if result.len() == 1 {
                 arg_vec[*res_idx] = result.remove(0);
@@ -970,7 +973,7 @@ pub fn parse_args(
             continue;
         }
 
-        let result_opt = collect_arg_result(arg, node_index, slot, pred_index, custom_res, shared);
+        let result_opt = collect_arg_result(arg, node_index, 0, slot, pred_index, custom_res, shared);
         if let Some(result) = result_opt {
             arg_vec.extend(result);
         }
@@ -1000,6 +1003,7 @@ fn get_object_value(obj_vec: &[CmTypes], node_index: usize) -> CmTypes {
 pub fn collect_arg_result(
     arg: &Arg,
     node_index: usize,
+    node_factor: usize,
     slot: usize,
     pred_index: usize,
     custom_res: Option<&CmTypes>,
@@ -1026,13 +1030,15 @@ pub fn collect_arg_result(
                 None => return None, // Early return if no predecessor
             };
 
-            // Special case for single index
+            // Single explicit index: use the declared index, NOT pred_index.
+            // The triggering predecessor may differ from the $res predecessor
+            // (e.g., demul's $res reads fft[0] but demul can be triggered by beam).
             if predecessor.indexes.len() == 1 {
                 let res_node = &shared.graph.nodes[*res_node_id as usize];
                 let res_factor = res_node.factor;
+                let dep_idx = find_pred_index(node_index, predecessor.indexes[0], res_factor);
                 let node_info =
-                    NodeInfo::new(*res_node_id as IdType, slot, pred_index % res_factor, 0);
-                // Lock-free atomic load
+                    NodeInfo::new(*res_node_id as IdType, slot, dep_idx, 0);
                 if let Some(result) = shared.node_results.get(&node_info) {
                     return Some(vec![result]);
                 } else {
@@ -1043,7 +1049,25 @@ pub fn collect_arg_result(
                 }
             }
 
-            // Batch process multiple indices
+            // 1:1 mapping: indexes.len() == node_factor means each instance
+            // reads exactly one predecessor result via pred_index (the triggering
+            // predecessor IS the $res predecessor in this case).
+            if predecessor.indexes.len() > 1 && predecessor.indexes.len() == node_factor {
+                let res_node = &shared.graph.nodes[*res_node_id as usize];
+                let res_factor = res_node.factor;
+                let node_info =
+                    NodeInfo::new(*res_node_id as IdType, slot, pred_index % res_factor, 0);
+                if let Some(result) = shared.node_results.get(&node_info) {
+                    return Some(vec![result]);
+                } else {
+                    panic!(
+                        "Missing result for node_info: {:?} when collecting argument",
+                        node_info
+                    );
+                }
+            }
+
+            // Collect-all path: factor != indexes.len() (e.g., write_res)
             let pred_node = &shared.graph.nodes[predecessor.id as usize];
             let pred_factor = pred_node.factor;
 
@@ -1229,7 +1253,6 @@ pub fn collect_successors_for_node(
         }
     };
 
-    let node_cache_entry = &shared.node_cache[node_id_usize];
     let mut succ_updates = Vec::new();
 
     // Collect info for each successor without locks
@@ -1252,27 +1275,6 @@ pub fn collect_successors_for_node(
         // Use pre-computed flag for lock-free check
         let has_condition = succ_cache.is_condition;
 
-        // Lock-free remaining count access with Acquire ordering
-        // This ensures we see all writes that happened before the Release write
-        let remaining = {
-            let succ_id_to_rem_idx = shared.node_id_to_rem[succ_id as usize];
-            if has_condition {
-                shared.remaining_cond_nodes[node_info.slot][succ_id_to_rem_idx]
-                    .load(Ordering::SeqCst)
-            } else {
-                shared.remaining_nodes[node_info.slot][succ_id_to_rem_idx].load(Ordering::SeqCst)
-            }
-        };
-
-        let succ_factor = succ_cache.factor;
-        let node_factor = node_cache_entry.factor;
-
-        let pred_count = succ_cache
-            .pred_vec
-            .get(node_info.id as usize)
-            .cloned()
-            .unwrap_or(0);
-
         // Compute predecessor group for group_by barriers
         let pred_group: Option<usize> = {
             if let Some(Some(gb)) = shared.pred_group_by.get(succ_id_usize)
@@ -1290,19 +1292,19 @@ pub fn collect_successors_for_node(
             }
         };
 
-        // Determine which indices of the successor to create
+        // Determine which indices of the successor to create.
+        // Always a single entry: decrease_and_get_ready returns ALL newly-ready
+        // instances via threshold/barrier logic. Multiple entries cause over-decrement.
         let succ_indexes = {
             if pred_group.is_some() {
-                // Group-based dependency: create a placeholder entry (index 0) for decrement
-                // The actual ready instances will be determined by decrease_and_get_ready()
-                // based on the group's dependency counter reaching threshold
+                // Group-based dependency: placeholder entry (index 0) for decrement
                 vec![0]
-            } else if succ_factor == node_factor || pred_count <= 1 {
-                // Single instance case: exact index mapping
+            } else if node_info.id == 0 {
+                // $network node: 1:1 index mapping for pred_index_filter routing
                 vec![node_info.index]
             } else {
-                let num_indexes = std::cmp::max(succ_factor, remaining);
-                (0..num_indexes).collect::<Vec<_>>()
+                // Single entry per (successor, pred_group) pair
+                vec![0]
             }
         };
 

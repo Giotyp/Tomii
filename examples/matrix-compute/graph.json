@@ -20,7 +20,7 @@
         },
         {
             "name": "fft_planner",
-            "function_name": "fft_planner",
+            "function": "fft_planner",
             "args": [
                 {
                     "type": "$ref",
@@ -30,7 +30,7 @@
         },
         {
             "name": "result_file",
-            "function_name": "get_out_file",
+            "function": "get_out_file",
             "args": [
                 {
                     "type": "String",
@@ -47,7 +47,7 @@
         {
             "name": "gen_vec",
             "factor": "num_nodes",
-            "function_name": "generate_vector",
+            "function": "generate_vector",
             "args": [
                 {
                     "type": "$ref",
@@ -58,7 +58,7 @@
         {
             "name": "compute_fft",
             "factor": "num_nodes",
-            "function_name": "compute_fft",
+            "function": "compute_fft",
             "args": [
                 {
                     "type": "$ref",
@@ -76,7 +76,7 @@
         {
             "name": "vec_mat",
             "factor": "num_nodes",
-            "function_name": "vec_to_mat",
+            "function": "vec_to_mat",
             "args": [
                 {
                     "type": "$res",
@@ -97,7 +97,7 @@
         {
             "name": "mat_mul",
             "factor": "num_nodes",
-            "function_name": "mat_mul",
+            "function": "mat_mul",
             "args": [
                 {
                     "type": "$res",
@@ -117,7 +117,7 @@
         },
         {
             "name": "write_res",
-            "function_name": "write_to_file",
+            "function": "write_to_file",
             "args": [
                 {
                     "type": "$ref",

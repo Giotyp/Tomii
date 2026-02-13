@@ -25,7 +25,7 @@ pub struct GraphFile {
 pub struct InitJson {
     pub name: String,
     pub args: Vec<ArgInit>,
-    pub function_name: Option<String>,
+    pub function: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 pub struct ArgInit {

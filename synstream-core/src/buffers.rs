@@ -1,5 +1,6 @@
 use deepsize::DeepSizeOf;
 
+use crate::debug::print_debug;
 use crate::graph_struct::Node;
 use crate::IdType;
 use std::cmp::PartialEq;
@@ -522,14 +523,27 @@ impl NodeDependencyEntry {
     /// Create a new dependency entry for a node in a slot
     /// group_size_opt: None or Some(factor) → single group (backward compatible)
     ///                 Some(gs) where gs < factor → multiple groups
-    pub fn new(factor: usize, total_deps: usize, has_barrier: bool, group_size_opt: Option<usize>) -> Self {
+    pub fn new(
+        factor: usize,
+        total_deps: usize,
+        has_barrier: bool,
+        group_size_opt: Option<usize>,
+    ) -> Self {
         let (group_size, num_groups) = match group_size_opt {
             Some(gs) if gs > 0 && gs < factor => (gs, factor / gs),
             _ => (factor, 1), // No grouping or full-factor group
         };
 
-        let deps_per_group = if num_groups > 0 { total_deps / num_groups } else { 0 };
-        let deps_per_instance = if group_size > 0 { deps_per_group / group_size } else { 0 };
+        let deps_per_group = if num_groups > 0 {
+            total_deps / num_groups
+        } else {
+            0
+        };
+        let deps_per_instance = if group_size > 0 {
+            deps_per_group / group_size
+        } else {
+            0
+        };
 
         let mut remaining_deps = Vec::with_capacity(num_groups);
         for _ in 0..num_groups {
@@ -579,8 +593,8 @@ impl NodeDependencyEntry {
 
         for &g in &groups_to_decrement {
             // Atomically decrement this group's counter by count
-            let result = self.remaining_deps[g]
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |val| {
+            let result =
+                self.remaining_deps[g].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |val| {
                     Some(val.saturating_sub(count))
                 });
 
@@ -654,7 +668,11 @@ impl NodeDependencyEntry {
 
     /// Reset this entry for a new slot iteration
     pub fn reset(&self, new_total_deps: usize) {
-        let deps_per_group = if self.num_groups > 0 { new_total_deps / self.num_groups } else { 0 };
+        let deps_per_group = if self.num_groups > 0 {
+            new_total_deps / self.num_groups
+        } else {
+            0
+        };
         for counter in &self.remaining_deps {
             counter.store(deps_per_group, Ordering::SeqCst);
         }
@@ -730,8 +748,10 @@ impl NodeDepMap {
                             node.factor
                         };
 
-                        eprintln!("DB: BARRIER GROUPING: node={}, factor={}, total_deps={}, group_by={}, num_pred_packets={}, num_barrier_groups={}, instances_per_group={}",
-                                  node.name, node.factor, total_deps, gb, num_pred_packets, num_barrier_groups, instances_per_barrier_group);
+                        print_debug(|| {
+                            format!("DB: BARRIER GROUPING: node={}, factor={}, total_deps={}, group_by={}, num_pred_packets={}, num_barrier_groups={}, instances_per_group={}",
+                                  node.name, node.factor, total_deps, gb, num_pred_packets, num_barrier_groups, instances_per_barrier_group)
+                        });
 
                         Some(instances_per_barrier_group)
                     } else {
@@ -741,7 +761,12 @@ impl NodeDepMap {
                     node.group_size
                 };
 
-                let entry = NodeDependencyEntry::new(node.factor, total_deps, has_barrier, effective_group_size);
+                let entry = NodeDependencyEntry::new(
+                    node.factor,
+                    total_deps,
+                    has_barrier,
+                    effective_group_size,
+                );
                 slot_entries.push(entry);
             }
 
@@ -755,7 +780,13 @@ impl NodeDepMap {
     /// group: None → global decrement, Some(g) → decrement group g only
     /// count: number of decrements to apply
     #[inline]
-    pub fn decrease_and_get_ready(&self, slot: usize, node_id: usize, group: Option<usize>, count: usize) -> Vec<usize> {
+    pub fn decrease_and_get_ready(
+        &self,
+        slot: usize,
+        node_id: usize,
+        group: Option<usize>,
+        count: usize,
+    ) -> Vec<usize> {
         if slot < self.slots.len() && node_id < self.slots[slot].len() {
             self.slots[slot][node_id].decrease_and_get_ready(group, count)
         } else {
@@ -766,7 +797,12 @@ impl NodeDepMap {
     /// Increment dependency for a specific node (used when condition fails)
     /// Returns the new dependency count
     #[inline]
-    pub fn increment_dependency(&self, slot: usize, node_id: usize, instance_idx: Option<usize>) -> Option<usize> {
+    pub fn increment_dependency(
+        &self,
+        slot: usize,
+        node_id: usize,
+        instance_idx: Option<usize>,
+    ) -> Option<usize> {
         if slot < self.slots.len() && node_id < self.slots[slot].len() {
             Some(self.slots[slot][node_id].increment_dependency(instance_idx))
         } else {

@@ -858,9 +858,9 @@ impl SynRt {
                                             let additional_args = parse_args(
                                                 &shared,
                                                 &idx_func.args,
-                                                0,  // node_index (network node)
+                                                0, // node_index (network node)
                                                 node_info.slot,
-                                                0,  // pred_index
+                                                0, // pred_index
                                                 None,
                                             );
                                             // Build full arg vector: packet first, then additional args
@@ -889,6 +889,28 @@ impl SynRt {
                                 };
 
                             node_info.index = packet_index;
+                            let slot = node_info.slot;
+                            let idx = node_info.index;
+                            let succs: Vec<String> = shared.graph.successors[0]
+                                .iter()
+                                .filter(|&&sid| {
+                                    if let Some(Some((start, end))) = shared
+                                        .pred_index_filter
+                                        .get(sid as usize)
+                                        .and_then(|v| v.get(0))
+                                    {
+                                        idx >= *start && idx < *end
+                                    } else {
+                                        true
+                                    }
+                                })
+                                .map(|&sid| {
+                                    format!("{}({})", shared.graph.nodes[sid as usize].name, sid)
+                                })
+                                .collect();
+                            if succs.len() != 1 {
+                                println!("PACKET idx={} routed to: {:?}", idx, succs);
+                            }
                         } else {
                             // ID function failed, skip processing this node
                             print_debug(|| {
@@ -1280,8 +1302,14 @@ impl SynRt {
 
                         let condition_passed = if let Some(cond_cache) = &succ_cache.node_condition
                         {
-                            let node_cond = shared.graph.nodes[succ_node_id].condition.as_ref().unwrap();
-                            evaluate_node_condition(&shared, &scheduled_succ_info, cond_cache, node_cond)
+                            let node_cond =
+                                shared.graph.nodes[succ_node_id].condition.as_ref().unwrap();
+                            evaluate_node_condition(
+                                &shared,
+                                &scheduled_succ_info,
+                                cond_cache,
+                                node_cond,
+                            )
                         } else {
                             conditions_met(&shared, &scheduled_succ_info, &cond_indexes[cond_idx])
                         };
@@ -1301,7 +1329,9 @@ impl SynRt {
                                 )
                             });
                         } else {
-                            shared.resolution_state.increment_dependency(&scheduled_succ_info);
+                            shared
+                                .resolution_state
+                                .increment_dependency(&scheduled_succ_info);
                             shared.resolution_state.reset_sent(
                                 node_info.slot,
                                 scheduled_succ_info.id as usize,
