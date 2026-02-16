@@ -4,7 +4,7 @@ use crate::resolution_state::ResolutionState;
 use crate::time_buffer::{TimeBufferManager, TimingMethod};
 use crate::{buffers::*, graph::*, graph_struct::*, scheduler::*, IdType};
 use core::panic;
-use crossbeam_channel::{Receiver as BatchReceiver, Sender as BatchSender};
+use flume::{Receiver, Sender};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -328,9 +328,9 @@ pub struct SharedData {
     pub base_instant: Arc<Instant>,
     pub job_counter: Arc<AtomicUsize>,
 
-    // Crossbeam channel for lock-free task completion delivery
-    pub batch_queue_tx: BatchSender<(NodeInfo, CmTypes)>,
-    pub batch_queue_rx: BatchReceiver<(NodeInfo, CmTypes)>,
+    // Flume MPSC channel for lock-free task completion delivery
+    pub batch_queue_tx: Sender<(NodeInfo, CmTypes)>,
+    pub batch_queue_rx: Receiver<(NodeInfo, CmTypes)>,
     pub target_batch_size: usize,
     pub batch_timeout_us: u64,
 
@@ -369,9 +369,9 @@ pub struct SharedData {
 
     // Network receiver infrastructure (optional - only present if network_config exists)
     pub receive_finished: Arc<AtomicBool>,
-    /// One channel per receiver thread — eliminates CAS contention on a shared head pointer.
-    pub packet_sender: BatchSender<PacketMessage>,
-    pub packet_receiver: BatchReceiver<PacketMessage>,
+    /// Flume MPSC channel from network receivers to resolution threads
+    pub packet_sender: Sender<PacketMessage>,
+    pub packet_receiver: Receiver<PacketMessage>,
     pub receiver_sockets: Vec<NetworkSocket>,
     pub packet_drop_counters: Vec<AtomicUsize>,
     pub shutdown_flag: Arc<AtomicBool>,
