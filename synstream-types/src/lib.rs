@@ -1,10 +1,11 @@
 use lazy_static::lazy_static;
+use parking_lot::RwLock;
 use rapidhash::{HashMapExt, RapidHashMap};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::any::Any;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -321,36 +322,25 @@ impl CmTypes {
     }
 
     /// Extract vector and downcast to specific type
-    /// Returns None if types don't match or lock is poisoned
+    /// Returns None if types don't match
     pub fn as_vec_any<T: Any + Clone>(&self) -> Option<Vec<T>> {
         if let CmTypes::VecAny(lock) = self {
-            match lock.read() {
-                Ok(guard) => {
-                    let mut result = Vec::with_capacity(guard.len());
-                    for boxed in guard.iter() {
-                        match boxed.downcast_ref::<T>() {
-                            Some(value) => result.push(value.clone()),
-                            None => {
-                                println!(
-                                    "VecAny downcast failed: Expected type '{}', but got type '{:?}'",
-                                    std::any::type_name::<T>(),
-                                    std::any::type_name_of_val(boxed.as_ref())
-                                );
-                                return None;
-                            }
-                        }
+            let guard = lock.read();
+            let mut result = Vec::with_capacity(guard.len());
+            for boxed in guard.iter() {
+                match boxed.downcast_ref::<T>() {
+                    Some(value) => result.push(value.clone()),
+                    None => {
+                        println!(
+                            "VecAny downcast failed: Expected type '{}', but got type '{:?}'",
+                            std::any::type_name::<T>(),
+                            std::any::type_name_of_val(boxed.as_ref())
+                        );
+                        return None;
                     }
-                    Some(result)
-                }
-                Err(poison) => {
-                    let guard = poison.into_inner();
-                    eprintln!(
-                        "RwLock poisoned while reading VecAny: {} elements",
-                        guard.len()
-                    );
-                    None
                 }
             }
+            Some(result)
         } else {
             None
         }
@@ -359,7 +349,7 @@ impl CmTypes {
     /// Get length of VecAny without extracting elements
     pub fn vec_any_len(&self) -> Option<usize> {
         if let CmTypes::VecAny(lock) = self {
-            lock.read().ok().map(|guard| guard.len())
+            Some(lock.read().len())
         } else {
             None
         }
@@ -371,24 +361,13 @@ impl CmTypes {
         F: FnOnce(&T) -> R,
     {
         if let CmTypes::Any(lock) = self {
-            match lock.read() {
-                Ok(guard) => match guard.downcast_ref::<T>() {
-                    Some(value) => Some(f(value)),
-                    None => {
-                        // Print both expected and actual type for debugging
-                        println!(
-                            "Downcast failed: Expected type '{}', but got type '{:?}'",
-                            std::any::type_name::<T>(),
-                            std::any::type_name_of_val(guard.as_ref())
-                        );
-                        None
-                    }
-                },
-                Err(poison) => {
-                    // Lock is poisoned — try to extract the inner guard for debugging
-                    let guard = poison.into_inner();
+            let guard = lock.read();
+            match guard.downcast_ref::<T>() {
+                Some(value) => Some(f(value)),
+                None => {
+                    // Print both expected and actual type for debugging
                     println!(
-                        "RwLock poisoned while reading Any: Expected type '{}', actual type '{:?}'",
+                        "Downcast failed: Expected type '{}', but got type '{:?}'",
                         std::any::type_name::<T>(),
                         std::any::type_name_of_val(guard.as_ref())
                     );
@@ -406,24 +385,13 @@ impl CmTypes {
         F: FnOnce(&mut T) -> R,
     {
         if let CmTypes::Any(lock) = self {
-            match lock.write() {
-                Ok(mut guard) => match guard.downcast_mut::<T>() {
-                    Some(value) => Some(f(value)),
-                    None => {
-                        // Print both expected and actual type for debugging
-                        println!(
-                            "Downcast failed: Expected type '{}', but got type '{:?}'",
-                            std::any::type_name::<T>(),
-                            std::any::type_name_of_val(guard.as_ref())
-                        );
-                        None
-                    }
-                },
-                Err(poison) => {
-                    // Lock is poisoned — try to extract the inner guard for debugging
-                    let guard = poison.into_inner();
+            let mut guard = lock.write();
+            match guard.downcast_mut::<T>() {
+                Some(value) => Some(f(value)),
+                None => {
+                    // Print both expected and actual type for debugging
                     println!(
-                        "RwLock poisoned while writing Any: Expected type '{}', actual type '{:?}'",
+                        "Downcast failed: Expected type '{}', but got type '{:?}'",
                         std::any::type_name::<T>(),
                         std::any::type_name_of_val(guard.as_ref())
                     );
@@ -558,20 +526,10 @@ impl CmTypes {
     /// - Proper synchronization is used when accessing the data from multiple threads
     pub unsafe fn as_mut_ptr<T: Any + Send + Sync>(&self) -> Option<SendPtr<T>> {
         if let CmTypes::Any(lock) = self {
-            match lock.read() {
-                Ok(guard) => guard
-                    .downcast_ref::<T>()
-                    .map(|r| SendPtr(r as *const T as *mut T)),
-                Err(poison) => {
-                    // Lock poisoned — extract inner guard to aid debugging
-                    let guard = poison.into_inner();
-                    eprintln!(
-                        "RwLock poisoned in as_mut_ptr(): actual type = '{:?}'",
-                        std::any::type_name_of_val(guard.as_ref())
-                    );
-                    None
-                }
-            }
+            let guard = lock.read();
+            guard
+                .downcast_ref::<T>()
+                .map(|r| SendPtr(r as *const T as *mut T))
         } else {
             None
         }
@@ -1185,11 +1143,8 @@ impl std::fmt::Debug for CmTypes {
             CmTypes::Any(_) => write!(f, "CustomType"),
             CmTypes::AnySliced(_) => write!(f, "SlicedType"),
             CmTypes::VecAny(lock) => {
-                if let Ok(guard) = lock.read() {
-                    write!(f, "VecAny[{}]", guard.len())
-                } else {
-                    write!(f, "VecAny[poisoned]")
-                }
+                let guard = lock.read();
+                write!(f, "VecAny[{}]", guard.len())
             }
         }
     }
@@ -1248,11 +1203,8 @@ impl fmt::Display for CmTypes {
             CmTypes::Any(_) => write!(f, "CustomType"),
             CmTypes::AnySliced(_) => write!(f, "CustomSlicedType"),
             CmTypes::VecAny(lock) => {
-                if let Ok(guard) = lock.read() {
-                    write!(f, "VecAny[{}]", guard.len())
-                } else {
-                    write!(f, "VecAny[poisoned]")
-                }
+                let guard = lock.read();
+                write!(f, "VecAny[{}]", guard.len())
             }
         }
     }
