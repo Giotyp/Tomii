@@ -510,6 +510,7 @@ pub struct NodeDependencyEntry {
     num_groups: usize,
 
     /// Dependencies per group counter
+    #[allow(dead_code)]
     deps_per_group: usize,
 
     /// Dependencies per instance (within a group for grouped nodes)

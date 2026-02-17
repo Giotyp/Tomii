@@ -319,7 +319,7 @@ pub struct SharedData {
     // Node cache for fast repeated access
     pub node_cache: Vec<NodeCacheEntry>,
 
-    // Internally synchronized data - LOCK-FREE result storage
+    // Internally synchronized data
     pub node_results: Arc<crate::buffers::LockFreeResultMap>,
     pub stream_complete_counter: Arc<AtomicUsize>,
     // Vector to keep track of running streams. If a streams is assigned then
@@ -353,15 +353,10 @@ pub struct SharedData {
     pub remaining_init: Arc<Vec<Vec<usize>>>,
     pub initial_prep_done: Arc<AtomicUsize>,
 
-    // O(1) slot completion counters - Phase 1.2 optimization
-    // slot_pending_tasks[slot] tracks total pending non-initial tasks for the slot
     pub slot_pending_tasks: Arc<Vec<AtomicUsize>>,
-    // slot_pending_cond_tasks[slot] tracks total pending condition tasks for the slot
     pub slot_pending_cond_tasks: Arc<Vec<AtomicUsize>>,
 
     // Condition node spawn tracking - optimization to skip evaluation when all instances spawned
-    // cond_instances_to_spawn[slot][node_id] tracks remaining instances to spawn per condition node
-    // Decremented when condition passes and task is spawned. When reaches 0, skip further evaluation.
     pub cond_instances_to_spawn: Arc<Vec<Vec<AtomicUsize>>>,
 
     // Slot priority processing state
@@ -391,15 +386,9 @@ pub struct SharedData {
     pub slot_packet_complete: Arc<Vec<AtomicBool>>,
 
     /// Per-slot in-flight batch processing counter - prevents premature slot completion
-    /// Incremented when batch processing starts for a slot, decremented after ALL successor processing
-    /// Completion requires: pending_tasks==0 AND pending_cond==0 AND processing_count==0
-    /// CRITICAL: Must decrement LAST (after successor processing) to prevent state reset during processing
     pub slot_processing_count: Arc<Vec<AtomicUsize>>,
 
     /// Per-group dependency support:
-    /// pred_index_filter[succ_id][pred_id] = Some((start, end)) means only predecessor instances
-    /// with index in [start, end) should trigger dependency decrements for this successor.
-    /// None means no filtering (full range). Outer vec indexed by successor node_id.
     pub pred_index_filter: Arc<Vec<Vec<Option<(usize, usize)>>>>,
 
     /// pred_group_by[succ_id][pred_id] = Some(group_size) means predecessor instances are grouped
@@ -941,7 +930,16 @@ pub fn parse_cached_args(
             .expect("Argument index out of bounds");
 
         let node_factor = shared.graph.nodes[node_id as usize].factor;
-        let result_opt = collect_arg_result(arg, node_id, node_index, node_factor, slot, pred_index, custom_res, shared);
+        let result_opt = collect_arg_result(
+            arg,
+            node_id,
+            node_index,
+            node_factor,
+            slot,
+            pred_index,
+            custom_res,
+            shared,
+        );
         if let Some(mut result) = result_opt {
             if result.len() == 1 {
                 arg_vec[*res_idx] = result.remove(0);
@@ -996,7 +994,16 @@ fn populate_cached_args_into(
             .expect("Argument index out of bounds");
 
         let node_factor = shared.graph.nodes[node_id as usize].factor;
-        let result_opt = collect_arg_result(arg, node_id, node_index, node_factor, slot, pred_index, None, shared);
+        let result_opt = collect_arg_result(
+            arg,
+            node_id,
+            node_index,
+            node_factor,
+            slot,
+            pred_index,
+            None,
+            shared,
+        );
         if let Some(mut result) = result_opt {
             if result.len() == 1 {
                 buf[*res_idx] = result.remove(0);
@@ -1024,7 +1031,8 @@ pub fn parse_args(
             continue;
         }
 
-        let result_opt = collect_arg_result(arg, 0, node_index, 0, slot, pred_index, custom_res, shared);
+        let result_opt =
+            collect_arg_result(arg, 0, node_index, 0, slot, pred_index, custom_res, shared);
         if let Some(result) = result_opt {
             arg_vec.extend(result);
         }
@@ -1106,8 +1114,7 @@ pub fn collect_arg_result(
                     find_pred_index(node_index, predecessor.indexes[0], res_factor)
                 };
 
-                let node_info =
-                    NodeInfo::new(*res_node_id as IdType, slot, dep_idx, 0);
+                let node_info = NodeInfo::new(*res_node_id as IdType, slot, dep_idx, 0);
                 if let Some(result) = shared.node_results.get(&node_info) {
                     return Some(vec![result]);
                 } else {
@@ -1190,7 +1197,6 @@ pub fn activate_next_slot(
         return None;
     }
 
-    // FIX: Acquire locks in the correct order (A -> B) to avoid deadlock
     // 1. Acquire running_streams (Read) FIRST
     let running_streams = shared.running_streams.read();
 
@@ -1220,7 +1226,7 @@ pub fn activate_next_slot(
         None
     };
 
-    // ATOMIC OPERATION: Retrieve buffered nodes while still holding slot_states lock
+    // Retrieve buffered nodes while still holding slot_states lock
     if let Some(slot_id) = activated_slot {
         let mut slot_buffers = shared.slot_buffers.write();
         let buffered = std::mem::take(&mut slot_buffers[slot_id]);
@@ -1230,7 +1236,6 @@ pub fn activate_next_slot(
         drop(states);
         drop(running_streams); // Release the first lock last
 
-        // Start timing for the slot
         if let Some(tb) = &shared.time_buffer {
             tb.start_slot_processing(slot_id);
         }
@@ -1287,9 +1292,6 @@ pub fn should_record_slot(shared: &Arc<SharedData>, slot: usize) -> bool {
 /// from immutable graph/cache structures and performs atomic loads (with proper
 /// Acquire ordering for synchronization).
 ///
-/// **Key invariant:** This function performs NO modifications to shared state.
-/// It is safe to call from multiple threads in parallel.
-///
 /// # Arguments
 /// * `shared` - Shared runtime data
 /// * `node_info` - Information about the node being processed
@@ -1297,15 +1299,6 @@ pub fn should_record_slot(shared: &Arc<SharedData>, slot: usize) -> bool {
 /// # Returns
 /// Vector of (successor_node_info, has_condition, successor_id) tuples
 /// representing all successors of the given node that have remaining dependencies.
-///
-/// # Safety Proof
-/// 1. `shared.graph.successors` - immutable after construction, safe concurrent reads
-/// 2. `shared.node_cache` - immutable, pre-computed, safe concurrent reads
-/// 3. Atomic load operations use Acquire ordering - ensures visibility of prior writes
-/// 4. No concurrent writes during this phase - parallel threads only read
-///
-/// Returns: Vec of (successor_node_info, has_condition, successor_id, pred_group)
-/// where pred_group is Some(group_idx) for per-group barriers, None for global decrements.
 #[inline]
 pub fn collect_successors_for_node(
     shared: &Arc<SharedData>,
@@ -1331,7 +1324,9 @@ pub fn collect_successors_for_node(
 
         // Predecessor index range filter: skip if this predecessor instance is outside
         // the declared index range for this successor
-        if let Some(Some((start, end))) = shared.pred_index_filter.get(succ_id_usize)
+        if let Some(Some((start, end))) = shared
+            .pred_index_filter
+            .get(succ_id_usize)
             .and_then(|v| v.get(node_id_usize))
         {
             if node_info.index < *start || node_info.index >= *end {
@@ -1346,11 +1341,15 @@ pub fn collect_successors_for_node(
 
         // Compute predecessor group for group_by barriers
         let pred_group: Option<usize> = {
-            if let Some(Some(gb)) = shared.pred_group_by.get(succ_id_usize)
+            if let Some(Some(gb)) = shared
+                .pred_group_by
+                .get(succ_id_usize)
                 .and_then(|v| v.get(node_id_usize))
             {
                 // Compute relative index within the declared range
-                let range_start = shared.pred_index_filter.get(succ_id_usize)
+                let range_start = shared
+                    .pred_index_filter
+                    .get(succ_id_usize)
                     .and_then(|v| v.get(node_id_usize))
                     .and_then(|f| f.map(|(s, _)| s))
                     .unwrap_or(0);
@@ -1362,8 +1361,6 @@ pub fn collect_successors_for_node(
         };
 
         // Determine which indices of the successor to create.
-        // Always a single entry: decrease_and_get_ready returns ALL newly-ready
-        // instances via threshold/barrier logic. Multiple entries cause over-decrement.
         let succ_indexes = {
             if pred_group.is_some() {
                 // Group-based dependency: placeholder entry (index 0) for decrement

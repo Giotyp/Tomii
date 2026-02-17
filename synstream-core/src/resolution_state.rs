@@ -92,8 +92,6 @@ struct StNodeDepEntry {
     group_size: usize,
     /// Number of groups
     num_groups: usize,
-    /// Dependencies per group counter
-    deps_per_group: usize,
     /// Dependencies per instance (within a group)
     deps_per_instance: usize,
     /// Whether this node has a barrier dependency
@@ -117,7 +115,6 @@ impl StNodeDepEntry {
             factor,
             group_size,
             num_groups,
-            deps_per_group,
             deps_per_instance,
             has_barrier,
             _init_total_deps: total_deps,

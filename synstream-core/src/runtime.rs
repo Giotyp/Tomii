@@ -26,13 +26,8 @@ pub const RUN_SLEEP: Duration = Duration::from_secs(10);
 
 /// Drain from Flume MPSC channel using O(1) atomic snapshot.
 /// Returns immediately with available items if any are ready (non-blocking fast path).
-/// If no items ready, blocks for up to `timeout` for the first item, then drains remaining.
-///
-/// Performance: Flume's drain() is a single atomic operation (12-54μs P99) vs
-/// O(N) try_recv() loop (237-1384μs P99 with Crossbeam).
+/// If no items ready, blocks for up to `timeout` for the first item, then drains remainin
 fn recv_batch<T>(rx: &flume::Receiver<T>, _max_items: usize, timeout: Duration) -> Vec<T> {
-    // Fast path: O(1) atomic snapshot via drain()
-    // This is the key performance improvement over Crossbeam's per-message draining
     let batch: Vec<T> = rx.drain().collect();
     if !batch.is_empty() {
         return batch;
@@ -43,8 +38,6 @@ fn recv_batch<T>(rx: &flume::Receiver<T>, _max_items: usize, timeout: Duration) 
         Ok(first_item) => {
             let mut batch = vec![first_item];
             // Drain any additional items that arrived while we were waiting
-            // Note: We ignore max_items for simplicity - Flume's drain is so fast
-            // that limiting here provides minimal benefit
             batch.extend(rx.drain());
             batch
         }
@@ -695,7 +688,7 @@ impl SynRt {
                     // run assign_stream_to_available_slot for each stream to set slot state to Active
                     let assigned_slots: Vec<usize> = activate_streams
                         .iter()
-                        .map(|&stream_id| assign_stream_to_available_slot(&shared, stream_id).0) // Extract slot_id from (slot_id, activated) tuple
+                        .map(|&stream_id| assign_stream_to_available_slot(&shared, stream_id).0)
                         .collect();
 
                     let compute_nodes = initial_nodes(&shared, assigned_slots);
@@ -744,8 +737,7 @@ impl SynRt {
                     let stream_packets = network_config.stream_packets;
                     let packet_process_func = network_config.extract_packet_func.unwrap();
 
-                    // Drain all available packets from channel (non-blocking)
-                    // Using Flume's drain() - O(1) atomic snapshot operation
+                    // Drain all available packets from channel
                     let packets: Vec<PacketMessage> = shared.packet_receiver.drain().collect();
                     let packet_rcv = if let Some(tb) = &shared.time_buffer {
                         tb.measure_time()
@@ -817,7 +809,7 @@ impl SynRt {
                                 tb.add_task_time(thread_slot, "Slot Assignment", usize::MAX, dur);
                             }
 
-                            // CRITICAL FIX (Issue A): If slot was just activated from Inactive → Active,
+                            // If slot was just activated from Inactive → Active,
                             // spawn initial compute nodes BEFORE processing any packets
                             if newly_activated {
                                 let activated_compute_nodes =
@@ -880,7 +872,6 @@ impl SynRt {
                                 };
 
                             node_info.index = packet_index;
-                            let slot = node_info.slot;
                             let idx = node_info.index;
                             let succs: Vec<String> = shared.graph.successors[0]
                                 .iter()
@@ -912,7 +903,6 @@ impl SynRt {
                             continue;
                         }
 
-                        // CRITICAL FIX #3: Double-checked locking to prevent TOCTOU race
                         // Check slot state atomically while holding lock to ensure decision is valid
                         let slot_is_active = {
                             let states = shared.slot_states.read();
@@ -979,8 +969,6 @@ impl SynRt {
                             shared.slot_packet_counters[node_info.slot].load(Ordering::SeqCst);
                         if packet_count == stream_packets {
                             // Exactly-once semantics: atomically claim completion ownership
-                            // Uses swap to ensure only ONE thread marks this stream as complete
-                            // This prevents double-counting if multiple threads see the final packet
                             let already_completed = shared.slot_packet_complete[node_info.slot]
                                 .swap(true, Ordering::SeqCst);
 
@@ -1055,9 +1043,6 @@ impl SynRt {
                 }
             }
 
-            // If nothing arrived from network AND scheduler, mark start of wait period.
-            // Otherwise, if we previously were waiting, record the idle interval now.
-            // Treat "work" as either network activity (packets_received) OR a non-empty batch.
             let has_work = packets_received || !batch.is_empty();
             if !has_work {
                 if let Some(start_ns_wait) = wait_start_ns.take() {
@@ -1079,9 +1064,6 @@ impl SynRt {
                                 task_id: IdType::MAX - 2,
                                 index: 0,
                             });
-                        } else {
-                            // Wait period too short - put the start time back to continue accumulating
-                            wait_start_ns = Some(start_ns_wait);
                         }
                     }
                 }
@@ -1169,28 +1151,24 @@ impl SynRt {
             return;
         }
 
-        // CRITICAL FIX #2: Track which slots are being processed to increment processing_count
-        // This prevents completion detection from triggering while we're still processing tasks
+        // Track which slots are being processed to increment processing_count
         let mut slots_in_batch: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for (node_info, _) in &batch {
             slots_in_batch.insert(node_info.slot);
         }
 
-        // Increment processing_count for all slots in this batch BEFORE any processing
-        // This ensures completion check sees processing_count > 0 and waits
+        // Increment processing_count for all slots in this batch
         for &slot in &slots_in_batch {
             shared.slot_processing_count[slot].fetch_add(1, Ordering::SeqCst);
         }
 
         // Store results and decrement atomics
-        // This phase must be sequential due to ID function side effects
         let mut nodes_sent_in_slot: HashMap<usize, usize> = HashMap::new();
         let mut nodes_for_successor_processing = Vec::new();
 
         let mut succesor_updates = Vec::new();
         for (node_info, result) in batch.into_iter() {
             // Mark stream activity FIRST for all nodes (including network nodes id=0)
-            // This ensures check_slots() will examine this slot for completion
             stream_slot_activity.insert(node_info.slot, true);
 
             if node_info.post_node {
@@ -1199,11 +1177,9 @@ impl SynRt {
                 continue;
             }
 
-            // store result - lock-free atomic store (no contention)
             shared.node_results.set(&node_info, result);
 
             // Decrement remaining_nodes counter now that this task is confirmed completed
-            // Using pre-computed node_id_is_cond flag for lock-free branch
             let node_id_usize = node_info.id as usize;
             let node_id_to_rem_idx = shared.node_id_to_rem[node_id_usize];
             let node_cache_entry = &shared.node_cache[node_id_usize];
@@ -1213,11 +1189,10 @@ impl SynRt {
                 shared.remaining_cond_nodes[node_info.slot][node_id_to_rem_idx]
                     .fetch_sub(1, Ordering::SeqCst);
 
-                // Phase 1.2: Also decrement slot-wide condition counter
+                // Decrement slot-wide condition counter
                 let prev_cond =
                     shared.slot_pending_cond_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
 
-                // DEBUG: Track condition task completions
                 if prev_cond <= 10 || prev_cond % 100 == 0 {
                     print_debug(|| {
                         format!(
@@ -1230,8 +1205,7 @@ impl SynRt {
                 shared.remaining_nodes[node_info.slot][node_id_to_rem_idx]
                     .fetch_sub(1, Ordering::SeqCst);
 
-                // Phase 1.2: Also decrement slot-wide task counter for O(1) completion check
-                // This maintains synchronization with per-node remaining_nodes atomics
+                // Decrement slot-wide task counter for O(1) completion check
                 let _ = shared.slot_pending_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
             }
             nodes_for_successor_processing.push(node_info.clone());
@@ -1239,8 +1213,6 @@ impl SynRt {
         }
 
         // Process dependency updates using pre-collected successor data
-        // NO deduplication - each successor update calls decrease_and_get_ready separately
-        // Atomic operations in decrease_and_get_ready handle concurrent decrements correctly
         for (idx, node_info) in nodes_for_successor_processing.into_iter().enumerate() {
             let succ_updates = succesor_updates.get(idx).cloned().unwrap_or_default();
 
@@ -1250,7 +1222,7 @@ impl SynRt {
             let nodes_sent: &mut usize = nodes_sent_in_slot.entry(node_info.slot).or_insert(0);
 
             // Process each successor update directly without deduplication
-            for (succ_info, has_cond, succ_id, pred_group) in succ_updates {
+            for (_succ_info, has_cond, succ_id, pred_group) in succ_updates {
                 let succ_node_id = succ_id as usize;
 
                 // Optimization: Skip condition evaluation if all instances already spawned
@@ -1265,7 +1237,6 @@ impl SynRt {
                 }
 
                 // Call decrease_and_get_ready with count=1 for this predecessor
-                // Multiple concurrent calls will properly aggregate via atomic operations
                 let ready_indices = shared.resolution_state.decrease_and_get_ready(
                     node_info.slot,
                     succ_node_id,
@@ -1369,9 +1340,7 @@ impl SynRt {
             });
         }
 
-        // CRITICAL FIX #2 (continued): Decrement processing_count AFTER all successor processing
-        // This allows completion detection to proceed once this thread has finished all work
-        // MUST use SeqCst to ensure ordering: successors processed → count decremented → completion check sees 0
+        // Decrement processing_count AFTER all successor processing
         for &slot in &slots_in_batch {
             shared.slot_processing_count[slot].fetch_sub(1, Ordering::SeqCst);
         }
@@ -1385,7 +1354,7 @@ impl SynRt {
         thread_slot: usize,
         cond_indexes: &[Vec<usize>],
     ) {
-        // CRITICAL FIX (Bug #15): Check ALL slots with assigned streams, not just slots in activity map
+        // CCheck ALL slots with assigned streams, not just slots in activity map
         // Per-thread activity map can miss completions when threads don't have the completing slot
         let slots_to_check: Vec<usize> = {
             let running_streams = shared.running_streams.read();
@@ -1402,10 +1371,7 @@ impl SynRt {
                 continue;
             }
 
-            // Check if all nodes in this slot have been processed (O(1) lock-free)
-            // Phase 1.2 optimization: Use aggregated counters instead of O(N×F) scan
-            // Must check BOTH regular tasks AND condition tasks for complete slot processing
-            // CRITICAL FIX #2: Also require processing_count == 0 to ensure no threads are mid-processing
+            // Check if all nodes in this slot have been processed
             let pending_regular = shared.slot_pending_tasks[proc_slot].load(Ordering::SeqCst);
             let pending_cond = shared.slot_pending_cond_tasks[proc_slot].load(Ordering::SeqCst);
             let processing_count = shared.slot_processing_count[proc_slot].load(Ordering::SeqCst);
@@ -1414,13 +1380,6 @@ impl SynRt {
                 pending_regular == 0 && pending_cond == 0 && processing_count == 0;
 
             if all_nodes_processed {
-                // Atomically claim ownership of this slot's completion.
-                // try_complete_slot checks and marks in a single critical section,
-                // so exactly one thread wins when multiple threads race here.
-                // This replaces the previous is_slot_completed() + mark_slot_completed()
-                // pair which had a TOCTOU window: between the separate check and mark,
-                // another thread could complete the full reinit+restart cycle and unmark
-                // the slot, causing the losing thread to double-complete and corrupt state.
                 if !shared.resolution_state.try_complete_slot(proc_slot) {
                     continue; // Another thread already owns this completion
                 }
@@ -1452,11 +1411,10 @@ impl SynRt {
                     slot_remaining[node_rem_idx].store(*init_val, Ordering::SeqCst);
                 }
 
-                // Phase 1.2: Reinit slot-wide counters for O(1) completion check
+                // Reinit slot-wide counters for O(1) completion check
                 let total_tasks: usize = slot_init.iter().sum();
                 shared.slot_pending_tasks[proc_slot].store(total_tasks, Ordering::SeqCst);
 
-                // DEBUG: Track counter reset values
                 print_debug(|| {
                     format!(
                         "RESET slot {} counters: slot_pending_tasks={}, slot_pending_cond_tasks will be set next",
@@ -1476,10 +1434,9 @@ impl SynRt {
                     }
                 }
 
-                // Phase 1.2: Reinit slot-wide condition counter
+                // Reinit slot-wide condition counter
                 shared.slot_pending_cond_tasks[proc_slot].store(total_cond_tasks, Ordering::SeqCst);
 
-                // DEBUG: Track condition counter reset
                 print_debug(|| {
                     format!(
                         "RESET slot {} cond counter: slot_pending_cond_tasks={}",
@@ -1487,11 +1444,11 @@ impl SynRt {
                     )
                 });
 
-                // CRITICAL FIX #2 (continued): Reset in-flight processing counter for next stream
+                // Reset in-flight processing counter for next stream
                 // Must be 0 before new stream starts processing, otherwise completion detection will wait forever
                 shared.slot_processing_count[proc_slot].store(0, Ordering::SeqCst);
 
-                // Phase 1.3: Reset condition spawn counters for next stream
+                // Reset condition spawn counters for next stream
                 // Each condition node starts with its full factor count available to spawn
                 for (node_idx, node_cache_entry) in shared.node_cache.iter().enumerate() {
                     if node_cache_entry.is_condition {
@@ -1503,11 +1460,7 @@ impl SynRt {
                 // Clear nodes_sent_to_queue for this slot - MUST happen before new nodes spawn
                 shared.resolution_state.clear_slot_sent_flags(proc_slot);
 
-                // CRITICAL FIX (Bug #21): Unmark slot completion flag so it can complete again
-                // for the next stream. This MUST happen after state reset but before new stream
-                // is assigned. Without this, when slot_priority is enabled, the slot remains
-                // marked as completed and try_complete_slot() returns false for all subsequent
-                // streams, causing them to hang forever.
+                // Unmark slot completion flag so it can complete again for the next stream.
                 shared.resolution_state.unmark_slot_completed(proc_slot);
 
                 print_debug(|| {
@@ -1518,13 +1471,10 @@ impl SynRt {
                 });
 
                 // Check if we should start a new iteration and release the slot
-                // IMPORTANT: Must call this BEFORE activate_next_slot() so the slot is released
-                // and activate_next_slot() sees available_slots[proc_slot] == usize::MAX
                 let can_restart = process_slot_completion(&shared, proc_slot);
                 stream_slot_activity.remove(&proc_slot);
 
                 // In slot-priority mode: rotate active slot and activate next buffered slot
-                // This must happen AFTER process_slot_completion() so the completing slot is released
                 let activated_slot_info = if shared.slot_priority_enabled {
                     activate_next_slot(&shared, Some(proc_slot))
                 } else {
@@ -1535,8 +1485,6 @@ impl SynRt {
                 let _buffering_slot_was_activated = activated_slot_info.is_some();
 
                 // Process activated slot: spawn initial nodes AND process buffered packets
-                // CRITICAL: Initial nodes must be spawned BEFORE processing buffered packets
-                // to ensure the compute graph starts for the activated slot
                 if let Some((activated_slot, buffered_batch)) = activated_slot_info {
                     print_debug(|| {
                         format!(
@@ -1545,8 +1493,7 @@ impl SynRt {
                         )
                     });
 
-                    // CRITICAL FIX: Spawn initial compute nodes for the activated slot FIRST
-                    // This starts the compute graph for the newly activated stream
+                    // Spawn initial compute nodes for the activated slot first
                     let activated_compute_nodes = initial_nodes(&shared, vec![activated_slot]);
 
                     print_debug(|| {
@@ -1589,9 +1536,6 @@ impl SynRt {
                     }
                 }
 
-                // CRITICAL: When slot-priority is enabled, only ONE slot should be Active at a time
-                // Never restart the completing slot in slot-priority mode; wait for packet arrival
-                // to trigger assignment via assign_stream_to_available_slot
                 let should_restart_completing_slot = can_restart && !shared.slot_priority_enabled;
 
                 if should_restart_completing_slot {
