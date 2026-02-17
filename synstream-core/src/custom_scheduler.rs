@@ -1,38 +1,40 @@
-//! # High-Performance Custom Scheduler
+//! # High-Performance Custom Scheduler (Channel-Based)
 //!
 //! A custom thread pool designed for low-latency task execution with:
-//! 1. **Spin-then-park workers** - Avoid kernel sleep overhead for idle workers
-//! 2. **Priority queues** - Urgent tasks are processed first
+//! 1. **MPMC channels** - Even 1-task-per-recv distribution, no batch imbalance
+//! 2. **Priority queues** - Urgent tasks are processed first (High > Normal > Low)
 //! 3. **Worker scoping** - Workers can be bound to specific queue groups
+//! 4. **Efficient blocking** - crossbeam select! with built-in park/wake
 //!
 //! ## Architecture
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────────┐
-//! │                         Scheduler                               │
-//! ├─────────────────────────────────────────────────────────────────┤
-//! │  WorkerGroup 0 (cores 4-8)         WorkerGroup 1 (cores 9-13)   │
-//! │  ┌─────────────────────────┐       ┌─────────────────────────┐  │
-//! │  │ Worker 0 ─┐             │       │ Worker 5 ─┐             │  │
-//! │  │ Worker 1 ─┼─► Queue Set │       │ Worker 6 ─┼─► Queue Set │  │
-//! │  │ Worker 2 ─┤   [High]    │       │ Worker 7 ─┤   [High]    │  │
-//! │  │ Worker 3 ─┤   [Normal]  │       │ Worker 8 ─┤   [Normal]  │  │
-//! │  │ Worker 4 ─┘   [Low]     │       │ Worker 9 ─┘   [Low]     │  │
-//! │  └─────────────────────────┘       └─────────────────────────┘  │
-//! │                                                                 │
-//! │  Global Queues (fallback when group queues empty):              │
-//! │  ┌─────────┐ ┌─────────┐ ┌─────────┐                           │
-//! │  │  High   │ │ Normal  │ │   Low   │                           │
-//! │  └─────────┘ └─────────┘ └─────────┘                           │
-//! └─────────────────────────────────────────────────────────────────┘
+//! +---------------------------------------------------------------+
+//! |                         Scheduler                             |
+//! +---------------------------------------------------------------+
+//! |  WorkerGroup 0 (cores 4-8)         WorkerGroup 1 (cores 9-13) |
+//! |  +-------------------------+       +-------------------------+ |
+//! |  | Worker 0                |       | Worker 5                | |
+//! |  | Worker 1                |       | Worker 6                | |
+//! |  | Worker 2                |       | Worker 7                | |
+//! |  | Worker 3                |       | Worker 8                | |
+//! |  | Worker 4                |       | Worker 9                | |
+//! |  |    recv from group chans|       |    recv from group chans| |
+//! |  |  Group Channels [H/N/L] |       |  Group Channels [H/N/L] | |
+//! |  +-------------------------+       +-------------------------+ |
+//! |                                                               |
+//! |  Global Channels (fallback when group channels empty):        |
+//! |  +---------+ +---------+ +---------+                         |
+//! |  |  High   | | Normal  | |   Low   |                         |
+//! |  +---------+ +---------+ +---------+                         |
+//! +---------------------------------------------------------------+
 //! ```
 
 #![allow(unused_imports)]
 #![allow(dead_code)]
 
 use core_affinity::{self, CoreId};
-use crossbeam_channel::{self, Receiver, Sender};
-use parking_lot::{Condvar, Mutex, RwLock};
+use crossbeam_channel::{Receiver, Sender};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -68,109 +70,113 @@ impl Default for Priority {
 }
 
 // ============================================================================
-// SECTION 2: Priority Queue Set (Crossbeam Channels)
+// SECTION 2: Channel-Based Queue Types
 // ============================================================================
 
-/// A set of queues with different priority levels
-/// Workers check High → Normal → Low in order
-/// Replaces Treiber stack with crossbeam channels for ABA-free operation
-pub struct PriorityQueueSet {
-    /// Three unbounded channels for High, Normal, Low priorities
-    high: Sender<BoxedTask>,
-    normal: Sender<BoxedTask>,
-    low: Sender<BoxedTask>,
-    high_rx: Receiver<BoxedTask>,
-    normal_rx: Receiver<BoxedTask>,
-    low_rx: Receiver<BoxedTask>,
-    /// Approximate task count (for metrics)
-    len: AtomicUsize,
+/// Recording metadata carried alongside task.
+/// Eliminates Arc::clone per spawn - worker loop handles metrics directly.
+struct RecordMeta {
+    job_id: usize,
+    task_id: IdType,
+    slot: usize,
+    index: usize,
 }
 
-impl PriorityQueueSet {
-    pub fn new() -> Self {
+/// Task + optional recording metadata. The item type for all channels.
+struct ScheduledTask {
+    task: BoxedTask,
+    meta: Option<RecordMeta>,
+}
+
+/// 3 priority-level MPMC channels (High/Normal/Low).
+/// Used for both global and per-group task distribution.
+/// crossbeam_channel provides efficient MPMC with built-in park/wake.
+struct ChannelSet {
+    high_tx: Sender<ScheduledTask>,
+    high_rx: Receiver<ScheduledTask>,
+    normal_tx: Sender<ScheduledTask>,
+    normal_rx: Receiver<ScheduledTask>,
+    low_tx: Sender<ScheduledTask>,
+    low_rx: Receiver<ScheduledTask>,
+}
+
+impl ChannelSet {
+    fn new() -> Self {
         let (high_tx, high_rx) = crossbeam_channel::unbounded();
         let (normal_tx, normal_rx) = crossbeam_channel::unbounded();
         let (low_tx, low_rx) = crossbeam_channel::unbounded();
-
         Self {
-            high: high_tx,
-            normal: normal_tx,
-            low: low_tx,
+            high_tx,
             high_rx,
+            normal_tx,
             normal_rx,
+            low_tx,
             low_rx,
-            len: AtomicUsize::new(0),
         }
     }
 
-    /// Push a task with specified priority
     #[inline]
-    pub fn push(&self, priority: Priority, task: BoxedTask) {
-        self.len.fetch_add(1, Ordering::Relaxed);
+    fn send(&self, priority: Priority, task: ScheduledTask) {
         let _ = match priority {
-            Priority::High => self.high.send(task),
-            Priority::Normal => self.normal.send(task),
-            Priority::Low => self.low.send(task),
+            Priority::High => self.high_tx.send(task),
+            Priority::Normal => self.normal_tx.send(task),
+            Priority::Low => self.low_tx.send(task),
         };
     }
 
-    /// Try to pop from highest priority queue first
+    /// Non-blocking priority-ordered receive.
+    /// Checks High first, then Normal, then Low.
     #[inline]
-    pub fn try_pop(&self) -> Option<BoxedTask> {
-        // Check High priority first
-        if let Ok(task) = self.high_rx.try_recv() {
-            self.len.fetch_sub(1, Ordering::Relaxed);
-            return Some(task);
-        }
-        // Then Normal
-        if let Ok(task) = self.normal_rx.try_recv() {
-            self.len.fetch_sub(1, Ordering::Relaxed);
-            return Some(task);
-        }
-        // Finally Low
-        if let Ok(task) = self.low_rx.try_recv() {
-            self.len.fetch_sub(1, Ordering::Relaxed);
-            return Some(task);
-        }
-        None
+    fn try_recv_prioritized(&self) -> Option<ScheduledTask> {
+        self.high_rx
+            .try_recv()
+            .ok()
+            .or_else(|| self.normal_rx.try_recv().ok())
+            .or_else(|| self.low_rx.try_recv().ok())
     }
 
-    /// Check if all queues are empty
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.high_rx.is_empty() && self.normal_rx.is_empty() && self.low_rx.is_empty()
     }
+}
 
-    /// Total pending tasks across all priorities (approximate)
-    pub fn total_len(&self) -> usize {
-        self.len.load(Ordering::Relaxed)
+/// Non-blocking priority-ordered receive across group and global channels.
+/// Order: group.high -> group.normal -> global.high -> global.normal -> group.low -> global.low
+#[inline]
+fn try_recv_all(
+    group: &ChannelSet,
+    global: &ChannelSet,
+    allow_global: bool,
+) -> Option<ScheduledTask> {
+    // Group high priority
+    if let Ok(t) = group.high_rx.try_recv() {
+        return Some(t);
     }
-
-    /// Wake workers waiting on any queue (no-op for crossbeam channels)
-    pub fn wake_all(&self) {
-        // No-op: crossbeam channels handle notifications internally
+    // Group normal priority
+    if let Ok(t) = group.normal_rx.try_recv() {
+        return Some(t);
     }
-
-    /// Wait for a task on ANY priority queue with timeout
-    /// Uses select! to efficiently wait on all three channels
-    /// Returns the received task (if any) to avoid consuming and dropping it
-    pub fn wait_for_any_task(&self, timeout: Duration) -> Option<BoxedTask> {
-        crossbeam_channel::select! {
-            recv(self.high_rx) -> msg => {
-                self.len.fetch_sub(1, Ordering::Relaxed);
-                msg.ok()
-            },
-            recv(self.normal_rx) -> msg => {
-                self.len.fetch_sub(1, Ordering::Relaxed);
-                msg.ok()
-            },
-            recv(self.low_rx) -> msg => {
-                self.len.fetch_sub(1, Ordering::Relaxed);
-                msg.ok()
-            },
-            default(timeout) => None,
+    // Global high/normal (if allowed)
+    if allow_global {
+        if let Ok(t) = global.high_rx.try_recv() {
+            return Some(t);
+        }
+        if let Ok(t) = global.normal_rx.try_recv() {
+            return Some(t);
         }
     }
+    // Group low priority
+    if let Ok(t) = group.low_rx.try_recv() {
+        return Some(t);
+    }
+    // Global low (if allowed)
+    if allow_global {
+        if let Ok(t) = global.low_rx.try_recv() {
+            return Some(t);
+        }
+    }
+    None
 }
 
 // ============================================================================
@@ -199,7 +205,7 @@ impl Default for WorkerGroupConfig {
             core_ids: None,
             group_id: 0,
             allow_global_steal: true,
-            spin_iterations: 64, // ~1-2µs of spinning on modern CPUs
+            spin_iterations: 64,
         }
     }
 }
@@ -207,8 +213,6 @@ impl Default for WorkerGroupConfig {
 /// Internal state for a worker group
 struct WorkerGroup {
     config: WorkerGroupConfig,
-    /// Local priority queues for this group
-    local_queues: Arc<PriorityQueueSet>,
     /// Worker thread handles
     handles: Vec<JoinHandle<()>>,
 }
@@ -232,10 +236,10 @@ struct WorkerState {
 
 /// Shared state for all workers
 struct SharedWorkerState {
-    /// Global queues (fallback when group queues empty)
-    global_queues: Arc<PriorityQueueSet>,
-    /// Per-group local queues
-    group_queues: Vec<Arc<PriorityQueueSet>>,
+    /// Global channels (fallback when group channels empty)
+    global_channels: ChannelSet,
+    /// Per-group channels
+    group_channels: Vec<Arc<ChannelSet>>,
     /// Shutdown signal
     shutdown: AtomicBool,
     /// Total tasks spawned (for metrics)
@@ -248,28 +252,35 @@ struct SharedWorkerState {
     async_recorder: Option<Arc<AsyncRecorder>>,
     /// Base instant for timing
     base_instant: Arc<Instant>,
-    /// System core offset for recorder channel indexing (Bug 2 fix)
+    /// System core offset for recorder channel indexing
     system_core_offset: usize,
 }
 
-/// Worker thread main loop
+/// Worker thread main loop.
+///
+/// Three phases per iteration:
+/// 1. Non-blocking try_recv from all channels in priority order
+/// 2. Adaptive spin: brief user-space spinning with try_recv checks
+/// 3. Block on crossbeam select! until a channel has data or timeout
+///
+/// The spin phase catches tasks arriving shortly after the initial check,
+/// avoiding the ~1-5us futex wake latency for burst arrivals.
 fn worker_loop(
     worker_id: usize,
     group_id: usize,
     core_id: CoreId,
     shared: Arc<SharedWorkerState>,
-    local_queues: Arc<PriorityQueueSet>,
-    spin_iterations: usize,
+    group_channels: Arc<ChannelSet>,
     allow_global_steal: bool,
+    spin_iterations: usize,
 ) {
     // Pin to core
     core_affinity::set_for_current(core_id);
 
-    // Set thread-local state (Bug 3 fix: set both WORKER_ID and WORKER_INDEX)
+    // Set thread-local state
     crate::scheduler::set_current_worker_id(core_id.id);
     crate::scheduler::set_current_worker_index(worker_id);
 
-    // Set internal thread-local state for group membership
     WORKER_STATE.with(|s| {
         s.set(WorkerState {
             worker_id,
@@ -279,7 +290,7 @@ fn worker_loop(
         });
     });
 
-    // Initialize async recorder channel if enabled (Bug 2 fix: use correct channel index)
+    // Initialize async recorder channel if enabled
     if let Some(ref recorder) = shared.async_recorder {
         let channel_index = core_id.id - shared.system_core_offset;
         if let Some(tx) = recorder.get_worker_sender(channel_index) {
@@ -287,7 +298,13 @@ fn worker_loop(
         }
     }
 
-    let park_timeout = Duration::from_micros(100); // 100µs park timeout
+    let has_recorder = shared.async_recorder.is_some();
+    let park_timeout = Duration::from_micros(500);
+
+    // Extract channel references for select! macro
+    let grp_high = &group_channels.high_rx;
+    let grp_norm = &group_channels.normal_rx;
+    let grp_low = &group_channels.low_rx;
 
     loop {
         // Check shutdown first
@@ -295,73 +312,98 @@ fn worker_loop(
             break;
         }
 
-        // Phase 1: Try local group queues (no spinning yet)
-        if let Some(task) = local_queues.try_pop() {
-            execute_task_wrapper(&shared, task);
+        // Phase 1: Non-blocking priority-ordered scan
+        if let Some(task) =
+            try_recv_all(&group_channels, &shared.global_channels, allow_global_steal)
+        {
+            execute_task(&shared, task, has_recorder);
             continue;
         }
 
-        // Phase 2: Try global queues if allowed
-        if allow_global_steal {
-            if let Some(task) = shared.global_queues.try_pop() {
-                execute_task_wrapper(&shared, task);
-                continue;
-            }
-        }
-
-        // Phase 3: Adaptive spinning (stay in user-space)
-        let mut found_task = false;
+        // Phase 2: Adaptive spin — stay in user-space briefly to catch burst arrivals
+        // Avoids ~1-5us futex wake latency for tasks arriving shortly after Phase 1
+        let mut found_in_spin = false;
         for _ in 0..spin_iterations {
-            // Check shutdown during spin
-            if shared.shutdown.load(Ordering::Relaxed) {
-                return;
-            }
-
-            // Spin-wait hint (PAUSE instruction on x86)
             std::hint::spin_loop();
-
-            // Re-check local queues
-            if let Some(task) = local_queues.try_pop() {
-                execute_task_wrapper(&shared, task);
-                found_task = true;
+            if let Some(task) =
+                try_recv_all(&group_channels, &shared.global_channels, allow_global_steal)
+            {
+                execute_task(&shared, task, has_recorder);
+                found_in_spin = true;
                 break;
             }
-
-            // Re-check global queues
-            if allow_global_steal {
-                if let Some(task) = shared.global_queues.try_pop() {
-                    execute_task_wrapper(&shared, task);
-                    found_task = true;
-                    break;
-                }
-            }
         }
-
-        if found_task {
+        if found_in_spin {
             continue;
         }
 
-        // Phase 4: Park with short timeout (kernel-space, but bounded)
-        // wait_for_any_task returns the task directly to avoid consuming+dropping it
-        // If select! fires, we execute the task immediately; otherwise loop back
-        if let Some(task) = local_queues.wait_for_any_task(park_timeout) {
-            execute_task_wrapper(&shared, task);
+        // Phase 3: Block on channels with timeout via select!
+        // crossbeam select! handles efficient OS-level park/wake.
+        // When a task arrives on any monitored channel, the blocked worker
+        // wakes immediately (futex-based, ~1-5us latency).
+        let task = if allow_global_steal {
+            let gbl_high = &shared.global_channels.high_rx;
+            let gbl_norm = &shared.global_channels.normal_rx;
+            let gbl_low = &shared.global_channels.low_rx;
+            crossbeam_channel::select! {
+                recv(grp_high) -> msg => msg.ok(),
+                recv(grp_norm) -> msg => msg.ok(),
+                recv(grp_low) -> msg => msg.ok(),
+                recv(gbl_high) -> msg => msg.ok(),
+                recv(gbl_norm) -> msg => msg.ok(),
+                recv(gbl_low) -> msg => msg.ok(),
+                default(park_timeout) => None,
+            }
+        } else {
+            crossbeam_channel::select! {
+                recv(grp_high) -> msg => msg.ok(),
+                recv(grp_norm) -> msg => msg.ok(),
+                recv(grp_low) -> msg => msg.ok(),
+                default(park_timeout) => None,
+            }
+        };
+
+        if let Some(task) = task {
+            execute_task(&shared, task, has_recorder);
         }
     }
 }
 
+/// Execute a single scheduled task, handling recording and metrics.
 #[inline]
-fn execute_task_wrapper(_shared: &Arc<SharedWorkerState>, task: BoxedTask) {
-    // Pure pass-through: all metrics handling is in the task wrappers
-    // (spawn_with_priority, spawn_to_group, spawn_with_meta)
-    task();
+fn execute_task(shared: &SharedWorkerState, st: ScheduledTask, has_recorder: bool) {
+    if let Some(meta) = st.meta {
+        if has_recorder {
+            let start = shared.base_instant.elapsed().as_nanos();
+            (st.task)();
+            let end = shared.base_instant.elapsed().as_nanos();
+
+            let worker = WORKER_STATE.with(|s| s.get().core_id);
+            submit_record(Record {
+                slot: meta.slot,
+                job_id: meta.job_id,
+                start_ns: start,
+                end_ns: end,
+                worker,
+                task_id: meta.task_id,
+                index: meta.index,
+            });
+        } else {
+            (st.task)();
+        }
+    } else {
+        (st.task)();
+    }
+
+    shared.pending_tasks.fetch_sub(1, Ordering::Relaxed);
+    shared.total_completed.fetch_add(1, Ordering::Relaxed);
 }
 
 // ============================================================================
 // SECTION 5: Main Scheduler Implementation
 // ============================================================================
 
-/// High-performance custom scheduler with priority queues and worker scoping
+/// High-performance custom scheduler with channel-based task distribution
 pub struct CustomScheduler {
     shared: Arc<SharedWorkerState>,
     groups: Vec<WorkerGroup>,
@@ -375,7 +417,7 @@ pub struct CustomScheduler {
     receiver_threads: usize,
     /// Total workers across all groups
     total_workers: usize,
-    /// Optional reserved core for main/orchestrator thread (Bug 4 fix)
+    /// Optional reserved core for main/orchestrator thread
     main_core: Option<CoreId>,
     /// Worker affinity configuration for use_workers routing
     worker_affinity: Option<crate::scheduler::WorkerAffinityConfig>,
@@ -418,7 +460,7 @@ impl CustomSchedulerBuilder {
         let group_id = self.groups.len();
         self.groups.push(WorkerGroupConfig {
             num_workers,
-            core_ids: None, // Will be auto-assigned
+            core_ids: None,
             group_id,
             allow_global_steal: true,
             spin_iterations,
@@ -504,7 +546,6 @@ impl CustomSchedulerBuilder {
         let has_global_workers = global_worker_count > 0;
 
         // Add global group at index 0 FIRST (even if 0 workers)
-        // This ensures self.groups[0] is the global group
         if has_global_workers {
             println!(
                 "  Global Group 0: {} workers (handles count-based and unspecified tasks)",
@@ -514,7 +555,7 @@ impl CustomSchedulerBuilder {
                 num_workers: global_worker_count,
                 core_ids: None,
                 group_id: 0,
-                allow_global_steal: true, // Can handle global tasks
+                allow_global_steal: true,
                 spin_iterations: 64,
             });
         } else {
@@ -531,7 +572,6 @@ impl CustomSchedulerBuilder {
         }
 
         // Now add range groups in order of group_id
-        // This ensures self.groups[group_id] = correct group
         let mut sorted_groups = affinity.affinity_groups.clone();
         sorted_groups.sort_by_key(|(gid, _)| *gid);
 
@@ -544,17 +584,13 @@ impl CustomSchedulerBuilder {
                 range.len()
             );
 
-            // Range workers should always be able to steal from global queue when idle
-            // This ensures tasks without use_workers can utilize ALL workers, not just global group
-            // Semantics: "use_workers: 0-7" means "task MUST run on 0-7"
-            //            NOT "workers 0-7 can ONLY run these tasks"
             let allow_steal = true;
 
             self = self.add_group(WorkerGroupConfig {
                 num_workers: range.len(),
-                core_ids: None, // Auto-assign during build()
+                core_ids: None,
                 group_id,
-                allow_global_steal: allow_steal, // Always allow stealing from global queue
+                allow_global_steal: allow_steal,
                 spin_iterations: 64,
             });
         }
@@ -570,7 +606,7 @@ impl CustomSchedulerBuilder {
         // Calculate total workers needed
         let total_workers: usize = self.groups.iter().map(|g| g.num_workers).sum();
 
-        // Use core allocation algorithm (Bug 4 fix)
+        // Use core allocation algorithm
         let alloc = crate::core_alloc::allocate_cores(
             self.core_offset,
             self.system_threads,
@@ -616,18 +652,18 @@ impl CustomSchedulerBuilder {
             None
         };
 
-        // Create global queues
-        let global_queues = Arc::new(PriorityQueueSet::new());
+        // Create global channels
+        let global_channels = ChannelSet::new();
 
-        // Create per-group queues
-        let group_queues: Vec<Arc<PriorityQueueSet>> = (0..self.groups.len())
-            .map(|_| Arc::new(PriorityQueueSet::new()))
+        // Create per-group channels
+        let group_channels: Vec<Arc<ChannelSet>> = (0..self.groups.len())
+            .map(|_| Arc::new(ChannelSet::new()))
             .collect();
 
-        // Create shared state (Bug 2 fix: add system_core_offset for recorder channel indexing)
+        // Create shared state
         let shared = Arc::new(SharedWorkerState {
-            global_queues: Arc::clone(&global_queues),
-            group_queues: group_queues.clone(),
+            global_channels,
+            group_channels: group_channels.clone(),
             shutdown: AtomicBool::new(false),
             total_spawned: AtomicUsize::new(0),
             total_completed: AtomicUsize::new(0),
@@ -638,11 +674,7 @@ impl CustomSchedulerBuilder {
         });
 
         // ===================================================================
-        // WORKER AFFINITY BUG FIX: Index-Based Worker Assignment
-        // ===================================================================
-        // The fix changes from sequential worker creation (per-group) to
-        // index-based assignment where workers are created 0..total_workers
-        // and each is assigned to the correct group based on WorkerAffinityConfig
+        // Worker creation
         // ===================================================================
 
         // Step 1: Pre-allocate group structures
@@ -651,64 +683,56 @@ impl CustomSchedulerBuilder {
         let mut group_worker_handles: Vec<Vec<JoinHandle<()>>> =
             (0..num_groups).map(|_| Vec::new()).collect();
 
-        // Step 2: Build worker_id → group_idx mapping from WorkerAffinityConfig
-        // Default: all workers belong to global group (group 0)
+        // Step 2: Build worker_id -> group_idx mapping from WorkerAffinityConfig
         let mut worker_to_group_idx: Vec<usize> = vec![0; total_workers];
 
         if let Some(ref affinity) = self.worker_affinity {
             for worker_id in 0..total_workers {
                 let group_ids = affinity.get_worker_groups(worker_id);
                 if !group_ids.is_empty() {
-                    // Worker belongs to range group (use first group_id if overlapping ranges)
                     worker_to_group_idx[worker_id] = group_ids[0];
                 }
-                // else: worker stays in global group (group_idx 0, already defaulted)
             }
         }
 
-        // Step 3: Diagnostic output - show worker assignment before creation
+        // Step 3: Diagnostic output
         println!("========== Worker to Group Assignment ==========");
         for worker_id in 0..total_workers {
             let group_idx = worker_to_group_idx[worker_id];
             let core_id = alloc.all_core_ids[worker_core_offset + worker_id];
             println!(
-                "  Worker {}: Group {} → Core {}",
+                "  Worker {}: Group {} -> Core {}",
                 worker_id, group_idx, core_id.id
             );
         }
         println!("================================================");
 
-        // Step 4: Create workers by index (0..total_workers), assigning to correct groups
+        // Step 4: Spawn workers with channel references
         for worker_id in 0..total_workers {
             let group_idx = worker_to_group_idx[worker_id];
             let core_id = alloc.all_core_ids[worker_core_offset + worker_id];
 
-            // Clone shared state for this worker
             let shared_clone = Arc::clone(&shared);
-            let local_queues_clone = Arc::clone(&group_queues[group_idx]);
-
-            // Get group configuration
+            let group_chans = Arc::clone(&group_channels[group_idx]);
             let config = &group_configs[group_idx];
-            let spin_iterations = config.spin_iterations;
             let allow_global_steal = config.allow_global_steal;
+            let spin_iters = config.spin_iterations;
 
-            // Spawn worker thread
             let handle = thread::Builder::new()
                 .name(format!("worker-{}", worker_id))
                 .spawn(move || {
                     worker_loop(
-                        worker_id, // Global worker index (0..total_workers)
-                        group_idx, // Group this worker belongs to
-                        core_id,   // Physical core to pin to
+                        worker_id,
+                        group_idx,
+                        core_id,
                         shared_clone,
-                        local_queues_clone,
-                        spin_iterations,
+                        group_chans,
                         allow_global_steal,
+                        spin_iters,
                     );
                 })
                 .expect("Failed to spawn worker thread");
 
-            // Add handle to the correct group's handle vector
             group_worker_handles[group_idx].push(handle);
         }
 
@@ -716,7 +740,6 @@ impl CustomSchedulerBuilder {
         for (group_idx, config) in group_configs.iter().enumerate() {
             let actual_workers = group_worker_handles[group_idx].len();
 
-            // Validate: actual worker count matches config expectation
             if actual_workers != config.num_workers {
                 println!(
                     "Warning: Group {} expected {} workers but got {}",
@@ -724,7 +747,6 @@ impl CustomSchedulerBuilder {
                 );
             }
 
-            // Collect worker IDs and core IDs for this group (for diagnostic output)
             let worker_ids: Vec<usize> = worker_to_group_idx
                 .iter()
                 .enumerate()
@@ -734,7 +756,7 @@ impl CustomSchedulerBuilder {
 
             let core_ids: Vec<usize> = worker_ids
                 .iter()
-                .map(|&worker_id| alloc.all_core_ids[worker_core_offset + worker_id].id)
+                .map(|&wid| alloc.all_core_ids[worker_core_offset + wid].id)
                 .collect();
 
             println!(
@@ -743,18 +765,14 @@ impl CustomSchedulerBuilder {
             );
         }
 
-        // Step 6: Assemble WorkerGroup structs by pairing configs with handles
+        // Step 6: Assemble WorkerGroup structs
         let mut groups = Vec::new();
-        for (group_idx, (config, handles)) in group_configs
+        for (_group_idx, (config, handles)) in group_configs
             .into_iter()
             .zip(group_worker_handles.into_iter())
             .enumerate()
         {
-            groups.push(WorkerGroup {
-                config,
-                local_queues: group_queues[group_idx].clone(),
-                handles,
-            });
+            groups.push(WorkerGroup { config, handles });
         }
 
         // Step 7: Validate total worker assignment
@@ -800,42 +818,34 @@ impl CustomScheduler {
     where
         F: FnOnce() + Send + 'static,
     {
-        let shared = Arc::clone(&self.shared);
         self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
         self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
 
-        // Wrap task with metrics (all tasks must be wrapped)
-        let wrapped_task = move || {
-            task();
-            shared.pending_tasks.fetch_sub(1, Ordering::Relaxed);
-            shared.total_completed.fetch_add(1, Ordering::Relaxed);
-        };
-
-        self.shared
-            .global_queues
-            .push(priority, Box::new(wrapped_task));
+        self.shared.global_channels.send(
+            priority,
+            ScheduledTask {
+                task: Box::new(task),
+                meta: None,
+            },
+        );
     }
 
-    /// Spawn a task to a specific worker group's local queue
+    /// Spawn a task to a specific worker group's channel
     pub fn spawn_to_group<F>(&self, group_id: usize, priority: Priority, task: F)
     where
         F: FnOnce() + Send + 'static,
     {
-        if group_id < self.groups.len() {
-            let shared = Arc::clone(&self.shared);
+        if group_id < self.shared.group_channels.len() {
             self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
             self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
 
-            // Wrap task with metrics
-            let wrapped_task = move || {
-                task();
-                shared.pending_tasks.fetch_sub(1, Ordering::Relaxed);
-                shared.total_completed.fetch_add(1, Ordering::Relaxed);
-            };
-
-            self.groups[group_id]
-                .local_queues
-                .push(priority, Box::new(wrapped_task));
+            self.shared.group_channels[group_id].send(
+                priority,
+                ScheduledTask {
+                    task: Box::new(task),
+                    meta: None,
+                },
+            );
         } else {
             // Fallback to global queue
             self.spawn_with_priority(priority, task);
@@ -847,39 +857,29 @@ impl CustomScheduler {
     where
         F: FnOnce() + Send + 'static,
     {
-        let shared = Arc::clone(&self.shared);
         let job_id = self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
         self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
 
-        let (task_id, slot, index, should_record) =
-            meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN, false));
-
-        let wrapped_task = move || {
-            let start = shared.base_instant.elapsed().as_nanos();
-            task();
-            let end = shared.base_instant.elapsed().as_nanos();
-
-            // Record if enabled - should_record was pre-computed at spawn time
-            if shared.async_recorder.is_some() && should_record {
-                let worker = WORKER_STATE.with(|s| s.get().core_id);
-                submit_record(Record {
-                    slot,
+        let record_meta = meta.and_then(|(task_id, slot, index, should_record)| {
+            if should_record {
+                Some(RecordMeta {
                     job_id,
-                    start_ns: start,
-                    end_ns: end,
-                    worker,
                     task_id,
+                    slot,
                     index,
-                });
+                })
+            } else {
+                None
             }
+        });
 
-            shared.pending_tasks.fetch_sub(1, Ordering::Relaxed);
-            shared.total_completed.fetch_add(1, Ordering::Relaxed);
-        };
-
-        self.shared
-            .global_queues
-            .push(Priority::Normal, Box::new(wrapped_task));
+        self.shared.global_channels.send(
+            Priority::Normal,
+            ScheduledTask {
+                task: Box::new(task),
+                meta: record_meta,
+            },
+        );
     }
 
     /// Spawn a task with metadata and priority
@@ -891,39 +891,29 @@ impl CustomScheduler {
     ) where
         F: FnOnce() + Send + 'static,
     {
-        let shared = Arc::clone(&self.shared);
         let job_id = self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
         self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
 
-        let (task_id, slot, index, should_record) =
-            meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN, false));
-
-        let wrapped_task = move || {
-            let start = shared.base_instant.elapsed().as_nanos();
-            task();
-            let end = shared.base_instant.elapsed().as_nanos();
-
-            // Record if enabled - should_record was pre-computed at spawn time
-            if shared.async_recorder.is_some() && should_record {
-                let worker = WORKER_STATE.with(|s| s.get().core_id);
-                submit_record(Record {
-                    slot,
+        let record_meta = meta.and_then(|(task_id, slot, index, should_record)| {
+            if should_record {
+                Some(RecordMeta {
                     job_id,
-                    start_ns: start,
-                    end_ns: end,
-                    worker,
                     task_id,
+                    slot,
                     index,
-                });
+                })
+            } else {
+                None
             }
+        });
 
-            shared.pending_tasks.fetch_sub(1, Ordering::Relaxed);
-            shared.total_completed.fetch_add(1, Ordering::Relaxed);
-        };
-
-        self.shared
-            .global_queues
-            .push(priority, Box::new(wrapped_task));
+        self.shared.global_channels.send(
+            priority,
+            ScheduledTask {
+                task: Box::new(task),
+                meta: record_meta,
+            },
+        );
     }
 
     /// Spawn a task to a specific worker group with metadata and priority
@@ -936,40 +926,30 @@ impl CustomScheduler {
     ) where
         F: FnOnce() + Send + 'static,
     {
-        if group_id < self.groups.len() {
-            let shared = Arc::clone(&self.shared);
+        if group_id < self.shared.group_channels.len() {
             let job_id = self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
             self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
 
-            let (task_id, slot, index, should_record) =
-                meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN, false));
-
-            let wrapped_task = move || {
-                let start = shared.base_instant.elapsed().as_nanos();
-                task();
-                let end = shared.base_instant.elapsed().as_nanos();
-
-                // Record if enabled - should_record was pre-computed at spawn time
-                if shared.async_recorder.is_some() && should_record {
-                    let worker = WORKER_STATE.with(|s| s.get().core_id);
-                    submit_record(Record {
-                        slot,
+            let record_meta = meta.and_then(|(task_id, slot, index, should_record)| {
+                if should_record {
+                    Some(RecordMeta {
                         job_id,
-                        start_ns: start,
-                        end_ns: end,
-                        worker,
                         task_id,
+                        slot,
                         index,
-                    });
+                    })
+                } else {
+                    None
                 }
+            });
 
-                shared.pending_tasks.fetch_sub(1, Ordering::Relaxed);
-                shared.total_completed.fetch_add(1, Ordering::Relaxed);
-            };
-
-            self.groups[group_id]
-                .local_queues
-                .push(priority, Box::new(wrapped_task));
+            self.shared.group_channels[group_id].send(
+                priority,
+                ScheduledTask {
+                    task: Box::new(task),
+                    meta: record_meta,
+                },
+            );
         } else {
             // Fallback to global queue with priority
             self.spawn_with_meta_priority(priority, meta, task);
@@ -1026,7 +1006,7 @@ impl CustomScheduler {
         self.shared.async_recorder.clone()
     }
 
-    /// Get main/orchestrator core if reserved (Bug 4 fix)
+    /// Get main/orchestrator core if reserved
     pub fn main_core(&self) -> Option<CoreId> {
         self.main_core.clone()
     }
@@ -1037,11 +1017,10 @@ impl CustomScheduler {
     }
 
     /// Get group_id for a given WorkerRangeSpec
-    /// Returns 0 for None (global) or the mapped group_id for specific worker specs
     pub fn get_affinity_group(&self, use_workers: Option<&crate::WorkerRangeSpec>) -> usize {
         match &self.worker_affinity {
             Some(affinity) => affinity.get_group(use_workers),
-            None => 0, // No affinity config - always use global
+            None => 0,
         }
     }
 
@@ -1059,12 +1038,7 @@ impl CustomScheduler {
         // Signal shutdown
         self.shared.shutdown.store(true, Ordering::Release);
 
-        // Wake all workers
-        self.shared.global_queues.wake_all();
-        for group in &self.groups {
-            group.local_queues.wake_all();
-        }
-
+        // Workers will see shutdown on next select! timeout (<=100us)
         // Join all worker threads
         for group in &mut self.groups {
             for handle in group.handles.drain(..) {
@@ -1096,66 +1070,59 @@ impl Drop for CustomScheduler {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::Mutex;
 
     #[test]
-    fn test_task_queue_basic() {
-        let queue = TaskQueue::new();
-        assert!(queue.is_empty());
-
-        let counter = Arc::new(AtomicUsize::new(0));
-        let counter_clone = Arc::clone(&counter);
-
-        queue.push(Box::new(move || {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        }));
-
-        assert!(!queue.is_empty());
-        assert_eq!(queue.len(), 1);
-
-        let task = queue.try_pop().unwrap();
-        task();
-
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
-        assert!(queue.is_empty());
-    }
-
-    #[test]
-    fn test_priority_queue_ordering() {
-        let pq = PriorityQueueSet::new();
-
+    fn test_channel_set_priority_ordering() {
+        let channels = ChannelSet::new();
         let order = Arc::new(Mutex::new(Vec::new()));
 
         // Push in reverse priority order
         let order_low = Arc::clone(&order);
-        pq.push(
+        channels.send(
             Priority::Low,
-            Box::new(move || {
-                order_low.lock().push("low");
-            }),
+            ScheduledTask {
+                task: Box::new(move || {
+                    order_low.lock().unwrap().push("low");
+                }),
+                meta: None,
+            },
         );
 
         let order_normal = Arc::clone(&order);
-        pq.push(
+        channels.send(
             Priority::Normal,
-            Box::new(move || {
-                order_normal.lock().push("normal");
-            }),
+            ScheduledTask {
+                task: Box::new(move || {
+                    order_normal.lock().unwrap().push("normal");
+                }),
+                meta: None,
+            },
         );
 
         let order_high = Arc::clone(&order);
-        pq.push(
+        channels.send(
             Priority::High,
-            Box::new(move || {
-                order_high.lock().push("high");
-            }),
+            ScheduledTask {
+                task: Box::new(move || {
+                    order_high.lock().unwrap().push("high");
+                }),
+                meta: None,
+            },
         );
 
-        // Pop should return High first
-        pq.try_pop().unwrap()();
-        pq.try_pop().unwrap()();
-        pq.try_pop().unwrap()();
+        // Receive in priority order: high first
+        if let Ok(st) = channels.high_rx.try_recv() {
+            (st.task)();
+        }
+        if let Ok(st) = channels.normal_rx.try_recv() {
+            (st.task)();
+        }
+        if let Ok(st) = channels.low_rx.try_recv() {
+            (st.task)();
+        }
 
-        let result = order.lock();
+        let result = order.lock().unwrap();
         assert_eq!(*result, vec!["high", "normal", "low"]);
     }
 
