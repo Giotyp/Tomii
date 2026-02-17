@@ -29,9 +29,9 @@ macro_rules! cache_sym {
 cache_sym! {
     pub static GENERATE_VECTOR_CM_SYM: fn(usize) -> CmTypes = b"generate_vector_cm";
 }
-pub fn generate_vector_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
+pub fn generate_vector_cm_wrap(args: &[CmTypes]) -> CmTypes {
     let buf_size = match args[0] {
-        CmTypes::Usize(x) => x.clone(),
+        CmTypes::Usize(x) => x,
         _ => panic!("Invalid argument type for packet length"),
     };
     GENERATE_VECTOR_CM_SYM(buf_size)
@@ -40,9 +40,9 @@ pub fn generate_vector_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
 cache_sym! {
     pub static FFT_PLANNER_CM_SYM: fn(usize) -> CmTypes = b"fft_planner_cm";
 }
-pub fn fft_planner_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
+pub fn fft_planner_cm_wrap(args: &[CmTypes]) -> CmTypes {
     let buf_size = match args[0] {
-        CmTypes::Usize(x) => x.clone(),
+        CmTypes::Usize(x) => x,
         _ => panic!("Invalid argument type for packet length"),
     };
     FFT_PLANNER_CM_SYM(buf_size)
@@ -51,7 +51,7 @@ pub fn fft_planner_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
 cache_sym! {
     pub static COMPUTE_FFT_CM_SYM: fn(&CmTypes, &CmTypes) = b"compute_fft_cm";
 }
-pub fn compute_fft_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
+pub fn compute_fft_cm_wrap(args: &[CmTypes]) -> CmTypes {
     let fft_planner = &args[0];
     let buffer = &args[1];
     COMPUTE_FFT_CM_SYM(fft_planner, buffer);
@@ -61,7 +61,7 @@ pub fn compute_fft_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
 cache_sym! {
     pub static VEC_TO_MAT_CM_SYM: fn(&CmTypes) -> CmTypes = b"vec_to_mat_cm";
 }
-pub fn vec_to_mat_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
+pub fn vec_to_mat_cm_wrap(args: &[CmTypes]) -> CmTypes {
     let vector = &args[0];
     VEC_TO_MAT_CM_SYM(vector)
 }
@@ -69,14 +69,14 @@ pub fn vec_to_mat_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
 cache_sym! {
     pub static MAT_MUL_CM_SYM: fn(&CmTypes, &CmTypes) -> CmTypes = b"mat_mul_cm";
 }
-pub fn mat_mul_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
+pub fn mat_mul_cm_wrap(args: &[CmTypes]) -> CmTypes {
     MAT_MUL_CM_SYM(&args[0], &args[1])
 }
 
 cache_sym! {
     pub static GET_OUT_FILE_SYM: fn(&str, &str) -> String = b"get_out_file";
 }
-pub fn get_out_file_wrap(args: Vec<CmTypes>) -> CmTypes {
+pub fn get_out_file_wrap(args: &[CmTypes]) -> CmTypes {
     let env_var = match &args[0] {
         CmTypes::String(x) => x.to_string(),
         _ => panic!("Expected string argument"),
@@ -94,13 +94,13 @@ pub fn get_out_file_wrap(args: Vec<CmTypes>) -> CmTypes {
 cache_sym! {
     pub static WRITE_TO_FILE_SYM: fn(&str, &Vec<CmTypes>) = b"write_to_file";
 }
-pub fn write_to_file_wrap(args: Vec<CmTypes>) -> CmTypes {
+pub fn write_to_file_wrap(args: &[CmTypes]) -> CmTypes {
     let file_path = match &args[0] {
         CmTypes::String(x) => x.to_string(),
         _ => panic!("Expected string argument"),
     };
 
-    let buffers = &args[1..]
+    let buffers = args[1..]
         .iter()
         .map(|x| x.clone())
         .collect::<Vec<CmTypes>>();

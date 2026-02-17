@@ -734,10 +734,10 @@ impl SynRt {
                 break;
             }
 
-            // Poll packet channels if:
-            // 1. Receivers are still active (!receive_finished), OR
-            let mut should_poll_packets =
-                thread_id == 0 && !shared.receive_finished.load(Ordering::SeqCst);
+            // Poll packet channels if there is a network config AND receivers are still active
+            let mut should_poll_packets = thread_id == 0
+                && network_config_opt.is_some()
+                && !shared.receive_finished.load(Ordering::SeqCst);
 
             while should_poll_packets {
                 if let Some(network_config) = network_config_opt.as_ref() {

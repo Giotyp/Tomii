@@ -28,19 +28,20 @@ WORKERS=2
 RUNTIME=60
 SLOTS=2
 EXP_STREAMS=1
+EXCLUDE_STREAMS=0 # exclude streams from timing stats
 OUTPUT="$SCRIPT_DIR/out.txt"
 TIMING_FILE="$SCRIPT_DIR/timing.txt"
 SYSTEM_THREADS=3
 BATCHING_SIZE=1
 BATCHING_LIMIT=10
 # Set to "--inits" to enable initializations printing
-INITS="--inits" 
+INITS="--inits"
 # Set to "--slot-priority" to enable slot priority
 SLOT_PRIORITY=""
 # Set to "--debug" to enable debug mode
 DEBUG=""
 # Set to "--record" to enable scheduler recording
-RECORD="" 
+RECORD="--record"
 
 export FUNC_PATH=$FUNC_PATH
 export WRAP_PATH=$WRAP_PATH
@@ -48,9 +49,10 @@ export REG_PATH=$REG_PATH
 export SCRIPT_DIR=$SCRIPT_DIR
 
 if [ $CLEANUP -eq 1 ]; then
-    # Clean and compile SynStream and mimo library
-    cargo clean --manifest-path "$BIN_DIR/Cargo.toml"
-    cargo build --manifest-path "$BIN_DIR/Cargo.toml" -r
+    # Clean and compile SynStream
+    cargo clean -p synstream-core
+    cargo build -r -p synstream-core
+    cargo build -r -p synstream-types
 
     # Compile library with the specific paths
     cargo clean --manifest-path "$SCRIPT_DIR/Cargo.toml"
@@ -73,6 +75,7 @@ cargo run --manifest-path "$BIN_DIR/Cargo.toml" -r --bin main -- \
     --max-runtime $RUNTIME \
     --slots $SLOTS \
     --max-streams $EXP_STREAMS \
+    --exclude-streams $EXCLUDE_STREAMS \
     --timing $TIMING_FILE \
     $RECORD \
     $DEBUG \
