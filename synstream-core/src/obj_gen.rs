@@ -103,7 +103,7 @@ pub fn init_objects(
                     args.push(arg_cmt);
                 }
 
-                let value_cmt = func_ptr(args.clone());
+                let value_cmt = func_ptr(&args);
                 value_vec.push(value_cmt.clone());
             }
             // fetch-add ObjectCount

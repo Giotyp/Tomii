@@ -6,10 +6,15 @@ use crate::{buffers::*, graph::*, graph_struct::*, scheduler::*, IdType};
 use core::panic;
 use flume::{Receiver, Sender};
 use parking_lot::RwLock;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use synstream_types::*;
+
+thread_local! {
+    static ARG_BUF: RefCell<Vec<CmTypes>> = RefCell::new(Vec::with_capacity(16));
+}
 
 /// Slot state for priority-based processing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -444,36 +449,6 @@ fn execute_task(
     //     None
     // };
 
-    // Build arguments here in the worker thread
-    let arg_vec = if let Some(args) = pre_built_args {
-        // For post-nodes or special cases with pre-built args
-        args
-    } else {
-        // For regular nodes, build args from cache
-        let node_cache = &shared.node_cache[node_info.id as usize];
-        create_node_args(
-            shared,
-            node_cache,
-            node_info.id,
-            node_info.index,
-            node_info.slot,
-            node_info.pred_index,
-        )
-    };
-
-    // if let Some(arg_start) = arg_build_start {
-    //     if let Some(tb) = time_buf {
-    //         let arg_end = tb.measure_time();
-    //         let arg_duration = tb.measure_duration(arg_start, arg_end);
-    //         tb.add_task_time(
-    //             node_info.slot,
-    //             &format!("{}-argbuild", node_name),
-    //             worker_id,
-    //             arg_duration,
-    //         );
-    //     }
-    // }
-
     // Start timing for actual function execution
     let start_time = if !node_info.post_node {
         Some(if let Some(tb) = time_buf {
@@ -485,7 +460,29 @@ fn execute_task(
         None
     };
 
-    let result = func(arg_vec);
+    let result = if let Some(ref args) = pre_built_args {
+        // For post-nodes or special cases with pre-built args
+        func(args)
+    } else {
+        // For regular nodes, build args from cache using thread-local buffer
+        let node_cache = &shared.node_cache[node_info.id as usize];
+        ARG_BUF.with(|buf_cell| {
+            let mut buf = buf_cell.borrow_mut();
+            buf.clear();
+            populate_cached_args_into(
+                &mut buf,
+                shared,
+                &node_cache.arg_cache,
+                node_info.id,
+                node_info.index,
+                node_info.slot,
+                node_info.pred_index,
+            );
+            let r = func(&buf);
+            buf.clear(); // release Arc refs promptly
+            r
+        })
+    };
 
     if let Some(start) = start_time {
         if let Some(tb) = time_buf {
@@ -665,7 +662,7 @@ pub fn evaluate_node_condition(
     );
 
     // Execute condition function to get result
-    let cond_result = (cond_cache.func_ptr)(cond_args);
+    let cond_result = (cond_cache.func_ptr)(&cond_args);
 
     // Evaluate result against expected value using operation
     node_cond.evaluate(&cond_result)
@@ -827,7 +824,7 @@ pub fn process_id_function(shared: &Arc<SharedData>, result: &CmTypes) -> Option
     if let Some(network_config) = network_config_opt {
         let id_function = network_config.id_function.unwrap();
         // Call the id function - wrap single result in Vec as expected by signature
-        let id_result = id_function(vec![result.clone()]);
+        let id_result = id_function(&[result.clone()]);
 
         // Extract stream from the result
         if let Some(new_stream) = id_result.valid_number_to_usize() {
@@ -955,6 +952,59 @@ pub fn parse_cached_args(
         }
     }
     arg_vec
+}
+
+/// Populate args directly into a provided buffer, avoiding heap allocation.
+/// Mirrors `parse_cached_args` but reuses the caller's Vec instead of allocating a new one.
+#[inline(always)]
+fn populate_cached_args_into(
+    buf: &mut Vec<CmTypes>,
+    shared: &Arc<SharedData>,
+    args_cache: &ArgCacheEntry,
+    node_id: IdType,
+    node_index: usize,
+    slot: usize,
+    pred_index: usize,
+) {
+    buf.extend(args_cache.args.iter().cloned());
+
+    if args_cache.buffer_ref_indexes.is_empty()
+        && args_cache.rt_idxs_indexes.is_empty()
+        && args_cache.rt_workers_indexes.is_empty()
+        && args_cache.res_indexes.is_empty()
+    {
+        return;
+    }
+
+    let workers = if !args_cache.rt_workers_indexes.is_empty() {
+        shared.workers
+    } else {
+        0
+    };
+
+    process_buffer_refs(buf, args_cache, node_index);
+    process_runtime_refs(buf, args_cache, node_index, workers);
+
+    for (res_idx, real_idx) in args_cache
+        .res_indexes
+        .iter()
+        .zip(args_cache.real_res_indexes.iter())
+    {
+        let arg = shared.graph.nodes[node_id as usize]
+            .args
+            .get(*real_idx)
+            .expect("Argument index out of bounds");
+
+        let node_factor = shared.graph.nodes[node_id as usize].factor;
+        let result_opt = collect_arg_result(arg, node_id, node_index, node_factor, slot, pred_index, None, shared);
+        if let Some(mut result) = result_opt {
+            if result.len() == 1 {
+                buf[*res_idx] = result.remove(0);
+            } else {
+                buf.splice(*res_idx..*res_idx + 1, result);
+            }
+        }
+    }
 }
 
 #[inline]

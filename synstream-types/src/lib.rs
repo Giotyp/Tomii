@@ -209,7 +209,7 @@ impl From<C64> for Complex64 {
 impl CmTypes {
     // Default CmPtr pointer
     pub fn default_pointer() -> CmPtr {
-        |_: Vec<CmTypes>| CmTypes::None
+        |_: &[CmTypes]| CmTypes::None
     }
 
     // Helper constructors for Arc-wrapped types - more ergonomic than calling Arc::new directly
@@ -1210,7 +1210,7 @@ impl fmt::Display for CmTypes {
     }
 }
 
-pub type CmPtr = fn(Vec<CmTypes>) -> CmTypes;
+pub type CmPtr = fn(&[CmTypes]) -> CmTypes;
 
 #[derive(Debug)]
 pub struct CustomError {

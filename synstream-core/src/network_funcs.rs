@@ -7,7 +7,7 @@ use synstream_types::CmTypes;
 /// Bind single UDP socket
 /// JSON signature: synstream::bind_udp(address: String, port: usize) -> CmTypes::Any(UdpSocket)
 #[no_mangle]
-pub fn synstream_bind_udp(args: Vec<CmTypes>) -> CmTypes {
+pub fn synstream_bind_udp(args: &[CmTypes]) -> CmTypes {
     assert_eq!(
         args.len(),
         2,
@@ -37,7 +37,7 @@ pub fn synstream_bind_udp(args: Vec<CmTypes>) -> CmTypes {
 /// JSON signature: synstream::bind_udp_range(address: String, start_port: usize, count: usize)
 ///                 -> CmTypes::VecAny(Vec<UdpSocket>)
 #[no_mangle]
-pub fn synstream_bind_udp_range(args: Vec<CmTypes>) -> CmTypes {
+pub fn synstream_bind_udp_range(args: &[CmTypes]) -> CmTypes {
     assert_eq!(
         args.len(),
         3,
@@ -84,7 +84,7 @@ pub fn synstream_bind_udp_range(args: Vec<CmTypes>) -> CmTypes {
 /// Bind single TCP listener
 /// JSON signature: synstream::bind_tcp(address: String, port: usize) -> CmTypes::Any(TcpListener)
 #[no_mangle]
-pub fn synstream_bind_tcp(args: Vec<CmTypes>) -> CmTypes {
+pub fn synstream_bind_tcp(args: &[CmTypes]) -> CmTypes {
     assert_eq!(
         args.len(),
         2,

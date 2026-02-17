@@ -30,11 +30,7 @@ pub const RUN_SLEEP: Duration = Duration::from_secs(10);
 ///
 /// Performance: Flume's drain() is a single atomic operation (12-54μs P99) vs
 /// O(N) try_recv() loop (237-1384μs P99 with Crossbeam).
-fn recv_batch<T>(
-    rx: &flume::Receiver<T>,
-    _max_items: usize,
-    timeout: Duration,
-) -> Vec<T> {
+fn recv_batch<T>(rx: &flume::Receiver<T>, _max_items: usize, timeout: Duration) -> Vec<T> {
     // Fast path: O(1) atomic snapshot via drain()
     // This is the key performance improvement over Crossbeam's per-message draining
     let batch: Vec<T> = rx.drain().collect();
@@ -776,7 +772,7 @@ impl SynRt {
                             TimingMethod::Instant(Instant::now())
                         };
 
-                        let packet_cm = packet_process_func(vec![received_bytes_cm]);
+                        let packet_cm = packet_process_func(&[received_bytes_cm]);
 
                         if let Some(tb) = &shared.time_buffer {
                             let end_proc = tb.measure_time();
@@ -862,7 +858,7 @@ impl SynRt {
                                             let mut full_args = vec![packet_cm.clone()];
                                             full_args.extend(additional_args);
 
-                                            let idx_result = idx_fn(full_args);
+                                            let idx_result = idx_fn(&full_args);
                                             // Still increment packet counter for receive-completion detection
                                             shared.slot_packet_counters[node_info.slot]
                                                 .fetch_add(1, Ordering::SeqCst);
