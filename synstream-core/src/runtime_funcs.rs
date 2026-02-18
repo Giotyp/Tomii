@@ -7,7 +7,7 @@ use core::panic;
 use flume::{Receiver, Sender};
 use parking_lot::RwLock;
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use synstream_types::*;
@@ -387,6 +387,12 @@ pub struct SharedData {
 
     /// Per-slot in-flight batch processing counter - prevents premature slot completion
     pub slot_processing_count: Arc<Vec<AtomicUsize>>,
+
+    /// Bitmap of slots that MAY have reached completion (all counters → 0).
+    /// Set (Release) by resolution threads when a counter decrements to 0.
+    /// Consumed (AcqRel swap) by check_slots — avoids running_streams lock on every iteration.
+    /// Supports up to 64 slots (sufficient for current max of 40).
+    pub slots_maybe_complete: Arc<AtomicU64>,
 
     /// Per-group dependency support:
     pub pred_index_filter: Arc<Vec<Vec<Option<(usize, usize)>>>>,
