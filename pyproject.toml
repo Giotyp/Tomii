@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "synstream"
+version = "0.1.0"
+description = "Python API for the SynStream task-graph framework"
+requires-python = ">=3.9"
+dependencies = ["pydantic>=2.0"]
+
+[project.optional-dependencies]
+dev = [
+    "datamodel-code-generator>=0.25",
+    "pytest>=7.0",
+    "mypy>=1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["synstream*"]
+
+[tool.pytest.ini_options]
+testpaths = ["synstream/tests"]
+
+[tool.mypy]
+packages = ["synstream"]
+strict = true

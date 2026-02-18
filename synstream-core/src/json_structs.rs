@@ -1,9 +1,10 @@
 use rapidhash::RapidHashMap;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use synstream_types::*;
 
 // Graph File Structure
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct GraphFile {
     pub initializations: Vec<InitJson>,
     pub nodes: Vec<NodeJson>,
@@ -12,7 +13,7 @@ pub struct GraphFile {
 }
 
 // Network Configuration
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct NetworkConfigJson {
     pub socket_type: String,
     pub num_sockets: Factor,
@@ -27,7 +28,7 @@ pub struct NetworkConfigJson {
     pub index_function: IndexFunctionJson,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct IndexFunctionJson {
     pub function: String,
     pub args: Vec<ArgJson>,
@@ -38,7 +39,7 @@ fn default_buffer_depth() -> usize {
 }
 
 // Node structures
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ConditionJson {
     pub operation: String,
     pub value: String,
@@ -46,7 +47,7 @@ pub struct ConditionJson {
 }
 
 // Node-level condition structure (new format)
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct NodeConditionJson {
     pub operation: String,
     pub value: String,
@@ -55,14 +56,14 @@ pub struct NodeConditionJson {
     pub args: Vec<ArgJson>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct PredJson {
     pub name: String,
     pub indexes: String,
     pub group_by: Option<Factor>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ArgJson {
     #[serde(rename = "type")]
     pub type_: String,
@@ -71,13 +72,13 @@ pub struct ArgJson {
     pub predecessor: Option<PredJson>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct LoopJson {
     pub name: String,
     pub factor: Option<Factor>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct NodeJson {
     pub name: String,
     pub factor: Option<Factor>,
@@ -95,14 +96,14 @@ pub struct NodeJson {
 }
 
 // Initializations
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ArgInit {
     #[serde(rename = "type")]
     pub type_: String,
     pub value: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct InitJson {
     pub name: String,
     pub factor: Option<Factor>,
@@ -110,8 +111,8 @@ pub struct InitJson {
     pub function: Option<String>,
 }
 
-// Factor struct
-#[derive(Debug, Clone, Deserialize)]
+// Factor: either a literal integer or a variable name reference
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum Factor {
     Number(usize),
