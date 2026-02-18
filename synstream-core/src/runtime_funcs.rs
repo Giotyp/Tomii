@@ -1300,10 +1300,15 @@ pub fn should_record_slot(shared: &Arc<SharedData>, slot: usize) -> bool {
 /// Vector of (successor_node_info, has_condition, successor_id) tuples
 /// representing all successors of the given node that have remaining dependencies.
 #[inline]
-pub fn collect_successors_for_node(
+/// Collect successor descriptors for `node_info`, appending into `out` (cleared first).
+/// Avoids a heap allocation on the hot path when the caller supplies a reusable buffer.
+pub fn collect_successors_for_node_into(
     shared: &Arc<SharedData>,
     node_info: &NodeInfo,
-) -> Vec<(NodeInfo, bool, IdType, Option<usize>)> {
+    out: &mut Vec<(NodeInfo, bool, IdType, Option<usize>)>,
+) {
+    out.clear();
+
     let node_id_usize = node_info.id as usize;
 
     // Get successor list for this node (immutable, pre-computed)
@@ -1314,8 +1319,6 @@ pub fn collect_successors_for_node(
             &shared.graph.successors[node_id_usize]
         }
     };
-
-    let mut succ_updates = Vec::new();
 
     // Collect info for each successor without locks
     for succ_id in successors {
@@ -1377,9 +1380,16 @@ pub fn collect_successors_for_node(
         // Add successor node info for each instance
         for succ_index in succ_indexes {
             let succ_info = NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.index);
-            succ_updates.push((succ_info, has_condition, succ_id, pred_group));
+            out.push((succ_info, has_condition, succ_id, pred_group));
         }
     }
+}
 
-    succ_updates
+pub fn collect_successors_for_node(
+    shared: &Arc<SharedData>,
+    node_info: &NodeInfo,
+) -> Vec<(NodeInfo, bool, IdType, Option<usize>)> {
+    let mut out = Vec::new();
+    collect_successors_for_node_into(shared, node_info, &mut out);
+    out
 }

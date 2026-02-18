@@ -1,5 +1,6 @@
 use core_affinity;
 use parking_lot::RwLock;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -43,6 +44,17 @@ fn recv_batch<T>(rx: &flume::Receiver<T>, _max_items: usize, timeout: Duration) 
         }
         Err(_) => Vec::new(), // timeout or disconnected
     }
+}
+
+// Per-resolution-thread reusable buffers — avoids heap allocation on the hot path.
+thread_local! {
+    // Successor descriptors collected for a single node being processed.
+    static SUCC_UPDATES_BUF: RefCell<Vec<(NodeInfo, bool, IdType, Option<usize>)>> =
+        RefCell::new(Vec::with_capacity(32));
+    // Nodes queued for scheduling from a single predecessor's successor set.
+    static SCHEDULE_BUF: RefCell<Vec<NodeInfo>> = RefCell::new(Vec::with_capacity(32));
+    // Ready instance indices returned by decrease_and_get_ready_into.
+    static READY_BUF: RefCell<Vec<usize>> = RefCell::new(Vec::with_capacity(16));
 }
 
 // Main SynStream Runtime struct with shared context
@@ -1151,180 +1163,187 @@ impl SynRt {
             return;
         }
 
-        // Track which slots are being processed to increment processing_count
-        let mut slots_in_batch: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        // 6A: Track which slots are in this batch using a bitset (no heap allocation).
+        let mut slots_in_batch: u64 = 0;
         for (node_info, _) in &batch {
-            slots_in_batch.insert(node_info.slot);
+            slots_in_batch |= 1u64 << node_info.slot;
         }
 
         // Increment processing_count for all slots in this batch
-        for &slot in &slots_in_batch {
-            shared.slot_processing_count[slot].fetch_add(1, Ordering::SeqCst);
+        {
+            let mut bits = slots_in_batch;
+            while bits != 0 {
+                let slot = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                shared.slot_processing_count[slot].fetch_add(1, Ordering::SeqCst);
+            }
         }
 
-        // Store results and decrement atomics
-        let mut nodes_sent_in_slot: HashMap<usize, usize> = HashMap::new();
-        let mut nodes_for_successor_processing = Vec::new();
+        // Phases 1+2+3: For each node — store result, decrement counters, process successors.
+        // All three phases run together per node while processing_count > 0, so completion
+        // detection cannot fire until Phase 4 decrements processing_count after this loop.
+        SUCC_UPDATES_BUF.with(|sbuf| {
+            SCHEDULE_BUF.with(|tbuf| {
+                READY_BUF.with(|rbuf| {
+                    let mut succ_buf = sbuf.borrow_mut();
+                    let mut sched = tbuf.borrow_mut();
+                    let mut ready = rbuf.borrow_mut();
 
-        let mut succesor_updates = Vec::new();
-        for (node_info, result) in batch.into_iter() {
-            // Mark stream activity FIRST for all nodes (including network nodes id=0)
-            stream_slot_activity.insert(node_info.slot, true);
+                    for (node_info, result) in batch.into_iter() {
+                        // Mark stream activity for all nodes (including network nodes id=0)
+                        stream_slot_activity.insert(node_info.slot, true);
 
-            if node_info.post_node {
-                // Store Result - lock-free atomic store
-                shared.node_results.set(&node_info, result);
-                continue;
-            }
-
-            shared.node_results.set(&node_info, result);
-
-            // Decrement remaining_nodes counter now that this task is confirmed completed
-            let node_id_usize = node_info.id as usize;
-            let node_id_to_rem_idx = shared.node_id_to_rem[node_id_usize];
-            let node_cache_entry = &shared.node_cache[node_id_usize];
-
-            // Lock-free access using pre-computed is_condition flag
-            if node_cache_entry.is_condition {
-                shared.remaining_cond_nodes[node_info.slot][node_id_to_rem_idx]
-                    .fetch_sub(1, Ordering::SeqCst);
-
-                // Decrement slot-wide condition counter
-                let prev_cond =
-                    shared.slot_pending_cond_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
-
-                if prev_cond <= 10 || prev_cond % 100 == 0 {
-                    print_debug(|| {
-                        format!(
-                            "COND task completed: slot={}, node_id={} ({}), prev_pending_cond={}, new={}",
-                            node_info.slot, node_id_usize, node_cache_entry.name, prev_cond, prev_cond - 1
-                        )
-                    });
-                }
-            } else if !node_cache_entry.is_initial {
-                shared.remaining_nodes[node_info.slot][node_id_to_rem_idx]
-                    .fetch_sub(1, Ordering::SeqCst);
-
-                // Decrement slot-wide task counter for O(1) completion check
-                let _ = shared.slot_pending_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
-            }
-            nodes_for_successor_processing.push(node_info.clone());
-            succesor_updates.push(collect_successors_for_node(&shared, &node_info))
-        }
-
-        // Process dependency updates using pre-collected successor data
-        for (idx, node_info) in nodes_for_successor_processing.into_iter().enumerate() {
-            let succ_updates = succesor_updates.get(idx).cloned().unwrap_or_default();
-
-            let mut nodes_to_schedule: Vec<NodeInfo> = Vec::new();
-
-            // if not exist, init nodes_sent for slot to 0
-            let nodes_sent: &mut usize = nodes_sent_in_slot.entry(node_info.slot).or_insert(0);
-
-            // Process each successor update directly without deduplication
-            for (_succ_info, has_cond, succ_id, pred_group) in succ_updates {
-                let succ_node_id = succ_id as usize;
-
-                // Optimization: Skip condition evaluation if all instances already spawned
-                if has_cond {
-                    let remaining_spawns = shared.cond_instances_to_spawn[node_info.slot]
-                        [succ_node_id]
-                        .load(Ordering::SeqCst);
-
-                    if remaining_spawns == 0 {
-                        continue; // All instances already spawned, skip
-                    }
-                }
-
-                // Call decrease_and_get_ready with count=1 for this predecessor
-                let ready_indices = shared.resolution_state.decrease_and_get_ready(
-                    node_info.slot,
-                    succ_node_id,
-                    pred_group,
-                    1, // Single decrement per predecessor
-                );
-
-                // Schedule all newly ready instances returned by this call
-                for ready_index in ready_indices {
-                    // Create successor with correct pred_index from completing predecessor
-                    let scheduled_succ_info = NodeInfo::new(
-                        succ_node_id as IdType,
-                        node_info.slot,
-                        ready_index,
-                        node_info.index, // Use completing predecessor's index
-                    );
-
-                    if !has_cond {
-                        nodes_to_schedule.push(scheduled_succ_info);
-                        *nodes_sent += 1;
-                    } else {
-                        // Evaluate condition for this successor instance
-                        let cond_idx = shared.node_cache[succ_node_id].cond_index;
-                        let succ_cache = &shared.node_cache[succ_node_id];
-
-                        let condition_passed = if let Some(cond_cache) = &succ_cache.node_condition
-                        {
-                            let node_cond =
-                                shared.graph.nodes[succ_node_id].condition.as_ref().unwrap();
-                            evaluate_node_condition(
-                                &shared,
-                                &scheduled_succ_info,
-                                cond_cache,
-                                node_cond,
-                            )
-                        } else {
-                            conditions_met(&shared, &scheduled_succ_info, &cond_indexes[cond_idx])
-                        };
-
-                        if condition_passed {
-                            nodes_to_schedule.push(scheduled_succ_info.clone());
-                            *nodes_sent += 1;
-
-                            let prev_spawns = shared.cond_instances_to_spawn[node_info.slot]
-                                [succ_node_id]
-                                .fetch_sub(1, Ordering::Release);
-
-                            print_debug(|| {
-                                format!(
-                                    "Condition passed for node {} ({}) index {}: remaining spawns {} -> {}",
-                                    succ_node_id, succ_cache.name, scheduled_succ_info.index, prev_spawns, prev_spawns - 1
-                                )
-                            });
-                        } else {
-                            shared
-                                .resolution_state
-                                .increment_dependency(&scheduled_succ_info);
-                            shared.resolution_state.reset_sent(
-                                node_info.slot,
-                                scheduled_succ_info.id as usize,
-                                scheduled_succ_info.index,
-                            );
+                        if node_info.post_node {
+                            shared.node_results.set(&node_info, result);
+                            continue;
                         }
-                    }
-                }
-            }
 
-            // Schedule all ready nodes collected from this completed node
-            Self::preparation(&shared, &nodes_to_schedule, thread_core, thread_slot);
-            print_debug(|| {
-                format!(
-                    "Thread {:?} -- Processed node {} in slot {}, scheduled: {:?}",
-                    thread_id,
-                    node_info.id,
-                    node_info.slot,
-                    nodes_to_schedule
-                        .iter()
-                        .map(|n| (n.id, n.index))
-                        .collect::<Vec<(IdType, usize)>>()
-                )
+                        // Phase 1: Store result
+                        shared.node_results.set(&node_info, result);
+
+                        // Phase 2: Decrement task counters
+                        let node_id_usize = node_info.id as usize;
+                        let node_id_to_rem_idx = shared.node_id_to_rem[node_id_usize];
+                        let node_cache_entry = &shared.node_cache[node_id_usize];
+
+                        if node_cache_entry.is_condition {
+                            shared.remaining_cond_nodes[node_info.slot][node_id_to_rem_idx]
+                                .fetch_sub(1, Ordering::SeqCst);
+                            let prev_cond = shared.slot_pending_cond_tasks[node_info.slot]
+                                .fetch_sub(1, Ordering::SeqCst);
+                            if prev_cond <= 10 || prev_cond % 100 == 0 {
+                                print_debug(|| {
+                                    format!(
+                                        "COND task completed: slot={}, node_id={} ({}), prev_pending_cond={}, new={}",
+                                        node_info.slot, node_id_usize, node_cache_entry.name,
+                                        prev_cond, prev_cond - 1
+                                    )
+                                });
+                            }
+                        } else if !node_cache_entry.is_initial {
+                            shared.remaining_nodes[node_info.slot][node_id_to_rem_idx]
+                                .fetch_sub(1, Ordering::SeqCst);
+                            let _ = shared.slot_pending_tasks[node_info.slot]
+                                .fetch_sub(1, Ordering::SeqCst);
+                        }
+
+                        // Phase 3: Collect successors and process them (no allocations)
+                        collect_successors_for_node_into(&shared, &node_info, &mut succ_buf);
+                        sched.clear();
+
+                        for (_succ_info, has_cond, succ_id, pred_group) in succ_buf.iter() {
+                            let succ_node_id = *succ_id as usize;
+
+                            // Skip condition evaluation if all instances already spawned
+                            if *has_cond {
+                                let remaining_spawns =
+                                    shared.cond_instances_to_spawn[node_info.slot][succ_node_id]
+                                        .load(Ordering::SeqCst);
+                                if remaining_spawns == 0 {
+                                    continue;
+                                }
+                            }
+
+                            // Decrement dependency counter; ready indices written into `ready`
+                            shared.resolution_state.decrease_and_get_ready_into(
+                                node_info.slot,
+                                succ_node_id,
+                                *pred_group,
+                                1,
+                                &mut ready,
+                            );
+
+                            for &ready_index in ready.iter() {
+                                let scheduled_succ_info = NodeInfo::new(
+                                    succ_node_id as IdType,
+                                    node_info.slot,
+                                    ready_index,
+                                    node_info.index,
+                                );
+
+                                if !has_cond {
+                                    sched.push(scheduled_succ_info);
+                                } else {
+                                    let cond_idx = shared.node_cache[succ_node_id].cond_index;
+                                    let succ_cache = &shared.node_cache[succ_node_id];
+
+                                    let condition_passed =
+                                        if let Some(cond_cache) = &succ_cache.node_condition {
+                                            let node_cond = shared.graph.nodes[succ_node_id]
+                                                .condition
+                                                .as_ref()
+                                                .unwrap();
+                                            evaluate_node_condition(
+                                                &shared,
+                                                &scheduled_succ_info,
+                                                cond_cache,
+                                                node_cond,
+                                            )
+                                        } else {
+                                            conditions_met(
+                                                &shared,
+                                                &scheduled_succ_info,
+                                                &cond_indexes[cond_idx],
+                                            )
+                                        };
+
+                                    if condition_passed {
+                                        sched.push(scheduled_succ_info.clone());
+                                        let prev_spawns =
+                                            shared.cond_instances_to_spawn[node_info.slot]
+                                                [succ_node_id]
+                                                .fetch_sub(1, Ordering::Release);
+                                        print_debug(|| {
+                                            format!(
+                                                "Condition passed for node {} ({}) index {}: remaining spawns {} -> {}",
+                                                succ_node_id, succ_cache.name,
+                                                scheduled_succ_info.index,
+                                                prev_spawns, prev_spawns - 1
+                                            )
+                                        });
+                                    } else {
+                                        shared
+                                            .resolution_state
+                                            .increment_dependency(&scheduled_succ_info);
+                                        shared.resolution_state.reset_sent(
+                                            node_info.slot,
+                                            scheduled_succ_info.id as usize,
+                                            scheduled_succ_info.index,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        Self::preparation(&shared, &*sched, thread_core, thread_slot);
+                        print_debug(|| {
+                            format!(
+                                "Thread {:?} -- Processed node {} in slot {}, scheduled: {:?}",
+                                thread_id,
+                                node_info.id,
+                                node_info.slot,
+                                sched.iter().map(|n| (n.id, n.index)).collect::<Vec<_>>()
+                            )
+                        });
+                    }
+                });
             });
-        }
+        });
 
         // Lock-free recording via per-worker channel
-        let should_record = shared.async_recorder.is_some()
-            && slots_in_batch
-                .iter()
-                .any(|&slot| should_record_slot(&shared, slot));
+        let should_record = shared.async_recorder.is_some() && {
+            let mut any = false;
+            let mut bits = slots_in_batch;
+            while bits != 0 {
+                let slot = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if should_record_slot(&shared, slot) {
+                    any = true;
+                    break;
+                }
+            }
+            any
+        };
         if should_record {
             let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
             let end_ns = shared.base_instant.elapsed().as_nanos();
@@ -1335,14 +1354,18 @@ impl SynRt {
                 end_ns,
                 worker: thread_core,
                 task_id: IdType::MAX,
-                // arbitrary index value
                 index: 0,
             });
         }
 
-        // Decrement processing_count AFTER all successor processing
-        for &slot in &slots_in_batch {
-            shared.slot_processing_count[slot].fetch_sub(1, Ordering::SeqCst);
+        // Phase 4: Decrement processing_count AFTER all successor processing
+        {
+            let mut bits = slots_in_batch;
+            while bits != 0 {
+                let slot = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                shared.slot_processing_count[slot].fetch_sub(1, Ordering::SeqCst);
+            }
         }
     }
 

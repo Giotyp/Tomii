@@ -583,16 +583,17 @@ impl NodeDependencyEntry {
     /// group: None → decrement ALL group counters (global barrier, e.g., beam→demul)
     ///        Some(g) → decrement only group g's counter
     /// count: number of decrements to apply (when multiple predecessors complete in same batch)
-    pub fn decrease_and_get_ready(&self, group: Option<usize>, count: usize) -> Vec<usize> {
-        let groups_to_decrement: Vec<usize> = match group {
-            Some(g) if g < self.num_groups => vec![g],
-            None => (0..self.num_groups).collect(),
-            _ => return Vec::new(), // Invalid group
+    /// Writes newly-ready instance indices into `ready` (cleared before use).
+    pub fn decrease_and_get_ready_into(&self, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
+        ready.clear();
+
+        let (g_start, g_end) = match group {
+            Some(g) if g < self.num_groups => (g, g + 1),
+            None => (0, self.num_groups),
+            _ => return, // Invalid group
         };
 
-        let mut ready = Vec::new();
-
-        for &g in &groups_to_decrement {
+        for g in g_start..g_end {
             // Atomically decrement this group's counter by count
             let result =
                 self.remaining_deps[g].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |val| {
@@ -638,7 +639,11 @@ impl NodeDependencyEntry {
                 }
             }
         }
+    }
 
+    pub fn decrease_and_get_ready(&self, group: Option<usize>, count: usize) -> Vec<usize> {
+        let mut ready = Vec::new();
+        self.decrease_and_get_ready_into(group, count, &mut ready);
         ready
     }
 
@@ -777,6 +782,24 @@ impl NodeDepMap {
         Self { slots: map_slots }
     }
 
+    /// Get ready instances for a node in a slot by decrementing dependencies by count.
+    /// Writes results into `ready` (cleared before use). No allocation on the hot path.
+    #[inline]
+    pub fn decrease_and_get_ready_into(
+        &self,
+        slot: usize,
+        node_id: usize,
+        group: Option<usize>,
+        count: usize,
+        ready: &mut Vec<usize>,
+    ) {
+        if slot < self.slots.len() && node_id < self.slots[slot].len() {
+            self.slots[slot][node_id].decrease_and_get_ready_into(group, count, ready);
+        } else {
+            ready.clear();
+        }
+    }
+
     /// Get ready instances for a node in a slot by decrementing dependencies by count
     /// group: None → global decrement, Some(g) → decrement group g only
     /// count: number of decrements to apply
@@ -788,11 +811,9 @@ impl NodeDepMap {
         group: Option<usize>,
         count: usize,
     ) -> Vec<usize> {
-        if slot < self.slots.len() && node_id < self.slots[slot].len() {
-            self.slots[slot][node_id].decrease_and_get_ready(group, count)
-        } else {
-            Vec::new()
-        }
+        let mut ready = Vec::new();
+        self.decrease_and_get_ready_into(slot, node_id, group, count, &mut ready);
+        ready
     }
 
     /// Increment dependency for a specific node (used when condition fails)

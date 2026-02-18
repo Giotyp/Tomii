@@ -74,6 +74,13 @@ pub trait ResolutionState: Send + Sync {
         Vec::new()
     }
 
+    // Hot-path variant: writes ready indices into caller-supplied buffer (no allocation).
+    // Default delegates to the Vec-returning version for backward compatibility.
+    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
+        ready.clear();
+        ready.extend(self.decrease_and_get_ready(slot, node_id, group, count));
+    }
+
     // Debug info for trait object printing
     fn debug_info(&self) -> String;
 }
@@ -129,17 +136,17 @@ impl StNodeDepEntry {
         (self.group_size - idx_in_group - 1) * self.deps_per_instance
     }
 
-    /// Decrement by count and return all newly-ready instance indices
-    fn decrease_and_get_ready(&mut self, group: Option<usize>, count: usize) -> Vec<usize> {
-        let groups_to_decrement: Vec<usize> = match group {
-            Some(g) if g < self.num_groups => vec![g],
-            None => (0..self.num_groups).collect(),
-            _ => return Vec::new(),
+    /// Decrement by count, write newly-ready instance indices into `ready` (cleared first).
+    fn decrease_and_get_ready_into(&mut self, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
+        ready.clear();
+
+        let (g_start, g_end) = match group {
+            Some(g) if g < self.num_groups => (g, g + 1),
+            None => (0, self.num_groups),
+            _ => return,
         };
 
-        let mut ready = Vec::new();
-
-        for &g in &groups_to_decrement {
+        for g in g_start..g_end {
             if self.remaining_deps[g] > 0 {
                 self.remaining_deps[g] = self.remaining_deps[g].saturating_sub(count);
             }
@@ -172,6 +179,12 @@ impl StNodeDepEntry {
                 }
             }
         }
+    }
+
+    #[allow(dead_code)]
+    fn decrease_and_get_ready(&mut self, group: Option<usize>, count: usize) -> Vec<usize> {
+        let mut ready = Vec::new();
+        self.decrease_and_get_ready_into(group, count, &mut ready);
         ready
     }
 
@@ -345,11 +358,17 @@ impl ResolutionState for SingleThreadedState {
     }
 
     fn decrease_and_get_ready(&self, slot: usize, node_id: usize, group: Option<usize>, count: usize) -> Vec<usize> {
+        let mut ready = Vec::new();
+        self.decrease_and_get_ready_into(slot, node_id, group, count, &mut ready);
+        ready
+    }
+
+    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
         let deps = self.node_deps.get_mut();
         if slot < deps.len() && node_id < deps[slot].len() {
-            deps[slot][node_id].decrease_and_get_ready(group, count)
+            deps[slot][node_id].decrease_and_get_ready_into(group, count, ready);
         } else {
-            Vec::new()
+            ready.clear();
         }
     }
 
@@ -464,8 +483,14 @@ impl ResolutionState for MultiThreadedState {
 
     #[inline]
     fn decrease_and_get_ready(&self, slot: usize, node_id: usize, group: Option<usize>, count: usize) -> Vec<usize> {
-        // Use the optimized per-node dependency tracking from NodeDepMap
-        self.node_dep_map.decrease_and_get_ready(slot, node_id, group, count)
+        let mut ready = Vec::new();
+        self.node_dep_map.decrease_and_get_ready_into(slot, node_id, group, count, &mut ready);
+        ready
+    }
+
+    #[inline]
+    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
+        self.node_dep_map.decrease_and_get_ready_into(slot, node_id, group, count, ready);
     }
 
     fn debug_info(&self) -> String {
