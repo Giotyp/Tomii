@@ -2,7 +2,7 @@ use core_affinity;
 use parking_lot::RwLock;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{self, sleep, spawn, JoinHandle};
 use std::time::{Duration, Instant};
@@ -363,7 +363,6 @@ impl SynRt {
             // Per-group dependency support
             pred_index_filter: Arc::new(pred_index_filter),
             pred_group_by: Arc::new(pred_group_by),
-            slots_maybe_complete: Arc::new(AtomicU64::new(0)),
         });
 
         SynRt { shared }
@@ -1221,19 +1220,11 @@ impl SynRt {
                                     )
                                 });
                             }
-                            if prev_cond == 1 {
-                                // Last condition task for this slot — hint completion bitmap.
-                                shared.slots_maybe_complete.fetch_or(1u64 << node_info.slot, Ordering::Release);
-                            }
                         } else if !node_cache_entry.is_initial {
                             shared.remaining_nodes[node_info.slot][node_id_to_rem_idx]
                                 .fetch_sub(1, Ordering::SeqCst);
-                            let prev_tasks = shared.slot_pending_tasks[node_info.slot]
+                            let _ = shared.slot_pending_tasks[node_info.slot]
                                 .fetch_sub(1, Ordering::SeqCst);
-                            if prev_tasks == 1 {
-                                // Last regular task for this slot — hint completion bitmap.
-                                shared.slots_maybe_complete.fetch_or(1u64 << node_info.slot, Ordering::Release);
-                            }
                         }
 
                         // Phase 3: Collect successors and process them (no allocations)
@@ -1373,13 +1364,7 @@ impl SynRt {
             while bits != 0 {
                 let slot = bits.trailing_zeros() as usize;
                 bits &= bits - 1;
-                let prev_proc = shared.slot_processing_count[slot].fetch_sub(1, Ordering::SeqCst);
-                if prev_proc == 1 {
-                    // Last in-flight batch for this slot — hint completion bitmap.
-                    shared
-                        .slots_maybe_complete
-                        .fetch_or(1u64 << slot, Ordering::Release);
-                }
+                shared.slot_processing_count[slot].fetch_sub(1, Ordering::SeqCst);
             }
         }
     }
@@ -1392,27 +1377,19 @@ impl SynRt {
         thread_slot: usize,
         cond_indexes: &[Vec<usize>],
     ) {
-        // Atomically claim all completion candidates via bitmap swap.
-        // Bits are set (Release) by process_batch_resolution when a counter reaches 0.
-        // The AcqRel swap here synchronizes with those Release stores, ensuring all prior
-        // counter decrements are visible before we read the per-slot counters below.
-        let candidates = shared.slots_maybe_complete.swap(0, Ordering::AcqRel);
+        // CCheck ALL slots with assigned streams, not just slots in activity map
+        // Per-thread activity map can miss completions when threads don't have the completing slot
+        let slots_to_check: Vec<usize> = {
+            let running_streams = shared.running_streams.read();
+            running_streams.iter().map(|(_, slot)| *slot).collect()
+        };
 
-        // Clear activity map (maintains same behavior as before for recording/tracking)
+        // Clear activity map AFTER getting slots to check (not before)
+        // This prevents redundant checking while ensuring we don't miss completions
         stream_slot_activity.clear();
 
-        if candidates == 0 {
-            return; // No slots signaled — fast path avoids per-slot counter reads
-        }
-
-        let mut remaining_bits = candidates;
-        while remaining_bits != 0 {
-            let proc_slot = remaining_bits.trailing_zeros() as usize;
-            remaining_bits &= remaining_bits - 1; // Clear lowest set bit
-
-            // Skip buffering slots - they cannot complete until activated.
-            // (In practice, the bit should not be set for Buffering slots since tasks
-            // don't run until a slot is Active — this is a safety guard.)
+        for proc_slot in slots_to_check {
+            // Skip buffering slots - they cannot complete until activated
             if shared.slot_priority_enabled && !is_slot_active(&shared, proc_slot) {
                 continue;
             }
@@ -1601,12 +1578,6 @@ impl SynRt {
                         Self::preparation(&shared, &compute_nodes, thread_core, thread_slot);
                     }
                 }
-            } else {
-                // Not actually complete yet (false positive or transient ordering race) —
-                // re-set the bit so a future iteration retries this slot.
-                shared
-                    .slots_maybe_complete
-                    .fetch_or(1u64 << proc_slot, Ordering::Release);
             }
         }
     }
