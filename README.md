@@ -6,15 +6,155 @@ SynStream automates the process of describing a computational graph and executin
 
 ## How to Use
 
-1. Describe the application using a JSON file (or use SynStream-Visualizer).
+There are two ways to define and run a SynStream application: the **Python API** (recommended) and the **JSON + CLI** workflow.
+
+---
+
+## Python API (Recommended)
+
+The `synstream` Python package lets you define graphs in code, build the plugin library, and launch the runtime — all from a single Python script.
+
+### Install
+
+```bash
+# From the workspace root
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+### Quick Start
+
+```python
+import synstream as ss
+
+app = ss.Graph()
+
+# Initializations (pre-computed objects shared across the graph)
+buf_size    = app.var("buf_size", 100)
+num_nodes   = app.var("num_nodes", 200)
+fft_planner = app.var("fft_planner", func="fft_planner", args=[buf_size])
+
+# Computation nodes: factor= creates parallel instances
+gen_vec     = app.node("gen_vec",     func="generate_vector", factor=num_nodes,
+                       args=[buf_size])
+compute_fft = app.node("compute_fft", func="compute_fft",     factor=num_nodes,
+                       args=[fft_planner, gen_vec.out()])   # $res dependency
+vec_mat     = app.node("vec_mat",     func="vec_to_mat",      factor=num_nodes,
+                       args=[gen_vec.out(), compute_fft.wait()])  # $barrier sync
+
+# Build plugin + runtime, then execute
+app.build(wrap_path="wrappers.rs", reg_path="reg.rs",
+          plugin_manifest="plugin/Cargo.toml")
+app.run(workers=4, slots=2, timing="timing.txt")
+```
+
+Or combine into one call:
+
+```python
+app.build_and_run(wrap_path="wrappers.rs", reg_path="reg.rs",
+                  plugin_manifest="plugin/Cargo.toml",
+                  workers=4, slots=2, timing="timing.txt")
+```
+
+### Graph API
+
+| Method | Description |
+|---|---|
+| `app.var(name, value)` | Constant initialization (e.g. `buf_size = app.var("buf_size", 100)`) |
+| `app.var(name, func=..., args=[...])` | Computed initialization (calls a plugin function at startup) |
+| `app.node(name, func=..., args=[...], factor=...)` | Computation node; `factor` creates parallel instances |
+| `app.post_node(...)` | Post-computation node (runs after the main graph completes) |
+| `node.out(i)` | Data dependency on instance `i` of a predecessor (`$res`) |
+| `node.wait(i)` | Barrier — wait for instance `i` to complete before proceeding (`$barrier`) |
+| `app.network(**cfg)` | Configure UDP/TCP packet injection for network-driven graphs |
+| `app.to_json()` / `app.save_json(path)` | Export graph to JSON without building |
+
+### Type System
+
+Python literals are auto-inferred (`int` → `usize`, `float` → `f64`). Use explicit wrappers for other types:
+
+```python
+import synstream as ss
+
+ss.i32(-5)
+ss.f32(3.14)
+ss.String("hello")
+ss.bool_(True)
+ss.Complex64(1.0, -0.5)
+ss.Vec("f32", [1.0, 2.0, 3.0])
+```
+
+### Loops and Conditions
+
+```python
+from synstream import Loop, Condition
+
+# Loop node: iterates `loop_factor` times
+loop_node = app.node("proc", func="process", factor=num_nodes,
+                     loop=Loop("iter", factor=loop_factor))
+
+# Conditional node: skips execution based on a plugin predicate
+cond_node = app.node("filter", func="filter_fn", factor=num_nodes,
+                     condition=Condition(
+                         operation="Eq", value=1, value_type="usize",
+                         func="check_fn", args=[some_var]
+                     ))
+```
+
+### Build Options
+
+```python
+app.build(
+    func_path="plugin/src/lib.rs",     # Auto-generate wrappers from source
+    # -- OR --
+    wrap_path="wrappers.rs",           # Use pre-generated wrapper files
+    reg_path="reg.rs",
+    plugin_manifest="plugin/Cargo.toml",
+    release=True,                       # Release build (default)
+    clean=False,                        # Skip cargo clean (faster rebuilds)
+)
+```
+
+### Run Options
+
+All CLI flags are available as keyword arguments (underscores replace hyphens):
+
+```python
+app.run(
+    workers=8,
+    system_threads=2,
+    slots=4,
+    max_streams=100,
+    max_runtime=60,
+    timing="timing.csv",
+    slot_priority=True,
+    exclude_streams=5,
+    debug=False,
+)
+```
+
+### Real-World Example
+
+See `examples/matrix-compute/run_bench.py` for a complete pipeline (FFT + matrix multiply) that replaces the shell script + JSON pair with a single Python file.
+
+```bash
+python examples/matrix-compute/run_bench.py --workers 4 --no-clean
+```
+
+---
+
+## JSON + CLI Workflow
+
+For environments without Python, or when exporting a graph for external tools:
+
+1. Describe the application using a JSON file (or export one via `app.save_json()`).
 
 2. Obtain (or create) a plugin library compatible with SynStream (dynamic `.so` file and header file or Rust source file).
 
-3. If the application functions use only Rust standard types, skip step 2 and have the source code available.
+3. Set the **FUNC_PATH** environment variable to the header or Rust source path.
 
-4. Set **FUNC_PATH** environment variable to the header or Rust source path.
-
-5. Execute SynStream. See available arguments with `cargo run -- --help`:
+4. Execute SynStream:
 
 ```
 Usage: main [OPTIONS] --json <FILE> --dylib <FILE>
@@ -52,7 +192,9 @@ Options:
 - `synstream-core` — Runtime, scheduler, graph engine, and network receiver infrastructure
 - `synstream-types` — `CmTypes` enum for type-erased value passing across plugin boundaries
 - `synstream-macro` — Procedural macros for plugin wrapping (WIP)
-- `examples/matrix-compute` — FFT and matrix computation benchmark (under refactoring)
+- `synstream/` — Python API package
+- `examples/matrix-compute` — FFT and matrix computation benchmark
+- `examples/mimolib` — MIMO streaming benchmark
 
 **Core modules in `synstream-core/src`:**
 - `runtime.rs` / `runtime_funcs.rs` — Main execution orchestration, slot and stream management
@@ -81,12 +223,15 @@ The `factor` field creates parallel node instances. Network nodes are handled by
 ## Environment Variables
 
 - `FUNC_PATH` — Path to plugin header or Rust source (required)
-- `WRAP_PATH` — Wrapper functions file (optional set to bypass converter, auto-generated)
-- `REG_PATH` — Function registry file (optional set to bypass converter, auto-generated)
+- `WRAP_PATH` — Wrapper functions file (optional, auto-generated)
+- `REG_PATH` — Function registry file (optional, auto-generated)
 
 ## Build
 
 ```bash
+# Setup environment (required before building)
+source examples/mimolib/scripts/export.sh
+
 # Build entire workspace
 cargo build
 
@@ -95,4 +240,7 @@ cargo build --release
 
 # Quick compilation check
 cargo check --lib
+
+# Regenerate Python bindings after changing json_structs.rs
+make schema
 ```
