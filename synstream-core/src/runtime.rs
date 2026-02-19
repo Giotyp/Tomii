@@ -25,27 +25,6 @@ use synstream_types::*;
 
 pub const RUN_SLEEP: Duration = Duration::from_secs(10);
 
-/// Drain from Flume MPSC channel using O(1) atomic snapshot.
-/// Returns immediately with available items if any are ready (non-blocking fast path).
-/// If no items ready, blocks for up to `timeout` for the first item, then drains remainin
-fn recv_batch<T>(rx: &flume::Receiver<T>, _max_items: usize, timeout: Duration) -> Vec<T> {
-    let batch: Vec<T> = rx.drain().collect();
-    if !batch.is_empty() {
-        return batch;
-    }
-
-    // Slow path: wait for first item with timeout
-    match rx.recv_timeout(timeout) {
-        Ok(first_item) => {
-            let mut batch = vec![first_item];
-            // Drain any additional items that arrived while we were waiting
-            batch.extend(rx.drain());
-            batch
-        }
-        Err(_) => Vec::new(), // timeout or disconnected
-    }
-}
-
 // Per-resolution-thread reusable buffers — avoids heap allocation on the hot path.
 thread_local! {
     // Successor descriptors collected for a single node being processed.
@@ -740,11 +719,10 @@ impl SynRt {
             }
 
             // Poll packet channels if there is a network config AND receivers are still active
-            let mut should_poll_packets = thread_id == 0
-                && network_config_opt.is_some()
-                && !shared.receive_finished.load(Ordering::SeqCst);
+            let mut should_poll_packets =
+                network_config_opt.is_some() && !shared.receive_finished.load(Ordering::SeqCst);
 
-            while should_poll_packets {
+            if should_poll_packets {
                 if let Some(network_config) = network_config_opt.as_ref() {
                     let stream_packets = network_config.stream_packets;
                     let packet_process_func = network_config.extract_packet_func.unwrap();
@@ -756,6 +734,10 @@ impl SynRt {
                     } else {
                         TimingMethod::Instant(Instant::now())
                     };
+
+                    // Accumulate active packets for a single batch call after all packets are routed
+                    let mut active_packet_batch: Vec<(NodeInfo, CmTypes)> = Vec::new();
+                    let mut newly_activated_slots: Vec<usize> = Vec::new();
 
                     for packet_msg in packets {
                         let receiver_core_id = packet_msg.receiver_core_id;
@@ -821,27 +803,17 @@ impl SynRt {
                                 tb.add_task_time(thread_slot, "Slot Assignment", usize::MAX, dur);
                             }
 
-                            // If slot was just activated from Inactive → Active,
-                            // spawn initial compute nodes BEFORE processing any packets
+                            // Track newly activated slots; initial nodes are spawned after
+                            // all packets are collected so compute starts before batch processing
                             if newly_activated {
-                                let activated_compute_nodes =
-                                    initial_nodes(&shared, vec![assigned_slot]);
-                                if !activated_compute_nodes.is_empty() {
-                                    print_debug(|| {
-                                        format!(
-                                            "Spawning {} initial nodes for newly activated slot {} (stream {})",
-                                            activated_compute_nodes.len(),
-                                            assigned_slot,
-                                            new_stream
-                                        )
-                                    });
-                                    Self::preparation(
-                                        &shared,
-                                        &activated_compute_nodes,
-                                        thread_core,
-                                        thread_slot,
-                                    );
-                                }
+                                print_debug(|| {
+                                    format!(
+                                        "Slot {} newly activated (stream {}), deferring initial node spawn",
+                                        assigned_slot,
+                                        new_stream
+                                    )
+                                });
+                                newly_activated_slots.push(assigned_slot);
                             }
 
                             // Use deterministic index_function if available, otherwise sequential counter
@@ -922,33 +894,11 @@ impl SynRt {
                         };
 
                         if slot_is_active {
-                            let info_res = (node_info.clone(), packet_cm);
-
-                            let start_ns_pkt = shared.base_instant.elapsed().as_nanos();
-                            let start_proc = if let Some(tb) = &shared.time_buffer {
-                                tb.measure_time()
-                            } else {
-                                TimingMethod::Instant(Instant::now())
-                            };
-                            Self::process_batch_resolution(
-                                &shared,
-                                vec![info_res],
-                                thread_core,
-                                thread_id,
-                                thread_slot,
-                                &cond_indexes,
-                                &mut stream_slot_activity,
-                                start_ns_pkt,
-                            );
-                            if let Some(tb) = &shared.time_buffer {
-                                let end_proc = tb.measure_time();
-                                let dur = tb.measure_duration(start_proc, end_proc);
-                                tb.add_task_time(thread_slot, "Batch Resolution", usize::MAX, dur);
-                            };
+                            // Accumulate into batch; single process_batch_resolution call after loop
+                            active_packet_batch.push((node_info.clone(), packet_cm));
                         } else {
                             let mut slot_buffers = shared.slot_buffers.write();
-                            slot_buffers[node_info.slot]
-                                .push((node_info.clone(), packet_cm.clone()));
+                            slot_buffers[node_info.slot].push((node_info.clone(), packet_cm));
                             drop(slot_buffers); // Release write lock immediately
                         }
 
@@ -1022,16 +972,79 @@ impl SynRt {
                             }
                         }
                     }
+
+                    // Spawn initial compute nodes for all newly activated slots BEFORE processing
+                    // their packets — preserves the ordering guarantee (compute starts first)
+                    if !newly_activated_slots.is_empty() {
+                        let activated_compute_nodes = initial_nodes(&shared, newly_activated_slots);
+                        if !activated_compute_nodes.is_empty() {
+                            print_debug(|| {
+                                format!(
+                                    "Spawning {} initial nodes for newly activated slots",
+                                    activated_compute_nodes.len()
+                                )
+                            });
+                            Self::preparation(
+                                &shared,
+                                &activated_compute_nodes,
+                                thread_core,
+                                thread_slot,
+                            );
+                        }
+                    }
+
+                    // Process all active packets as a single batch
+                    if !active_packet_batch.is_empty() {
+                        let start_ns_batch = shared.base_instant.elapsed().as_nanos();
+                        let start_proc = if let Some(tb) = &shared.time_buffer {
+                            tb.measure_time()
+                        } else {
+                            TimingMethod::Instant(Instant::now())
+                        };
+                        Self::process_batch_resolution(
+                            &shared,
+                            active_packet_batch,
+                            thread_core,
+                            thread_id,
+                            thread_slot,
+                            &cond_indexes,
+                            &mut stream_slot_activity,
+                            start_ns_batch,
+                        );
+                        if let Some(tb) = &shared.time_buffer {
+                            let end_proc = tb.measure_time();
+                            let dur = tb.measure_duration(start_proc, end_proc);
+                            tb.add_task_time(thread_slot, "Batch Resolution", usize::MAX, dur);
+                        }
+                    }
                 }
-                should_poll_packets = !shared.receive_finished.load(Ordering::SeqCst);
             }
 
-            // Pull batch from lock-free queue with timeout
-            let batch = recv_batch(
-                &shared.batch_queue_rx,
-                shared.target_batch_size,
-                receive_timeout,
-            );
+            // Pull up to target_batch_size items; block for the first if none ready
+            let batch = {
+                let b: Vec<_> = shared
+                    .batch_queue_rx
+                    .try_iter()
+                    .take(shared.target_batch_size)
+                    .collect();
+                if !b.is_empty() {
+                    b
+                } else {
+                    match shared.batch_queue_rx.recv_timeout(receive_timeout) {
+                        Ok(first) => {
+                            let mut b = vec![first];
+                            b.extend(
+                                shared
+                                    .batch_queue_rx
+                                    .try_iter()
+                                    .take(shared.target_batch_size - 1),
+                            );
+                            b
+                        }
+                        Err(_) => Vec::new(),
+                    }
+                }
+            };
 
             // Check shutdown immediately after blocking call returns
             if shared.shutdown_flag.load(Ordering::SeqCst) {
@@ -1377,7 +1390,7 @@ impl SynRt {
         thread_slot: usize,
         cond_indexes: &[Vec<usize>],
     ) {
-        // CCheck ALL slots with assigned streams, not just slots in activity map
+        // Check ALL slots with assigned streams, not just slots in activity map
         // Per-thread activity map can miss completions when threads don't have the completing slot
         let slots_to_check: Vec<usize> = {
             let running_streams = shared.running_streams.read();

@@ -364,7 +364,6 @@ pub struct SharedData {
     pub last_slot_assigned: Arc<AtomicUsize>,
     pub slot_priority_enabled: bool,
     // Per-slot buffering: holds ready nodes with their packet data waiting for slot activation
-    // CRITICAL: Must store (NodeInfo, CmTypes) to preserve network packet data
     pub slot_buffers: Arc<RwLock<Vec<Vec<(NodeInfo, CmTypes)>>>>,
 
     // Network receiver infrastructure (optional - only present if network_config exists)
