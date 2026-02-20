@@ -34,7 +34,14 @@ thread_local! {
     static SCHEDULE_BUF: RefCell<Vec<NodeInfo>> = RefCell::new(Vec::with_capacity(32));
     // Ready instance indices returned by decrease_and_get_ready_into.
     static READY_BUF: RefCell<Vec<usize>> = RefCell::new(Vec::with_capacity(16));
+    // Accumulates all scheduled successor nodes across an entire batch.
+    // A single preparation() call is made after the batch loop instead of one per node.
+    static BATCH_SCHED_BUF: RefCell<Vec<NodeInfo>> = RefCell::new(Vec::with_capacity(256));
 }
+
+/// Spin iterations before falling back to blocking recv_timeout.
+/// Catches burst completions that land in the queue just after try_iter() returned empty.
+const SPIN_ITERATIONS: u32 = 32;
 
 // Main SynStream Runtime struct with shared context
 pub struct SynRt {
@@ -696,16 +703,15 @@ impl SynRt {
         // Persistent completion tracking across all batches for this stream
         let mut stream_slot_activity: HashMap<usize, bool> = HashMap::new();
 
+        // Cached slot list for check_slots — avoids running_streams.read() every iteration.
+        // Refreshed only when a stream is assigned or released (slots_dirty = true).
+        let mut cached_slots: Vec<usize> = Vec::new();
+        let mut slots_dirty = true; // force refresh on first check_slots call
+
         // Packet Process Function
         let network_config_opt = shared.graph.network_config();
-        // Track start of idle/wait periods so we can record waiting time
-        let mut wait_start_ns: Option<u128> = None;
-        // Minimum wait duration (in nanoseconds) to record - reduces record spam
-        // Only record wait periods longer than 100μs to avoid thousands of tiny records
-        const MIN_WAIT_RECORD_NS: u128 = 100_000; // 100μs
 
         let receive_timeout = Duration::from_micros(shared.batch_timeout_us);
-        let mut packets_received: bool = false;
 
         // Process completed nodes with dynamic batching from scheduler
         loop {
@@ -719,7 +725,7 @@ impl SynRt {
             }
 
             // Poll packet channels if there is a network config AND receivers are still active
-            let mut should_poll_packets =
+            let should_poll_packets =
                 network_config_opt.is_some() && !shared.receive_finished.load(Ordering::SeqCst);
 
             if should_poll_packets {
@@ -902,8 +908,6 @@ impl SynRt {
                             drop(slot_buffers); // Release write lock immediately
                         }
 
-                        packets_received = true;
-
                         if shared.async_recorder.is_some()
                             && should_record_slot(&shared, node_info.slot)
                         {
@@ -976,6 +980,7 @@ impl SynRt {
                     // Spawn initial compute nodes for all newly activated slots BEFORE processing
                     // their packets — preserves the ordering guarantee (compute starts first)
                     if !newly_activated_slots.is_empty() {
+                        slots_dirty = true; // new streams added to running_streams
                         let activated_compute_nodes = initial_nodes(&shared, newly_activated_slots);
                         if !activated_compute_nodes.is_empty() {
                             print_debug(|| {
@@ -1020,13 +1025,31 @@ impl SynRt {
                 }
             }
 
-            // Pull up to target_batch_size items; block for the first if none ready
+            // Pull up to target_batch_size items; block for the first if none ready.
+            // A short spin catches burst completions that land just after try_iter() returns empty,
+            // avoiding unnecessary blocking and the round-trip latency of recv_timeout.
             let batch = {
-                let b: Vec<_> = shared
+                let mut b: Vec<_> = shared
                     .batch_queue_rx
                     .try_iter()
                     .take(shared.target_batch_size)
                     .collect();
+                if b.is_empty() {
+                    // Spin briefly before committing to a blocking wait
+                    for _ in 0..SPIN_ITERATIONS {
+                        std::hint::spin_loop();
+                        if let Ok(item) = shared.batch_queue_rx.try_recv() {
+                            b.push(item);
+                            b.extend(
+                                shared
+                                    .batch_queue_rx
+                                    .try_iter()
+                                    .take(shared.target_batch_size - 1),
+                            );
+                            break;
+                        }
+                    }
+                }
                 if !b.is_empty() {
                     b
                 } else {
@@ -1065,32 +1088,6 @@ impl SynRt {
                         thread_id
                     );
                     break;
-                }
-            }
-
-            let has_work = packets_received || !batch.is_empty();
-            if !has_work {
-                if let Some(start_ns_wait) = wait_start_ns.take() {
-                    // Record all wait time regardless of stream filter (system overhead)
-                    if shared.async_recorder.is_some() {
-                        let end_ns = shared.base_instant.elapsed().as_nanos();
-                        let wait_duration = end_ns.saturating_sub(start_ns_wait);
-
-                        // Only submit record if wait time exceeds minimum threshold
-                        // This prevents thousands of tiny records for short idle periods
-                        if wait_duration >= MIN_WAIT_RECORD_NS {
-                            let job_id = shared.job_counter.fetch_add(1, Ordering::SeqCst);
-                            submit_record(Record {
-                                slot: thread_slot,
-                                job_id,
-                                start_ns: start_ns_wait,
-                                end_ns,
-                                worker: thread_core,
-                                task_id: IdType::MAX - 2,
-                                index: 0,
-                            });
-                        }
-                    }
                 }
             }
 
@@ -1134,15 +1131,14 @@ impl SynRt {
                 thread_core,
                 thread_slot,
                 &cond_indexes,
+                &mut cached_slots,
+                &mut slots_dirty,
             );
             if let Some(tb) = &shared.time_buffer {
                 let end_proc = tb.measure_time();
                 let dur = tb.measure_duration(start_proc, end_proc);
                 tb.add_task_time(thread_slot, "Slot Check", usize::MAX, dur);
             }
-            wait_start_ns = Some(shared.base_instant.elapsed().as_nanos());
-
-            packets_received = false;
 
             // Check for completion of all streams
             let completed_streams = shared.stream_complete_counter.load(Ordering::SeqCst);
@@ -1195,150 +1191,165 @@ impl SynRt {
         // Phases 1+2+3: For each node — store result, decrement counters, process successors.
         // All three phases run together per node while processing_count > 0, so completion
         // detection cannot fire until Phase 4 decrements processing_count after this loop.
+        //
+        // Opt: Successor nodes are accumulated into BATCH_SCHED_BUF across all nodes in the
+        // batch; a single preparation() call is made after the loop instead of one per node.
+        // This reduces scheduler submissions from O(batch_size) to O(1) per batch.
         SUCC_UPDATES_BUF.with(|sbuf| {
             SCHEDULE_BUF.with(|tbuf| {
                 READY_BUF.with(|rbuf| {
-                    let mut succ_buf = sbuf.borrow_mut();
-                    let mut sched = tbuf.borrow_mut();
-                    let mut ready = rbuf.borrow_mut();
+                    BATCH_SCHED_BUF.with(|bbuf| {
+                        let mut succ_buf = sbuf.borrow_mut();
+                        let mut sched = tbuf.borrow_mut();
+                        let mut ready = rbuf.borrow_mut();
+                        let mut batch_sched = bbuf.borrow_mut();
+                        batch_sched.clear();
 
-                    for (node_info, result) in batch.into_iter() {
-                        // Mark stream activity for all nodes (including network nodes id=0)
-                        stream_slot_activity.insert(node_info.slot, true);
+                        for (node_info, result) in batch.into_iter() {
+                            // Mark stream activity for all nodes (including network nodes id=0)
+                            stream_slot_activity.insert(node_info.slot, true);
 
-                        if node_info.post_node {
+                            if node_info.post_node {
+                                shared.node_results.set(&node_info, result);
+                                continue;
+                            }
+
+                            // Phase 1: Store result
                             shared.node_results.set(&node_info, result);
-                            continue;
-                        }
 
-                        // Phase 1: Store result
-                        shared.node_results.set(&node_info, result);
+                            // Phase 2: Decrement task counters
+                            let node_id_usize = node_info.id as usize;
+                            let node_id_to_rem_idx = shared.node_id_to_rem[node_id_usize];
+                            let node_cache_entry = &shared.node_cache[node_id_usize];
 
-                        // Phase 2: Decrement task counters
-                        let node_id_usize = node_info.id as usize;
-                        let node_id_to_rem_idx = shared.node_id_to_rem[node_id_usize];
-                        let node_cache_entry = &shared.node_cache[node_id_usize];
-
-                        if node_cache_entry.is_condition {
-                            shared.remaining_cond_nodes[node_info.slot][node_id_to_rem_idx]
-                                .fetch_sub(1, Ordering::SeqCst);
-                            let prev_cond = shared.slot_pending_cond_tasks[node_info.slot]
-                                .fetch_sub(1, Ordering::SeqCst);
-                            if prev_cond <= 10 || prev_cond % 100 == 0 {
-                                print_debug(|| {
-                                    format!(
-                                        "COND task completed: slot={}, node_id={} ({}), prev_pending_cond={}, new={}",
-                                        node_info.slot, node_id_usize, node_cache_entry.name,
-                                        prev_cond, prev_cond - 1
-                                    )
-                                });
-                            }
-                        } else if !node_cache_entry.is_initial {
-                            shared.remaining_nodes[node_info.slot][node_id_to_rem_idx]
-                                .fetch_sub(1, Ordering::SeqCst);
-                            let _ = shared.slot_pending_tasks[node_info.slot]
-                                .fetch_sub(1, Ordering::SeqCst);
-                        }
-
-                        // Phase 3: Collect successors and process them (no allocations)
-                        collect_successors_for_node_into(&shared, &node_info, &mut succ_buf);
-                        sched.clear();
-
-                        for (_succ_info, has_cond, succ_id, pred_group) in succ_buf.iter() {
-                            let succ_node_id = *succ_id as usize;
-
-                            // Skip condition evaluation if all instances already spawned
-                            if *has_cond {
-                                let remaining_spawns =
-                                    shared.cond_instances_to_spawn[node_info.slot][succ_node_id]
-                                        .load(Ordering::SeqCst);
-                                if remaining_spawns == 0 {
-                                    continue;
+                            if node_cache_entry.is_condition {
+                                shared.remaining_cond_nodes[node_info.slot][node_id_to_rem_idx]
+                                    .fetch_sub(1, Ordering::SeqCst);
+                                let prev_cond = shared.slot_pending_cond_tasks[node_info.slot]
+                                    .fetch_sub(1, Ordering::SeqCst);
+                                if prev_cond <= 10 || prev_cond % 100 == 0 {
+                                    print_debug(|| {
+                                        format!(
+                                            "COND task completed: slot={}, node_id={} ({}), prev_pending_cond={}, new={}",
+                                            node_info.slot, node_id_usize, node_cache_entry.name,
+                                            prev_cond, prev_cond - 1
+                                        )
+                                    });
                                 }
+                            } else if !node_cache_entry.is_initial {
+                                shared.remaining_nodes[node_info.slot][node_id_to_rem_idx]
+                                    .fetch_sub(1, Ordering::SeqCst);
+                                let _ = shared.slot_pending_tasks[node_info.slot]
+                                    .fetch_sub(1, Ordering::SeqCst);
                             }
 
-                            // Decrement dependency counter; ready indices written into `ready`
-                            shared.resolution_state.decrease_and_get_ready_into(
-                                node_info.slot,
-                                succ_node_id,
-                                *pred_group,
-                                1,
-                                &mut ready,
-                            );
+                            // Phase 3: Collect successors and process them (no allocations)
+                            collect_successors_for_node_into(&shared, &node_info, &mut succ_buf);
+                            sched.clear();
 
-                            for &ready_index in ready.iter() {
-                                let scheduled_succ_info = NodeInfo::new(
-                                    succ_node_id as IdType,
+                            for (_succ_info, has_cond, succ_id, pred_group) in succ_buf.iter() {
+                                let succ_node_id = *succ_id as usize;
+
+                                // Skip condition evaluation if all instances already spawned
+                                if *has_cond {
+                                    let remaining_spawns =
+                                        shared.cond_instances_to_spawn[node_info.slot][succ_node_id]
+                                            .load(Ordering::SeqCst);
+                                    if remaining_spawns == 0 {
+                                        continue;
+                                    }
+                                }
+
+                                // Decrement dependency counter; ready indices written into `ready`
+                                shared.resolution_state.decrease_and_get_ready_into(
                                     node_info.slot,
-                                    ready_index,
-                                    node_info.index,
+                                    succ_node_id,
+                                    *pred_group,
+                                    1,
+                                    &mut ready,
                                 );
 
-                                if !has_cond {
-                                    sched.push(scheduled_succ_info);
-                                } else {
-                                    let cond_idx = shared.node_cache[succ_node_id].cond_index;
-                                    let succ_cache = &shared.node_cache[succ_node_id];
+                                for &ready_index in ready.iter() {
+                                    let scheduled_succ_info = NodeInfo::new(
+                                        succ_node_id as IdType,
+                                        node_info.slot,
+                                        ready_index,
+                                        node_info.index,
+                                    );
 
-                                    let condition_passed =
-                                        if let Some(cond_cache) = &succ_cache.node_condition {
-                                            let node_cond = shared.graph.nodes[succ_node_id]
-                                                .condition
-                                                .as_ref()
-                                                .unwrap();
-                                            evaluate_node_condition(
-                                                &shared,
-                                                &scheduled_succ_info,
-                                                cond_cache,
-                                                node_cond,
-                                            )
-                                        } else {
-                                            conditions_met(
-                                                &shared,
-                                                &scheduled_succ_info,
-                                                &cond_indexes[cond_idx],
-                                            )
-                                        };
-
-                                    if condition_passed {
-                                        sched.push(scheduled_succ_info.clone());
-                                        let prev_spawns =
-                                            shared.cond_instances_to_spawn[node_info.slot]
-                                                [succ_node_id]
-                                                .fetch_sub(1, Ordering::Release);
-                                        print_debug(|| {
-                                            format!(
-                                                "Condition passed for node {} ({}) index {}: remaining spawns {} -> {}",
-                                                succ_node_id, succ_cache.name,
-                                                scheduled_succ_info.index,
-                                                prev_spawns, prev_spawns - 1
-                                            )
-                                        });
+                                    if !has_cond {
+                                        sched.push(scheduled_succ_info);
                                     } else {
-                                        shared
-                                            .resolution_state
-                                            .increment_dependency(&scheduled_succ_info);
-                                        shared.resolution_state.reset_sent(
-                                            node_info.slot,
-                                            scheduled_succ_info.id as usize,
-                                            scheduled_succ_info.index,
-                                        );
+                                        let cond_idx = shared.node_cache[succ_node_id].cond_index;
+                                        let succ_cache = &shared.node_cache[succ_node_id];
+
+                                        let condition_passed =
+                                            if let Some(cond_cache) = &succ_cache.node_condition {
+                                                let node_cond = shared.graph.nodes[succ_node_id]
+                                                    .condition
+                                                    .as_ref()
+                                                    .unwrap();
+                                                evaluate_node_condition(
+                                                    &shared,
+                                                    &scheduled_succ_info,
+                                                    cond_cache,
+                                                    node_cond,
+                                                )
+                                            } else {
+                                                conditions_met(
+                                                    &shared,
+                                                    &scheduled_succ_info,
+                                                    &cond_indexes[cond_idx],
+                                                )
+                                            };
+
+                                        if condition_passed {
+                                            sched.push(scheduled_succ_info.clone());
+                                            let prev_spawns =
+                                                shared.cond_instances_to_spawn[node_info.slot]
+                                                    [succ_node_id]
+                                                    .fetch_sub(1, Ordering::Release);
+                                            print_debug(|| {
+                                                format!(
+                                                    "Condition passed for node {} ({}) index {}: remaining spawns {} -> {}",
+                                                    succ_node_id, succ_cache.name,
+                                                    scheduled_succ_info.index,
+                                                    prev_spawns, prev_spawns - 1
+                                                )
+                                            });
+                                        } else {
+                                            shared
+                                                .resolution_state
+                                                .increment_dependency(&scheduled_succ_info);
+                                            shared.resolution_state.reset_sent(
+                                                node_info.slot,
+                                                scheduled_succ_info.id as usize,
+                                                scheduled_succ_info.index,
+                                            );
+                                        }
                                     }
                                 }
                             }
+
+                            // Accumulate this node's successors into the batch buffer.
+                            // preparation() is called once after all nodes are processed.
+                            batch_sched.extend_from_slice(&*sched);
+                            print_debug(|| {
+                                format!(
+                                    "Thread {:?} -- Processed node {} in slot {}, scheduled: {:?}",
+                                    thread_id,
+                                    node_info.id,
+                                    node_info.slot,
+                                    sched.iter().map(|n| (n.id, n.index)).collect::<Vec<_>>()
+                                )
+                            });
                         }
 
-                        Self::preparation(&shared, &*sched, thread_core, thread_slot);
-                        print_debug(|| {
-                            format!(
-                                "Thread {:?} -- Processed node {} in slot {}, scheduled: {:?}",
-                                thread_id,
-                                node_info.id,
-                                node_info.slot,
-                                sched.iter().map(|n| (n.id, n.index)).collect::<Vec<_>>()
-                            )
-                        });
-                    }
+                        // Single preparation call with all successors from the entire batch.
+                        if !batch_sched.is_empty() {
+                            Self::preparation(&shared, &*batch_sched, thread_core, thread_slot);
+                        }
+                    });
                 });
             });
         });
@@ -1389,19 +1400,23 @@ impl SynRt {
         thread_core: usize,
         thread_slot: usize,
         cond_indexes: &[Vec<usize>],
+        cached_slots: &mut Vec<usize>,
+        slots_dirty: &mut bool,
     ) {
-        // Check ALL slots with assigned streams, not just slots in activity map
-        // Per-thread activity map can miss completions when threads don't have the completing slot
-        let slots_to_check: Vec<usize> = {
+        // Refresh the cached slot list only when dirty (stream assigned or completed).
+        // Avoids acquiring running_streams.read() on every iteration in the hot path.
+        if *slots_dirty || cached_slots.is_empty() {
             let running_streams = shared.running_streams.read();
-            running_streams.iter().map(|(_, slot)| *slot).collect()
-        };
+            cached_slots.clear();
+            cached_slots.extend(running_streams.iter().map(|(_, slot)| *slot));
+            *slots_dirty = false;
+        }
 
         // Clear activity map AFTER getting slots to check (not before)
         // This prevents redundant checking while ensuring we don't miss completions
         stream_slot_activity.clear();
 
-        for proc_slot in slots_to_check {
+        for proc_slot in cached_slots.iter().copied() {
             // Skip buffering slots - they cannot complete until activated
             if shared.slot_priority_enabled && !is_slot_active(&shared, proc_slot) {
                 continue;
@@ -1509,6 +1524,7 @@ impl SynRt {
                 // Check if we should start a new iteration and release the slot
                 let can_restart = process_slot_completion(&shared, proc_slot);
                 stream_slot_activity.remove(&proc_slot);
+                *slots_dirty = true; // release_slot modified running_streams
 
                 // In slot-priority mode: rotate active slot and activate next buffered slot
                 let activated_slot_info = if shared.slot_priority_enabled {
