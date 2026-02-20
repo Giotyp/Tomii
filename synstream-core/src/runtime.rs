@@ -1028,46 +1028,11 @@ impl SynRt {
             // Pull up to target_batch_size items; block for the first if none ready.
             // A short spin catches burst completions that land just after try_iter() returns empty,
             // avoiding unnecessary blocking and the round-trip latency of recv_timeout.
-            let batch = {
-                let mut b: Vec<_> = shared
-                    .batch_queue_rx
-                    .try_iter()
-                    .take(shared.target_batch_size)
-                    .collect();
-                if b.is_empty() {
-                    // Spin briefly before committing to a blocking wait
-                    for _ in 0..SPIN_ITERATIONS {
-                        std::hint::spin_loop();
-                        if let Ok(item) = shared.batch_queue_rx.try_recv() {
-                            b.push(item);
-                            b.extend(
-                                shared
-                                    .batch_queue_rx
-                                    .try_iter()
-                                    .take(shared.target_batch_size - 1),
-                            );
-                            break;
-                        }
-                    }
-                }
-                if !b.is_empty() {
-                    b
-                } else {
-                    match shared.batch_queue_rx.recv_timeout(receive_timeout) {
-                        Ok(first) => {
-                            let mut b = vec![first];
-                            b.extend(
-                                shared
-                                    .batch_queue_rx
-                                    .try_iter()
-                                    .take(shared.target_batch_size - 1),
-                            );
-                            b
-                        }
-                        Err(_) => Vec::new(),
-                    }
-                }
-            };
+            let batch = Self::receive_batch(
+                &shared.batch_queue_rx,
+                shared.target_batch_size,
+                receive_timeout,
+            );
 
             // Check shutdown immediately after blocking call returns
             if shared.shutdown_flag.load(Ordering::SeqCst) {
@@ -1156,6 +1121,37 @@ impl SynRt {
 
 // Helper Functions
 impl SynRt {
+    fn receive_batch<T>(
+        rx: &Receiver<T>,
+        target_batch_size: usize,
+        receive_timeout: Duration,
+    ) -> Vec<T> {
+        let mut b: Vec<T> = rx.try_iter().take(target_batch_size).collect();
+        if b.is_empty() {
+            // Spin briefly before committing to a blocking wait
+            for _ in 0..SPIN_ITERATIONS {
+                std::hint::spin_loop();
+                if let Ok(item) = rx.try_recv() {
+                    b.push(item);
+                    b.extend(rx.try_iter().take(target_batch_size - 1));
+                    break;
+                }
+            }
+        }
+        if !b.is_empty() {
+            b
+        } else {
+            match rx.recv_timeout(receive_timeout) {
+                Ok(first) => {
+                    let mut b = vec![first];
+                    b.extend(rx.try_iter().take(target_batch_size - 1));
+                    b
+                }
+                Err(_) => Vec::new(),
+            }
+        }
+    }
+
     /// Process a batch of completed nodes: store results, update dependencies, schedule successors
     /// Returns true if work was performed (for timing/recording purposes)
     fn process_batch_resolution(
