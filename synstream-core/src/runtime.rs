@@ -733,13 +733,24 @@ impl SynRt {
                     let stream_packets = network_config.stream_packets;
                     let packet_process_func = network_config.extract_packet_func.unwrap();
 
+                    // Cache index_function pointer outside packet loop to avoid
+                    // redundant network_config lookups per packet
+                    let idx_func_ptr: Option<(
+                        synstream_types::CmPtr,
+                        &Vec<crate::graph_struct::Arg>,
+                    )> = network_config
+                        .index_function
+                        .as_ref()
+                        .and_then(|idx_func| idx_func.func_ptr.map(|fp| (fp, &idx_func.args)));
+
                     // Drain all available packets from channel
                     let packets: Vec<PacketMessage> = shared.packet_receiver.drain().collect();
                     // Capture receive time as Instant (PacketMessage.timestamp is always Instant)
                     let packet_rcv_instant = Instant::now();
 
-                    // Accumulate active packets for a single batch call after all packets are routed
-                    let mut active_packet_batch: Vec<(NodeInfo, CmTypes)> = Vec::new();
+                    // Pre-allocate with estimated capacity to avoid reallocation
+                    let mut active_packet_batch: Vec<(NodeInfo, CmTypes)> =
+                        Vec::with_capacity(packets.len());
                     let mut newly_activated_slots: Vec<usize> = Vec::new();
 
                     for packet_msg in packets {
@@ -752,8 +763,8 @@ impl SynRt {
                             tb.add_task_time(thread_slot, "Packet Received", usize::MAX, dur);
                         }
 
-                        // Process packet and record
-                        let received_bytes_cm = CmTypes::from_any(packet_msg.packet_bytes);
+                        // Process packet — Bytes variant avoids Arc/RwLock/Box overhead
+                        let received_bytes_cm = CmTypes::from_bytes(packet_msg.packet_bytes);
                         let start_proc = if let Some(tb) = &shared.time_buffer {
                             tb.measure_time()
                         } else {
@@ -818,67 +829,32 @@ impl SynRt {
                                 newly_activated_slots.push(assigned_slot);
                             }
 
-                            // Use deterministic index_function if available, otherwise sequential counter
-                            let packet_index =
-                                if let Some(ref net_cfg) = shared.graph.network_config() {
-                                    if let Some(ref idx_func) = net_cfg.index_function {
-                                        if let Some(idx_fn) = idx_func.func_ptr {
-                                            // Parse additional arguments for index_function
-                                            let additional_args = parse_args(
-                                                &shared,
-                                                &idx_func.args,
-                                                0, // node_index (network node)
-                                                node_info.slot,
-                                                0, // pred_index
-                                                None,
-                                            );
-                                            // Build full arg vector: packet first, then additional args
-                                            let mut full_args = vec![packet_cm.clone()];
-                                            full_args.extend(additional_args);
+                            // Use cached index_function pointer (avoids redundant network_config lookups)
+                            let packet_index = if let Some((idx_fn, idx_args)) = idx_func_ptr {
+                                let additional_args = parse_args(
+                                    &shared,
+                                    idx_args,
+                                    0, // node_index (network node)
+                                    node_info.slot,
+                                    0, // pred_index
+                                    None,
+                                );
+                                let mut full_args = Vec::with_capacity(1 + additional_args.len());
+                                full_args.push(packet_cm.clone());
+                                full_args.extend(additional_args);
 
-                                            let idx_result = idx_fn(&full_args);
-                                            // Still increment packet counter for receive-completion detection
-                                            shared.slot_packet_counters[node_info.slot]
-                                                .fetch_add(1, Ordering::SeqCst);
-                                            idx_result
-                                                .valid_number_to_usize()
-                                                .expect("index_function must return usize")
-                                        } else {
-                                            // No function pointer, fall back to counter
-                                            shared.slot_packet_counters[node_info.slot]
-                                                .fetch_add(1, Ordering::SeqCst)
-                                        }
-                                    } else {
-                                        shared.slot_packet_counters[node_info.slot]
-                                            .fetch_add(1, Ordering::SeqCst)
-                                    }
-                                } else {
-                                    shared.slot_packet_counters[node_info.slot]
-                                        .fetch_add(1, Ordering::SeqCst)
-                                };
+                                let idx_result = idx_fn(&full_args);
+                                shared.slot_packet_counters[node_info.slot]
+                                    .fetch_add(1, Ordering::SeqCst);
+                                idx_result
+                                    .valid_number_to_usize()
+                                    .expect("index_function must return usize")
+                            } else {
+                                shared.slot_packet_counters[node_info.slot]
+                                    .fetch_add(1, Ordering::SeqCst)
+                            };
 
                             node_info.index = packet_index;
-                            let idx = node_info.index;
-                            let succs: Vec<String> = shared.graph.successors[0]
-                                .iter()
-                                .filter(|&&sid| {
-                                    if let Some(Some((start, end))) = shared
-                                        .pred_index_filter
-                                        .get(sid as usize)
-                                        .and_then(|v| v.get(0))
-                                    {
-                                        idx >= *start && idx < *end
-                                    } else {
-                                        true
-                                    }
-                                })
-                                .map(|&sid| {
-                                    format!("{}({})", shared.graph.nodes[sid as usize].name, sid)
-                                })
-                                .collect();
-                            if succs.len() != 1 {
-                                println!("PACKET idx={} routed to: {:?}", idx, succs);
-                            }
                         } else {
                             // ID function failed, skip processing this node
                             print_debug(|| {
@@ -896,7 +872,6 @@ impl SynRt {
                         };
 
                         if slot_is_active {
-                            // Accumulate into batch; single process_batch_resolution call after loop
                             active_packet_batch.push((node_info.clone(), packet_cm));
                         } else {
                             let mut slot_buffers = shared.slot_buffers.write();

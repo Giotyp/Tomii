@@ -91,6 +91,8 @@ pub enum TimingRequest {
     },
     FinishSlotProcessing {
         slot_id: usize,
+        /// Pre-captured end time at call site for precise timing
+        end_time: TimingMethod,
         response_tx: mpsc::Sender<SlotStats>,
     },
     GetSlotStatistics {
@@ -187,10 +189,11 @@ impl AsyncTimeBuffer {
                     }
                     TimingRequest::FinishSlotProcessing {
                         slot_id,
+                        end_time,
                         response_tx,
                     } => {
                         if let Ok(mut buf) = time_buffer.lock() {
-                            let stats = buf.finish_slot_processing(slot_id);
+                            let stats = buf.finish_slot_processing_with_time(slot_id, end_time);
                             let _ = response_tx.send(stats);
                         }
                     }
@@ -328,10 +331,18 @@ impl AsyncTimeBuffer {
     }
 
     /// Finish slot processing and get stats (blocking - returns result)
-    pub fn finish_slot_processing(&self, slot_id: usize) -> Result<SlotStats, &'static str> {
+    /// End timestamp is captured at call site for precise timing (matches start_slot_processing_async)
+    pub fn finish_slot_processing(&self, slot_id: usize, use_rdtsc: bool) -> Result<SlotStats, &'static str> {
+        // Capture end timestamp at call site, before channel send
+        let end_time = if use_rdtsc {
+            TimingMethod::Rdtsc(rdtsc())
+        } else {
+            TimingMethod::Instant(Instant::now())
+        };
         let (response_tx, response_rx) = mpsc::channel();
         let request = TimingRequest::FinishSlotProcessing {
             slot_id,
+            end_time,
             response_tx,
         };
 
@@ -515,7 +526,20 @@ impl TimeBuffer {
 
     /// Finish processing for a slot and calculate total time
     /// Returns the SlotStats for this processing stream
+    /// NOTE: End timestamp is captured at call site. Use finish_slot_processing_with_time
+    /// for async mode where the end time is pre-captured before channel transit.
     pub fn finish_slot_processing(&mut self, slot_id: usize) -> SlotStats {
+        let end_time = if self.use_rdtsc {
+            TimingMethod::Rdtsc(rdtsc())
+        } else {
+            TimingMethod::Instant(Instant::now())
+        };
+        self.finish_slot_processing_with_time(slot_id, end_time)
+    }
+
+    /// Finish processing for a slot using a pre-captured end time
+    /// Used by async mode to ensure precise timing regardless of channel latency
+    pub fn finish_slot_processing_with_time(&mut self, slot_id: usize, end_time: TimingMethod) -> SlotStats {
         if slot_id >= self.slots {
             panic!(
                 "Slot ID {} out of bounds (max: {})",
@@ -531,13 +555,13 @@ impl TimeBuffer {
             )
         });
 
-        let total_time = match start_time {
-            TimingMethod::Instant(start) => Instant::now().duration_since(start),
-            TimingMethod::Rdtsc(start_cycles) => {
-                let end_cycles = rdtsc();
+        let total_time = match (start_time, end_time) {
+            (TimingMethod::Instant(start), TimingMethod::Instant(end)) => end.duration_since(start),
+            (TimingMethod::Rdtsc(start_cycles), TimingMethod::Rdtsc(end_cycles)) => {
                 let cycles = end_cycles.saturating_sub(start_cycles);
                 Duration::from_nanos(cycles_to_ns(cycles) as u64)
             }
+            _ => panic!("Cannot mix Instant and Rdtsc timing methods"),
         };
 
         let stream_count = self.slot_statistics[slot_id].len();
@@ -1027,10 +1051,11 @@ impl TimeBufferManager {
     }
 
     /// Finish slot processing (always blocking to return result)
+    /// In async mode, end timestamp is captured at call site for precise timing
     pub fn finish_slot_processing(&self, slot_id: usize) -> Result<SlotStats, &'static str> {
         if self.is_async {
             if let Some(ref async_buf) = self.async_buffer {
-                async_buf.finish_slot_processing(slot_id)
+                async_buf.finish_slot_processing(slot_id, self.use_rdtsc)
             } else {
                 Err("Async buffer not initialized")
             }

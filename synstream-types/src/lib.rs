@@ -49,6 +49,9 @@ pub enum CmTypes {
     AnySliced(Arc<dyn SlicedAccess>),
     /// Vector of Any types (for multi-socket initialization)
     VecAny(Arc<RwLock<Vec<Box<dyn Any + Send + Sync>>>>),
+    /// Raw byte buffer — cheap-clone packet data via Arc (no RwLock/Box overhead).
+    /// Used by network receiver path instead of from_any(Vec<u8>).
+    Bytes(Arc<Vec<u8>>),
 }
 
 // Custom Deserialize implementation for CmTypes to handle Arc-wrapped types
@@ -304,6 +307,31 @@ impl CmTypes {
     pub fn as_complex64(&self) -> Option<C64> {
         match self {
             CmTypes::Complex64(c) => Some(**c),
+            _ => None,
+        }
+    }
+
+    /// Wrap raw bytes in Arc — cheap cloning, no RwLock/Box overhead.
+    /// Use this instead of `from_any(Vec<u8>)` in performance-critical paths.
+    #[inline]
+    pub fn from_bytes(bytes: Vec<u8>) -> CmTypes {
+        CmTypes::Bytes(Arc::new(bytes))
+    }
+
+    /// Access byte data via closure — works with both `Bytes` and `Any(Vec<u8>)`.
+    /// For `Bytes`: direct reference (zero overhead).
+    /// For `Any(Vec<u8>)`: acquires RwLock read guard (backward compatible).
+    #[inline]
+    pub fn with_bytes<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        match self {
+            CmTypes::Bytes(bytes) => Some(f(bytes.as_slice())),
+            CmTypes::Any(lock) => {
+                let guard = lock.read();
+                guard.downcast_ref::<Vec<u8>>().map(|bytes| f(bytes.as_slice()))
+            }
             _ => None,
         }
     }
@@ -1107,6 +1135,7 @@ impl PartialEq for CmTypes {
             (CmTypes::Complex64(a), CmTypes::Complex64(b)) => **a == **b,
             (CmTypes::None, CmTypes::None) => true,
             (CmTypes::Init, CmTypes::Init) => true,
+            (CmTypes::Bytes(a), CmTypes::Bytes(b)) => a == b,
             _ => false,
         }
     }
@@ -1146,6 +1175,7 @@ impl std::fmt::Debug for CmTypes {
                 let guard = lock.read();
                 write!(f, "VecAny[{}]", guard.len())
             }
+            CmTypes::Bytes(val) => write!(f, "Bytes(len={})", val.len()),
         }
     }
 }
@@ -1206,6 +1236,7 @@ impl fmt::Display for CmTypes {
                 let guard = lock.read();
                 write!(f, "VecAny[{}]", guard.len())
             }
+            CmTypes::Bytes(val) => write!(f, "Bytes[{}]", val.len()),
         }
     }
 }
