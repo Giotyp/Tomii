@@ -3,18 +3,35 @@ extern crate libc;
 use libc::{clock_gettime, timespec, CLOCK_REALTIME};
 use std::arch::asm;
 use std::mem::zeroed;
+use std::sync::OnceLock;
 
+static RDTSC_FREQ_GHZ: OnceLock<f64> = OnceLock::new();
+
+/// Read the timestamp counter with serialization (prevents instruction reordering).
+/// `rdtscp` waits for all prior instructions to complete before reading the counter,
+/// giving more accurate per-task measurements than plain `rdtsc`.
 pub fn rdtsc() -> u64 {
     let rax: u32;
     let rdx: u32;
     unsafe {
         asm!(
-            "rdtsc",
+            "rdtscp",
             out("rax") rax,
             out("rdx") rdx,
+            out("rcx") _,  // rdtscp also writes processor ID to ecx
         );
     }
     ((rdx as u64) << 32) | (rax as u64)
+}
+
+/// Initialize the RDTSC frequency cache eagerly.
+/// Call this once at startup (before any timing) to avoid calibration during hot paths.
+pub fn init_rdtsc_freq() {
+    RDTSC_FREQ_GHZ.get_or_init(measure_rdtsc_freq);
+}
+
+fn get_rdtsc_freq() -> f64 {
+    *RDTSC_FREQ_GHZ.get_or_init(measure_rdtsc_freq)
 }
 
 /// Measure the frequency of RDTSC based by comparing against
@@ -46,7 +63,7 @@ fn measure_rdtsc_freq() -> f64 {
         let freq_ghz = rdtsc_cycles as f64 * 1.0 / clock_ns as f64;
 
         // RDTSC frequencies outside these ranges are rare
-        if freq_ghz < 1.0 && freq_ghz > 4.0 {
+        if freq_ghz < 1.0 || freq_ghz > 4.0 {
             println!("Invalid RDTSC frequency {:.2?}", freq_ghz);
             panic!("Invalid RDTSC frequency");
         }
@@ -55,21 +72,21 @@ fn measure_rdtsc_freq() -> f64 {
 }
 
 pub fn cycles_to_sec(cycles: u64) -> f64 {
-    let freq_ghz = measure_rdtsc_freq();
+    let freq_ghz = get_rdtsc_freq();
     cycles as f64 / (freq_ghz * 1_000_000_000.0)
 }
 
 pub fn cycles_to_ms(cycles: u64) -> f64 {
-    let freq_ghz = measure_rdtsc_freq();
+    let freq_ghz = get_rdtsc_freq();
     cycles as f64 / (freq_ghz * 1_000_000.0)
 }
 
 pub fn cycles_to_us(cycles: u64) -> f64 {
-    let freq_ghz = measure_rdtsc_freq();
+    let freq_ghz = get_rdtsc_freq();
     cycles as f64 / (freq_ghz * 1000.0)
 }
 
 pub fn cycles_to_ns(cycles: u64) -> f64 {
-    let freq_ghz = measure_rdtsc_freq();
-    cycles as f64 / (freq_ghz * 1000.0)
+    let freq_ghz = get_rdtsc_freq();
+    cycles as f64 / freq_ghz
 }

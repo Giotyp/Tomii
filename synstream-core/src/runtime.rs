@@ -735,11 +735,8 @@ impl SynRt {
 
                     // Drain all available packets from channel
                     let packets: Vec<PacketMessage> = shared.packet_receiver.drain().collect();
-                    let packet_rcv = if let Some(tb) = &shared.time_buffer {
-                        tb.measure_time()
-                    } else {
-                        TimingMethod::Instant(Instant::now())
-                    };
+                    // Capture receive time as Instant (PacketMessage.timestamp is always Instant)
+                    let packet_rcv_instant = Instant::now();
 
                     // Accumulate active packets for a single batch call after all packets are routed
                     let mut active_packet_batch: Vec<(NodeInfo, CmTypes)> = Vec::new();
@@ -749,10 +746,9 @@ impl SynRt {
                         let receiver_core_id = packet_msg.receiver_core_id;
                         let packet_timestamp = packet_msg.timestamp;
                         if let Some(tb) = &shared.time_buffer {
-                            let dur = tb.measure_duration(
-                                TimingMethod::Instant(packet_msg.timestamp),
-                                packet_rcv.clone(),
-                            );
+                            // Use Instant for this measurement since PacketMessage.timestamp
+                            // is always Instant (from network receiver threads)
+                            let dur = packet_rcv_instant.duration_since(packet_msg.timestamp);
                             tb.add_task_time(thread_slot, "Packet Received", usize::MAX, dur);
                         }
 

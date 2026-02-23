@@ -8,6 +8,7 @@ use synstream_core::graph::Graph;
 use synstream_core::graph_gen::from_json;
 use synstream_core::runtime::SynRt;
 use synstream_core::scheduler::{create_scheduler, SchedulerType};
+use synstream_core::utils_rdtsc;
 
 #[derive(Parser)]
 #[clap(author = "George Typaldos", version, about)]
@@ -162,6 +163,11 @@ fn main() {
         println!();
     }
     print_debug(|| "Objects Initialized".to_string());
+
+    // Eagerly calibrate RDTSC frequency once at startup (avoids 1M-iteration loop on hot path)
+    if args.use_rdtsc {
+        utils_rdtsc::init_rdtsc_freq();
+    }
 
     let timing_enabled = args.timing.is_some();
 
