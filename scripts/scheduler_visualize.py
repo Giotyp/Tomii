@@ -695,7 +695,7 @@ def visualize(
     num_worker_cores = len(pure_worker_cores)
     num_system_threads = len(system_slots)
     num_worker_slots = len(slots)
-    num_receiver_threads = len(receiver_slots)
+    num_receiver_threads = len(receiver_workers)
     plt.suptitle(
         f"{title}\n"
         f"Worker Cores: {num_worker_cores} / System Threads: {num_system_threads} / "
