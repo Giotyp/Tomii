@@ -751,7 +751,6 @@ impl SynRt {
                     // Pre-allocate with estimated capacity to avoid reallocation
                     let mut active_packet_batch: Vec<(NodeInfo, CmTypes)> =
                         Vec::with_capacity(packets.len());
-                    let mut newly_activated_slots: Vec<usize> = Vec::new();
 
                     for packet_msg in packets {
                         let receiver_core_id = packet_msg.receiver_core_id;
@@ -816,17 +815,28 @@ impl SynRt {
                                 tb.add_task_time(thread_slot, "Slot Assignment", usize::MAX, dur);
                             }
 
-                            // Track newly activated slots; initial nodes are spawned after
-                            // all packets are collected so compute starts before batch processing
                             if newly_activated {
-                                print_debug(|| {
-                                    format!(
-                                        "Slot {} newly activated (stream {}), deferring initial node spawn",
-                                        assigned_slot,
-                                        new_stream
-                                    )
-                                });
-                                newly_activated_slots.push(assigned_slot);
+                                slots_dirty = true;
+                                // Spawn initial nodes immediately so workers start
+                                // executing while remaining packets are still processed.
+                                let init_nodes =
+                                    initial_nodes(&shared, vec![assigned_slot]);
+                                if !init_nodes.is_empty() {
+                                    print_debug(|| {
+                                        format!(
+                                            "Slot {} newly activated (stream {}), spawning {} initial nodes",
+                                            assigned_slot,
+                                            new_stream,
+                                            init_nodes.len()
+                                        )
+                                    });
+                                    Self::preparation(
+                                        &shared,
+                                        &init_nodes,
+                                        thread_core,
+                                        thread_slot,
+                                    );
+                                }
                             }
 
                             // Use cached index_function pointer (avoids redundant network_config lookups)
@@ -865,7 +875,6 @@ impl SynRt {
                             continue;
                         }
 
-                        // Check slot state atomically while holding lock to ensure decision is valid
                         let slot_is_active = {
                             let states = shared.slot_states.read();
                             states[node_info.slot] == SlotState::Active
@@ -948,26 +957,6 @@ impl SynRt {
                         }
                     }
 
-                    // Spawn initial compute nodes for all newly activated slots BEFORE processing
-                    // their packets — preserves the ordering guarantee (compute starts first)
-                    if !newly_activated_slots.is_empty() {
-                        slots_dirty = true; // new streams added to running_streams
-                        let activated_compute_nodes = initial_nodes(&shared, newly_activated_slots);
-                        if !activated_compute_nodes.is_empty() {
-                            print_debug(|| {
-                                format!(
-                                    "Spawning {} initial nodes for newly activated slots",
-                                    activated_compute_nodes.len()
-                                )
-                            });
-                            Self::preparation(
-                                &shared,
-                                &activated_compute_nodes,
-                                thread_core,
-                                thread_slot,
-                            );
-                        }
-                    }
 
                     // Process all active packets as a single batch
                     if !active_packet_batch.is_empty() {
