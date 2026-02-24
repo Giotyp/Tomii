@@ -713,6 +713,10 @@ impl SynRt {
 
         let receive_timeout = Duration::from_micros(shared.batch_timeout_us);
 
+        // Reusable drain buffer — allocated once, keeps capacity across loop iterations.
+        // Avoids a Vec<PacketMessage> allocation on every drain call.
+        let mut packet_buf: Vec<PacketMessage> = Vec::new();
+
         // Process completed nodes with dynamic batching from scheduler
         loop {
             // Check shutdown flag first to exit immediately when signaled
@@ -743,16 +747,17 @@ impl SynRt {
                         .as_ref()
                         .and_then(|idx_func| idx_func.func_ptr.map(|fp| (fp, &idx_func.args)));
 
-                    // Drain all available packets from channel
-                    let packets: Vec<PacketMessage> = shared.packet_receiver.drain().collect();
+                    // Drain all available packets into reusable buffer (no Vec alloc per call)
+                    packet_buf.clear();
+                    packet_buf.extend(shared.packet_receiver.drain());
                     // Capture receive time as Instant (PacketMessage.timestamp is always Instant)
                     let packet_rcv_instant = Instant::now();
 
                     // Pre-allocate with estimated capacity to avoid reallocation
                     let mut active_packet_batch: Vec<(NodeInfo, CmTypes)> =
-                        Vec::with_capacity(packets.len());
+                        Vec::with_capacity(packet_buf.len());
 
-                    for packet_msg in packets {
+                    for packet_msg in packet_buf.drain(..) {
                         let receiver_core_id = packet_msg.receiver_core_id;
                         let packet_timestamp = packet_msg.timestamp;
                         if let Some(tb) = &shared.time_buffer {
@@ -1652,9 +1657,11 @@ fn prepare_network_infrastructure(
     Receiver<PacketMessage>,
     Vec<AtomicUsize>,
 ) {
-    let (packet_sender, packet_receiver) = flume::unbounded();
     if let Some(config_spec) = graph.network_config() {
         let num_sockets = config_spec.num_sockets;
+        // Bounded channel: ring-buffer internals, no dynamic growth under load.
+        // 512 slots per socket absorbs bursts; drop_counters handle overflow gracefully.
+        let (packet_sender, packet_receiver) = flume::bounded(num_sockets * 512);
 
         let receiver_sockets =
             bind_udp_socket_range(&config_spec.address, config_spec.start_port, num_sockets);
@@ -1668,6 +1675,7 @@ fn prepare_network_infrastructure(
             packet_drop_counters,
         )
     } else {
+        let (packet_sender, packet_receiver) = flume::bounded(1);
         (Vec::new(), packet_sender, packet_receiver, Vec::new())
     }
 }

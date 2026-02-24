@@ -253,19 +253,19 @@ pub fn multi_socket_receiver_loop(
     let mut last_packet_timestamp: Instant = Instant::now();
 
     loop {
+        // Check shutdown once per full round-robin sweep, not per socket
+        if shutdown.load(Ordering::Relaxed) {
+            let last_first_dur = last_packet_timestamp.duration_since(first_packet_timestamp);
+            println!(
+                "Multi-socket receiver {}: Total receiving: {:?}",
+                thread_id, last_first_dur
+            );
+            println!("Multi-socket receiver {} shutting down", thread_id);
+            return;
+        }
+
         // Round-robin poll all assigned sockets
         for socket_id in socket_range.clone() {
-            if shutdown.load(Ordering::Relaxed) {
-                // calculate time from base_instant for first and last packet
-                let last_first_dur = last_packet_timestamp.duration_since(first_packet_timestamp);
-                println!(
-                    "Multi-socket receiver {}: Total receiving: {:?}",
-                    thread_id, last_first_dur
-                );
-                println!("Multi-socket receiver {} shutting down", thread_id);
-                return;
-            }
-
             let socket = &shared.receiver_sockets[socket_id];
             let drop_counter = &shared.packet_drop_counters[socket_id];
 
