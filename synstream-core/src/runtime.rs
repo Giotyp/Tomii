@@ -238,7 +238,7 @@ impl SynRt {
         // Initialize per-slot buffering queues (stores NodeInfo + packet data)
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
-        let (receiver_sockets, packet_sender, packet_receiver, packet_drop_counters) =
+        let (receiver_sockets, packet_sender, packet_receiver, packet_drop_counters, buffer_pool) =
             prepare_network_infrastructure(app_graph);
 
         // Precompute pred_index_filter and pred_group_by for per-group dependency support
@@ -340,6 +340,7 @@ impl SynRt {
             receiver_sockets,
             packet_drop_counters,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
+            buffer_pool,
             slot_packet_counters: Arc::new((0..slots).map(|_| AtomicUsize::new(0)).collect()),
             streams_receive_counter: Arc::new(AtomicUsize::new(0)),
             // Initialize packet completion flags to false for all slots
@@ -767,7 +768,9 @@ impl SynRt {
                             tb.add_task_time(thread_slot, "Packet Received", usize::MAX, dur);
                         }
 
-                        // Process packet — Bytes variant avoids Arc/RwLock/Box overhead
+                        // Process packet — Bytes variant avoids Arc/RwLock/Box overhead.
+                        // received_bytes_cm is kept alive (not moved) so we can reclaim
+                        // its underlying Vec<u8> back into buffer_pool after the call.
                         let received_bytes_cm = CmTypes::from_bytes(packet_msg.packet_bytes);
                         let start_proc = if let Some(tb) = &shared.time_buffer {
                             tb.measure_time()
@@ -775,12 +778,23 @@ impl SynRt {
                             TimingMethod::Instant(Instant::now())
                         };
 
-                        let packet_cm = packet_process_func(&[received_bytes_cm]);
+                        // Pass a clone (cheap Arc increment) so received_bytes_cm stays
+                        // alive for the pool reclaim below.
+                        let packet_cm = packet_process_func(&[received_bytes_cm.clone()]);
 
                         if let Some(tb) = &shared.time_buffer {
                             let end_proc = tb.measure_time();
                             let dur = tb.measure_duration(start_proc, end_proc);
                             tb.add_task_time(thread_slot, "Packet Processing", usize::MAX, dur);
+                        }
+
+                        // Reclaim the raw packet buffer into the pool.
+                        // try_unwrap succeeds when refcount == 1 (plugin only borrowed via &[CmTypes],
+                        // did not clone the Arc). On failure the buffer simply drops normally.
+                        if let CmTypes::Bytes(arc) = received_bytes_cm {
+                            if let Ok(buf) = Arc::try_unwrap(arc) {
+                                shared.buffer_pool.lock().push(buf);
+                            }
                         }
 
                         // Create temporary node_info with index=0 for ID function call
@@ -824,8 +838,7 @@ impl SynRt {
                                 slots_dirty = true;
                                 // Spawn initial nodes immediately so workers start
                                 // executing while remaining packets are still processed.
-                                let init_nodes =
-                                    initial_nodes(&shared, vec![assigned_slot]);
+                                let init_nodes = initial_nodes(&shared, vec![assigned_slot]);
                                 if !init_nodes.is_empty() {
                                     print_debug(|| {
                                         format!(
@@ -961,7 +974,6 @@ impl SynRt {
                             }
                         }
                     }
-
 
                     // Process all active packets as a single batch
                     if !active_packet_batch.is_empty() {
@@ -1656,26 +1668,49 @@ fn prepare_network_infrastructure(
     Sender<PacketMessage>,
     Receiver<PacketMessage>,
     Vec<AtomicUsize>,
+    parking_lot::Mutex<Vec<Vec<u8>>>,
 ) {
     if let Some(config_spec) = graph.network_config() {
         let num_sockets = config_spec.num_sockets;
+        let channel_cap = num_sockets * 512;
         // Bounded channel: ring-buffer internals, no dynamic growth under load.
         // 512 slots per socket absorbs bursts; drop_counters handle overflow gracefully.
-        let (packet_sender, packet_receiver) = flume::bounded(num_sockets * 512);
+        let (packet_sender, packet_receiver) = flume::bounded(channel_cap);
 
         let receiver_sockets =
             bind_udp_socket_range(&config_spec.address, config_spec.start_port, num_sockets);
 
         let packet_drop_counters = (0..num_sockets).map(|_| AtomicUsize::new(0)).collect();
 
+        // Pre-allocate one buffer per channel slot so receivers never hit the allocator
+        // on the hot path. Each buffer has len == packet_length so recv() can use it
+        // directly as &mut [u8] without any additional setup.
+        let packet_length = config_spec.packet_length;
+        let pool: Vec<Vec<u8>> = (0..channel_cap)
+            .map(|_| {
+                let mut v = Vec::with_capacity(packet_length);
+                // SAFETY: recv() overwrites all packet_length bytes before any read.
+                // Identical justification to the receiver thread hot path.
+                unsafe { v.set_len(packet_length) };
+                v
+            })
+            .collect();
+
         (
             receiver_sockets,
             packet_sender,
             packet_receiver,
             packet_drop_counters,
+            parking_lot::Mutex::new(pool),
         )
     } else {
         let (packet_sender, packet_receiver) = flume::bounded(1);
-        (Vec::new(), packet_sender, packet_receiver, Vec::new())
+        (
+            Vec::new(),
+            packet_sender,
+            packet_receiver,
+            Vec::new(),
+            parking_lot::Mutex::new(Vec::new()),
+        )
     }
 }

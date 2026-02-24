@@ -162,8 +162,20 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
             break;
         }
 
-        // Allocate fresh buffer per packet — simple, no pool management overhead
-        let mut packet_bytes = vec![0u8; packet_length];
+        // Pop a pre-allocated buffer from the pool; fall back to fresh allocation
+        // if the pool is empty (burst scenario). Recycled buffers already have
+        // len == packet_length so no set_len is required on the hot path.
+        let mut packet_bytes = shared
+            .buffer_pool
+            .lock()
+            .pop()
+            .unwrap_or_else(|| {
+                let mut v = Vec::with_capacity(packet_length);
+                // SAFETY: recv() overwrites exactly packet_length bytes.
+                // The size == packet_length check below ensures no uninitialized bytes are read.
+                unsafe { v.set_len(packet_length) };
+                v
+            });
 
         // Receive packet (blocking with read_timeout)
         match socket.recv(&mut packet_bytes) {
@@ -269,8 +281,20 @@ pub fn multi_socket_receiver_loop(
             let socket = &shared.receiver_sockets[socket_id];
             let drop_counter = &shared.packet_drop_counters[socket_id];
 
-            // Allocate fresh buffer per packet — simple, no pool management overhead
-            let mut packet_bytes = vec![0u8; packet_length];
+            // Pop a pre-allocated buffer from the pool; fall back to fresh allocation
+            // if the pool is empty (burst scenario). Recycled buffers already have
+            // len == packet_length so no set_len is required on the hot path.
+            let mut packet_bytes = shared
+                .buffer_pool
+                .lock()
+                .pop()
+                .unwrap_or_else(|| {
+                    let mut v = Vec::with_capacity(packet_length);
+                    // SAFETY: recv() overwrites exactly packet_length bytes.
+                    // The size == packet_length check below ensures no uninitialized bytes are read.
+                    unsafe { v.set_len(packet_length) };
+                    v
+                });
 
             match socket.recv(&mut packet_bytes) {
                 Ok(size) => {

@@ -5,7 +5,7 @@ use crate::time_buffer::{TimeBufferManager, TimingMethod};
 use crate::{buffers::*, graph::*, graph_struct::*, scheduler::*, IdType};
 use core::panic;
 use flume::{Receiver, Sender};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -374,6 +374,11 @@ pub struct SharedData {
     pub receiver_sockets: Vec<NetworkSocket>,
     pub packet_drop_counters: Vec<AtomicUsize>,
     pub shutdown_flag: Arc<AtomicBool>,
+    /// Pre-allocated packet buffer pool — avoids per-packet heap allocation in receiver threads.
+    /// Receivers pop a buffer, fill it via recv(), pass ownership through the channel.
+    /// Resolution threads reclaim the buffer via Arc::try_unwrap after packet_process_func returns.
+    /// Falls back to fresh allocation when the pool is empty (burst scenario).
+    pub buffer_pool: Mutex<Vec<Vec<u8>>>,
 
     /// Per-slot packet counters - each slot tracks its own packet index independently
     /// This prevents index overflow when multiple streams are processed concurrently
