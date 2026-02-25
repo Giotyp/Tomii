@@ -34,14 +34,33 @@ thread_local! {
     static SCHEDULE_BUF: RefCell<Vec<NodeInfo>> = RefCell::new(Vec::with_capacity(32));
     // Ready instance indices returned by decrease_and_get_ready_into.
     static READY_BUF: RefCell<Vec<usize>> = RefCell::new(Vec::with_capacity(16));
-    // Accumulates all scheduled successor nodes across an entire batch.
-    // A single preparation() call is made after the batch loop instead of one per node.
+    // Accumulates scheduled successor nodes during batch processing.
+    // Flushed incrementally via preparation() every INCREMENTAL_SCHED_THRESHOLD items
+    // so workers receive tasks while the system thread is still processing the batch.
     static BATCH_SCHED_BUF: RefCell<Vec<NodeInfo>> = RefCell::new(Vec::with_capacity(256));
+    // Reusable buffers for preparation() — eliminates vec![None; N] heap allocation
+    // on every incremental flush (~77 flushes/stream × 2 vecs = ~154 allocs/stream saved).
+    static PREP_ARGS_BUF: RefCell<Vec<Option<Vec<synstream_types::CmTypes>>>> =
+        RefCell::new(Vec::with_capacity(64));
+    static PREP_FUNCS_BUF: RefCell<Vec<Option<synstream_types::CmPtr>>> =
+        RefCell::new(Vec::with_capacity(64));
+    // Reusable staging buffer for task completion batches: converts Vec<NodeInfo> (from the
+    // batch_queue) into Vec<(NodeInfo, Option<CmTypes>)> without per-batch heap allocation.
+    // The Vec is drained (not consumed) by process_batch_resolution, so capacity is retained.
+    static TASK_COMP_BUF: RefCell<Vec<(NodeInfo, Option<synstream_types::CmTypes>)>> =
+        RefCell::new(Vec::with_capacity(256));
 }
 
 /// Spin iterations before falling back to blocking recv_timeout.
 /// Catches burst completions that land in the queue just after try_iter() returned empty.
 const SPIN_ITERATIONS: u32 = 32;
+
+/// When BATCH_SCHED_BUF reaches this many accumulated successors, flush them to the
+/// scheduler immediately instead of waiting for the entire batch to finish processing.
+/// This eliminates the dead zone where workers idle while the system thread processes
+/// a large batch. Value tuned to balance dispatch latency (~100μs per flush at ~3μs/task)
+/// against per-flush overhead (~500ns for timing + allocation).
+const INCREMENTAL_SCHED_THRESHOLD: usize = 32;
 
 // Main SynStream Runtime struct with shared context
 pub struct SynRt {
@@ -97,6 +116,24 @@ impl SynRt {
             }
         }
 
+        // Pre-compute scheduler priority and affinity group per node.
+        // Avoids per-task node.name.clone(), node.use_workers.clone(), and
+        // priority conversion in the hot send_to_scheduler loop.
+        {
+            use crate::custom_scheduler::Priority;
+            use crate::graph_struct::NodePriority;
+            for (node_id, entry) in node_cache.iter_mut().enumerate() {
+                let node = &app_graph.nodes[node_id];
+                entry.priority = match node.priority {
+                    NodePriority::High => Priority::High,
+                    NodePriority::Normal => Priority::Normal,
+                    NodePriority::Low => Priority::Low,
+                };
+                entry.affinity_group =
+                    scheduler.get_affinity_group(node.use_workers.as_ref());
+            }
+        }
+
         // Core configuration
         let system_threads = scheduler.system_threads();
         let core_offset = scheduler.core_offset();
@@ -129,8 +166,10 @@ impl SynRt {
 
         let job_counter = Arc::new(AtomicUsize::new(0));
 
-        // Create Flume MPSC channel for lock-free task completion delivery
-        let (batch_queue_tx, batch_queue_rx) = flume::unbounded();
+        // Create Flume MPSC channel for lock-free task completion delivery.
+        // Channel carries only NodeInfo tokens; results are pre-stored in node_results by workers.
+        let (batch_queue_tx, batch_queue_rx): (Sender<NodeInfo>, Receiver<NodeInfo>) =
+            flume::unbounded();
 
         // Initialize shared dependency tracking structures
         let dependency_count_vec: Vec<usize> = app_graph.dependency_count_vec();
@@ -607,15 +646,20 @@ impl SynRt {
         };
         let start_ns = shared.base_instant.elapsed().as_nanos();
 
-        // Schedule Task - args will be built in the worker thread
-        let pre_built_args_vec = vec![None; nodes_to_schedule.len()];
-        let custom_func_vec = vec![None; nodes_to_schedule.len()];
-        send_to_scheduler(
-            &shared,
-            nodes_to_schedule,
-            &pre_built_args_vec,
-            &custom_func_vec,
-        );
+        // Schedule Task - args will be built in the worker thread.
+        // Reuse thread-local buffers to avoid vec![None; N] heap allocation per flush.
+        PREP_ARGS_BUF.with(|abuf| {
+            PREP_FUNCS_BUF.with(|fbuf| {
+                let mut args_buf = abuf.borrow_mut();
+                let mut funcs_buf = fbuf.borrow_mut();
+                let n = nodes_to_schedule.len();
+                args_buf.clear();
+                args_buf.resize(n, None);
+                funcs_buf.clear();
+                funcs_buf.resize(n, None);
+                send_to_scheduler(shared, nodes_to_schedule, &*args_buf, &*funcs_buf);
+            });
+        });
 
         if let Some(tb) = &shared.time_buffer {
             let end_time = tb.measure_time();
@@ -754,8 +798,10 @@ impl SynRt {
                     // Capture receive time as Instant (PacketMessage.timestamp is always Instant)
                     let packet_rcv_instant = Instant::now();
 
-                    // Pre-allocate with estimated capacity to avoid reallocation
-                    let mut active_packet_batch: Vec<(NodeInfo, CmTypes)> =
+                    // Pre-allocate with estimated capacity to avoid reallocation.
+                    // Network packet results are inline (Some), so use Option<CmTypes> to match
+                    // the process_batch_resolution signature shared with task completions.
+                    let mut active_packet_batch: Vec<(NodeInfo, Option<CmTypes>)> =
                         Vec::with_capacity(packet_buf.len());
 
                     for packet_msg in packet_buf.drain(..) {
@@ -899,10 +945,10 @@ impl SynRt {
                         };
 
                         if slot_is_active {
-                            active_packet_batch.push((node_info.clone(), packet_cm));
+                            active_packet_batch.push((node_info.clone(), Some(packet_cm)));
                         } else {
                             let mut slot_buffers = shared.slot_buffers.write();
-                            slot_buffers[node_info.slot].push((node_info.clone(), packet_cm));
+                            slot_buffers[node_info.slot].push((node_info.clone(), Some(packet_cm)));
                             drop(slot_buffers); // Release write lock immediately
                         }
 
@@ -985,7 +1031,7 @@ impl SynRt {
                         };
                         Self::process_batch_resolution(
                             &shared,
-                            active_packet_batch,
+                            &mut active_packet_batch,
                             thread_core,
                             thread_id,
                             thread_slot,
@@ -1035,7 +1081,8 @@ impl SynRt {
 
             let empty_batch = batch.is_empty();
 
-            // Process the entire batch
+            // Process the entire batch of compute task completions.
+            // Reuse TASK_COMP_BUF to stage NodeInfo → (NodeInfo, None) without allocation.
             if !empty_batch {
                 let start_ns_batch = shared.base_instant.elapsed().as_nanos();
                 let start_proc = if let Some(tb) = &shared.time_buffer {
@@ -1043,16 +1090,24 @@ impl SynRt {
                 } else {
                     TimingMethod::Instant(Instant::now())
                 };
-                Self::process_batch_resolution(
-                    &shared,
-                    batch,
-                    thread_core,
-                    thread_id,
-                    thread_slot,
-                    &cond_indexes,
-                    &mut stream_slot_activity,
-                    start_ns_batch,
-                );
+                TASK_COMP_BUF.with(|tbuf| {
+                    let mut comp_batch = tbuf.borrow_mut();
+                    comp_batch.clear();
+                    // Extend with (NodeInfo, None): result is already in node_results (pre-stored
+                    // by execute_task). The None signals process_batch_resolution to skip Phase 1.
+                    comp_batch.extend(batch.into_iter().map(|n| (n, None)));
+                    Self::process_batch_resolution(
+                        &shared,
+                        &mut *comp_batch,
+                        thread_core,
+                        thread_id,
+                        thread_slot,
+                        &cond_indexes,
+                        &mut stream_slot_activity,
+                        start_ns_batch,
+                    );
+                    // comp_batch is now empty (drained); capacity is retained for the next call.
+                });
                 if let Some(tb) = &shared.time_buffer {
                     let end_proc = tb.measure_time();
                     let dur = tb.measure_duration(start_proc, end_proc);
@@ -1131,9 +1186,17 @@ impl SynRt {
 
     /// Process a batch of completed nodes: store results, update dependencies, schedule successors
     /// Returns true if work was performed (for timing/recording purposes)
+    /// Process a batch of completed nodes (both network packets and compute tasks).
+    ///
+    /// `batch` is passed as `&mut Vec` and drained in-place so the caller retains
+    /// Vec capacity for reuse, eliminating per-batch heap allocation on the hot path.
+    ///
+    /// `result` in each tuple:
+    /// - `Some(cm)` for network packets — result stored in node_results (Phase 1).
+    /// - `None` for compute tasks — result already pre-stored by the worker in execute_task.
     fn process_batch_resolution(
         shared: &Arc<SharedData>,
-        batch: Vec<(NodeInfo, CmTypes)>,
+        batch: &mut Vec<(NodeInfo, Option<CmTypes>)>,
         thread_core: usize,
         thread_id: usize,
         thread_slot: usize,
@@ -1147,7 +1210,7 @@ impl SynRt {
 
         // 6A: Track which slots are in this batch using a bitset (no heap allocation).
         let mut slots_in_batch: u64 = 0;
-        for (node_info, _) in &batch {
+        for (node_info, _) in batch.iter() {
             slots_in_batch |= 1u64 << node_info.slot;
         }
 
@@ -1178,17 +1241,24 @@ impl SynRt {
                         let mut batch_sched = bbuf.borrow_mut();
                         batch_sched.clear();
 
-                        for (node_info, result) in batch.into_iter() {
+                        for (node_info, result_opt) in batch.drain(..) {
                             // Mark stream activity for all nodes (including network nodes id=0)
                             stream_slot_activity.insert(node_info.slot, true);
 
                             if node_info.post_node {
-                                shared.node_results.set(&node_info, result);
+                                // For post_nodes: result pre-stored by execute_task (None here).
+                                // Network post_nodes (rare) carry Some(result) and store it now.
+                                if let Some(r) = result_opt {
+                                    shared.node_results.set(&node_info, r);
+                                }
                                 continue;
                             }
 
-                            // Phase 1: Store result
-                            shared.node_results.set(&node_info, result);
+                            // Phase 1: Store result for network packets (Some).
+                            // Compute task results are already stored by execute_task (None).
+                            if let Some(r) = result_opt {
+                                shared.node_results.set(&node_info, r);
+                            }
 
                             // Phase 2: Decrement task counters
                             let node_id_usize = node_info.id as usize;
@@ -1305,7 +1375,6 @@ impl SynRt {
                             }
 
                             // Accumulate this node's successors into the batch buffer.
-                            // preparation() is called once after all nodes are processed.
                             batch_sched.extend_from_slice(&*sched);
                             print_debug(|| {
                                 format!(
@@ -1316,9 +1385,18 @@ impl SynRt {
                                     sched.iter().map(|n| (n.id, n.index)).collect::<Vec<_>>()
                                 )
                             });
+
+                            // Incremental flush: dispatch accumulated successors to workers
+                            // as soon as we have enough, rather than waiting for the entire
+                            // batch to finish. This eliminates the dead zone where workers
+                            // idle while the system thread processes a large batch.
+                            if batch_sched.len() >= INCREMENTAL_SCHED_THRESHOLD {
+                                Self::preparation(&shared, &*batch_sched, thread_core, thread_slot);
+                                batch_sched.clear();
+                            }
                         }
 
-                        // Single preparation call with all successors from the entire batch.
+                        // Final flush for any remaining successors after the batch loop.
                         if !batch_sched.is_empty() {
                             Self::preparation(&shared, &*batch_sched, thread_core, thread_slot);
                         }
@@ -1510,7 +1588,7 @@ impl SynRt {
                 let _buffering_slot_was_activated = activated_slot_info.is_some();
 
                 // Process activated slot: spawn initial nodes AND process buffered packets
-                if let Some((activated_slot, buffered_batch)) = activated_slot_info {
+                if let Some((activated_slot, mut buffered_batch)) = activated_slot_info {
                     print_debug(|| {
                         format!(
                             "Activated slot {} from Buffering to Active (completing slot: {})",
@@ -1550,7 +1628,7 @@ impl SynRt {
                         let start_ns_batch = shared.base_instant.elapsed().as_nanos();
                         Self::process_batch_resolution(
                             &shared,
-                            buffered_batch,
+                            &mut buffered_batch,
                             thread_core,
                             thread_id,
                             thread_slot,

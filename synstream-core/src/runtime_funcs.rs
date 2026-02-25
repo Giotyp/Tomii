@@ -43,6 +43,10 @@ pub struct NodeCacheEntry {
     pub successor_count: usize,
     // Node-level condition cache (new format)
     pub node_condition: Option<NodeConditionCache>,
+    // Pre-computed scheduler priority (avoids per-task conversion from NodePriority)
+    pub priority: crate::custom_scheduler::Priority,
+    // Pre-computed scheduler affinity group (avoids per-task use_workers.clone() + lookup)
+    pub affinity_group: usize,
 }
 
 #[derive(Clone)]
@@ -126,6 +130,8 @@ pub fn node_cache_entry(
             cond_index: 0,
             successor_count: 0,
             node_condition: None,
+            priority: crate::custom_scheduler::Priority::Normal,
+            affinity_group: 0,
         };
     }
 
@@ -299,6 +305,9 @@ pub fn node_cache_entry(
         cond_index,
         successor_count: 0, // Will be filled by caller with successor list length
         node_condition,
+        // Defaults; overwritten in SynRt::new after scheduler is available
+        priority: crate::custom_scheduler::Priority::Normal,
+        affinity_group: 0,
     }
 }
 
@@ -333,9 +342,11 @@ pub struct SharedData {
     pub base_instant: Arc<Instant>,
     pub job_counter: Arc<AtomicUsize>,
 
-    // Flume MPSC channel for lock-free task completion delivery
-    pub batch_queue_tx: Sender<(NodeInfo, CmTypes)>,
-    pub batch_queue_rx: Receiver<(NodeInfo, CmTypes)>,
+    // Flume MPSC channel for lock-free task completion delivery.
+    // Workers pre-store results in node_results before sending, so only the
+    // NodeInfo token travels through the queue (no CmTypes copy in the hot path).
+    pub batch_queue_tx: Sender<NodeInfo>,
+    pub batch_queue_rx: Receiver<NodeInfo>,
     pub target_batch_size: usize,
     pub batch_timeout_us: u64,
 
@@ -363,8 +374,9 @@ pub struct SharedData {
     pub slot_states: Arc<RwLock<Vec<SlotState>>>,
     pub last_slot_assigned: Arc<AtomicUsize>,
     pub slot_priority_enabled: bool,
-    // Per-slot buffering: holds ready nodes with their packet data waiting for slot activation
-    pub slot_buffers: Arc<RwLock<Vec<Vec<(NodeInfo, CmTypes)>>>>,
+    // Per-slot buffering: holds ready nodes with their packet data waiting for slot activation.
+    // CmTypes is Some(result) for network packets (result inline), None for compute tasks (pre-stored).
+    pub slot_buffers: Arc<RwLock<Vec<Vec<(NodeInfo, Option<CmTypes>)>>>>,
 
     // Network receiver infrastructure (optional - only present if network_config exists)
     pub receive_finished: Arc<AtomicBool>,
@@ -405,8 +417,6 @@ fn execute_task(
     shared: &Arc<SharedData>,
     func: CmPtr,
     node_info: &NodeInfo,
-    time_buf: &Option<Arc<TimeBufferManager>>,
-    node_name: &str,
     pre_built_args: Option<Vec<CmTypes>>,
     spawn_ns: u128,
 ) {
@@ -431,16 +441,8 @@ fn execute_task(
         }
     }
 
-    // Measure argument building time separately
-    // let arg_build_start = if !node_info.post_node {
-    //     Some(if let Some(tb) = time_buf {
-    //         tb.measure_time()
-    //     } else {
-    //         TimingMethod::Instant(Instant::now())
-    //     })
-    // } else {
-    //     None
-    // };
+    // Look up time_buf from shared (avoids Option<Arc> clone per task in closure capture)
+    let time_buf = &shared.time_buffer;
 
     // Start timing for actual function execution
     let start_time = if !node_info.post_node {
@@ -481,12 +483,18 @@ fn execute_task(
         if let Some(tb) = time_buf {
             let end_time = tb.measure_time();
             let duration = tb.measure_duration(start, end_time);
+            // Look up node_name from cache (avoids String clone per task in closure capture)
+            let node_name = &shared.node_cache[node_info.id as usize].name;
             tb.add_task_time(node_info.slot, node_name, worker_id, duration);
         }
     }
 
-    // Direct lock-free push to batch_queue - no mutex, no batching logic
-    let _ = shared.batch_queue_tx.try_send((node_info.clone(), result));
+    // Pre-store result in node_results (Release ordering) before sending the completion token.
+    // The flume queue's Release CAS / Acquire swap establishes happens-before, so the resolution
+    // thread sees the stored result after it receives the NodeInfo token.
+    shared.node_results.set(node_info, result);
+    // Send only the lightweight NodeInfo token — no CmTypes copy through the queue.
+    let _ = shared.batch_queue_tx.try_send(node_info.clone());
 }
 
 #[inline]
@@ -497,92 +505,49 @@ pub fn send_to_scheduler(
     custom_func_vec: &Vec<Option<CmPtr>>,
 ) {
     for (i, node_info) in nodes_to_schedule.iter().enumerate() {
-        let (func_ptr, node_name, node_priority, node_use_workers) = {
-            if node_info.post_node {
-                let nodes = &shared
-                    .graph
-                    .post_nodes
-                    .as_ref()
-                    .expect("Post nodes not initialized");
+        // Look up func_ptr, priority, and affinity from pre-computed cache.
+        // Post-nodes use the cold path since they're rare (end-of-run only).
+        let (func_ptr, task_priority, affinity_group) = if node_info.post_node {
+            let nodes = &shared
+                .graph
+                .post_nodes
+                .as_ref()
+                .expect("Post nodes not initialized");
+            let node = &nodes[node_info.id as usize];
 
-                let node = &nodes[node_info.id as usize];
+            let func = custom_func_vec[i]
+                .unwrap_or_else(|| node.func_ptr.expect("Post node function pointer is None"));
 
-                let func = {
-                    if custom_func_vec[i].is_some() {
-                        custom_func_vec[i].unwrap()
-                    } else {
-                        node.func_ptr.expect("Post node function pointer is None")
-                    }
-                };
-
-                let node_name = node.name.clone();
-                (func, node_name, node.priority, node.use_workers.clone())
-            } else {
-                let node = &shared.graph.nodes[node_info.id as usize];
-                let func = {
-                    if custom_func_vec[i].is_some() {
-                        custom_func_vec[i].unwrap()
-                    } else {
-                        shared.node_cache[node_info.id as usize].func_ptr
-                    }
-                };
-
-                (
-                    func,
-                    node.name.clone(),
-                    node.priority,
-                    node.use_workers.clone(),
-                )
-            }
+            use crate::custom_scheduler::Priority;
+            use crate::graph_struct::NodePriority;
+            let priority = match node.priority {
+                NodePriority::High => Priority::High,
+                NodePriority::Normal => Priority::Normal,
+                NodePriority::Low => Priority::Low,
+            };
+            let group = shared
+                .scheduler
+                .get_affinity_group(node.use_workers.as_ref());
+            (func, priority, group)
+        } else {
+            let cache = &shared.node_cache[node_info.id as usize];
+            let func = custom_func_vec[i].unwrap_or(cache.func_ptr);
+            (func, cache.priority, cache.affinity_group)
         };
 
-        let time_buf = shared.time_buffer.clone();
         let shared_clone = Arc::clone(shared);
-
-        // Determine if we should record this task based on stream filter
         let should_record = should_record_slot(shared, node_info.slot);
-
-        // Spawn task - route to network pool if requested
         let meta_data = (node_info.id, node_info.slot, node_info.index, should_record);
         let node_info = node_info.clone();
         let pre_built_args = pre_built_args_vec[i].clone();
-        // Capture spawn timestamp before any processing
+
+        // Per-task spawn timestamp for accurate scheduling latency measurement.
         let spawn_ns = shared.base_instant.elapsed().as_nanos();
-
-        // Convert NodePriority to scheduler Priority
-        use crate::custom_scheduler::Priority;
-        use crate::graph_struct::NodePriority;
-
-        let task_priority = match node_priority {
-            NodePriority::High => Priority::High,
-            NodePriority::Normal => Priority::Normal,
-            NodePriority::Low => Priority::Low,
-        };
-
-        // Create the task closure
         let task = move || {
-            execute_task(
-                &shared_clone,
-                func_ptr,
-                &node_info,
-                &time_buf,
-                &node_name,
-                pre_built_args,
-                spawn_ns,
-            )
+            execute_task(&shared_clone, func_ptr, &node_info, pre_built_args, spawn_ns)
         };
-
-        // Route task based on use_workers affinity
-        // - None: Use global queue (group 0 - any available workers)
-        // - Some(Count(N)): Use global queue (group 0 - any N available workers)
-        // - Some(Range(start-end)): Route to dedicated exclusive group for that range
-        let affinity_group = shared
-            .scheduler
-            .get_affinity_group(node_use_workers.as_ref());
 
         if affinity_group > 0 {
-            // Range-based affinity - spawn to dedicated exclusive group
-            // These workers ONLY handle tasks with this specific range
             shared.scheduler.spawn_to_group_with_meta(
                 affinity_group,
                 task_priority,
@@ -590,8 +555,6 @@ pub fn send_to_scheduler(
                 task,
             );
         } else {
-            // No affinity OR count-based - spawn to global queue
-            // Global workers handle: None specs, Count specs, and any non-range tasks
             shared
                 .scheduler
                 .spawn_task_with_meta_priority(task_priority, Some(meta_data), task);
@@ -1196,7 +1159,7 @@ pub fn is_slot_active(shared: &Arc<SharedData>, slot: usize) -> bool {
 pub fn activate_next_slot(
     shared: &Arc<SharedData>,
     completing_slot: Option<usize>,
-) -> Option<(usize, Vec<(NodeInfo, CmTypes)>)> {
+) -> Option<(usize, Vec<(NodeInfo, Option<CmTypes>)>)> {
     if !shared.slot_priority_enabled {
         return None;
     }
