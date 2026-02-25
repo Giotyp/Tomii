@@ -5,7 +5,34 @@ use crate::graph_struct::Node;
 use crate::IdType;
 use std::cmp::PartialEq;
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+
+// ---------------------------------------------------------------------------
+// Generational pack/unpack helpers
+//
+// We pack a 32-bit generation counter and a 32-bit value into a single u64.
+// Upper 32 bits = generation, lower 32 bits = value (remaining count or sent flag).
+// This lets a single SeqCst CAS atomically reset a counter when a new generation
+// starts (lazy reinit), eliminating the O(nodes × factor) slot reset loops.
+// ---------------------------------------------------------------------------
+
+/// Pack generation `gen` and value `val` into a single u64.
+#[inline(always)]
+pub fn gen_pack(gen: u32, val: u32) -> u64 {
+    ((gen as u64) << 32) | (val as u64)
+}
+
+/// Extract the generation from a packed u64.
+#[inline(always)]
+pub fn gen_unpack_gen(packed: u64) -> u32 {
+    (packed >> 32) as u32
+}
+
+/// Extract the value from a packed u64.
+#[inline(always)]
+pub fn gen_unpack_val(packed: u64) -> u32 {
+    packed as u32
+}
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct NodeInfo {
@@ -491,14 +518,23 @@ impl Debug for AtomicVecMap {
 /// Per-node dependency entry for threshold-based spawning
 /// Supports per-group counters for fine-grained barrier dependencies.
 /// When num_groups == 1, behavior is identical to the original single-counter design.
+///
+/// # Generational design
+///
+/// Each `AtomicU64` packs a 32-bit generation counter (upper) and a 32-bit value
+/// (lower). When a slot starts a new stream, the runtime increments the
+/// `slot_generation` counter. On the next access to an entry, if the stored
+/// generation differs from the current one, the entry lazily reinitialises itself
+/// to its initial value — no O(N) sweep required at slot reset time.
 #[derive(Debug)]
 pub struct NodeDependencyEntry {
-    /// Per-group atomic counters (length = num_groups)
-    /// For nodes without group_size, num_groups=1 → single counter (backward compatible)
-    remaining_deps: Vec<AtomicUsize>,
+    /// Per-group packed (gen: u32, remaining: u32) — length = num_groups.
+    /// Upper 32 bits: generation. Lower 32 bits: remaining dependency count.
+    remaining_deps: Vec<AtomicU64>,
 
-    /// Bitmap for sent tracking (prevents double-spawn)
-    instances_sent: Vec<AtomicBool>,
+    /// Per-instance packed (gen: u32, sent: u32) — length = factor.
+    /// Upper 32 bits: generation. Lower 32 bits: 0 = not sent, 1 = sent.
+    instances_sent: Vec<AtomicU64>,
 
     /// Cached metadata (avoid lookups)
     factor: usize,
@@ -509,9 +545,8 @@ pub struct NodeDependencyEntry {
     /// Number of groups (= factor / group_size, 1 if no groups)
     num_groups: usize,
 
-    /// Dependencies per group counter
-    #[allow(dead_code)]
-    deps_per_group: usize,
+    /// Initial dependencies per group (used for lazy reinit on generation mismatch)
+    deps_per_group: u32,
 
     /// Dependencies per instance (within a group for grouped nodes)
     deps_per_instance: usize,
@@ -535,26 +570,27 @@ impl NodeDependencyEntry {
             _ => (factor, 1), // No grouping or full-factor group
         };
 
-        let deps_per_group = if num_groups > 0 {
+        let dpg = if num_groups > 0 {
             total_deps / num_groups
         } else {
             0
         };
         let deps_per_instance = if group_size > 0 {
-            deps_per_group / group_size
+            dpg / group_size
         } else {
             0
         };
+        let deps_per_group = dpg as u32;
 
-        let mut remaining_deps = Vec::with_capacity(num_groups);
-        for _ in 0..num_groups {
-            remaining_deps.push(AtomicUsize::new(deps_per_group));
-        }
+        // Initialise with generation=0, value=initial_deps_per_group
+        let remaining_deps: Vec<AtomicU64> = (0..num_groups)
+            .map(|_| AtomicU64::new(gen_pack(0, deps_per_group)))
+            .collect();
 
-        let mut instances_sent = Vec::with_capacity(factor);
-        for _ in 0..factor {
-            instances_sent.push(AtomicBool::new(false));
-        }
+        // Initialise with generation=0, sent=0 (not sent)
+        let instances_sent: Vec<AtomicU64> = (0..factor)
+            .map(|_| AtomicU64::new(gen_pack(0, 0)))
+            .collect();
 
         Self {
             remaining_deps,
@@ -580,11 +616,17 @@ impl NodeDependencyEntry {
     }
 
     /// Atomically decrease dependency by count and return indices of newly ready instances.
-    /// group: None → decrement ALL group counters (global barrier, e.g., beam→demul)
-    ///        Some(g) → decrement only group g's counter
-    /// count: number of decrements to apply (when multiple predecessors complete in same batch)
+    /// `slot_gen`: current slot generation (u32); stale entries are lazily reinitialised.
+    /// `group`: None → decrement ALL group counters, Some(g) → decrement group g only.
+    /// `count`: number of decrements to apply (aggregated from same-batch predecessors).
     /// Writes newly-ready instance indices into `ready` (cleared before use).
-    pub fn decrease_and_get_ready_into(&self, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
+    pub fn decrease_and_get_ready_into(
+        &self,
+        slot_gen: u32,
+        group: Option<usize>,
+        count: usize,
+        ready: &mut Vec<usize>,
+    ) {
         ready.clear();
 
         let (g_start, g_end) = match group {
@@ -594,15 +636,31 @@ impl NodeDependencyEntry {
         };
 
         for g in g_start..g_end {
-            // Atomically decrement this group's counter by count
-            let result =
-                self.remaining_deps[g].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |val| {
-                    Some(val.saturating_sub(count))
-                });
+            // Atomically decrement this group's counter with lazy generational reinit.
+            // If the stored generation differs from slot_gen, treat the value as the
+            // initial deps_per_group (stale entry from a previous stream).
+            let init_val = self.deps_per_group;
+            let prev_packed = self.remaining_deps[g]
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |packed| {
+                    let stored_gen = gen_unpack_gen(packed);
+                    let current = if stored_gen == slot_gen {
+                        gen_unpack_val(packed)
+                    } else {
+                        init_val // Lazy reinit: stale gen → full initial value
+                    };
+                    let new_val = current.saturating_sub(count as u32);
+                    Some(gen_pack(slot_gen, new_val))
+                })
+                .unwrap(); // fetch_update always succeeds (closure returns Some)
 
-            let new_remaining = match result {
-                Ok(prev) => prev.saturating_sub(count),
-                Err(current) => current,
+            let new_remaining = {
+                let stored_gen = gen_unpack_gen(prev_packed);
+                let old_val = if stored_gen == slot_gen {
+                    gen_unpack_val(prev_packed)
+                } else {
+                    init_val
+                };
+                old_val.saturating_sub(count as u32) as usize
             };
 
             // Determine instance range for this group
@@ -613,11 +671,25 @@ impl NodeDependencyEntry {
                 // Barrier: spawn all instances in group when counter reaches 0
                 if new_remaining == 0 {
                     for idx in start..end {
-                        if self.instances_sent[idx]
-                            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                            .is_ok()
-                        {
-                            ready.push(idx);
+                        // CAS from (any_gen, 0) to (slot_gen, 1) — marks as sent this generation
+                        loop {
+                            let cur = self.instances_sent[idx].load(Ordering::SeqCst);
+                            let cur_gen = gen_unpack_gen(cur);
+                            let cur_sent = gen_unpack_val(cur) != 0;
+                            // If same gen and already sent, skip
+                            if cur_gen == slot_gen && cur_sent {
+                                break;
+                            }
+                            let new_packed = gen_pack(slot_gen, 1);
+                            if self.instances_sent[idx]
+                                .compare_exchange(cur, new_packed, Ordering::SeqCst, Ordering::SeqCst)
+                                .is_ok()
+                            {
+                                // Won the CAS: instance is newly ready for this generation
+                                ready.push(idx);
+                                break;
+                            }
+                            // CAS failed (another thread raced), retry
                         }
                     }
                 }
@@ -628,11 +700,26 @@ impl NodeDependencyEntry {
                     for idx in start..end {
                         let idx_in_group = idx - start;
                         if new_remaining <= self.threshold_for_instance_in_group(idx_in_group) {
-                            if self.instances_sent[idx]
-                                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                                .is_ok()
-                            {
-                                ready.push(idx);
+                            loop {
+                                let cur = self.instances_sent[idx].load(Ordering::SeqCst);
+                                let cur_gen = gen_unpack_gen(cur);
+                                let cur_sent = gen_unpack_val(cur) != 0;
+                                if cur_gen == slot_gen && cur_sent {
+                                    break; // Already sent this generation
+                                }
+                                let new_packed = gen_pack(slot_gen, 1);
+                                if self.instances_sent[idx]
+                                    .compare_exchange(
+                                        cur,
+                                        new_packed,
+                                        Ordering::SeqCst,
+                                        Ordering::SeqCst,
+                                    )
+                                    .is_ok()
+                                {
+                                    ready.push(idx);
+                                    break;
+                                }
                             }
                         }
                     }
@@ -641,50 +728,66 @@ impl NodeDependencyEntry {
         }
     }
 
-    pub fn decrease_and_get_ready(&self, group: Option<usize>, count: usize) -> Vec<usize> {
+    pub fn decrease_and_get_ready(
+        &self,
+        slot_gen: u32,
+        group: Option<usize>,
+        count: usize,
+    ) -> Vec<usize> {
         let mut ready = Vec::new();
-        self.decrease_and_get_ready_into(group, count, &mut ready);
+        self.decrease_and_get_ready_into(slot_gen, group, count, &mut ready);
         ready
     }
 
-    /// Increment dependency counter (used when condition fails and dependency needs to be restored)
+    /// Increment dependency counter (used when condition fails and dependency needs to be restored).
     /// Increments the counter for the group that contains the given instance.
-    pub fn increment_dependency(&self, instance_idx: Option<usize>) -> usize {
+    /// `slot_gen`: current slot generation, used for lazy reinit on generation mismatch.
+    pub fn increment_dependency(&self, slot_gen: u32, instance_idx: Option<usize>) -> usize {
         let g = match instance_idx {
-            Some(idx) => idx / self.group_size,
-            None => 0, // Default to first group
+            Some(idx) => std::cmp::min(idx / self.group_size, self.num_groups - 1),
+            None => 0,
         };
-        let g = std::cmp::min(g, self.num_groups - 1);
-        self.remaining_deps[g].fetch_add(1, Ordering::SeqCst) + 1
-    }
-
-    /// Reset the sent flag for a specific instance (used when conditions not met)
-    pub fn reset_sent_flag(&self, instance_idx: usize) {
-        if instance_idx < self.instances_sent.len() {
-            self.instances_sent[instance_idx].store(false, Ordering::SeqCst);
-        }
-    }
-
-    /// Clear all sent flags for this entry
-    pub fn clear_sent_flags(&self) {
-        for flag in &self.instances_sent {
-            flag.store(false, Ordering::SeqCst);
-        }
-    }
-
-    /// Reset this entry for a new slot iteration
-    pub fn reset(&self, new_total_deps: usize) {
-        let deps_per_group = if self.num_groups > 0 {
-            new_total_deps / self.num_groups
+        let init_val = self.deps_per_group;
+        let prev = self.remaining_deps[g]
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |packed| {
+                let stored_gen = gen_unpack_gen(packed);
+                let current = if stored_gen == slot_gen {
+                    gen_unpack_val(packed)
+                } else {
+                    init_val
+                };
+                Some(gen_pack(slot_gen, current.saturating_add(1)))
+            })
+            .unwrap();
+        let stored_gen = gen_unpack_gen(prev);
+        let old_val = if stored_gen == slot_gen {
+            gen_unpack_val(prev)
         } else {
-            0
+            init_val
         };
-        for counter in &self.remaining_deps {
-            counter.store(deps_per_group, Ordering::SeqCst);
+        (old_val + 1) as usize
+    }
+
+    /// Reset the sent flag for a specific instance (used when conditions not met).
+    /// `slot_gen`: current slot generation — writes generation so future CAS sees correct state.
+    pub fn reset_sent_flag(&self, slot_gen: u32, instance_idx: usize) {
+        if instance_idx < self.instances_sent.len() {
+            self.instances_sent[instance_idx].store(gen_pack(slot_gen, 0), Ordering::SeqCst);
         }
-        for flag in &self.instances_sent {
-            flag.store(false, Ordering::SeqCst);
-        }
+    }
+
+    /// Clear all sent flags for this entry.
+    /// No-op under the generational design: the generation bump in slot_generation
+    /// makes all existing `instances_sent` entries stale. Kept for trait compat.
+    pub fn clear_sent_flags(&self) {
+        // No-op: generation bump handles lazy clearing.
+    }
+
+    /// Reset this entry for a new slot iteration.
+    /// No-op under the generational design: the generation bump in slot_generation
+    /// triggers lazy reinit on the next access. Kept for trait compat.
+    pub fn reset(&self, _new_total_deps: usize) {
+        // No-op: generation bump handles lazy reinit.
     }
 }
 
@@ -783,82 +886,80 @@ impl NodeDepMap {
     }
 
     /// Get ready instances for a node in a slot by decrementing dependencies by count.
+    /// `slot_gen`: current slot generation for lazy generational reinit.
     /// Writes results into `ready` (cleared before use). No allocation on the hot path.
     #[inline]
     pub fn decrease_and_get_ready_into(
         &self,
         slot: usize,
         node_id: usize,
+        slot_gen: u32,
         group: Option<usize>,
         count: usize,
         ready: &mut Vec<usize>,
     ) {
         if slot < self.slots.len() && node_id < self.slots[slot].len() {
-            self.slots[slot][node_id].decrease_and_get_ready_into(group, count, ready);
+            self.slots[slot][node_id].decrease_and_get_ready_into(slot_gen, group, count, ready);
         } else {
             ready.clear();
         }
     }
 
-    /// Get ready instances for a node in a slot by decrementing dependencies by count
-    /// group: None → global decrement, Some(g) → decrement group g only
-    /// count: number of decrements to apply
+    /// Get ready instances for a node in a slot by decrementing dependencies by count.
+    /// `slot_gen`: current slot generation for lazy generational reinit.
+    /// `group`: None → global decrement, Some(g) → decrement group g only.
+    /// `count`: number of decrements to apply.
     #[inline]
     pub fn decrease_and_get_ready(
         &self,
         slot: usize,
         node_id: usize,
+        slot_gen: u32,
         group: Option<usize>,
         count: usize,
     ) -> Vec<usize> {
         let mut ready = Vec::new();
-        self.decrease_and_get_ready_into(slot, node_id, group, count, &mut ready);
+        self.decrease_and_get_ready_into(slot, node_id, slot_gen, group, count, &mut ready);
         ready
     }
 
-    /// Increment dependency for a specific node (used when condition fails)
-    /// Returns the new dependency count
+    /// Increment dependency for a specific node (used when condition fails).
+    /// `slot_gen`: current slot generation for lazy generational reinit.
+    /// Returns the new dependency count.
     #[inline]
     pub fn increment_dependency(
         &self,
         slot: usize,
         node_id: usize,
+        slot_gen: u32,
         instance_idx: Option<usize>,
     ) -> Option<usize> {
         if slot < self.slots.len() && node_id < self.slots[slot].len() {
-            Some(self.slots[slot][node_id].increment_dependency(instance_idx))
+            Some(self.slots[slot][node_id].increment_dependency(slot_gen, instance_idx))
         } else {
             None
         }
     }
 
-    /// Reset the sent flag for an instance (used when conditions not met)
+    /// Reset the sent flag for an instance (used when conditions not met).
+    /// `slot_gen`: current slot generation — writes generation so future CAS sees correct state.
     #[inline]
-    pub fn reset_sent_flag(&self, slot: usize, node_id: usize, instance_idx: usize) {
+    pub fn reset_sent_flag(&self, slot: usize, node_id: usize, slot_gen: u32, instance_idx: usize) {
         if slot < self.slots.len() && node_id < self.slots[slot].len() {
-            self.slots[slot][node_id].reset_sent_flag(instance_idx);
+            self.slots[slot][node_id].reset_sent_flag(slot_gen, instance_idx);
         }
     }
 
-    /// Clear all sent flags for a slot (used during slot reinitialization)
-    pub fn clear_slot_sent_flags(&self, slot: usize) {
-        if slot < self.slots.len() {
-            for entry in &self.slots[slot] {
-                entry.clear_sent_flags();
-            }
-        }
+    /// Clear all sent flags for a slot.
+    /// No-op under the generational design: slot_generation bump handles lazy clearing.
+    pub fn clear_slot_sent_flags(&self, _slot: usize) {
+        // No-op: generation bump handles lazy clearing.
     }
 
-    /// Reset dependencies for a slot (used for multi-slot streaming)
-    pub fn reinit_slot(&self, nodes: &Vec<Node>, slot: usize, dep_counts: &Vec<usize>) {
-        if slot < self.slots.len() {
-            for node_id in 0..nodes.len() {
-                if node_id < self.slots[slot].len() {
-                    let total_deps = dep_counts[node_id];
-                    self.slots[slot][node_id].reset(total_deps);
-                }
-            }
-        }
+    /// Reset dependencies for a slot.
+    /// No-op under the generational design: slot_generation bump triggers lazy reinit.
+    pub fn reinit_slot(&self, _nodes: &Vec<Node>, _slot: usize, _dep_counts: &Vec<usize>) {
+        // No-op: generation bump handles lazy reinit.
     }
 }
 
@@ -892,55 +993,57 @@ mod tests {
 
     #[test]
     fn test_threshold_spawning_factor_4() {
-        // factor=4, deps_per_inst=2, total_deps=8, no groups
+        // factor=4, deps_per_inst=2, total_deps=8, no groups; use gen=0
         let entry = NodeDependencyEntry::new(4, 8, false, None);
+        let gen: u32 = 0;
 
         // Call 1: 8->7, instance 0 threshold=6, not ready (7 > 6)
-        let ready = entry.decrease_and_get_ready(None);
+        let ready = entry.decrease_and_get_ready(gen, None, 1);
         assert!(ready.is_empty());
 
         // Call 2: 7->6, instance 0 threshold=6, ready! (6 <= 6)
-        let ready = entry.decrease_and_get_ready(None);
+        let ready = entry.decrease_and_get_ready(gen, None, 1);
         assert_eq!(ready, vec![0]);
 
         // Call 3: 6->5, instance 1 threshold=4, not ready (5 > 4)
-        let ready = entry.decrease_and_get_ready(None);
+        let ready = entry.decrease_and_get_ready(gen, None, 1);
         assert!(ready.is_empty());
 
         // Call 4: 5->4, instance 1 threshold=4, ready! (4 <= 4)
-        let ready = entry.decrease_and_get_ready(None);
+        let ready = entry.decrease_and_get_ready(gen, None, 1);
         assert_eq!(ready, vec![1]);
 
         // Call 5: 4->3, instance 2 threshold=2, not ready (3 > 2)
-        let ready = entry.decrease_and_get_ready(None);
+        let ready = entry.decrease_and_get_ready(gen, None, 1);
         assert!(ready.is_empty());
 
         // Call 6: 3->2, instance 2 threshold=2, ready! (2 <= 2)
-        let ready = entry.decrease_and_get_ready(None);
+        let ready = entry.decrease_and_get_ready(gen, None, 1);
         assert_eq!(ready, vec![2]);
 
         // Call 7: 2->1, instance 3 threshold=0, not ready (1 > 0)
-        let ready = entry.decrease_and_get_ready(None);
+        let ready = entry.decrease_and_get_ready(gen, None, 1);
         assert!(ready.is_empty());
 
         // Call 8: 1->0, instance 3 threshold=0, ready! (0 <= 0)
-        let ready = entry.decrease_and_get_ready(None);
+        let ready = entry.decrease_and_get_ready(gen, None, 1);
         assert_eq!(ready, vec![3]);
     }
 
     #[test]
     fn test_barrier_spawns_all_at_once() {
-        // Barrier node with factor=3, total_deps=3, no groups
+        // Barrier node with factor=3, total_deps=3, no groups; use gen=0
         let entry = NodeDependencyEntry::new(3, 3, true, None);
+        let gen: u32 = 0;
 
         // Decrease until deps reach 0
         for _ in 0..2 {
-            let ready = entry.decrease_and_get_ready(None);
+            let ready = entry.decrease_and_get_ready(gen, None, 1);
             assert!(ready.is_empty()); // Barrier not ready yet
         }
 
         // Final decrease brings deps to 0, barrier spawns all
-        let ready = entry.decrease_and_get_ready(None);
+        let ready = entry.decrease_and_get_ready(gen, None, 1);
         assert_eq!(ready.len(), 3);
         assert!(ready.contains(&0));
         assert!(ready.contains(&1));
@@ -950,46 +1053,46 @@ mod tests {
     #[test]
     fn test_no_double_spawn() {
         let entry = NodeDependencyEntry::new(2, 4, false, None);
+        let gen: u32 = 0;
 
         // factor=2, total_deps=4, deps_per_instance=2
         // Instance 0 threshold = (2-0-1)*2 = 2
         // Instance 1 threshold = (2-1-1)*2 = 0
 
         // Call 1: 4->3, instance 0 threshold=2, not ready (3 > 2)
-        let ready = entry.decrease_and_get_ready(None);
+        let ready = entry.decrease_and_get_ready(gen, None, 1);
         assert!(ready.is_empty());
 
         // Call 2: 3->2, instance 0 threshold=2, ready! (2 <= 2)
-        let ready = entry.decrease_and_get_ready(None);
+        let ready = entry.decrease_and_get_ready(gen, None, 1);
         assert_eq!(ready, vec![0]);
 
         // Call 3: 2->1, instance 1 threshold=0, not ready (1 > 0)
-        let ready = entry.decrease_and_get_ready(None);
+        let ready = entry.decrease_and_get_ready(gen, None, 1);
         assert!(ready.is_empty());
 
         // Call 4: 1->0, instance 1 threshold=0, ready! (0 <= 0)
-        let ready = entry.decrease_and_get_ready(None);
+        let ready = entry.decrease_and_get_ready(gen, None, 1);
         assert_eq!(ready, vec![1]);
 
         // Call 5: try another decrement (would underflow)
         // No more deps to satisfy, nothing ready
-        let ready = entry.decrease_and_get_ready(None);
+        let ready = entry.decrease_and_get_ready(gen, None, 1);
         assert!(ready.is_empty());
     }
 
     #[test]
     fn test_entry_reset() {
+        // The generational design lazy-resets on generation change.
+        // Simulate "reset" by using gen=1 after initial decrements with gen=0.
         let entry = NodeDependencyEntry::new(2, 4, false, None);
 
-        // Decrease twice
-        let _ = entry.decrease_and_get_ready(None);
-        let _ = entry.decrease_and_get_ready(None);
+        // Decrease twice with gen=0
+        let _ = entry.decrease_and_get_ready(0, None, 1);
+        let _ = entry.decrease_and_get_ready(0, None, 1);
 
-        // Reset for new slot
-        entry.reset(4);
-
-        // Should behave like new
-        let ready = entry.decrease_and_get_ready(None);
+        // "Reset" via generation bump: use gen=1 — should behave like new
+        let ready = entry.decrease_and_get_ready(1, None, 1);
         assert!(ready.is_empty());
     }
 
@@ -1000,28 +1103,29 @@ mod tests {
         let entry = NodeDependencyEntry::new(6, 6, true, Some(3));
         assert_eq!(entry.num_groups, 2);
         assert_eq!(entry.deps_per_group, 3);
+        let gen: u32 = 0;
 
         // Decrement group 0 twice → not ready yet
-        let ready = entry.decrease_and_get_ready(Some(0));
+        let ready = entry.decrease_and_get_ready(gen, Some(0), 1);
         assert!(ready.is_empty());
-        let ready = entry.decrease_and_get_ready(Some(0));
+        let ready = entry.decrease_and_get_ready(gen, Some(0), 1);
         assert!(ready.is_empty());
 
         // Decrement group 0 third time → group 0 instances (0,1,2) spawn
-        let ready = entry.decrease_and_get_ready(Some(0));
+        let ready = entry.decrease_and_get_ready(gen, Some(0), 1);
         assert_eq!(ready.len(), 3);
         assert!(ready.contains(&0));
         assert!(ready.contains(&1));
         assert!(ready.contains(&2));
 
         // Group 1 still blocked
-        let ready = entry.decrease_and_get_ready(Some(1));
+        let ready = entry.decrease_and_get_ready(gen, Some(1), 1);
         assert!(ready.is_empty());
-        let ready = entry.decrease_and_get_ready(Some(1));
+        let ready = entry.decrease_and_get_ready(gen, Some(1), 1);
         assert!(ready.is_empty());
 
         // Decrement group 1 third time → group 1 instances (3,4,5) spawn
-        let ready = entry.decrease_and_get_ready(Some(1));
+        let ready = entry.decrease_and_get_ready(gen, Some(1), 1);
         assert_eq!(ready.len(), 3);
         assert!(ready.contains(&3));
         assert!(ready.contains(&4));

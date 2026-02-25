@@ -7,10 +7,14 @@ use core::panic;
 use flume::{Receiver, Sender};
 use parking_lot::{Mutex, RwLock};
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use synstream_types::*;
+
+/// Type aliases for the crossbeam batch_queue channel used by workers → resolution threads.
+pub type BatchQueueTx = crossbeam_channel::Sender<crate::buffers::NodeInfo>;
+pub type BatchQueueRx = crossbeam_channel::Receiver<crate::buffers::NodeInfo>;
 
 thread_local! {
     static ARG_BUF: RefCell<Vec<CmTypes>> = RefCell::new(Vec::with_capacity(16));
@@ -342,33 +346,32 @@ pub struct SharedData {
     pub base_instant: Arc<Instant>,
     pub job_counter: Arc<AtomicUsize>,
 
-    // Flume MPSC channel for lock-free task completion delivery.
-    // Workers pre-store results in node_results before sending, so only the
-    // NodeInfo token travels through the queue (no CmTypes copy in the hot path).
-    pub batch_queue_tx: Sender<NodeInfo>,
-    pub batch_queue_rx: Receiver<NodeInfo>,
+    // Crossbeam bounded channel for lock-free task completion delivery.
+    // Ring-buffer internals (no per-send Box::new). Workers pre-store results in
+    // node_results before sending, so only the NodeInfo token travels through the
+    // queue (no CmTypes copy in the hot path).
+    pub batch_queue_tx: BatchQueueTx,
+    pub batch_queue_rx: BatchQueueRx,
     pub target_batch_size: usize,
     pub batch_timeout_us: u64,
 
     // Resolution state - abstracted for single vs multi-threaded
     pub resolution_state: Arc<dyn ResolutionState>,
 
-    // Shared dependency tracking for multi-threaded resolution
-    pub remaining_nodes: Arc<Vec<Vec<AtomicUsize>>>,
-    // remaining_cond_nodes[slot][cond_rem_idx] - AtomicUsize for lock-free access
-    pub remaining_cond_nodes: Arc<Vec<Vec<AtomicUsize>>>,
-    pub node_id_to_rem: Arc<Vec<usize>>,
-    // Maps node_id to whether it's in remaining_nodes (false) or remaining_cond_nodes (true)
-    pub node_id_is_cond: Arc<Vec<bool>>,
-    // Initial factors for remaining_nodes, used for reinit (remaining_init[slot][node_rem_idx])
-    pub remaining_init: Arc<Vec<Vec<usize>>>,
     pub initial_prep_done: Arc<AtomicUsize>,
 
     pub slot_pending_tasks: Arc<Vec<AtomicUsize>>,
     pub slot_pending_cond_tasks: Arc<Vec<AtomicUsize>>,
 
-    // Condition node spawn tracking - optimization to skip evaluation when all instances spawned
-    pub cond_instances_to_spawn: Arc<Vec<Vec<AtomicUsize>>>,
+    // Condition node spawn tracking - optimization to skip evaluation when all instances spawned.
+    // Each AtomicU64 packs (gen: u32, remaining_spawns: u32). Generation mismatch triggers
+    // lazy reinit to nc.factor, eliminating the O(cond_nodes) reset loop at slot completion.
+    pub cond_instances_to_spawn: Arc<Vec<Vec<AtomicU64>>>,
+
+    // Slot generation counter - incremented on slot completion to lazily reinitialise all
+    // NodeDependencyEntry and cond_instances_to_spawn entries for that slot.
+    // Upper 32 bits unused; lower 32 bits used as u32 generation ID.
+    pub slot_generation: Arc<Vec<AtomicU64>>,
 
     // Slot priority processing state
     pub slot_states: Arc<RwLock<Vec<SlotState>>>,
@@ -489,12 +492,14 @@ fn execute_task(
         }
     }
 
-    // Pre-store result in node_results (Release ordering) before sending the completion token.
-    // The flume queue's Release CAS / Acquire swap establishes happens-before, so the resolution
+    // Pre-store result in node_results before sending the completion token.
+    // The crossbeam bounded channel's internal ordering ensures the resolution
     // thread sees the stored result after it receives the NodeInfo token.
     shared.node_results.set(node_info, result);
-    // Send only the lightweight NodeInfo token — no CmTypes copy through the queue.
-    let _ = shared.batch_queue_tx.try_send(node_info.clone());
+    // Send the lightweight NodeInfo token. Use blocking send (not try_send) so that
+    // a full queue causes the worker to wait rather than silently dropping the token.
+    // Dropping a token would leave slot_pending_tasks > 0 forever → hang.
+    let _ = shared.batch_queue_tx.send(node_info.clone());
 }
 
 #[inline]
@@ -715,6 +720,13 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
             )
         });
         drop(running_streams); // Release lock before returning
+
+        // Bump slot generation for the new stream — lazily reinitialises all
+        // NodeDependencyEntry, instances_sent, and cond_instances_to_spawn entries.
+        // Done here (new-stream start, Inactive → Active) rather than in the slot
+        // completion path so that old-stream in-flight tasks retain the old generation
+        // and cannot spuriously spawn or corrupt the new stream's dependency counters.
+        shared.slot_generation[last_slot_assigned].fetch_add(1, Ordering::SeqCst);
 
         // Start timing for the slot immediately upon assignment
         if let Some(tb) = &shared.time_buffer {
@@ -1202,6 +1214,13 @@ pub fn activate_next_slot(
         drop(slot_buffers);
         drop(states);
         drop(running_streams); // Release the first lock last
+
+        // Bump slot generation for the new stream — lazily reinitialises all
+        // NodeDependencyEntry, instances_sent, and cond_instances_to_spawn entries.
+        // Done here (new-stream start, Buffering → Active) so that old-stream tasks
+        // still in the batch_queue use the old generation and cannot corrupt the
+        // new stream's dependency counters or cause spurious task spawning.
+        shared.slot_generation[slot_id].fetch_add(1, Ordering::SeqCst);
 
         if let Some(tb) = &shared.time_buffer {
             tb.start_slot_processing(slot_id);

@@ -2,7 +2,7 @@ use core_affinity;
 use parking_lot::RwLock;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{self, sleep, spawn, JoinHandle};
 use std::time::{Duration, Instant};
@@ -20,10 +20,14 @@ use crate::runtime_funcs::*;
 use crate::scheduler::SchedulerImpl;
 use crate::time_buffer::{TimeBufferManager, TimingMethod};
 use crate::{buffers::*, IdType, Record};
+use crossbeam_channel::bounded as cb_bounded;
 use flume::{Receiver, Sender};
 use synstream_types::*;
 
 pub const RUN_SLEEP: Duration = Duration::from_secs(10);
+
+/// Capacity for the bounded crossbeam batch_queue (ring-buffer; no per-send allocation).
+const BATCH_QUEUE_CAPACITY: usize = 65536;
 
 // Per-resolution-thread reusable buffers — avoids heap allocation on the hot path.
 thread_local! {
@@ -129,8 +133,7 @@ impl SynRt {
                     NodePriority::Normal => Priority::Normal,
                     NodePriority::Low => Priority::Low,
                 };
-                entry.affinity_group =
-                    scheduler.get_affinity_group(node.use_workers.as_ref());
+                entry.affinity_group = scheduler.get_affinity_group(node.use_workers.as_ref());
             }
         }
 
@@ -166,10 +169,14 @@ impl SynRt {
 
         let job_counter = Arc::new(AtomicUsize::new(0));
 
-        // Create Flume MPSC channel for lock-free task completion delivery.
-        // Channel carries only NodeInfo tokens; results are pre-stored in node_results by workers.
-        let (batch_queue_tx, batch_queue_rx): (Sender<NodeInfo>, Receiver<NodeInfo>) =
-            flume::unbounded();
+        // Create bounded crossbeam channel for lock-free task completion delivery.
+        // Ring-buffer internals eliminate per-send Box::new; ring-buffer pop replaces
+        // linked-list drain. Channel carries only NodeInfo tokens; results are pre-stored
+        // in node_results by workers.
+        let (batch_queue_tx, batch_queue_rx): (
+            crate::runtime_funcs::BatchQueueTx,
+            crate::runtime_funcs::BatchQueueRx,
+        ) = cb_bounded(BATCH_QUEUE_CAPACITY);
 
         // Initialize shared dependency tracking structures
         let dependency_count_vec: Vec<usize> = app_graph.dependency_count_vec();
@@ -204,70 +211,40 @@ impl SynRt {
             resolution_state.debug_info()
         );
 
-        // Initialize remaining nodes trackers with AtomicUsize for thread-safe access
-        let mut remaining_nodes = Vec::new();
-        let mut remaining_cond_nodes = Vec::new();
-        let mut remaining_init = Vec::new(); // Store initial values for reinit
-        let mut node_id_to_rem = vec![0; app_graph.nodes.len()];
-        let mut node_id_is_cond = vec![false; app_graph.nodes.len()]; // Track which nodes are condition nodes
-
-        for _slot in 0..slots {
-            let mut slot_remaining = Vec::new();
-            let mut slot_cond_remaining = Vec::new();
-            let mut slot_remaining_init = Vec::new();
-
-            for node_id in 0..app_graph.nodes.len() {
-                if app_graph.initial_nodes.contains(&(node_id as IdType)) {
-                    slot_remaining.push(AtomicUsize::new(0));
-                    slot_remaining_init.push(0);
-                    node_id_to_rem[node_id] = slot_remaining.len() - 1;
-                    node_id_is_cond[node_id] = false;
-                } else if !app_graph.condition_nodes.contains(&(node_id as IdType)) {
-                    let factor = node_cache[node_id].factor;
-                    slot_remaining.push(AtomicUsize::new(factor));
-                    slot_remaining_init.push(factor);
-                    node_id_to_rem[node_id] = slot_remaining.len() - 1;
-                    node_id_is_cond[node_id] = false;
-                } else {
-                    slot_cond_remaining.push(AtomicUsize::new(node_cache[node_id].factor));
-                    node_id_to_rem[node_id] = slot_cond_remaining.len() - 1;
-                    node_id_is_cond[node_id] = true;
-                }
-            }
-            remaining_nodes.push(slot_remaining);
-            remaining_cond_nodes.push(slot_cond_remaining);
-            remaining_init.push(slot_remaining_init);
-        }
+        // Compute O(1) slot completion counters from node_cache (no per-slot Vec needed).
+        // total_tasks: sum of factors for non-initial, non-condition nodes (dep-tracked tasks).
+        // total_cond_tasks: sum of factors for condition nodes.
+        let total_tasks: usize = node_cache
+            .iter()
+            .filter(|nc| !nc.is_initial && !nc.is_condition)
+            .map(|nc| nc.factor)
+            .sum();
+        let total_cond_tasks: usize = node_cache
+            .iter()
+            .filter(|nc| nc.is_condition)
+            .map(|nc| nc.factor)
+            .sum();
 
         // Initialize O(1) slot completion counters - Phase 1.2 optimization
         // These replace the O(N×F) linear scan in slot completion checking
-        let mut slot_pending_tasks = Vec::with_capacity(slots);
-        let mut slot_pending_cond_tasks = Vec::with_capacity(slots);
+        let slot_pending_tasks: Vec<AtomicUsize> =
+            (0..slots).map(|_| AtomicUsize::new(total_tasks)).collect();
+        let slot_pending_cond_tasks: Vec<AtomicUsize> = (0..slots)
+            .map(|_| AtomicUsize::new(total_cond_tasks))
+            .collect();
 
-        for slot in 0..slots {
-            // Sum all initial dependency counts for non-initial nodes in this slot
-            let total_tasks: usize = remaining_init[slot].iter().sum();
-            slot_pending_tasks.push(AtomicUsize::new(total_tasks));
-
-            // Sum all condition node factors for this slot
-            let total_cond_tasks: usize = remaining_cond_nodes[slot]
-                .iter()
-                .map(|atomic| atomic.load(Ordering::SeqCst))
-                .sum();
-            slot_pending_cond_tasks.push(AtomicUsize::new(total_cond_tasks));
-        }
-
-        // Initialize condition spawn counters - tracks remaining instances to spawn per condition node
-        // Used to skip condition evaluation once all instances have been spawned
-        let cond_instances_to_spawn: Vec<Vec<AtomicUsize>> = (0..slots)
+        // Initialize condition spawn counters - tracks remaining instances to spawn per condition node.
+        // Each AtomicU64 packs (gen: u32, remaining_spawns: u32). Generation mismatch triggers
+        // lazy reinit to nc.factor, eliminating the O(cond_nodes) reset loop at slot completion.
+        let cond_instances_to_spawn: Vec<Vec<AtomicU64>> = (0..slots)
             .map(|_| {
                 node_cache
                     .iter()
                     .map(|nc| {
                         if nc.is_condition {
-                            AtomicUsize::new(nc.factor) // Start with factor count
+                            AtomicU64::new(crate::buffers::gen_pack(0, nc.factor as u32))
                         } else {
-                            AtomicUsize::new(0) // Non-condition nodes: not used
+                            AtomicU64::new(crate::buffers::gen_pack(0, 0))
                         }
                     })
                     .collect()
@@ -359,15 +336,11 @@ impl SynRt {
             target_batch_size,
             batch_timeout_us,
             resolution_state,
-            remaining_nodes: Arc::new(remaining_nodes),
-            remaining_cond_nodes: Arc::new(remaining_cond_nodes),
-            node_id_to_rem: Arc::new(node_id_to_rem),
-            node_id_is_cond: Arc::new(node_id_is_cond),
-            remaining_init: Arc::new(remaining_init),
             initial_prep_done: Arc::new(AtomicUsize::new(0)),
             slot_pending_tasks: Arc::new(slot_pending_tasks),
             slot_pending_cond_tasks: Arc::new(slot_pending_cond_tasks),
             cond_instances_to_spawn: Arc::new(cond_instances_to_spawn),
+            slot_generation: Arc::new((0..slots).map(|_| AtomicU64::new(0)).collect()),
             slot_states: Arc::new(RwLock::new(vec![SlotState::Inactive; slots])),
             last_slot_assigned: Arc::new(AtomicUsize::new(0)),
             slot_priority_enabled,
@@ -1154,7 +1127,7 @@ impl SynRt {
 // Helper Functions
 impl SynRt {
     fn receive_batch<T>(
-        rx: &Receiver<T>,
+        rx: &crossbeam_channel::Receiver<T>,
         target_batch_size: usize,
         receive_timeout: Duration,
     ) -> Vec<T> {
@@ -1262,12 +1235,9 @@ impl SynRt {
 
                             // Phase 2: Decrement task counters
                             let node_id_usize = node_info.id as usize;
-                            let node_id_to_rem_idx = shared.node_id_to_rem[node_id_usize];
                             let node_cache_entry = &shared.node_cache[node_id_usize];
 
                             if node_cache_entry.is_condition {
-                                shared.remaining_cond_nodes[node_info.slot][node_id_to_rem_idx]
-                                    .fetch_sub(1, Ordering::SeqCst);
                                 let prev_cond = shared.slot_pending_cond_tasks[node_info.slot]
                                     .fetch_sub(1, Ordering::SeqCst);
                                 if prev_cond <= 10 || prev_cond % 100 == 0 {
@@ -1280,8 +1250,6 @@ impl SynRt {
                                     });
                                 }
                             } else if !node_cache_entry.is_initial {
-                                shared.remaining_nodes[node_info.slot][node_id_to_rem_idx]
-                                    .fetch_sub(1, Ordering::SeqCst);
                                 let _ = shared.slot_pending_tasks[node_info.slot]
                                     .fetch_sub(1, Ordering::SeqCst);
                             }
@@ -1290,14 +1258,24 @@ impl SynRt {
                             collect_successors_for_node_into(&shared, &node_info, &mut succ_buf);
                             sched.clear();
 
+                            // Load slot generation once per node (all successors share same slot)
+                            let slot_gen = shared.slot_generation[node_info.slot]
+                                .load(Ordering::SeqCst) as u32;
+
                             for (_succ_info, has_cond, succ_id, pred_group) in succ_buf.iter() {
                                 let succ_node_id = *succ_id as usize;
 
-                                // Skip condition evaluation if all instances already spawned
+                                // Skip condition evaluation if all instances already spawned.
+                                // Use generational lazy check: if stored gen != slot_gen, treat as full factor.
                                 if *has_cond {
-                                    let remaining_spawns =
-                                        shared.cond_instances_to_spawn[node_info.slot][succ_node_id]
-                                            .load(Ordering::SeqCst);
+                                    let packed = shared.cond_instances_to_spawn[node_info.slot][succ_node_id]
+                                        .load(Ordering::SeqCst);
+                                    let stored_gen = crate::buffers::gen_unpack_gen(packed);
+                                    let remaining_spawns = if stored_gen == slot_gen {
+                                        crate::buffers::gen_unpack_val(packed)
+                                    } else {
+                                        shared.node_cache[succ_node_id].factor as u32 // stale gen → full factor
+                                    };
                                     if remaining_spawns == 0 {
                                         continue;
                                     }
@@ -1307,6 +1285,7 @@ impl SynRt {
                                 shared.resolution_state.decrease_and_get_ready_into(
                                     node_info.slot,
                                     succ_node_id,
+                                    slot_gen,
                                     *pred_group,
                                     1,
                                     &mut ready,
@@ -1348,26 +1327,41 @@ impl SynRt {
 
                                         if condition_passed {
                                             sched.push(scheduled_succ_info.clone());
-                                            let prev_spawns =
-                                                shared.cond_instances_to_spawn[node_info.slot]
-                                                    [succ_node_id]
-                                                    .fetch_sub(1, Ordering::Release);
+                                            // Decrement cond_instances_to_spawn with generational lazy reinit
+                                            let factor = shared.node_cache[succ_node_id].factor as u32;
+                                            let prev_packed = shared.cond_instances_to_spawn[node_info.slot]
+                                                [succ_node_id]
+                                                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |packed| {
+                                                    let stored_gen = crate::buffers::gen_unpack_gen(packed);
+                                                    let current = if stored_gen == slot_gen {
+                                                        crate::buffers::gen_unpack_val(packed)
+                                                    } else {
+                                                        factor // lazy reinit
+                                                    };
+                                                    Some(crate::buffers::gen_pack(slot_gen, current.saturating_sub(1)))
+                                                })
+                                                .unwrap();
+                                            let prev_spawns = {
+                                                let sg = crate::buffers::gen_unpack_gen(prev_packed);
+                                                if sg == slot_gen { crate::buffers::gen_unpack_val(prev_packed) as usize } else { factor as usize }
+                                            };
                                             print_debug(|| {
                                                 format!(
                                                     "Condition passed for node {} ({}) index {}: remaining spawns {} -> {}",
                                                     succ_node_id, succ_cache.name,
                                                     scheduled_succ_info.index,
-                                                    prev_spawns, prev_spawns - 1
+                                                    prev_spawns, prev_spawns.saturating_sub(1)
                                                 )
                                             });
                                         } else {
                                             shared
                                                 .resolution_state
-                                                .increment_dependency(&scheduled_succ_info);
+                                                .increment_dependency(&scheduled_succ_info, slot_gen);
                                             shared.resolution_state.reset_sent(
                                                 node_info.slot,
                                                 scheduled_succ_info.id as usize,
                                                 scheduled_succ_info.index,
+                                                slot_gen,
                                             );
                                         }
                                     }
@@ -1486,17 +1480,23 @@ impl SynRt {
                     continue; // Another thread already owns this completion
                 }
 
+                // Double-check after winning the CAS: re-read counters with SeqCst to rule
+                // out a stale win.
+                let re_pending = shared.slot_pending_tasks[proc_slot].load(Ordering::SeqCst);
+                let re_cond = shared.slot_pending_cond_tasks[proc_slot].load(Ordering::SeqCst);
+                let re_proc = shared.slot_processing_count[proc_slot].load(Ordering::SeqCst);
+                if re_pending != 0 || re_cond != 0 || re_proc != 0 {
+                    // Stale win: another thread already completed and reset this slot.
+                    shared.resolution_state.unmark_slot_completed(proc_slot);
+                    continue;
+                }
+
                 print_debug(|| {
                     format!(
                         "Thread {:?} -- Completed iteration at slot {}",
                         thread_id, proc_slot
                     )
                 });
-
-                // Reset dependency_map for this slot via resolution state
-                shared
-                    .resolution_state
-                    .reinit_dependencies(&shared.graph.nodes, proc_slot);
 
                 // Reset packet completion flag for the next stream
                 // Allows completion detection to work for the new iteration
@@ -1506,63 +1506,34 @@ impl SynRt {
                 // This ensures the network node index starts at 0 for the new stream
                 shared.slot_packet_counters[proc_slot].store(0, Ordering::SeqCst);
 
-                // Reinit remaining_nodes for this slot using pre-computed init values (lock-free)
-                let slot_remaining = &shared.remaining_nodes[proc_slot];
-                let slot_init = &shared.remaining_init[proc_slot];
-                for (node_rem_idx, init_val) in slot_init.iter().enumerate() {
-                    slot_remaining[node_rem_idx].store(*init_val, Ordering::SeqCst);
-                }
+                // Compute total_tasks and total_cond_tasks from node_cache (O(nodes), not O(N×F))
+                let total_tasks: usize = shared
+                    .node_cache
+                    .iter()
+                    .filter(|nc| !nc.is_initial && !nc.is_condition)
+                    .map(|nc| nc.factor)
+                    .sum();
+                let total_cond_tasks: usize = shared
+                    .node_cache
+                    .iter()
+                    .filter(|nc| nc.is_condition)
+                    .map(|nc| nc.factor)
+                    .sum();
 
-                // Reinit slot-wide counters for O(1) completion check
-                let total_tasks: usize = slot_init.iter().sum();
                 shared.slot_pending_tasks[proc_slot].store(total_tasks, Ordering::SeqCst);
-
-                print_debug(|| {
-                    format!(
-                        "RESET slot {} counters: slot_pending_tasks={}, slot_pending_cond_tasks will be set next",
-                        proc_slot, total_tasks
-                    )
-                });
-
-                // Reinit remaining_cond_nodes for this slot (reset to factor values)
-                let slot_cond_remaining = &shared.remaining_cond_nodes[proc_slot];
-                let mut total_cond_tasks = 0;
-                for node_id in 0..shared.graph.nodes.len() {
-                    if shared.node_id_is_cond[node_id] {
-                        let node_id_to_rem_idx = shared.node_id_to_rem[node_id];
-                        let factor = shared.node_cache[node_id].factor;
-                        slot_cond_remaining[node_id_to_rem_idx].store(factor, Ordering::SeqCst);
-                        total_cond_tasks += factor;
-                    }
-                }
-
-                // Reinit slot-wide condition counter
                 shared.slot_pending_cond_tasks[proc_slot].store(total_cond_tasks, Ordering::SeqCst);
 
                 print_debug(|| {
                     format!(
-                        "RESET slot {} cond counter: slot_pending_cond_tasks={}",
-                        proc_slot, total_cond_tasks
+                        "RESET slot {} counters: slot_pending_tasks={}, slot_pending_cond_tasks={}",
+                        proc_slot, total_tasks, total_cond_tasks
                     )
                 });
 
-                // Reset in-flight processing counter for next stream
-                // Must be 0 before new stream starts processing, otherwise completion detection will wait forever
-                shared.slot_processing_count[proc_slot].store(0, Ordering::SeqCst);
-
-                // Reset condition spawn counters for next stream
-                // Each condition node starts with its full factor count available to spawn
-                for (node_idx, node_cache_entry) in shared.node_cache.iter().enumerate() {
-                    if node_cache_entry.is_condition {
-                        shared.cond_instances_to_spawn[proc_slot][node_idx]
-                            .store(node_cache_entry.factor, Ordering::SeqCst);
-                    }
-                }
-
-                // Clear nodes_sent_to_queue for this slot - MUST happen before new nodes spawn
-                shared.resolution_state.clear_slot_sent_flags(proc_slot);
-
                 // Unmark slot completion flag so it can complete again for the next stream.
+                // cond_instances_to_spawn, NodeDependencyEntry, and instances_sent are all
+                // lazily reinitialised via slot_generation bump at new-stream start (in
+                // activate_next_slot / assign_stream_to_available_slot / restart path).
                 shared.resolution_state.unmark_slot_completed(proc_slot);
 
                 print_debug(|| {
@@ -1642,6 +1613,22 @@ impl SynRt {
                 let should_restart_completing_slot = can_restart && !shared.slot_priority_enabled;
 
                 if should_restart_completing_slot {
+                    // Bump slot generation for the new stream — lazily reinitialises all
+                    // NodeDependencyEntry, instances_sent, and cond_instances_to_spawn entries.
+                    // Done here (new-stream start) rather than in the completion path so that
+                    // any old-stream tasks still in flight use the old generation and cannot
+                    // trigger spurious spawning or corrupt the new stream's dependency counters.
+                    shared.slot_generation[proc_slot].fetch_add(1, Ordering::SeqCst);
+
+                    // Restart timing for the new stream on this slot.
+                    // start_slot_processing is normally called in assign_stream_to_available_slot
+                    // (first assignment) and activate_next_slot (Buffering→Active). For a slot
+                    // that restarts in-place (no new assignment), we must call it here so that
+                    // the next finish_slot_processing call does not panic on a None start time.
+                    if let Some(tb) = &shared.time_buffer {
+                        tb.start_slot_processing(proc_slot);
+                    }
+
                     // Spawn initial compute nodes for the restarting slot
                     // (network nodes are handled by receivers, not scheduled)
                     let compute_nodes = initial_nodes(&shared, vec![proc_slot]);

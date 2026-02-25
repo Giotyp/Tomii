@@ -34,7 +34,8 @@ pub trait ResolutionState: Send + Sync {
     fn try_mark_sent(&self, slot: usize, node_id: usize, index: usize) -> bool;
 
     // Reset the sent flag for a node (used when conditions not met)
-    fn reset_sent(&self, slot: usize, node_id: usize, index: usize);
+    // slot_gen: current slot generation for generational sent-flag reset
+    fn reset_sent(&self, slot: usize, node_id: usize, index: usize, slot_gen: u32);
 
     // Check if a slot has been marked as completed
     fn is_slot_completed(&self, slot: usize) -> bool;
@@ -57,7 +58,8 @@ pub trait ResolutionState: Send + Sync {
     fn decrease_dependency(&self, node_info: &NodeInfo) -> Option<usize>;
 
     // Increase dependency count and return new count
-    fn increment_dependency(&self, node_info: &NodeInfo) -> Option<usize>;
+    // slot_gen: current slot generation for lazy generational reinit
+    fn increment_dependency(&self, node_info: &NodeInfo, slot_gen: u32) -> Option<usize>;
 
     // Reinitialize dependency map for a slot
     fn reinit_dependencies(&self, nodes: &Vec<crate::graph_struct::Node>, slot: usize);
@@ -66,9 +68,10 @@ pub trait ResolutionState: Send + Sync {
     // Decrements the dependency counter for a node in a slot by `count` and returns
     // all instance indices that are now ready to spawn. This replaces N per-instance
     // decrements with aggregated decrements, enabling threshold-based spawning.
+    // slot_gen: current slot generation (u32) for lazy generational reinit
     // group: None → global decrement (all groups), Some(g) → decrement group g only
     // count: number of decrements to apply (when multiple predecessors complete in same batch)
-    fn decrease_and_get_ready(&self, _slot: usize, _node_id: usize, _group: Option<usize>, _count: usize) -> Vec<usize> {
+    fn decrease_and_get_ready(&self, _slot: usize, _node_id: usize, _slot_gen: u32, _group: Option<usize>, _count: usize) -> Vec<usize> {
         // Default implementation for backward compatibility: return empty
         // This allows implementations that don't override it to continue working
         Vec::new()
@@ -76,9 +79,9 @@ pub trait ResolutionState: Send + Sync {
 
     // Hot-path variant: writes ready indices into caller-supplied buffer (no allocation).
     // Default delegates to the Vec-returning version for backward compatibility.
-    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
+    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
         ready.clear();
-        ready.extend(self.decrease_and_get_ready(slot, node_id, group, count));
+        ready.extend(self.decrease_and_get_ready(slot, node_id, slot_gen, group, count));
     }
 
     // Debug info for trait object printing
@@ -88,11 +91,13 @@ pub trait ResolutionState: Send + Sync {
 /// Per-node dependency entry for single-threaded threshold-based spawning.
 /// Mirrors `NodeDependencyEntry` logic but without atomic overhead.
 /// Supports per-group counters for fine-grained barrier dependencies.
+///
+/// Uses a plain `u32` generation field per entry (no atomics needed in single-threaded mode).
 struct StNodeDepEntry {
-    /// Per-group counters (length = num_groups)
-    remaining_deps: Vec<usize>,
-    /// Per-instance sent flag (prevents double-spawn)
-    instances_sent: Vec<bool>,
+    /// Per-group packed (gen: u32, remaining: u32) as u64
+    remaining_deps: Vec<u64>,
+    /// Per-instance packed (gen: u32, sent: u32) as u64
+    instances_sent: Vec<u64>,
     /// Node factor (number of instances)
     factor: usize,
     /// Instances per group
@@ -101,10 +106,10 @@ struct StNodeDepEntry {
     num_groups: usize,
     /// Dependencies per instance (within a group)
     deps_per_instance: usize,
+    /// Initial dependencies per group (for lazy reinit)
+    deps_per_group: u32,
     /// Whether this node has a barrier dependency
     has_barrier: bool,
-    /// Initial total_deps value (for reinit)
-    _init_total_deps: usize,
 }
 
 impl StNodeDepEntry {
@@ -113,18 +118,20 @@ impl StNodeDepEntry {
             Some(gs) if gs > 0 && gs < factor => (gs, factor / gs),
             _ => (factor, 1),
         };
-        let deps_per_group = if num_groups > 0 { total_deps / num_groups } else { 0 };
-        let deps_per_instance = if group_size > 0 { deps_per_group / group_size } else { 0 };
+        let dpg = if num_groups > 0 { total_deps / num_groups } else { 0 };
+        let deps_per_instance = if group_size > 0 { dpg / group_size } else { 0 };
+        let deps_per_group = dpg as u32;
 
+        use crate::buffers::{gen_pack};
         Self {
-            remaining_deps: vec![deps_per_group; num_groups],
-            instances_sent: vec![false; factor],
+            remaining_deps: (0..num_groups).map(|_| gen_pack(0, deps_per_group)).collect(),
+            instances_sent: (0..factor).map(|_| gen_pack(0, 0)).collect(),
             factor,
             group_size,
             num_groups,
             deps_per_instance,
+            deps_per_group,
             has_barrier,
-            _init_total_deps: total_deps,
         }
     }
 
@@ -136,8 +143,9 @@ impl StNodeDepEntry {
         (self.group_size - idx_in_group - 1) * self.deps_per_instance
     }
 
-    /// Decrement by count, write newly-ready instance indices into `ready` (cleared first).
-    fn decrease_and_get_ready_into(&mut self, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
+    /// Decrement by count with generational lazy reinit; write newly-ready indices into `ready`.
+    fn decrease_and_get_ready_into(&mut self, slot_gen: u32, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
+        use crate::buffers::{gen_pack, gen_unpack_gen, gen_unpack_val};
         ready.clear();
 
         let (g_start, g_end) = match group {
@@ -147,10 +155,16 @@ impl StNodeDepEntry {
         };
 
         for g in g_start..g_end {
-            if self.remaining_deps[g] > 0 {
-                self.remaining_deps[g] = self.remaining_deps[g].saturating_sub(count);
-            }
-            let new_remaining = self.remaining_deps[g];
+            let packed = self.remaining_deps[g];
+            let stored_gen = gen_unpack_gen(packed);
+            let current = if stored_gen == slot_gen {
+                gen_unpack_val(packed)
+            } else {
+                self.deps_per_group // lazy reinit
+            };
+            let new_val = current.saturating_sub(count as u32);
+            self.remaining_deps[g] = gen_pack(slot_gen, new_val);
+            let new_remaining = new_val as usize;
 
             let start = g * self.group_size;
             let end = std::cmp::min(start + self.group_size, self.factor);
@@ -158,8 +172,11 @@ impl StNodeDepEntry {
             if self.has_barrier {
                 if new_remaining == 0 {
                     for idx in start..end {
-                        if !self.instances_sent[idx] {
-                            self.instances_sent[idx] = true;
+                        let s = self.instances_sent[idx];
+                        let s_gen = gen_unpack_gen(s);
+                        let s_sent = gen_unpack_val(s) != 0;
+                        if !(s_gen == slot_gen && s_sent) {
+                            self.instances_sent[idx] = gen_pack(slot_gen, 1);
                             ready.push(idx);
                         }
                     }
@@ -170,8 +187,11 @@ impl StNodeDepEntry {
                     for idx in start..end {
                         let idx_in_group = idx - start;
                         if new_remaining <= self.threshold_for_instance_in_group(idx_in_group) {
-                            if !self.instances_sent[idx] {
-                                self.instances_sent[idx] = true;
+                            let s = self.instances_sent[idx];
+                            let s_gen = gen_unpack_gen(s);
+                            let s_sent = gen_unpack_val(s) != 0;
+                            if !(s_gen == slot_gen && s_sent) {
+                                self.instances_sent[idx] = gen_pack(slot_gen, 1);
                                 ready.push(idx);
                             }
                         }
@@ -181,41 +201,31 @@ impl StNodeDepEntry {
         }
     }
 
-    #[allow(dead_code)]
-    fn decrease_and_get_ready(&mut self, group: Option<usize>, count: usize) -> Vec<usize> {
-        let mut ready = Vec::new();
-        self.decrease_and_get_ready_into(group, count, &mut ready);
-        ready
-    }
-
-    fn increment(&mut self, instance_idx: Option<usize>) {
+    fn increment(&mut self, slot_gen: u32, instance_idx: Option<usize>) {
+        use crate::buffers::{gen_pack, gen_unpack_gen, gen_unpack_val};
         let g = match instance_idx {
             Some(idx) => std::cmp::min(idx / self.group_size, self.num_groups - 1),
             None => 0,
         };
-        self.remaining_deps[g] += 1;
+        let packed = self.remaining_deps[g];
+        let stored_gen = gen_unpack_gen(packed);
+        let current = if stored_gen == slot_gen { gen_unpack_val(packed) } else { self.deps_per_group };
+        self.remaining_deps[g] = gen_pack(slot_gen, current.saturating_add(1));
     }
 
-    fn reset_sent(&mut self, idx: usize) {
+    fn reset_sent(&mut self, slot_gen: u32, idx: usize) {
+        use crate::buffers::gen_pack;
         if idx < self.instances_sent.len() {
-            self.instances_sent[idx] = false;
+            self.instances_sent[idx] = gen_pack(slot_gen, 0);
         }
     }
 
     fn clear_sent(&mut self) {
-        for flag in self.instances_sent.iter_mut() {
-            *flag = false;
-        }
+        // No-op: generation bump in slot_generation handles lazy clearing.
     }
 
-    fn reinit(&mut self, new_total_deps: usize) {
-        let deps_per_group = if self.num_groups > 0 { new_total_deps / self.num_groups } else { 0 };
-        for counter in self.remaining_deps.iter_mut() {
-            *counter = deps_per_group;
-        }
-        for flag in self.instances_sent.iter_mut() {
-            *flag = false;
-        }
+    fn reinit(&mut self, _new_total_deps: usize) {
+        // No-op: generation bump in slot_generation handles lazy reinit.
     }
 }
 
@@ -261,10 +271,14 @@ impl SingleThreadedState {
 impl ResolutionState for SingleThreadedState {
     #[inline]
     fn try_mark_sent(&self, slot: usize, node_id: usize, index: usize) -> bool {
+        use crate::buffers::{gen_pack, gen_unpack_gen, gen_unpack_val};
         let deps = self.node_deps.get_mut();
         if slot < deps.len() && node_id < deps[slot].len() && index < deps[slot][node_id].factor {
-            if !deps[slot][node_id].instances_sent[index] {
-                deps[slot][node_id].instances_sent[index] = true;
+            let packed = deps[slot][node_id].instances_sent[index];
+            // Use gen=0 as legacy sentinel — single-threaded path doesn't use generations here
+            let is_sent = gen_unpack_gen(packed) == 0 && gen_unpack_val(packed) != 0;
+            if !is_sent {
+                deps[slot][node_id].instances_sent[index] = gen_pack(0, 1);
                 return true;
             }
         }
@@ -272,10 +286,10 @@ impl ResolutionState for SingleThreadedState {
     }
 
     #[inline]
-    fn reset_sent(&self, slot: usize, node_id: usize, index: usize) {
+    fn reset_sent(&self, slot: usize, node_id: usize, index: usize, slot_gen: u32) {
         let deps = self.node_deps.get_mut();
         if slot < deps.len() && node_id < deps[slot].len() {
-            deps[slot][node_id].reset_sent(index);
+            deps[slot][node_id].reset_sent(slot_gen, index);
         }
     }
 
@@ -317,6 +331,7 @@ impl ResolutionState for SingleThreadedState {
 
     #[inline]
     fn decrease_dependency(&self, node_info: &NodeInfo) -> Option<usize> {
+        use crate::buffers::{gen_pack, gen_unpack_gen, gen_unpack_val};
         // Legacy per-instance method - no longer primary path but kept for compatibility
         let deps = self.node_deps.get_mut();
         let slot = node_info.slot;
@@ -324,22 +339,26 @@ impl ResolutionState for SingleThreadedState {
         if slot < deps.len() && node_id < deps[slot].len() {
             let entry = &mut deps[slot][node_id];
             let g = std::cmp::min(node_info.index / entry.group_size, entry.num_groups - 1);
-            if entry.remaining_deps[g] > 0 {
-                entry.remaining_deps[g] -= 1;
-            }
-            return Some(entry.remaining_deps[g]);
+            let packed = entry.remaining_deps[g];
+            let stored_gen = gen_unpack_gen(packed);
+            let current = gen_unpack_val(packed);
+            let new_val = current.saturating_sub(1);
+            entry.remaining_deps[g] = gen_pack(stored_gen, new_val);
+            return Some(new_val as usize);
         }
         None
     }
 
     #[inline]
-    fn increment_dependency(&self, node_info: &NodeInfo) -> Option<usize> {
+    fn increment_dependency(&self, node_info: &NodeInfo, slot_gen: u32) -> Option<usize> {
         let deps = self.node_deps.get_mut();
         let slot = node_info.slot;
         let node_id = node_info.id as usize;
         if slot < deps.len() && node_id < deps[slot].len() {
-            deps[slot][node_id].increment(Some(node_info.index));
-            return Some(deps[slot][node_id].remaining_deps[0]);
+            deps[slot][node_id].increment(slot_gen, Some(node_info.index));
+            use crate::buffers::gen_unpack_val;
+            let g = 0;
+            return Some(gen_unpack_val(deps[slot][node_id].remaining_deps[g]) as usize);
         }
         None
     }
@@ -357,16 +376,16 @@ impl ResolutionState for SingleThreadedState {
         }
     }
 
-    fn decrease_and_get_ready(&self, slot: usize, node_id: usize, group: Option<usize>, count: usize) -> Vec<usize> {
+    fn decrease_and_get_ready(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize) -> Vec<usize> {
         let mut ready = Vec::new();
-        self.decrease_and_get_ready_into(slot, node_id, group, count, &mut ready);
+        self.decrease_and_get_ready_into(slot, node_id, slot_gen, group, count, &mut ready);
         ready
     }
 
-    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
+    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
         let deps = self.node_deps.get_mut();
         if slot < deps.len() && node_id < deps[slot].len() {
-            deps[slot][node_id].decrease_and_get_ready_into(group, count, ready);
+            deps[slot][node_id].decrease_and_get_ready_into(slot_gen, group, count, ready);
         } else {
             ready.clear();
         }
@@ -423,9 +442,9 @@ impl ResolutionState for MultiThreadedState {
     }
 
     #[inline]
-    fn reset_sent(&self, slot: usize, node_id: usize, index: usize) {
+    fn reset_sent(&self, slot: usize, node_id: usize, index: usize, slot_gen: u32) {
         // Delegate to NodeDepMap
-        self.node_dep_map.reset_sent_flag(slot, node_id, index);
+        self.node_dep_map.reset_sent_flag(slot, node_id, slot_gen, index);
     }
 
     #[inline]
@@ -468,10 +487,10 @@ impl ResolutionState for MultiThreadedState {
     }
 
     #[inline]
-    fn increment_dependency(&self, node_info: &NodeInfo) -> Option<usize> {
+    fn increment_dependency(&self, node_info: &NodeInfo, slot_gen: u32) -> Option<usize> {
         // Delegate to NodeDepMap
         self.node_dep_map
-            .increment_dependency(node_info.slot, node_info.id as usize, Some(node_info.index))
+            .increment_dependency(node_info.slot, node_info.id as usize, slot_gen, Some(node_info.index))
     }
 
     #[inline]
@@ -482,15 +501,15 @@ impl ResolutionState for MultiThreadedState {
     }
 
     #[inline]
-    fn decrease_and_get_ready(&self, slot: usize, node_id: usize, group: Option<usize>, count: usize) -> Vec<usize> {
+    fn decrease_and_get_ready(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize) -> Vec<usize> {
         let mut ready = Vec::new();
-        self.node_dep_map.decrease_and_get_ready_into(slot, node_id, group, count, &mut ready);
+        self.node_dep_map.decrease_and_get_ready_into(slot, node_id, slot_gen, group, count, &mut ready);
         ready
     }
 
     #[inline]
-    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
-        self.node_dep_map.decrease_and_get_ready_into(slot, node_id, group, count, ready);
+    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
+        self.node_dep_map.decrease_and_get_ready_into(slot, node_id, slot_gen, group, count, ready);
     }
 
     fn debug_info(&self) -> String {
