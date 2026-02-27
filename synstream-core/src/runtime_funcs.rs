@@ -1110,6 +1110,41 @@ fn get_object_value(obj_vec: &[CmTypes], node_index: usize) -> CmTypes {
     }
 }
 
+/// Spin-wait for a predecessor result that is temporarily absent because its
+/// producer task is still executing on a parallel worker.
+///
+/// This handles the race where the threshold-based dispatcher fires a successor
+/// (e.g. copy_op[0]) after *any* predecessor completes, even though the specific
+/// predecessor instance that this successor reads (e.g. gen_b[0]) has not yet
+/// stored its result.  With a single worker the ordering is serial and the race
+/// cannot occur; with multiple workers it can.
+///
+/// Returns `Some(result)` once the result is visible, or `None` if the slot
+/// generation changes (slot recycled → task is stale and should be dropped).
+#[cold]
+#[inline(never)]
+fn spin_wait_for_result(
+    shared: &Arc<SharedData>,
+    node_info: &NodeInfo,
+) -> Option<synstream_types::CmTypes> {
+    loop {
+        if let Some(result) = shared.node_results.get(node_info) {
+            return Some(result);
+        }
+        let exec_slot = EXECUTING_SLOT.with(|s| *s.borrow());
+        let exec_gen = EXECUTING_GEN.with(|g| *g.borrow());
+        if exec_slot != usize::MAX {
+            let current_gen =
+                shared.slot_generation[exec_slot].load(Ordering::SeqCst) as u32;
+            if exec_gen != current_gen {
+                STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = true);
+                return None;
+            }
+        }
+        std::hint::spin_loop();
+    }
+}
+
 #[inline]
 pub fn collect_arg_result(
     arg: &Arg,
@@ -1174,26 +1209,14 @@ pub fn collect_arg_result(
                 let node_info = NodeInfo::new(*res_node_id as IdType, slot, dep_idx, 0);
                 if let Some(result) = shared.node_results.get(&node_info) {
                     return Some(vec![result]);
-                } else {
-                    // Result missing — check if gen changed since execute_task's guard.
-                    // If so, reinit_slot cleared results after our gen check passed (TOCTOU race).
-                    let exec_slot = EXECUTING_SLOT.with(|s| *s.borrow());
-                    let exec_gen = EXECUTING_GEN.with(|g| *g.borrow());
-                    if exec_slot != usize::MAX {
-                        let current_gen =
-                            shared.slot_generation[exec_slot].load(Ordering::SeqCst) as u32;
-                        if exec_gen != current_gen {
-                            // Gen changed: task became stale while waiting in Rayon queue.
-                            // Signal execute_task to drop this task silently.
-                            STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = true);
-                            return None;
-                        }
-                    }
-                    panic!(
-                        "Missing result for node_info: {:?} when collecting argument",
-                        node_info
-                    );
                 }
+                // Result temporarily absent: predecessor may still be executing on a
+                // parallel worker (threshold dispatch fired before its store completed).
+                // Spin-wait until the result arrives or the slot becomes stale.
+                return match spin_wait_for_result(shared, &node_info) {
+                    Some(result) => Some(vec![result]),
+                    None => None,
+                };
             }
 
             // 1:1 mapping: indexes.len() == node_factor means each instance
@@ -1206,23 +1229,12 @@ pub fn collect_arg_result(
                     NodeInfo::new(*res_node_id as IdType, slot, pred_index % res_factor, 0);
                 if let Some(result) = shared.node_results.get(&node_info) {
                     return Some(vec![result]);
-                } else {
-                    // Result missing — check if gen changed since execute_task's guard.
-                    let exec_slot = EXECUTING_SLOT.with(|s| *s.borrow());
-                    let exec_gen = EXECUTING_GEN.with(|g| *g.borrow());
-                    if exec_slot != usize::MAX {
-                        let current_gen =
-                            shared.slot_generation[exec_slot].load(Ordering::SeqCst) as u32;
-                        if exec_gen != current_gen {
-                            STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = true);
-                            return None;
-                        }
-                    }
-                    panic!(
-                        "Missing result for node_info: {:?} when collecting argument",
-                        node_info
-                    );
                 }
+                // Spin-wait: predecessor may still be in-flight on another worker.
+                return match spin_wait_for_result(shared, &node_info) {
+                    Some(result) => Some(vec![result]),
+                    None => None,
+                };
             }
 
             // Collect-all path: factor != indexes.len() (e.g., write_res)
@@ -1244,21 +1256,11 @@ pub fn collect_arg_result(
                 if let Some(result) = shared.node_results.get(&node_info) {
                     result_vec.push(result);
                 } else {
-                    // Result missing — check if gen changed since execute_task's guard.
-                    let exec_slot = EXECUTING_SLOT.with(|s| *s.borrow());
-                    let exec_gen = EXECUTING_GEN.with(|g| *g.borrow());
-                    if exec_slot != usize::MAX {
-                        let current_gen =
-                            shared.slot_generation[exec_slot].load(Ordering::SeqCst) as u32;
-                        if exec_gen != current_gen {
-                            STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = true);
-                            return None;
-                        }
+                    // Spin-wait: predecessor may still be in-flight on another worker.
+                    match spin_wait_for_result(shared, &node_info) {
+                        Some(result) => result_vec.push(result),
+                        None => return None, // Stale
                     }
-                    panic!(
-                        "Missing result for node_info: {:?} when collecting argument",
-                        node_info
-                    );
                 }
             }
 
