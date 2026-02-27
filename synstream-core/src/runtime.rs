@@ -254,8 +254,14 @@ impl SynRt {
         // Initialize per-slot buffering queues (stores NodeInfo + packet data)
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
-        let (receiver_sockets, packet_sender, packet_receiver, packet_drop_counters, buffer_pool) =
-            prepare_network_infrastructure(app_graph);
+        let (
+            receiver_sockets,
+            packet_sender,
+            packet_receiver,
+            packet_drop_counters,
+            buffer_return_senders,
+            buffer_return_receivers,
+        ) = prepare_network_infrastructure(app_graph);
 
         // Precompute pred_index_filter and pred_group_by for per-group dependency support
         let num_nodes = app_graph.nodes.len();
@@ -352,7 +358,8 @@ impl SynRt {
             receiver_sockets,
             packet_drop_counters,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
-            buffer_pool,
+            buffer_return_senders,
+            buffer_return_receivers,
             slot_packet_counters: Arc::new((0..slots).map(|_| AtomicUsize::new(0)).collect()),
             streams_receive_counter: Arc::new(AtomicUsize::new(0)),
             // Initialize packet completion flags to false for all slots
@@ -422,10 +429,22 @@ impl SynRt {
                     let shared_clone = Arc::clone(&self.shared);
                     let core_id = receiver_offset + socket_id;
 
+                    // Take the return-channel receiver end for this socket.
+                    // Each receiver is taken exactly once here; subsequent access would panic.
+                    let return_rx = self.shared.buffer_return_receivers[socket_id]
+                        .lock()
+                        .take()
+                        .expect("buffer_return_receivers already taken");
+
                     let handle = thread::Builder::new()
                         .name(format!("rx-{}", socket_id))
                         .spawn(move || {
-                            single_socket_receiver_loop(shared_clone, socket_id, core_id);
+                            single_socket_receiver_loop(
+                                shared_clone,
+                                socket_id,
+                                core_id,
+                                return_rx,
+                            );
                         })
                         .expect("Failed to spawn receiver thread");
                     handles.push(handle);
@@ -447,6 +466,16 @@ impl SynRt {
                     let socket_range = start_socket..end_socket;
                     let socket_range_display = socket_range.clone();
 
+                    // Collect the return-channel receiver ends for all sockets in this thread's range.
+                    let return_rxs: Vec<flume::Receiver<Vec<u8>>> = (start_socket..end_socket)
+                        .map(|sid| {
+                            self.shared.buffer_return_receivers[sid]
+                                .lock()
+                                .take()
+                                .expect("buffer_return_receivers already taken")
+                        })
+                        .collect();
+
                     let shared_clone = Arc::clone(&self.shared);
                     let core_id = receiver_offset + thread_id;
 
@@ -458,6 +487,7 @@ impl SynRt {
                                 thread_id,
                                 socket_range,
                                 core_id,
+                                return_rxs,
                             );
                         })
                         .expect("Failed to spawn receiver thread");
@@ -780,6 +810,7 @@ impl SynRt {
                     for packet_msg in packet_buf.drain(..) {
                         let receiver_core_id = packet_msg.receiver_core_id;
                         let packet_timestamp = packet_msg.timestamp;
+                        let packet_socket_id = packet_msg.socket_id;
                         if let Some(tb) = &shared.time_buffer {
                             // Use Instant for this measurement since PacketMessage.timestamp
                             // is always Instant (from network receiver threads)
@@ -807,12 +838,17 @@ impl SynRt {
                             tb.add_task_time(thread_slot, "Packet Processing", usize::MAX, dur);
                         }
 
-                        // Reclaim the raw packet buffer into the pool.
+                        // Reclaim the raw packet buffer back to the originating receiver thread.
                         // try_unwrap succeeds when refcount == 1 (plugin only borrowed via &[CmTypes],
-                        // did not clone the Arc). On failure the buffer simply drops normally.
+                        // did not clone the Arc). Routes via the per-socket return channel (SPSC,
+                        // no mutex). try_send is non-blocking; if the channel is full the buffer
+                        // simply drops and the receiver will fresh-allocate on the next burst.
                         if let CmTypes::Bytes(arc) = received_bytes_cm {
                             if let Ok(buf) = Arc::try_unwrap(arc) {
-                                shared.buffer_pool.lock().push(buf);
+                                if let Some(tx) = shared.buffer_return_senders.get(packet_socket_id)
+                                {
+                                    let _ = tx.try_send(buf);
+                                }
                             }
                         }
 
@@ -1068,7 +1104,23 @@ impl SynRt {
                     comp_batch.clear();
                     // Extend with (NodeInfo, None): result is already in node_results (pre-stored
                     // by execute_task). The None signals process_batch_resolution to skip Phase 1.
-                    comp_batch.extend(batch.into_iter().map(|n| (n, None)));
+                    // Filter out stale tasks: workers that passed the gen check in execute_task
+                    // before the slot's generation was bumped will complete and submit to
+                    // batch_queue with the old gen. Processing these would corrupt the new
+                    // stream's pending counters and dependency state (Bug #31).
+                    comp_batch.extend(batch.into_iter().filter(|n| {
+                        let current_gen = shared.slot_generation[n.slot].load(Ordering::SeqCst) as u32;
+                        if n.gen != current_gen {
+                            print_debug(|| {
+                                format!(
+                                    "Stale batch completion dropped: node {} slot {} index {} gen {} (current {})",
+                                    n.id, n.slot, n.index, n.gen, current_gen
+                                )
+                            });
+                            return false;
+                        }
+                        true
+                    }).map(|n| (n, None)));
                     Self::process_batch_resolution(
                         &shared,
                         &mut *comp_batch,
@@ -1498,6 +1550,15 @@ impl SynRt {
                     )
                 });
 
+                // Bump slot generation IMMEDIATELY after confirming true completion,
+                // BEFORE any counter resets.  This closes the window where stale tasks
+                // (gen=G) could pass the batch_queue gen filter while counters have
+                // already been reset to their initial values.  With the bump here,
+                // stale completions see current_gen=G+1 != gen=G and are dropped.
+                // Also invalidates old tasks still queued in Rayon (execute_task gen
+                // check) before process_slot_completion clears predecessor results.
+                shared.slot_generation[proc_slot].fetch_add(1, Ordering::SeqCst);
+
                 // Reset packet completion flag for the next stream
                 // Allows completion detection to work for the new iteration
                 shared.slot_packet_complete[proc_slot].store(false, Ordering::SeqCst);
@@ -1531,9 +1592,6 @@ impl SynRt {
                 });
 
                 // Unmark slot completion flag so it can complete again for the next stream.
-                // cond_instances_to_spawn, NodeDependencyEntry, and instances_sent are all
-                // lazily reinitialised via slot_generation bump at new-stream start (in
-                // activate_next_slot / assign_stream_to_available_slot / restart path).
                 shared.resolution_state.unmark_slot_completed(proc_slot);
 
                 print_debug(|| {
@@ -1613,36 +1671,33 @@ impl SynRt {
                 let should_restart_completing_slot = can_restart && !shared.slot_priority_enabled;
 
                 if should_restart_completing_slot {
-                    // Bump slot generation for the new stream — lazily reinitialises all
-                    // NodeDependencyEntry, instances_sent, and cond_instances_to_spawn entries.
-                    // Done here (new-stream start) rather than in the completion path so that
-                    // any old-stream tasks still in flight use the old generation and cannot
-                    // trigger spurious spawning or corrupt the new stream's dependency counters.
-                    shared.slot_generation[proc_slot].fetch_add(1, Ordering::SeqCst);
+                    // In network mode, do NOT spawn initial nodes or start timing here.
+                    // The packet loop will re-activate this slot via
+                    // assign_stream_to_available_slot (Inactive → Active), which handles
+                    // the gen bump, timing start, and initial node spawning atomically.
+                    // Spawning here would race with that path: tasks from this spawn
+                    // (gen=G+1) partially execute and decrement counters before the
+                    // activation gen bump (G+1→G+2) makes them stale. The activation
+                    // path then provides a full set of decrements → underflow → hang.
+                    if shared.graph.network_config().is_none() {
+                        // Non-network mode: restart in-place (no packet-driven activation).
+                        if let Some(tb) = &shared.time_buffer {
+                            tb.start_slot_processing(proc_slot);
+                        }
 
-                    // Restart timing for the new stream on this slot.
-                    // start_slot_processing is normally called in assign_stream_to_available_slot
-                    // (first assignment) and activate_next_slot (Buffering→Active). For a slot
-                    // that restarts in-place (no new assignment), we must call it here so that
-                    // the next finish_slot_processing call does not panic on a None start time.
-                    if let Some(tb) = &shared.time_buffer {
-                        tb.start_slot_processing(proc_slot);
-                    }
+                        let compute_nodes = initial_nodes(&shared, vec![proc_slot]);
 
-                    // Spawn initial compute nodes for the restarting slot
-                    // (network nodes are handled by receivers, not scheduled)
-                    let compute_nodes = initial_nodes(&shared, vec![proc_slot]);
+                        print_debug(|| {
+                            format!(
+                                "Spawned {} initial nodes for restarting slot {}",
+                                compute_nodes.len(),
+                                proc_slot
+                            )
+                        });
 
-                    print_debug(|| {
-                        format!(
-                            "Spawned {} initial nodes for restarting slot {}",
-                            compute_nodes.len(),
-                            proc_slot
-                        )
-                    });
-
-                    if !compute_nodes.is_empty() {
-                        Self::preparation(&shared, &compute_nodes, thread_core, thread_slot);
+                        if !compute_nodes.is_empty() {
+                            Self::preparation(&shared, &compute_nodes, thread_core, thread_slot);
+                        }
                     }
                 }
             }
@@ -1733,7 +1788,8 @@ fn prepare_network_infrastructure(
     Sender<PacketMessage>,
     Receiver<PacketMessage>,
     Vec<AtomicUsize>,
-    parking_lot::Mutex<Vec<Vec<u8>>>,
+    Vec<flume::Sender<Vec<u8>>>,
+    Vec<parking_lot::Mutex<Option<flume::Receiver<Vec<u8>>>>>,
 ) {
     if let Some(config_spec) = graph.network_config() {
         let num_sockets = config_spec.num_sockets;
@@ -1747,26 +1803,26 @@ fn prepare_network_infrastructure(
 
         let packet_drop_counters = (0..num_sockets).map(|_| AtomicUsize::new(0)).collect();
 
-        // Pre-allocate one buffer per channel slot so receivers never hit the allocator
-        // on the hot path. Each buffer has len == packet_length so recv() can use it
-        // directly as &mut [u8] without any additional setup.
-        let packet_length = config_spec.packet_length;
-        let pool: Vec<Vec<u8>> = (0..channel_cap)
-            .map(|_| {
-                let mut v = Vec::with_capacity(packet_length);
-                // SAFETY: recv() overwrites all packet_length bytes before any read.
-                // Identical justification to the receiver thread hot path.
-                unsafe { v.set_len(packet_length) };
-                v
-            })
-            .collect();
+        // Create one SPSC return channel per socket.
+        // Resolution thread sends reclaimed buffers to the originating receiver thread,
+        // eliminating the shared mutex that was the hot-path contention point.
+        // Capacity matches RECEIVER_LOCAL_POOL_SIZE — if full, buffer drops and
+        // the receiver falls back to fresh allocation (burst safety valve).
+        let mut buffer_return_senders = Vec::with_capacity(num_sockets);
+        let mut buffer_return_receivers = Vec::with_capacity(num_sockets);
+        for _ in 0..num_sockets {
+            let (tx, rx) = flume::bounded::<Vec<u8>>(crate::network::RECEIVER_LOCAL_POOL_SIZE);
+            buffer_return_senders.push(tx);
+            buffer_return_receivers.push(parking_lot::Mutex::new(Some(rx)));
+        }
 
         (
             receiver_sockets,
             packet_sender,
             packet_receiver,
             packet_drop_counters,
-            parking_lot::Mutex::new(pool),
+            buffer_return_senders,
+            buffer_return_receivers,
         )
     } else {
         let (packet_sender, packet_receiver) = flume::bounded(1);
@@ -1775,7 +1831,8 @@ fn prepare_network_infrastructure(
             packet_sender,
             packet_receiver,
             Vec::new(),
-            parking_lot::Mutex::new(Vec::new()),
+            Vec::new(),
+            Vec::new(),
         )
     }
 }

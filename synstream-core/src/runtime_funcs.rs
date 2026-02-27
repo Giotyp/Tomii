@@ -18,6 +18,12 @@ pub type BatchQueueRx = crossbeam_channel::Receiver<crate::buffers::NodeInfo>;
 
 thread_local! {
     static ARG_BUF: RefCell<Vec<CmTypes>> = RefCell::new(Vec::with_capacity(16));
+    // Stale-task signaling for collect_arg_result → execute_task.
+    // Set by collect_arg_result when a gen mismatch is detected during arg collection.
+    // Checked by execute_task after populate_cached_args_into returns.
+    static STALE_TASK_DETECTED: RefCell<bool> = RefCell::new(false);
+    static EXECUTING_SLOT: RefCell<usize> = RefCell::new(usize::MAX);
+    static EXECUTING_GEN: RefCell<u32> = RefCell::new(0);
 }
 
 /// Slot state for priority-based processing
@@ -389,11 +395,14 @@ pub struct SharedData {
     pub receiver_sockets: Vec<NetworkSocket>,
     pub packet_drop_counters: Vec<AtomicUsize>,
     pub shutdown_flag: Arc<AtomicBool>,
-    /// Pre-allocated packet buffer pool — avoids per-packet heap allocation in receiver threads.
-    /// Receivers pop a buffer, fill it via recv(), pass ownership through the channel.
-    /// Resolution threads reclaim the buffer via Arc::try_unwrap after packet_process_func returns.
-    /// Falls back to fresh allocation when the pool is empty (burst scenario).
-    pub buffer_pool: Mutex<Vec<Vec<u8>>>,
+    /// Per-socket buffer return channels: resolution thread → receiver thread.
+    /// After packet_process_func returns, resolution sends the reclaimed buffer to the
+    /// originating receiver's return channel instead of a shared mutex pool.
+    /// Indexed by socket_id. Eliminates all shared-mutex contention on the receive hot path.
+    pub buffer_return_senders: Vec<Sender<Vec<u8>>>,
+    /// Receiver ends of the per-socket return channels.
+    /// Each entry is taken exactly once when the corresponding receiver thread is spawned.
+    pub buffer_return_receivers: Vec<Mutex<Option<Receiver<Vec<u8>>>>>,
 
     /// Per-slot packet counters - each slot tracks its own packet index independently
     /// This prevents index overflow when multiple streams are processed concurrently
@@ -423,6 +432,32 @@ fn execute_task(
     pre_built_args: Option<Vec<CmTypes>>,
     spawn_ns: u128,
 ) {
+    // Stale-task guard: if the slot's generation has advanced since this task was
+    // scheduled, the slot was recycled (stream completed + reassigned) while the
+    // task sat in the Rayon queue.  Executing it would read cleared predecessor
+    // results → panic, or corrupt the new stream's dependency counters.
+    // Post-nodes are exempt (gen is always 0 and they run after all streams finish).
+    if !node_info.post_node {
+        let current_gen =
+            shared.slot_generation[node_info.slot].load(Ordering::SeqCst) as u32;
+        if current_gen != node_info.gen {
+            print_debug(|| {
+                format!(
+                    "Stale task dropped: node {} slot {} index {} gen {} (current {})",
+                    node_info.id, node_info.slot, node_info.index,
+                    node_info.gen, current_gen
+                )
+            });
+            return;
+        }
+    }
+
+    // Initialize stale-detection context for collect_arg_result.
+    // Must be set before any call to populate_cached_args_into.
+    STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = false);
+    EXECUTING_SLOT.with(|s| *s.borrow_mut() = node_info.slot);
+    EXECUTING_GEN.with(|g| *g.borrow_mut() = node_info.gen);
+
     // Capture execution start timestamp immediately
     let exec_start_ns = shared.base_instant.elapsed().as_nanos();
 
@@ -464,7 +499,7 @@ fn execute_task(
     } else {
         // For regular nodes, build args from cache using thread-local buffer
         let node_cache = &shared.node_cache[node_info.id as usize];
-        ARG_BUF.with(|buf_cell| {
+        let result_opt = ARG_BUF.with(|buf_cell| {
             let mut buf = buf_cell.borrow_mut();
             buf.clear();
             populate_cached_args_into(
@@ -476,10 +511,27 @@ fn execute_task(
                 node_info.slot,
                 node_info.pred_index,
             );
+            // Check stale BEFORE calling func (result missing due to reinit_slot race)
+            if STALE_TASK_DETECTED.with(|f| *f.borrow()) {
+                buf.clear();
+                return None::<CmTypes>;
+            }
             let r = func(&buf);
             buf.clear(); // release Arc refs promptly
-            r
-        })
+            Some(r)
+        });
+        match result_opt {
+            Some(r) => r,
+            None => {
+                print_debug(|| {
+                    format!(
+                        "Stale task dropped during arg collection: node {} slot {} index {} gen {}",
+                        node_info.id, node_info.slot, node_info.index, node_info.gen
+                    )
+                });
+                return; // Silently drop — slot was recycled during arg collection
+            }
+        }
     };
 
     if let Some(start) = start_time {
@@ -543,7 +595,13 @@ pub fn send_to_scheduler(
         let shared_clone = Arc::clone(shared);
         let should_record = should_record_slot(shared, node_info.slot);
         let meta_data = (node_info.id, node_info.slot, node_info.index, should_record);
-        let node_info = node_info.clone();
+        let mut node_info = node_info.clone();
+        // Stamp the current slot generation so execute_task can detect stale tasks.
+        // Post-nodes are exempt: they run after all streams complete and have no generation risk.
+        if !node_info.post_node {
+            node_info.gen =
+                shared.slot_generation[node_info.slot].load(Ordering::SeqCst) as u32;
+        }
         let pre_built_args = pre_built_args_vec[i].clone();
 
         // Per-task spawn timestamp for accurate scheduling latency measurement.
@@ -672,13 +730,17 @@ pub fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
                 shared.max_streams
             );
 
-        // Release the slot
-        release_slot(shared, slot);
-
-        // Clear completed nodes for this slot to allow restart - lock-free atomic clear
+        // Clear completed nodes BEFORE releasing the slot.
+        // reinit_slot must finish before release_slot makes the slot available for a new
+        // stream assignment.  If release_slot ran first, assign_stream_to_available_slot
+        // could pick up the Inactive slot, spawn initial tasks (storing results), and then
+        // reinit_slot would clear those new-stream results → panic in legitimate tasks.
         shared
             .node_results
             .reinit_slot(&shared.graph.nodes, slot, None);
+
+        // Release the slot (makes it available for next stream assignment)
+        release_slot(shared, slot);
 
         true // Signal to caller: slot should restart
     } else {
@@ -1059,6 +1121,11 @@ pub fn collect_arg_result(
             Some(vec![get_object_value(obj_vec, node_index)])
         }
         CmTypes::Res(res_node_id) => {
+            // Short-circuit: if a previous arg already detected stale, skip remaining
+            if STALE_TASK_DETECTED.with(|f| *f.borrow()) {
+                return None;
+            }
+
             if let Some(custom_res) = custom_res {
                 return Some(vec![(*custom_res).clone()]);
             }
@@ -1097,6 +1164,20 @@ pub fn collect_arg_result(
                 if let Some(result) = shared.node_results.get(&node_info) {
                     return Some(vec![result]);
                 } else {
+                    // Result missing — check if gen changed since execute_task's guard.
+                    // If so, reinit_slot cleared results after our gen check passed (TOCTOU race).
+                    let exec_slot = EXECUTING_SLOT.with(|s| *s.borrow());
+                    let exec_gen = EXECUTING_GEN.with(|g| *g.borrow());
+                    if exec_slot != usize::MAX {
+                        let current_gen =
+                            shared.slot_generation[exec_slot].load(Ordering::SeqCst) as u32;
+                        if exec_gen != current_gen {
+                            // Gen changed: task became stale while waiting in Rayon queue.
+                            // Signal execute_task to drop this task silently.
+                            STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = true);
+                            return None;
+                        }
+                    }
                     panic!(
                         "Missing result for node_info: {:?} when collecting argument",
                         node_info
@@ -1115,6 +1196,17 @@ pub fn collect_arg_result(
                 if let Some(result) = shared.node_results.get(&node_info) {
                     return Some(vec![result]);
                 } else {
+                    // Result missing — check if gen changed since execute_task's guard.
+                    let exec_slot = EXECUTING_SLOT.with(|s| *s.borrow());
+                    let exec_gen = EXECUTING_GEN.with(|g| *g.borrow());
+                    if exec_slot != usize::MAX {
+                        let current_gen =
+                            shared.slot_generation[exec_slot].load(Ordering::SeqCst) as u32;
+                        if exec_gen != current_gen {
+                            STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = true);
+                            return None;
+                        }
+                    }
                     panic!(
                         "Missing result for node_info: {:?} when collecting argument",
                         node_info
@@ -1141,6 +1233,17 @@ pub fn collect_arg_result(
                 if let Some(result) = shared.node_results.get(&node_info) {
                     result_vec.push(result);
                 } else {
+                    // Result missing — check if gen changed since execute_task's guard.
+                    let exec_slot = EXECUTING_SLOT.with(|s| *s.borrow());
+                    let exec_gen = EXECUTING_GEN.with(|g| *g.borrow());
+                    if exec_slot != usize::MAX {
+                        let current_gen =
+                            shared.slot_generation[exec_slot].load(Ordering::SeqCst) as u32;
+                        if exec_gen != current_gen {
+                            STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = true);
+                            return None;
+                        }
+                    }
                     panic!(
                         "Missing result for node_info: {:?} when collecting argument",
                         node_info

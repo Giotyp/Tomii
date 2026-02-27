@@ -28,6 +28,11 @@ use std::time::{Duration, Instant};
 /// Requires: sudo sysctl -w net.core.rmem_max=16777216
 const SOCKET_RECV_BUF_SIZE: usize = 16 * 1024 * 1024;
 
+/// Number of packet buffers pre-allocated per receiver thread at startup.
+/// Matches the old shared pool allocation of channel_cap / num_sockets (512 per socket).
+/// Buffers are recycled via the per-socket return channel; fresh allocation only on burst.
+pub const RECEIVER_LOCAL_POOL_SIZE: usize = 1024;
+
 use crate::runtime_funcs::SharedData;
 
 /// Raw packet message forwarded from receiver thread to resolution
@@ -129,7 +134,12 @@ pub fn bind_udp_socket_range(address: &str, start_port: usize, count: usize) -> 
 /// It continuously receives packets, extracts frame IDs, and forwards to resolution.
 ///
 /// Thread naming is handled by the caller via `thread::Builder::name()`.
-pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, core_id: usize) {
+pub fn single_socket_receiver_loop(
+    shared: Arc<SharedData>,
+    socket_id: usize,
+    core_id: usize,
+    return_rx: flume::Receiver<Vec<u8>>,
+) {
     // Pin to core
     if let Some(core_ids) = core_affinity::get_core_ids() {
         if core_id < core_ids.len() {
@@ -152,6 +162,17 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
         .expect("Network config must be present for receiver threads");
     let packet_length = network_config_arc.packet_length;
 
+    // Pre-allocate local buffer pool — no shared mutex on the hot path.
+    // Resolution thread returns used buffers via return_rx; fresh allocation is the burst fallback.
+    let mut local_pool: Vec<Vec<u8>> = (0..RECEIVER_LOCAL_POOL_SIZE)
+        .map(|_| {
+            let mut v = Vec::with_capacity(packet_length);
+            // SAFETY: recv() overwrites exactly packet_length bytes before any read.
+            unsafe { v.set_len(packet_length) };
+            v
+        })
+        .collect();
+
     println!("Receiver thread {} started on core {}", socket_id, core_id);
 
     loop {
@@ -162,20 +183,21 @@ pub fn single_socket_receiver_loop(shared: Arc<SharedData>, socket_id: usize, co
             break;
         }
 
-        // Pop a pre-allocated buffer from the pool; fall back to fresh allocation
-        // if the pool is empty (burst scenario). Recycled buffers already have
-        // len == packet_length so no set_len is required on the hot path.
-        let mut packet_bytes = shared
-            .buffer_pool
-            .lock()
-            .pop()
-            .unwrap_or_else(|| {
-                let mut v = Vec::with_capacity(packet_length);
-                // SAFETY: recv() overwrites exactly packet_length bytes.
-                // The size == packet_length check below ensures no uninitialized bytes are read.
-                unsafe { v.set_len(packet_length) };
-                v
-            });
+        // Drain any buffers returned by the resolution thread back into the local pool.
+        // try_recv is non-blocking; if the channel is empty we proceed immediately.
+        while let Ok(buf) = return_rx.try_recv() {
+            local_pool.push(buf);
+        }
+
+        // Pop from local pool; fall back to fresh allocation on burst (pool temporarily empty).
+        // Recycled buffers already have len == packet_length so no set_len on the hot path.
+        let mut packet_bytes = local_pool.pop().unwrap_or_else(|| {
+            let mut v = Vec::with_capacity(packet_length);
+            // SAFETY: recv() overwrites exactly packet_length bytes.
+            // The size == packet_length check below ensures no uninitialized bytes are read.
+            unsafe { v.set_len(packet_length) };
+            v
+        });
 
         // Receive packet (blocking with read_timeout)
         match socket.recv(&mut packet_bytes) {
@@ -229,6 +251,7 @@ pub fn multi_socket_receiver_loop(
     thread_id: usize,
     socket_range: std::ops::Range<usize>,
     core_id: usize,
+    return_rxs: Vec<flume::Receiver<Vec<u8>>>,
 ) {
     // Pin to core
     if let Some(core_ids) = core_affinity::get_core_ids() {
@@ -252,6 +275,23 @@ pub fn multi_socket_receiver_loop(
         let socket = &shared.receiver_sockets[socket_id];
         let _ = socket.set_read_timeout(Some(read_timeout));
     }
+
+    // Pre-allocate one local pool per socket in this thread's range.
+    // return_rxs[i] corresponds to socket_range.start + i.
+    let range_start = socket_range.start;
+    let range_len = socket_range.end - socket_range.start;
+    let mut local_pools: Vec<Vec<Vec<u8>>> = (0..range_len)
+        .map(|_| {
+            (0..RECEIVER_LOCAL_POOL_SIZE)
+                .map(|_| {
+                    let mut v = Vec::with_capacity(packet_length);
+                    // SAFETY: recv() overwrites exactly packet_length bytes before any read.
+                    unsafe { v.set_len(packet_length) };
+                    v
+                })
+                .collect()
+        })
+        .collect();
 
     println!(
         "Multi-socket receiver thread {} polling sockets {:?} on core {}",
@@ -278,23 +318,23 @@ pub fn multi_socket_receiver_loop(
 
         // Round-robin poll all assigned sockets
         for socket_id in socket_range.clone() {
+            let local_idx = socket_id - range_start;
             let socket = &shared.receiver_sockets[socket_id];
             let drop_counter = &shared.packet_drop_counters[socket_id];
 
-            // Pop a pre-allocated buffer from the pool; fall back to fresh allocation
-            // if the pool is empty (burst scenario). Recycled buffers already have
-            // len == packet_length so no set_len is required on the hot path.
-            let mut packet_bytes = shared
-                .buffer_pool
-                .lock()
-                .pop()
-                .unwrap_or_else(|| {
-                    let mut v = Vec::with_capacity(packet_length);
-                    // SAFETY: recv() overwrites exactly packet_length bytes.
-                    // The size == packet_length check below ensures no uninitialized bytes are read.
-                    unsafe { v.set_len(packet_length) };
-                    v
-                });
+            // Drain any buffers returned by the resolution thread into this socket's local pool.
+            while let Ok(buf) = return_rxs[local_idx].try_recv() {
+                local_pools[local_idx].push(buf);
+            }
+
+            // Pop from local pool; fall back to fresh allocation on burst.
+            let mut packet_bytes = local_pools[local_idx].pop().unwrap_or_else(|| {
+                let mut v = Vec::with_capacity(packet_length);
+                // SAFETY: recv() overwrites exactly packet_length bytes.
+                // The size == packet_length check below ensures no uninitialized bytes are read.
+                unsafe { v.set_len(packet_length) };
+                v
+            });
 
             match socket.recv(&mut packet_bytes) {
                 Ok(size) => {
