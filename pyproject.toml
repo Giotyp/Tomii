@@ -7,7 +7,7 @@ name = "synstream"
 version = "0.1.0"
 description = "Python API for the SynStream task-graph framework"
 requires-python = ">=3.9"
-dependencies = ["pydantic>=2.0"]
+dependencies = ["pydantic>=2.0", "matplotlib>=3.0"]
 
 [project.optional-dependencies]
 dev = [

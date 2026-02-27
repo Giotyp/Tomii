@@ -20,6 +20,39 @@ pub struct Graph {
     pub network_config: Option<Arc<GraphNetworkConfig>>,
 }
 
+/// Compute how many predecessor instances will actually send decrements
+/// to this successor.  When a pred_index_filter would narrow down which
+/// instances send decrements, the count equals the filtered range.
+/// Otherwise ALL predecessor instances contribute (pred_factor).
+fn contributing_instances(
+    pred: &crate::graph_struct::Predecessor,
+    nodes: &[Node],
+    succ_factor: usize,
+) -> usize {
+    let pred_factor = nodes[pred.id as usize].factor;
+    if pred.indexes.is_empty() {
+        return pred_factor;
+    }
+    // Replicate the pred_index_filter logic from runtime.rs
+    let min_idx = *pred.indexes.iter().min().unwrap() as usize;
+    let max_idx = *pred.indexes.iter().max().unwrap() as usize;
+    let range_len = max_idx - min_idx + 1;
+
+    let should_filter = if pred.group_by.is_some() {
+        true
+    } else if range_len < pred_factor && range_len == pred.indexes.len() {
+        range_len == succ_factor
+    } else {
+        false
+    };
+
+    if should_filter {
+        pred.indexes.len()
+    } else {
+        pred_factor
+    }
+}
+
 impl GraphStruct for Graph {
     fn add_node(&mut self, node: Node) {
         // assert that node.id === self.nodes.len()
@@ -90,10 +123,20 @@ impl GraphStruct for Graph {
     }
 
     fn dependency_count_vec(&self) -> Vec<usize> {
-        // Return a vector with the dependency count for each node
-        // For nodes with group_size, global predecessors (no group_by) have their
-        // contribution multiplied by num_groups, since each group counter needs
-        // the full set of decrements from global predecessors.
+        // Return a vector with the dependency count for each node.
+        //
+        // dep_count must equal the total number of decrements the node will
+        // receive from all predecessor instances.  When a pred_index_filter
+        // narrows which predecessor instances send decrements, the count
+        // equals the filtered range (pred.indexes.len()).  When no filter
+        // applies, ALL predecessor instances contribute, so the count is
+        // pred_factor.  Using pred.indexes.len() in the no-filter case
+        // caused deps_per_instance to truncate to 0, making every instance
+        // ready after a single predecessor completion (Bug #33).
+        //
+        // For nodes with group_size, global predecessors (no group_by) have
+        // their contribution multiplied by num_groups, since each group
+        // counter needs the full set of decrements from global predecessors.
         let mut dep_count_vec: Vec<usize> = Vec::new();
 
         for node in &self.nodes {
@@ -127,19 +170,23 @@ impl GraphStruct for Graph {
                                     node.name, node.factor, node.group_size, num_barrier_groups, group_by_size, pred.indexes.len(), dep_count, barrier_deps)
                                 });
                                 dep_count += barrier_deps;
-                            } else if num_groups > 1 {
-                                // Global barrier: each instance group needs all deps
-                                print_debug(|| {
-                                    format!("DEPCOUNT: node={}, factor={}, group_size={:?}, num_groups={}, group_by=None, indexes.len()={}, dep_count_before={}, adding={}",
-                                    node.name, node.factor, node.group_size, num_groups, pred.indexes.len(), dep_count, pred.indexes.len() * num_groups)
-                                });
-                                dep_count += pred.indexes.len() * num_groups;
                             } else {
-                                print_debug(|| {
-                                    format!("DEPCOUNT: node={}, factor={}, group_size={:?}, num_groups={} (<=1), indexes.len()={}, dep_count_before={}, adding={}",
-                                    node.name, node.factor, node.group_size, num_groups, pred.indexes.len(), dep_count, pred.indexes.len())
-                                });
-                                dep_count += pred.indexes.len();
+                                let contributing =
+                                    contributing_instances(pred, &self.nodes, node.factor);
+                                if num_groups > 1 {
+                                    // Global barrier: each instance group needs all deps
+                                    print_debug(|| {
+                                        format!("DEPCOUNT: node={}, factor={}, group_size={:?}, num_groups={}, group_by=None, contributing={}, dep_count_before={}, adding={}",
+                                        node.name, node.factor, node.group_size, num_groups, contributing, dep_count, contributing * num_groups)
+                                    });
+                                    dep_count += contributing * num_groups;
+                                } else {
+                                    print_debug(|| {
+                                        format!("DEPCOUNT: node={}, factor={}, group_size={:?}, num_groups={} (<=1), contributing={}, dep_count_before={}, adding={}",
+                                        node.name, node.factor, node.group_size, num_groups, contributing, dep_count, contributing)
+                                    });
+                                    dep_count += contributing;
+                                }
                             }
                         }
                     }
@@ -151,7 +198,9 @@ impl GraphStruct for Graph {
                 if !arg.type_.is_barrier() {
                     if let Some(pred) = &arg.predecessor {
                         if preds_seen.insert(pred.id) {
-                            dep_count += pred.indexes.len();
+                            let contributing =
+                                contributing_instances(pred, &self.nodes, node.factor);
+                            dep_count += contributing;
                         }
                     }
                 }

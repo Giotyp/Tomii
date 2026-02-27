@@ -1681,6 +1681,38 @@ impl SynRt {
                     // path then provides a full set of decrements → underflow → hang.
                     if shared.graph.network_config().is_none() {
                         // Non-network mode: restart in-place (no packet-driven activation).
+                        //
+                        // Re-register slot in running_streams so check_slots can detect the
+                        // new stream's completion. process_slot_completion called release_slot
+                        // which removed proc_slot from running_streams and marked it Inactive.
+                        // Without re-adding it, cached_slots never includes this slot and the
+                        // new stream's completion is never detected → hang (Bug fix for
+                        // EXP_STREAMS > SLOTS in non-network mode).
+                        //
+                        // Lock ordering: running_streams → slot_states (global protocol).
+                        {
+                            let mut running_streams = shared.running_streams.write();
+                            let mut slot_states = shared.slot_states.write();
+                            // Count Active/Buffering slots (proc_slot is Inactive after
+                            // release_slot, so it is already excluded from this count).
+                            let currently_active = slot_states
+                                .iter()
+                                .filter(|&&s| {
+                                    s == SlotState::Active || s == SlotState::Buffering
+                                })
+                                .count();
+                            let completed =
+                                shared.stream_complete_counter.load(Ordering::SeqCst);
+                            // Unique stream ID: completed streams + in-flight streams gives
+                            // the next monotonically increasing ID, avoiding conflicts with
+                            // IDs already assigned during initialisation (0..slots).
+                            let next_stream_id = completed + currently_active;
+                            slot_states[proc_slot] = SlotState::Active;
+                            running_streams.push((next_stream_id, proc_slot));
+                        }
+                        // slots_dirty is already true (set after process_slot_completion)
+                        // so the per-thread cached_slots will be refreshed next iteration.
+
                         if let Some(tb) = &shared.time_buffer {
                             tb.start_slot_processing(proc_slot);
                         }

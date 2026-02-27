@@ -812,6 +812,17 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
                 )
             });
             drop(running_streams); // Release lock before returning
+            // In non-network mode, initial nodes are spawned immediately for
+            // Buffering slots too (see initial_nodes call site). Without this
+            // start_slot_processing call the timing controller panics when
+            // finish_slot_processing is called at stream completion because it
+            // never saw a StartSlotProcessing for this slot.
+            // In network mode, activate_next_slot will call start_slot_processing
+            // again (overwriting the start time) when the slot transitions to
+            // Active — that is fine; the later timestamp is more accurate there.
+            if let Some(tb) = &shared.time_buffer {
+                tb.start_slot_processing(slot_id);
+            }
             return (slot_id, false); // Assigned but Buffering, not Active
         }
     }
