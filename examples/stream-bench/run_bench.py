@@ -1,7 +1,7 @@
 """SynStream STREAM benchmark — sweep of all 4 STREAM kernels across worker counts.
 
 Builds the stream-bench plugin once, then runs each (kernel, workers) combination
-and records timing CSVs for downstream analysis.
+and records timing txts for downstream analysis.
 
 Usage:
     # From repo root (activate venv first: source .venv/bin/activate)
@@ -24,16 +24,17 @@ from pathlib import Path
 # Resolve paths
 # ---------------------------------------------------------------------------
 
-HERE = Path(__file__).resolve().parent       # examples/stream-bench/
-REPO_ROOT = HERE.parents[1]                  # workspace root
+HERE = Path(__file__).resolve().parent  # examples/stream-bench/
+REPO_ROOT = HERE.parents[1]  # workspace root
 sys.path.insert(0, str(REPO_ROOT))
 
-import synstream as ss                       # noqa: E402
+import synstream as ss  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="SynStream STREAM benchmark sweep")
@@ -74,7 +75,7 @@ def _parse_args() -> argparse.Namespace:
         "--results-dir",
         type=Path,
         default=HERE / "results",
-        help="output directory for timing CSVs",
+        help="output directory for timing txts",
     )
     p.add_argument(
         "--no-clean",
@@ -93,78 +94,74 @@ def _parse_args() -> argparse.Namespace:
 # concrete init var makes the range "0-num_workers" resolve correctly.
 # ---------------------------------------------------------------------------
 
+
 def build_copy_graph(array_size: int, workers: int) -> ss.Graph:
     app = ss.Graph()
-    nw   = app.var("num_workers", ss.usize(workers))
-    n    = app.var("array_size",  ss.usize(array_size))
-    fill = app.var("fill_val",    ss.f64(2.0))
+    nw = app.var("num_workers", ss.usize(workers))
+    n = app.var("array_size", ss.usize(array_size))
+    fill = app.var("fill_val", ss.f64(2.0))
 
-    gen_b   = app.node("gen_b",   func="generate_array", factor=nw,
-                       args=[n, fill])
-    copy_op = app.node("copy_op", func="stream_copy",    factor=nw,
-                       args=[gen_b.out()])
-    app.node("sink", func="sink",
-             args=[copy_op.wait(0, nw)])
+    gen_b = app.node("gen_b", func="generate_array", factor=nw, args=[n, fill])
+    copy_op = app.node("copy_op", func="stream_copy", factor=nw, args=[gen_b.out()])
+    app.node("sink", func="sink", args=[copy_op.wait(0, nw)])
     return app
 
 
 def build_scale_graph(array_size: int, workers: int) -> ss.Graph:
     app = ss.Graph()
-    nw     = app.var("num_workers", ss.usize(workers))
-    n      = app.var("array_size",  ss.usize(array_size))
-    fill   = app.var("fill_val",    ss.f64(2.0))
-    scalar = app.var("scalar",      ss.f64(3.0))
+    nw = app.var("num_workers", ss.usize(workers))
+    n = app.var("array_size", ss.usize(array_size))
+    fill = app.var("fill_val", ss.f64(2.0))
+    scalar = app.var("scalar", ss.f64(3.0))
 
-    gen_b    = app.node("gen_b",    func="generate_array", factor=nw,
-                        args=[n, fill])
-    scale_op = app.node("scale_op", func="stream_scale",   factor=nw,
-                        args=[gen_b.out(), scalar])
-    app.node("sink", func="sink",
-             args=[scale_op.wait(0, nw)])
+    gen_b = app.node("gen_b", func="generate_array", factor=nw, args=[n, fill])
+    scale_op = app.node(
+        "scale_op", func="stream_scale", factor=nw, args=[gen_b.out(), scalar]
+    )
+    app.node("sink", func="sink", args=[scale_op.wait(0, nw)])
     return app
 
 
 def build_add_graph(array_size: int, workers: int) -> ss.Graph:
     app = ss.Graph()
-    nw     = app.var("num_workers", ss.usize(workers))
-    n      = app.var("array_size",  ss.usize(array_size))
-    fill_b = app.var("fill_b",      ss.f64(2.0))
-    fill_c = app.var("fill_c",      ss.f64(1.0))
+    nw = app.var("num_workers", ss.usize(workers))
+    n = app.var("array_size", ss.usize(array_size))
+    fill_b = app.var("fill_b", ss.f64(2.0))
+    fill_c = app.var("fill_c", ss.f64(1.0))
 
-    gen_b  = app.node("gen_b",  func="generate_array", factor=nw,
-                      args=[n, fill_b])
-    gen_c  = app.node("gen_c",  func="generate_array", factor=nw,
-                      args=[n, fill_c])
-    add_op = app.node("add_op", func="stream_add",     factor=nw,
-                      args=[gen_b.out(), gen_c.out()])
-    app.node("sink", func="sink",
-             args=[add_op.wait(0, nw)])
+    gen_b = app.node("gen_b", func="generate_array", factor=nw, args=[n, fill_b])
+    gen_c = app.node("gen_c", func="generate_array", factor=nw, args=[n, fill_c])
+    add_op = app.node(
+        "add_op", func="stream_add", factor=nw, args=[gen_b.out(), gen_c.out()]
+    )
+    app.node("sink", func="sink", args=[add_op.wait(0, nw)])
     return app
 
 
 def build_triad_graph(array_size: int, workers: int) -> ss.Graph:
     app = ss.Graph()
-    nw     = app.var("num_workers", ss.usize(workers))
-    n      = app.var("array_size",  ss.usize(array_size))
-    fill_b = app.var("fill_b",      ss.f64(2.0))
-    fill_c = app.var("fill_c",      ss.f64(1.0))
-    scalar = app.var("scalar",      ss.f64(3.0))
+    nw = app.var("num_workers", ss.usize(workers))
+    n = app.var("array_size", ss.usize(array_size))
+    fill_b = app.var("fill_b", ss.f64(2.0))
+    fill_c = app.var("fill_c", ss.f64(1.0))
+    scalar = app.var("scalar", ss.f64(3.0))
 
-    gen_b    = app.node("gen_b",    func="generate_array", factor=nw,
-                        args=[n, fill_b])
-    gen_c    = app.node("gen_c",    func="generate_array", factor=nw,
-                        args=[n, fill_c])
-    triad_op = app.node("triad_op", func="stream_triad",   factor=nw,
-                        args=[gen_b.out(), gen_c.out(), scalar])
-    app.node("sink", func="sink",
-             args=[triad_op.wait(0, nw)])
+    gen_b = app.node("gen_b", func="generate_array", factor=nw, args=[n, fill_b])
+    gen_c = app.node("gen_c", func="generate_array", factor=nw, args=[n, fill_c])
+    triad_op = app.node(
+        "triad_op",
+        func="stream_triad",
+        factor=nw,
+        args=[gen_b.out(), gen_c.out(), scalar],
+    )
+    app.node("sink", func="sink", args=[triad_op.wait(0, nw)])
     return app
 
 
 _GRAPH_BUILDERS = {
-    "copy":  build_copy_graph,
+    "copy": build_copy_graph,
     "scale": build_scale_graph,
-    "add":   build_add_graph,
+    "add": build_add_graph,
     "triad": build_triad_graph,
 }
 
@@ -172,6 +169,7 @@ _GRAPH_BUILDERS = {
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     args = _parse_args()
@@ -193,7 +191,7 @@ def main() -> None:
     for kernel in args.kernels:
         builder = _GRAPH_BUILDERS[kernel]
         for workers in args.workers:
-            timing_file = args.results_dir / f"synstream_stream_{kernel}_w{workers}.csv"
+            timing_file = args.results_dir / f"synstream_stream_{kernel}_w{workers}.txt"
             print(
                 f"\n=== SynStream STREAM {kernel.upper()} | workers={workers} ===",
                 flush=True,
