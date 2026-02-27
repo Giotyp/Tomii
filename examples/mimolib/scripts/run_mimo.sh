@@ -38,8 +38,8 @@ TIMING_FILE="$MIMOLIB_DIR/timing.txt"
 SCHED_FILE="$MIMOLIB_DIR/timing_sched.csv"
 RECORD="--record"
 DEBUG=""
-CLEANUP=0
-RUN_BIN=0
+CLEANUP=1
+RUN_BIN=1
 
 
 # Function to cleanup background processes on SIGINT
