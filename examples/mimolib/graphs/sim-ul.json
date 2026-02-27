@@ -1,0 +1,16 @@
+{
+    "bs_radio_num": 64,
+    "ue_radio_num": 8,
+    "frame_schedule": [
+        "PUUUUUUUUUUUUU"
+    ],
+    "max_frame": 500,
+    "bs_server_addr": "127.0.0.1",
+    "bs_rru_addr": "127.0.0.1",
+    "fft_size": 2048,
+    "ofdm_data_num": 1200,
+    "fft_block_size": 2,
+    "beam_block_size": 3,
+    "demul_block_size": 64,
+    "freq_orthogonal_pilot": false
+}

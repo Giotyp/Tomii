@@ -1,0 +1,11 @@
+[package]
+name = "stream-bench"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "streambench"
+crate-type = ["dylib", "rlib"]
+
+[dependencies]
+synstream-types = { path = "../../synstream-types" }

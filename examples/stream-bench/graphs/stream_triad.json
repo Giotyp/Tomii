@@ -1,0 +1,62 @@
+{
+    "comment": "Use run_bench.py for accurate benchmarking. This JSON is for reference only.",
+    "initializations": [
+        {
+            "name": "num_workers",
+            "args": [{"type": "usize", "value": "4"}]
+        },
+        {
+            "name": "array_size",
+            "args": [{"type": "usize", "value": "268435456"}]
+        },
+        {
+            "name": "fill_b",
+            "args": [{"type": "f64", "value": "2.0"}]
+        },
+        {
+            "name": "fill_c",
+            "args": [{"type": "f64", "value": "1.0"}]
+        },
+        {
+            "name": "scalar",
+            "args": [{"type": "f64", "value": "3.0"}]
+        }
+    ],
+    "nodes": [
+        {
+            "name": "gen_b",
+            "factor": "num_workers",
+            "function": "generate_array",
+            "args": [
+                {"type": "$ref", "value": "array_size"},
+                {"type": "$ref", "value": "fill_b"}
+            ]
+        },
+        {
+            "name": "gen_c",
+            "factor": "num_workers",
+            "function": "generate_array",
+            "args": [
+                {"type": "$ref", "value": "array_size"},
+                {"type": "$ref", "value": "fill_c"}
+            ]
+        },
+        {
+            "name": "triad_op",
+            "factor": "num_workers",
+            "function": "stream_triad",
+            "args": [
+                {"type": "$res", "predecessor": {"name": "gen_b", "indexes": "0"}},
+                {"type": "$res", "predecessor": {"name": "gen_c", "indexes": "0"}},
+                {"type": "$ref", "value": "scalar"}
+            ]
+        },
+        {
+            "name": "sink",
+            "function": "sink",
+            "args": [
+                {"type": "$barrier", "predecessor": {"name": "triad_op", "indexes": "0-num_workers"}}
+            ]
+        }
+    ]
+}

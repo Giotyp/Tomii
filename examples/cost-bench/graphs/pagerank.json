@@ -1,0 +1,58 @@
+{
+    "comment": "Use run_bench.py for accurate benchmarking. This JSON is for reference only (num_workers=4).",
+    "initializations": [
+        {
+            "name": "num_workers",
+            "args": [{"type": "usize", "value": "4"}]
+        },
+        {
+            "name": "graph_file",
+            "args": [{"type": "String", "value": "SNAP_GRAPH_FILE"}]
+        },
+        {
+            "name": "damping",
+            "args": [{"type": "f64", "value": "0.85"}]
+        },
+        {
+            "name": "graph",
+            "function": "load_graph",
+            "args": [{"type": "$ref", "value": "graph_file"}]
+        },
+        {
+            "name": "ranks",
+            "function": "create_ranks",
+            "args": [{"type": "$ref", "value": "graph"}]
+        }
+    ],
+    "nodes": [
+        {
+            "name": "partition",
+            "factor": "num_workers",
+            "function": "get_partition",
+            "args": [
+                {"type": "$ref", "value": "graph"},
+                {"type": "$ref", "value": "$index"},
+                {"type": "$ref", "value": "$workers"}
+            ]
+        },
+        {
+            "name": "scatter",
+            "factor": "num_workers",
+            "function": "pr_scatter",
+            "args": [
+                {"type": "$res", "predecessor": {"name": "partition", "indexes": "0"}},
+                {"type": "$ref", "value": "graph"},
+                {"type": "$ref", "value": "ranks"}
+            ]
+        },
+        {
+            "name": "gather",
+            "function": "pr_gather",
+            "args": [
+                {"type": "$ref", "value": "ranks"},
+                {"type": "$ref", "value": "damping"},
+                {"type": "$res", "predecessor": {"name": "scatter", "indexes": "0-num_workers"}}
+            ]
+        }
+    ]
+}

@@ -1,0 +1,66 @@
+{
+    "initializations": [
+        {
+            "name": "array_size",
+            "args": [
+                {
+                    "type": "usize",
+                    "value": "268435456"
+                }
+            ]
+        },
+        {
+            "name": "fill_val",
+            "args": [
+                {
+                    "type": "f64",
+                    "value": "2.0"
+                }
+            ]
+        }
+    ],
+    "nodes": [
+        {
+            "name": "gen_b",
+            "factor": "$workers",
+            "function": "generate_array",
+            "args": [
+                {
+                    "type": "$ref",
+                    "value": "array_size"
+                },
+                {
+                    "type": "$ref",
+                    "value": "fill_val"
+                }
+            ]
+        },
+        {
+            "name": "copy_op",
+            "factor": "$workers",
+            "function": "stream_copy",
+            "args": [
+                {
+                    "type": "$res",
+                    "predecessor": {
+                        "name": "gen_b",
+                        "indexes": "0"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "sink",
+            "function": "sink",
+            "args": [
+                {
+                    "type": "$barrier",
+                    "predecessor": {
+                        "name": "copy_op",
+                        "indexes": "0-$workers"
+                    }
+                }
+            ]
+        }
+    ]
+}
