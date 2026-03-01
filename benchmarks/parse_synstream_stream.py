@@ -68,12 +68,20 @@ def check_sufficient_streams(txt: str, path: Path) -> None:
         )
 
 
-def extract_kernel_avg_per_stream(txt: str, task_name: str) -> float:
-    """Return Avg/Stream (seconds) for the named task from a timing .txt file."""
-    # Match the task header, then the next Timing line
+def extract_kernel_avg_task(txt: str, task_name: str) -> float:
+    """Return Avg/Task (seconds) for the named task from a timing .txt file.
+
+    Avg/Task is the mean wall-clock time per individual task instance.  With
+    factor=N parallel instances running on N workers, Avg/Task ≈ the parallel
+    wall-clock duration of one batch, so total GB/s = N*bytes / Avg/Task.
+    (Avg/Stream is the SUM of all N instance times — a CPU-time metric, not
+    wall-clock — and must not be used for bandwidth calculation.)
+    """
+    # Timing line format:
+    #   Timing - Avg/Stream: 3.9328s, Avg/Task: 983.2026ms, Min: ...
     header_pat = re.compile(
         rf"Task\s+'{re.escape(task_name)}'[^\n]*\n"
-        rf"\s+Timing\s+-\s+Avg/Stream:\s*(\S+)",
+        rf"\s+Timing\s+-\s+Avg/Stream:\s*\S+\s*,\s*Avg/Task:\s*(\S+)",
         re.MULTILINE,
     )
     m = header_pat.search(txt)
@@ -109,7 +117,7 @@ def convert_file(
     task_name = _TASK_NAME[kernel]
     try:
         check_sufficient_streams(txt, txt_path)
-        elapsed_s = extract_kernel_avg_per_stream(txt, task_name)
+        elapsed_s = extract_kernel_avg_task(txt, task_name)
     except ValueError as e:
         print(f"[skip] {txt_path.name}: {e}", file=sys.stderr)
         return
