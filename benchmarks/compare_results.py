@@ -81,8 +81,9 @@ def gather_pagerank_results(results_dir: Path) -> Optional["pd.DataFrame"]:
 
 # ── plots ─────────────────────────────────────────────────────────────────────
 
-COLORS = {"synstream": "#1f77b4", "timely": "#ff7f0e"}
-MARKERS = {"synstream": "o", "timely": "s"}
+COLORS = {"synstream": "#1f77b4", "timely": "#ff7f0e", "timely_pinned": "#d62728"}
+MARKERS = {"synstream": "o", "timely": "s", "timely_pinned": "^"}
+LABELS = {"synstream": "SynStream", "timely": "Timely (unpinned)", "timely_pinned": "Timely (taskset-pinned)"}
 
 
 def plot_stream(df: "pd.DataFrame", out_dir: Path) -> None:
@@ -94,14 +95,16 @@ def plot_stream(df: "pd.DataFrame", out_dir: Path) -> None:
         sub = df[df["kernel"] == kernel]
         for system, grp in sub.groupby("system"):
             grp_sorted = grp.sort_values("workers")
+            linestyle = "--" if system == "timely_pinned" else "-"
             ax.plot(
                 grp_sorted["workers"],
                 grp_sorted["gb_s"],
-                label=system,
+                label=LABELS.get(system, system),
                 color=COLORS.get(system, "gray"),
                 marker=MARKERS.get(system, "^"),
                 linewidth=1.8,
                 markersize=6,
+                linestyle=linestyle,
             )
         ax.set_title(f"STREAM {kernel.capitalize()}")
         ax.set_xlabel("Workers")
@@ -130,7 +133,7 @@ def plot_pagerank(df: "pd.DataFrame", out_dir: Path) -> None:
             grp_sorted = grp.sort_values("workers")
             ax.plot(
                 grp_sorted["workers"],
-                grp_sorted["total_s"],
+                grp_sorted["s_per_iter"],
                 label=system,
                 color=COLORS.get(system, "gray"),
                 marker=MARKERS.get(system, "^"),
@@ -139,7 +142,7 @@ def plot_pagerank(df: "pd.DataFrame", out_dir: Path) -> None:
             )
         ax.set_title(f"PageRank — {dataset}")
         ax.set_xlabel("Workers")
-        ax.set_ylabel("Total time (s)")
+        ax.set_ylabel("Time per iteration (s)")
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
 
@@ -163,7 +166,7 @@ def print_stream_table(df: "pd.DataFrame") -> None:
 def print_pagerank_table(df: "pd.DataFrame") -> None:
     print("\n── PageRank Benchmark Summary ──")
     pivot = df.pivot_table(
-        values="total_s", index=["dataset", "workers"], columns="system", aggfunc="mean"
+        values="s_per_iter", index=["dataset", "workers"], columns="system", aggfunc="mean"
     )
     print(pivot.to_string())
 
