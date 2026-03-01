@@ -349,3 +349,79 @@ impl Graph {
         println!("Successors: {:?}", self.successors);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph_struct::{NodePriority, Predecessor};
+
+    fn make_node(id: u16, factor: usize) -> Node {
+        Node {
+            name: String::new(),
+            args: vec![],
+            id,
+            loop_args: None,
+            factor,
+            group_size: None,
+            func_ptr: None,
+            loop_: None,
+            condition: None,
+            priority: NodePriority::Normal,
+            use_workers: None,
+        }
+    }
+
+    // Case 1: no pred_index_filter → all pred_factor instances contribute.
+    // Regression guard: must never return indexes.len() when indexes is empty.
+    #[test]
+    fn no_indexes_returns_pred_factor() {
+        let nodes = vec![make_node(0, 64)];
+        let pred = Predecessor { id: 0, indexes: vec![], group_by: None };
+        assert_eq!(contributing_instances(&pred, &nodes, 64), 64);
+    }
+
+    // Case 2: group_by present → filter always applies regardless of succ_factor.
+    #[test]
+    fn group_by_always_filters() {
+        let nodes = vec![make_node(0, 64)];
+        let pred = Predecessor {
+            id: 0,
+            indexes: (0..14).collect(),
+            group_by: Some(14),
+        };
+        // succ_factor doesn't match indexes.len() — without group_by this would NOT filter
+        assert_eq!(contributing_instances(&pred, &nodes, 64), 14);
+    }
+
+    // Case 3: compact range whose length equals succ_factor → filter applies.
+    // Models a 14-antenna slice feeding 14 FFT instances (pred_factor=64, succ_factor=14).
+    #[test]
+    fn range_filter_active_when_range_matches_succ_factor() {
+        let nodes = vec![make_node(0, 64)];
+        let pred = Predecessor { id: 0, indexes: (0..14).collect(), group_by: None };
+        assert_eq!(contributing_instances(&pred, &nodes, 14), 14);
+    }
+
+    // Case 4 (Bug #33): indexes present, compact range, but range != succ_factor
+    // → filter must NOT apply; must return pred_factor, not indexes.len().
+    // This is the exact scenario that broke MIMO: pred CSI (factor=64) feeding FFT
+    // (factor=64) with a partial index list present but no filter intended.
+    #[test]
+    fn indexes_present_but_succ_factor_mismatch_returns_pred_factor() {
+        let nodes = vec![make_node(0, 64)];
+        let pred = Predecessor { id: 0, indexes: (0..14).collect(), group_by: None };
+        // succ_factor=64 ≠ range_len=14 → should_filter=false
+        assert_eq!(contributing_instances(&pred, &nodes, 64), 64);
+    }
+
+    // Case 5: sparse indexes (range_len > indexes.len()) → filter guard fails → pred_factor.
+    // Exercises the `range_len == pred.indexes.len()` condition in the else-if branch.
+    #[test]
+    fn sparse_indexes_returns_pred_factor() {
+        let nodes = vec![make_node(0, 64)];
+        // Two non-contiguous entries: range_len = 63-0+1 = 64 = pred_factor,
+        // but indexes.len()=2 ≠ range_len → should_filter=false.
+        let pred = Predecessor { id: 0, indexes: vec![0, 63], group_by: None };
+        assert_eq!(contributing_instances(&pred, &nodes, 2), 64);
+    }
+}
