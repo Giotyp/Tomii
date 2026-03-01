@@ -75,7 +75,7 @@ fn main() {
     let t0 = Instant::now();
 
     timely::execute_from_args(
-        vec![String::from("--workers"), num_workers.to_string()].into_iter(),
+        vec![String::from("-w"), num_workers.to_string()].into_iter(),
         move |worker| {
             let wi = worker.index();
             let nw = worker.peers();

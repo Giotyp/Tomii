@@ -78,7 +78,7 @@ fn main() {
         let kernel_rep = kernel.clone();
 
         timely::execute_from_args(
-            vec![String::from("--workers"), num_workers.to_string()].into_iter(),
+            vec![String::from("-w"), num_workers.to_string()].into_iter(),
             move |worker| {
                 let _wi = worker.index();
                 let n = array_size;
