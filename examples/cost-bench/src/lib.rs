@@ -2,7 +2,7 @@ pub mod graph_io;
 pub mod pagerank;
 
 use graph_io::{CsrGraph, PartitionedEdges};
-use pagerank::{pr_gather, pr_scatter};
+use pagerank::{pr_gather, pr_partial_gather, pr_reduce, pr_scatter};
 use synstream_types::CmTypes;
 
 // ---------------------------------------------------------------------------
@@ -109,5 +109,41 @@ pub fn pr_gather_cm(ranks: &CmTypes, damping: f64, contribs: &[CmTypes]) -> CmTy
         })
         .expect("pr_gather_cm: ranks must be Vec<f32>");
 
+    CmTypes::None
+}
+
+/// Partial gather: sum all N scatter contributions for this instance's node range.
+///
+/// args layout (via wrapper): [n_workers: Usize, idx: Usize, contrib_0..contrib_{N-1}]
+#[no_mangle]
+pub fn pr_partial_gather_cm(n_workers: usize, idx: usize, contribs: &[CmTypes]) -> CmTypes {
+    let cloned: Vec<Vec<f32>> = contribs
+        .iter()
+        .map(|c| {
+            c.with_any(|v: &Vec<f32>| v.clone())
+                .expect("pr_partial_gather_cm: contribution must be Vec<f32>")
+        })
+        .collect();
+    let borrowed: Vec<&Vec<f32>> = cloned.iter().collect();
+    CmTypes::from_any(pr_partial_gather(idx, n_workers, &borrowed))
+}
+
+/// Reduce: apply PageRank formula and write new ranks from N partial sums.
+///
+/// args layout (via wrapper): [ranks: Any<Vec<f32>>, damping: F64, partial_0..partial_{N-1}]
+#[no_mangle]
+pub fn pr_reduce_cm(ranks: &CmTypes, damping: f64, partial_sums: &[CmTypes]) -> CmTypes {
+    let d = damping as f32;
+    let cloned: Vec<Vec<f32>> = partial_sums
+        .iter()
+        .map(|ps| {
+            ps.with_any(|v: &Vec<f32>| v.clone())
+                .expect("pr_reduce_cm: partial sum must be Vec<f32>")
+        })
+        .collect();
+    let borrowed: Vec<&Vec<f32>> = cloned.iter().collect();
+    ranks
+        .with_any_mut(|rank_vec: &mut Vec<f32>| pr_reduce(rank_vec, d, &borrowed))
+        .expect("pr_reduce_cm: ranks must be Vec<f32>");
     CmTypes::None
 }

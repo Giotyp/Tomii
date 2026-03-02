@@ -125,12 +125,20 @@ def build_pagerank_graph(damping: float, workers: int) -> ss.Graph:
         args=[all_partitions, _index, graph, ranks],
     )
 
-    # gather: args = [ranks, damping, scatter_0, scatter_1, ..., scatter_{w-1}]
-    # Using scatter.out(0, nw) → "0-num_workers" → indices [0..workers)
+    # partial_gather[i]: sum all N scatter contributions for node range [i*chunk, (i+1)*chunk).
+    # factor=nw → N parallel instances; $index selects each instance's range.
+    partial_gather = app.node(
+        "partial_gather",
+        func="pr_partial_gather",
+        factor=nw,
+        args=[nw, _index, scatter.out(0, nw)],
+    )
+
+    # reduce: apply damping formula and write new ranks from N partial sums.
     app.node(
-        "gather",
-        func="pr_gather",
-        args=[ranks, damping_var, scatter.out(0, nw)],
+        "reduce",
+        func="pr_reduce",
+        args=[ranks, damping_var, partial_gather.out(0, nw)],
     )
 
     return app

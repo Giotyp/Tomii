@@ -90,3 +90,32 @@ pub fn pr_gather_cm_wrap(args: &[CmTypes]) -> CmTypes {
     // args[0] = ranks, args[1] = damping, args[2..] = scatter contributions
     PR_GATHER_CM_SYM(&args[0], damping, &args[2..])
 }
+
+cache_sym! {
+    pub static PR_PARTIAL_GATHER_CM_SYM: fn(usize, usize, &[CmTypes]) -> CmTypes
+        = b"pr_partial_gather_cm";
+}
+pub fn pr_partial_gather_cm_wrap(args: &[CmTypes]) -> CmTypes {
+    let n_workers = match args[0] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("pr_partial_gather_cm: expected Usize for n_workers"),
+    };
+    let idx = match args[1] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("pr_partial_gather_cm: expected Usize for idx"),
+    };
+    // args[0] = n_workers, args[1] = idx, args[2..] = scatter contributions
+    PR_PARTIAL_GATHER_CM_SYM(n_workers, idx, &args[2..])
+}
+
+cache_sym! {
+    pub static PR_REDUCE_CM_SYM: fn(&CmTypes, f64, &[CmTypes]) -> CmTypes = b"pr_reduce_cm";
+}
+pub fn pr_reduce_cm_wrap(args: &[CmTypes]) -> CmTypes {
+    let damping = match args[1] {
+        CmTypes::F64(x) => x,
+        _ => panic!("pr_reduce_cm: expected F64 for damping"),
+    };
+    // args[0] = ranks, args[1] = damping, args[2..] = partial sums
+    PR_REDUCE_CM_SYM(&args[0], damping, &args[2..])
+}
