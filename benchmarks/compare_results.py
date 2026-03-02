@@ -92,10 +92,9 @@ def plot_stream(df: "pd.DataFrame", out_dir: Path) -> None:
     fig.suptitle("STREAM Benchmark: SynStream vs Timely Dataflow", fontsize=13)
 
     for ax, kernel in zip(axes.flat, kernels):
-        sub = df[df["kernel"] == kernel]
+        sub = df[(df["kernel"] == kernel) & (df["system"] != "timely_pinned")]
         for system, grp in sub.groupby("system"):
             grp_sorted = grp.sort_values("workers")
-            linestyle = "--" if system == "timely_pinned" else "-"
             ax.plot(
                 grp_sorted["workers"],
                 grp_sorted["gb_s"],
@@ -104,7 +103,6 @@ def plot_stream(df: "pd.DataFrame", out_dir: Path) -> None:
                 marker=MARKERS.get(system, "^"),
                 linewidth=1.8,
                 markersize=6,
-                linestyle=linestyle,
             )
         ax.set_title(f"STREAM {kernel.capitalize()}")
         ax.set_xlabel("Workers")
