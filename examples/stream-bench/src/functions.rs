@@ -61,3 +61,74 @@ pub fn stream_triad(b: &[f64], c: &[f64], scalar: f64) -> Vec<f64> {
 pub fn sink(result: &[f64]) -> usize {
     result.len() * std::mem::size_of::<f64>()
 }
+
+// ---------------------------------------------------------------------------
+// Buffer-pool helpers for pre-allocated STREAM benchmarks
+// ---------------------------------------------------------------------------
+
+use std::sync::Mutex;
+
+/// Create N pre-allocated read-only arrays, each filled with `fill`.
+pub fn create_buffer_pool(n_workers: usize, array_size: usize, fill: f64) -> Vec<Vec<f64>> {
+    (0..n_workers).map(|_| vec![fill; array_size]).collect()
+}
+
+/// Create N pre-allocated mutable arrays (zero-initialised), wrapped in Mutex.
+pub fn create_mutable_buffer_pool(
+    n_workers: usize,
+    array_size: usize,
+) -> Vec<Mutex<Vec<f64>>> {
+    (0..n_workers)
+        .map(|_| Mutex::new(vec![0.0f64; array_size]))
+        .collect()
+}
+
+/// STREAM Copy in-place: a[i] = b[i]
+pub fn stream_copy_pooled(a: &mut Vec<f64>, b: &Vec<f64>) {
+    let n = b.len();
+    unsafe {
+        let ap = a.as_mut_ptr();
+        let bp = b.as_ptr();
+        for i in 0..n {
+            ap.add(i).write(bp.add(i).read());
+        }
+    }
+}
+
+/// STREAM Scale in-place: a[i] = scalar * b[i]
+pub fn stream_scale_pooled(a: &mut Vec<f64>, b: &Vec<f64>, scalar: f64) {
+    let n = b.len();
+    unsafe {
+        let ap = a.as_mut_ptr();
+        let bp = b.as_ptr();
+        for i in 0..n {
+            ap.add(i).write(bp.add(i).read() * scalar);
+        }
+    }
+}
+
+/// STREAM Add in-place: a[i] = b[i] + c[i]
+pub fn stream_add_pooled(a: &mut Vec<f64>, b: &Vec<f64>, c: &Vec<f64>) {
+    let n = b.len();
+    unsafe {
+        let ap = a.as_mut_ptr();
+        let bp = b.as_ptr();
+        let cp = c.as_ptr();
+        for i in 0..n {
+            ap.add(i).write(bp.add(i).read() + cp.add(i).read());
+        }
+    }
+}
+
+/// STREAM Triad in-place: a[i] = b[i] + scalar * c[i]
+pub fn stream_triad_pooled(a: &mut Vec<f64>, b: &Vec<f64>, c: &Vec<f64>, scalar: f64) {
+    let n = b.len();
+    unsafe {
+        let ap = a.as_mut_ptr();
+        let bp = b.as_ptr();
+        let cp = c.as_ptr();
+        for i in 0..n {
+            ap.add(i).write(bp.add(i).read() + scalar * cp.add(i).read());
+        }
+    }
+}

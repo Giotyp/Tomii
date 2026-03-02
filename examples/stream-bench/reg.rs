@@ -9,6 +9,12 @@ pub fn get_func(func_name: &str) -> Option<CmPtr> {
         "stream_add" => Some(stream_add_cm_wrap),
         "stream_triad" => Some(stream_triad_cm_wrap),
         "sink" => Some(sink_cm_wrap),
+        "create_buffer_pool" => Some(create_buffer_pool_cm_wrap),
+        "create_mutable_buffer_pool" => Some(create_mutable_buffer_pool_cm_wrap),
+        "stream_copy_pooled" => Some(stream_copy_pooled_cm_wrap),
+        "stream_scale_pooled" => Some(stream_scale_pooled_cm_wrap),
+        "stream_add_pooled" => Some(stream_add_pooled_cm_wrap),
+        "stream_triad_pooled" => Some(stream_triad_pooled_cm_wrap),
         _ => {
             println!("Function {} not found", func_name);
             panic!("Panicking...");

@@ -29,6 +29,7 @@ REPO_ROOT = HERE.parents[1]  # workspace root
 sys.path.insert(0, str(REPO_ROOT))
 
 import synstream as ss  # noqa: E402
+from synstream._types import TypedValue  # noqa: E402  (private but stable)
 
 
 # ---------------------------------------------------------------------------
@@ -74,8 +75,14 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--results-dir",
         type=Path,
-        default=HERE / "results",
-        help="output directory for timing txts",
+        default=None,
+        help="output directory for timing txts (default: results/ or results_pooled/ with --pooled)",
+    )
+    p.add_argument(
+        "--pooled",
+        action="store_true",
+        default=False,
+        help="use pre-allocated buffer pools (eliminates per-stream allocation overhead)",
     )
     p.add_argument(
         "--no-clean",
@@ -167,13 +174,100 @@ _GRAPH_BUILDERS = {
 
 
 # ---------------------------------------------------------------------------
+# Pooled graph builders (pre-allocated buffers — no per-stream allocation)
+# ---------------------------------------------------------------------------
+
+
+def build_copy_graph_pooled(array_size: int, workers: int) -> ss.Graph:
+    app = ss.Graph()
+    nw     = app.var("num_workers", ss.usize(workers))
+    n      = app.var("array_size",  ss.usize(array_size))
+    fill_b = app.var("fill_b",      ss.f64(2.0))
+    _index = TypedValue("$ref", "$index")
+
+    all_b = app.var("all_b", func="create_buffer_pool",         args=[nw, n, fill_b])
+    all_a = app.var("all_a", func="create_mutable_buffer_pool", args=[nw, n])
+
+    copy_op = app.node("copy_op", func="stream_copy_pooled", factor=nw,
+                       args=[all_a, all_b, _index])
+    app.node("sink", func="sink", args=[copy_op.wait(0, nw)])
+    return app
+
+
+def build_scale_graph_pooled(array_size: int, workers: int) -> ss.Graph:
+    app = ss.Graph()
+    nw     = app.var("num_workers", ss.usize(workers))
+    n      = app.var("array_size",  ss.usize(array_size))
+    fill_b = app.var("fill_b",      ss.f64(2.0))
+    scalar = app.var("scalar",      ss.f64(3.0))
+    _index = TypedValue("$ref", "$index")
+
+    all_b = app.var("all_b", func="create_buffer_pool",         args=[nw, n, fill_b])
+    all_a = app.var("all_a", func="create_mutable_buffer_pool", args=[nw, n])
+
+    scale_op = app.node("scale_op", func="stream_scale_pooled", factor=nw,
+                        args=[all_a, all_b, _index, scalar])
+    app.node("sink", func="sink", args=[scale_op.wait(0, nw)])
+    return app
+
+
+def build_add_graph_pooled(array_size: int, workers: int) -> ss.Graph:
+    app = ss.Graph()
+    nw     = app.var("num_workers", ss.usize(workers))
+    n      = app.var("array_size",  ss.usize(array_size))
+    fill_b = app.var("fill_b",      ss.f64(2.0))
+    fill_c = app.var("fill_c",      ss.f64(1.0))
+    _index = TypedValue("$ref", "$index")
+
+    all_b = app.var("all_b", func="create_buffer_pool",         args=[nw, n, fill_b])
+    all_c = app.var("all_c", func="create_buffer_pool",         args=[nw, n, fill_c])
+    all_a = app.var("all_a", func="create_mutable_buffer_pool", args=[nw, n])
+
+    add_op = app.node("add_op", func="stream_add_pooled", factor=nw,
+                      args=[all_a, all_b, all_c, _index])
+    app.node("sink", func="sink", args=[add_op.wait(0, nw)])
+    return app
+
+
+def build_triad_graph_pooled(array_size: int, workers: int) -> ss.Graph:
+    app = ss.Graph()
+    nw     = app.var("num_workers", ss.usize(workers))
+    n      = app.var("array_size",  ss.usize(array_size))
+    fill_b = app.var("fill_b",      ss.f64(2.0))
+    fill_c = app.var("fill_c",      ss.f64(1.0))
+    scalar = app.var("scalar",      ss.f64(3.0))
+    _index = TypedValue("$ref", "$index")
+
+    all_b = app.var("all_b", func="create_buffer_pool",         args=[nw, n, fill_b])
+    all_c = app.var("all_c", func="create_buffer_pool",         args=[nw, n, fill_c])
+    all_a = app.var("all_a", func="create_mutable_buffer_pool", args=[nw, n])
+
+    triad_op = app.node("triad_op", func="stream_triad_pooled", factor=nw,
+                        args=[all_a, all_b, all_c, _index, scalar])
+    app.node("sink", func="sink", args=[triad_op.wait(0, nw)])
+    return app
+
+
+_POOLED_GRAPH_BUILDERS = {
+    "copy":  build_copy_graph_pooled,
+    "scale": build_scale_graph_pooled,
+    "add":   build_add_graph_pooled,
+    "triad": build_triad_graph_pooled,
+}
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 
 def main() -> None:
     args = _parse_args()
+    if args.results_dir is None:
+        args.results_dir = HERE / ("results_pooled" if args.pooled else "results")
     args.results_dir.mkdir(parents=True, exist_ok=True)
+
+    builders = _POOLED_GRAPH_BUILDERS if args.pooled else _GRAPH_BUILDERS
 
     # Build plugin + binary once
     build_app = ss.Graph()
@@ -189,7 +283,7 @@ def main() -> None:
 
     # Sweep (kernel, workers)
     for kernel in args.kernels:
-        builder = _GRAPH_BUILDERS[kernel]
+        builder = builders[kernel]
         for workers in args.workers:
             timing_file = args.results_dir / f"synstream_stream_{kernel}_w{workers}.txt"
             print(

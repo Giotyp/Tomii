@@ -81,3 +81,89 @@ cache_sym! {
 pub fn sink_cm_wrap(args: &[CmTypes]) -> CmTypes {
     SINK_CM_SYM(&args[0])
 }
+
+cache_sym! {
+    pub static CREATE_BUFFER_POOL_CM_SYM: fn(usize, usize, f64) -> CmTypes = b"create_buffer_pool_cm";
+}
+pub fn create_buffer_pool_cm_wrap(args: &[CmTypes]) -> CmTypes {
+    let n_workers = match args[0] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("create_buffer_pool_cm: expected Usize for n_workers"),
+    };
+    let array_size = match args[1] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("create_buffer_pool_cm: expected Usize for array_size"),
+    };
+    let fill = match args[2] {
+        CmTypes::F64(x) => x,
+        _ => panic!("create_buffer_pool_cm: expected F64 for fill"),
+    };
+    CREATE_BUFFER_POOL_CM_SYM(n_workers, array_size, fill)
+}
+
+cache_sym! {
+    pub static CREATE_MUTABLE_BUFFER_POOL_CM_SYM: fn(usize, usize) -> CmTypes = b"create_mutable_buffer_pool_cm";
+}
+pub fn create_mutable_buffer_pool_cm_wrap(args: &[CmTypes]) -> CmTypes {
+    let n_workers = match args[0] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("create_mutable_buffer_pool_cm: expected Usize for n_workers"),
+    };
+    let array_size = match args[1] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("create_mutable_buffer_pool_cm: expected Usize for array_size"),
+    };
+    CREATE_MUTABLE_BUFFER_POOL_CM_SYM(n_workers, array_size)
+}
+
+cache_sym! {
+    pub static STREAM_COPY_POOLED_CM_SYM: fn(&CmTypes, &CmTypes, usize) -> CmTypes = b"stream_copy_pooled_cm";
+}
+pub fn stream_copy_pooled_cm_wrap(args: &[CmTypes]) -> CmTypes {
+    let idx = match args[2] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("stream_copy_pooled_cm: expected Usize for idx"),
+    };
+    STREAM_COPY_POOLED_CM_SYM(&args[0], &args[1], idx)
+}
+
+cache_sym! {
+    pub static STREAM_SCALE_POOLED_CM_SYM: fn(&CmTypes, &CmTypes, usize, f64) -> CmTypes = b"stream_scale_pooled_cm";
+}
+pub fn stream_scale_pooled_cm_wrap(args: &[CmTypes]) -> CmTypes {
+    let idx = match args[2] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("stream_scale_pooled_cm: expected Usize for idx"),
+    };
+    let scalar = match args[3] {
+        CmTypes::F64(x) => x,
+        _ => panic!("stream_scale_pooled_cm: expected F64 for scalar"),
+    };
+    STREAM_SCALE_POOLED_CM_SYM(&args[0], &args[1], idx, scalar)
+}
+
+cache_sym! {
+    pub static STREAM_ADD_POOLED_CM_SYM: fn(&CmTypes, &CmTypes, &CmTypes, usize) -> CmTypes = b"stream_add_pooled_cm";
+}
+pub fn stream_add_pooled_cm_wrap(args: &[CmTypes]) -> CmTypes {
+    let idx = match args[3] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("stream_add_pooled_cm: expected Usize for idx"),
+    };
+    STREAM_ADD_POOLED_CM_SYM(&args[0], &args[1], &args[2], idx)
+}
+
+cache_sym! {
+    pub static STREAM_TRIAD_POOLED_CM_SYM: fn(&CmTypes, &CmTypes, &CmTypes, usize, f64) -> CmTypes = b"stream_triad_pooled_cm";
+}
+pub fn stream_triad_pooled_cm_wrap(args: &[CmTypes]) -> CmTypes {
+    let idx = match args[3] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("stream_triad_pooled_cm: expected Usize for idx"),
+    };
+    let scalar = match args[4] {
+        CmTypes::F64(x) => x,
+        _ => panic!("stream_triad_pooled_cm: expected F64 for scalar"),
+    };
+    STREAM_TRIAD_POOLED_CM_SYM(&args[0], &args[1], &args[2], idx, scalar)
+}

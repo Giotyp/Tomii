@@ -81,9 +81,9 @@ def gather_pagerank_results(results_dir: Path) -> Optional["pd.DataFrame"]:
 
 # ── plots ─────────────────────────────────────────────────────────────────────
 
-COLORS = {"synstream": "#1f77b4", "timely": "#ff7f0e", "timely_pinned": "#d62728", "tbb": "#2ca02c"}
-MARKERS = {"synstream": "o", "timely": "s", "timely_pinned": "^", "tbb": "D"}
-LABELS = {"synstream": "SynStream", "timely": "Timely (unpinned)", "timely_pinned": "Timely (taskset-pinned)", "tbb": "Intel TBB"}
+COLORS = {"synstream": "#1f77b4", "timely": "#ff7f0e", "timely_pinned": "#d62728", "tbb": "#2ca02c", "synstream_pooled": "#9467bd"}
+MARKERS = {"synstream": "o", "timely": "s", "timely_pinned": "^", "tbb": "D", "synstream_pooled": "v"}
+LABELS = {"synstream": "SynStream", "timely": "Timely (unpinned)", "timely_pinned": "Timely (taskset-pinned)", "tbb": "Intel TBB", "synstream_pooled": "SynStream (pooled)"}
 
 
 def plot_stream(df: "pd.DataFrame", out_dir: Path) -> None:

@@ -1,6 +1,7 @@
 pub mod functions;
 
 use functions::*;
+use std::sync::Mutex;
 use synstream_types::CmTypes;
 
 #[no_mangle]
@@ -48,4 +49,102 @@ pub fn sink_cm(result: &CmTypes) -> CmTypes {
                 .unwrap_or(CmTypes::None)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Buffer-pool _cm wrappers
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub fn create_buffer_pool_cm(n_workers: usize, array_size: usize, fill: f64) -> CmTypes {
+    CmTypes::from_any(create_buffer_pool(n_workers, array_size, fill))
+}
+
+#[no_mangle]
+pub fn create_mutable_buffer_pool_cm(n_workers: usize, array_size: usize) -> CmTypes {
+    CmTypes::from_any(create_mutable_buffer_pool(n_workers, array_size))
+}
+
+#[no_mangle]
+pub fn stream_copy_pooled_cm(all_a: &CmTypes, all_b: &CmTypes, idx: usize) -> CmTypes {
+    all_a
+        .with_any(|a_pool: &Vec<Mutex<Vec<f64>>>| {
+            all_b
+                .with_any(|b_pool: &Vec<Vec<f64>>| {
+                    let mut a = a_pool[idx].lock().unwrap();
+                    stream_copy_pooled(&mut a, &b_pool[idx]);
+                })
+                .unwrap()
+        })
+        .expect("stream_copy_pooled_cm: type error");
+    CmTypes::None
+}
+
+#[no_mangle]
+pub fn stream_scale_pooled_cm(
+    all_a: &CmTypes,
+    all_b: &CmTypes,
+    idx: usize,
+    scalar: f64,
+) -> CmTypes {
+    all_a
+        .with_any(|a_pool: &Vec<Mutex<Vec<f64>>>| {
+            all_b
+                .with_any(|b_pool: &Vec<Vec<f64>>| {
+                    let mut a = a_pool[idx].lock().unwrap();
+                    stream_scale_pooled(&mut a, &b_pool[idx], scalar);
+                })
+                .unwrap()
+        })
+        .expect("stream_scale_pooled_cm: type error");
+    CmTypes::None
+}
+
+#[no_mangle]
+pub fn stream_add_pooled_cm(
+    all_a: &CmTypes,
+    all_b: &CmTypes,
+    all_c: &CmTypes,
+    idx: usize,
+) -> CmTypes {
+    all_a
+        .with_any(|a_pool: &Vec<Mutex<Vec<f64>>>| {
+            all_b
+                .with_any(|b_pool: &Vec<Vec<f64>>| {
+                    all_c
+                        .with_any(|c_pool: &Vec<Vec<f64>>| {
+                            let mut a = a_pool[idx].lock().unwrap();
+                            stream_add_pooled(&mut a, &b_pool[idx], &c_pool[idx]);
+                        })
+                        .unwrap()
+                })
+                .unwrap()
+        })
+        .expect("stream_add_pooled_cm: type error");
+    CmTypes::None
+}
+
+#[no_mangle]
+pub fn stream_triad_pooled_cm(
+    all_a: &CmTypes,
+    all_b: &CmTypes,
+    all_c: &CmTypes,
+    idx: usize,
+    scalar: f64,
+) -> CmTypes {
+    all_a
+        .with_any(|a_pool: &Vec<Mutex<Vec<f64>>>| {
+            all_b
+                .with_any(|b_pool: &Vec<Vec<f64>>| {
+                    all_c
+                        .with_any(|c_pool: &Vec<Vec<f64>>| {
+                            let mut a = a_pool[idx].lock().unwrap();
+                            stream_triad_pooled(&mut a, &b_pool[idx], &c_pool[idx], scalar);
+                        })
+                        .unwrap()
+                })
+                .unwrap()
+        })
+        .expect("stream_triad_pooled_cm: type error");
+    CmTypes::None
 }

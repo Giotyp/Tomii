@@ -94,6 +94,7 @@ def convert_file(
     txt_path: Path,
     output_dir: Path,
     array_size: int,
+    system: str = "synstream",
 ) -> None:
     """Parse one SynStream timing .txt and append a row to the output CSV."""
     # Expected filename: synstream_stream_<kernel>_w<workers>.txt
@@ -125,13 +126,13 @@ def convert_file(
     bytes_total = workers * _ARRAYS[kernel] * array_size * 8
     gb_s = bytes_total / elapsed_s / 1e9
 
-    out_csv = output_dir / f"synstream_stream_{kernel}_w{workers}.csv"
+    out_csv = output_dir / f"{system}_stream_{kernel}_w{workers}.csv"
     needs_header = not out_csv.exists()
     with out_csv.open("a", newline="") as f:
         w = csv.writer(f)
         if needs_header:
             w.writerow(["system", "kernel", "array_size", "workers", "elapsed_s", "gb_s"])
-        w.writerow(["synstream", kernel, array_size, workers, f"{elapsed_s:.6f}", f"{gb_s:.3f}"])
+        w.writerow([system, kernel, array_size, workers, f"{elapsed_s:.6f}", f"{gb_s:.3f}"])
 
     print(
         f"  {txt_path.name} → {out_csv.name}  "
@@ -159,6 +160,11 @@ def main() -> None:
         default=268_435_456,
         help="f64 elements per worker array (default: 256M)",
     )
+    p.add_argument(
+        "--system",
+        default="synstream",
+        help="system label for output CSV rows (default: synstream)",
+    )
     args = p.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -170,7 +176,7 @@ def main() -> None:
 
     print(f"Converting {len(txt_files)} file(s) from {args.input_dir} → {args.output_dir}")
     for f in txt_files:
-        convert_file(f, args.output_dir, args.array_size)
+        convert_file(f, args.output_dir, args.array_size, args.system)
 
 
 if __name__ == "__main__":
