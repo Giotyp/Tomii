@@ -42,16 +42,34 @@ pub fn get_partition_cm(graph: &CmTypes, idx: usize, n_parts: usize) -> CmTypes 
         .expect("get_partition_cm: expected CsrGraph")
 }
 
+/// Pre-compute all N partitions at initialization time so they are reused
+/// across every stream (iteration) without re-partitioning the graph.
+#[no_mangle]
+pub fn get_all_partitions_cm(graph: &CmTypes, n_parts: usize) -> CmTypes {
+    graph
+        .with_any(|g: &CsrGraph| {
+            let parts: Vec<PartitionedEdges> = (0..n_parts)
+                .map(|i| PartitionedEdges::from_graph(g, i, n_parts))
+                .collect();
+            CmTypes::from_any(parts)
+        })
+        .expect("get_all_partitions_cm: expected CsrGraph")
+}
+
 // ---------------------------------------------------------------------------
 // Compute functions
 // ---------------------------------------------------------------------------
 
-/// Scatter: compute per-edge contributions for this partition.
+/// Scatter: compute per-edge contributions for partition `idx`.
+///
+/// `all_parts` is the pre-computed Vec<PartitionedEdges> from `get_all_partitions_cm`.
+/// `idx` is the instance index ($index), selecting which partition this worker owns.
 /// Returns a Vec<f32> of length `num_nodes`.
 #[no_mangle]
-pub fn pr_scatter_cm(partition: &CmTypes, graph: &CmTypes, ranks: &CmTypes) -> CmTypes {
-    partition
-        .with_any(|part: &PartitionedEdges| {
+pub fn pr_scatter_cm(all_parts: &CmTypes, idx: usize, graph: &CmTypes, ranks: &CmTypes) -> CmTypes {
+    all_parts
+        .with_any(|parts: &Vec<PartitionedEdges>| {
+            let part = &parts[idx];
             graph
                 .with_any(|g: &CsrGraph| {
                     ranks
@@ -60,7 +78,7 @@ pub fn pr_scatter_cm(partition: &CmTypes, graph: &CmTypes, ranks: &CmTypes) -> C
                 })
                 .expect("pr_scatter_cm: graph must be CsrGraph")
         })
-        .expect("pr_scatter_cm: partition must be PartitionedEdges")
+        .expect("pr_scatter_cm: all_parts must be Vec<PartitionedEdges>")
 }
 
 /// Gather: aggregate all scatter contributions and update ranks in-place.

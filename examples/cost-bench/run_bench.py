@@ -109,26 +109,20 @@ def build_pagerank_graph(damping: float, workers: int) -> ss.Graph:
     _workers = TypedValue("$ref", "$workers")  # total worker count
 
     # Initializations
-    nw          = app.var("num_workers", ss.usize(workers))
-    graph_file  = app.var("graph_file",  ss.String("SNAP_GRAPH_FILE"))
-    damping_var = app.var("damping",     ss.f64(damping))
-    graph       = app.var("graph",       func="load_graph",   args=[graph_file])
-    ranks       = app.var("ranks",       func="create_ranks", args=[graph])
+    nw             = app.var("num_workers",   ss.usize(workers))
+    graph_file     = app.var("graph_file",    ss.String("SNAP_GRAPH_FILE"))
+    damping_var    = app.var("damping",       ss.f64(damping))
+    graph          = app.var("graph",         func="load_graph",        args=[graph_file])
+    ranks          = app.var("ranks",         func="create_ranks",      args=[graph])
+    all_partitions = app.var("all_partitions", func="get_all_partitions", args=[graph, nw])
 
-    # partition[i]: extract edge slice for worker i (uses runtime $index and $workers)
-    partition = app.node(
-        "partition",
-        func="get_partition",
-        factor=nw,
-        args=[graph, _index, _workers],
-    )
-
-    # scatter[i]: compute contributions for partition i using current ranks
+    # scatter[i]: compute contributions for pre-computed partition[i] using current ranks.
+    # all_partitions is computed once at init; $index selects this worker's slice.
     scatter = app.node(
         "scatter",
         func="pr_scatter",
         factor=nw,
-        args=[partition.out(), graph, ranks],
+        args=[all_partitions, _index, graph, ranks],
     )
 
     # gather: args = [ranks, damping, scatter_0, scatter_1, ..., scatter_{w-1}]

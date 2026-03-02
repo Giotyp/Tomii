@@ -55,13 +55,28 @@ pub fn get_partition_cm_wrap(args: &[CmTypes]) -> CmTypes {
     GET_PARTITION_CM_SYM(&args[0], idx, n_parts)
 }
 
+cache_sym! {
+    pub static GET_ALL_PARTITIONS_CM_SYM: fn(&CmTypes, usize) -> CmTypes = b"get_all_partitions_cm";
+}
+pub fn get_all_partitions_cm_wrap(args: &[CmTypes]) -> CmTypes {
+    let n_parts = match args[1] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("get_all_partitions_cm: expected Usize for n_parts"),
+    };
+    GET_ALL_PARTITIONS_CM_SYM(&args[0], n_parts)
+}
+
 // --- Compute functions ---
 
 cache_sym! {
-    pub static PR_SCATTER_CM_SYM: fn(&CmTypes, &CmTypes, &CmTypes) -> CmTypes = b"pr_scatter_cm";
+    pub static PR_SCATTER_CM_SYM: fn(&CmTypes, usize, &CmTypes, &CmTypes) -> CmTypes = b"pr_scatter_cm";
 }
 pub fn pr_scatter_cm_wrap(args: &[CmTypes]) -> CmTypes {
-    PR_SCATTER_CM_SYM(&args[0], &args[1], &args[2])
+    let idx = match args[1] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("pr_scatter_cm: expected Usize for idx"),
+    };
+    PR_SCATTER_CM_SYM(&args[0], idx, &args[2], &args[3])
 }
 
 cache_sym! {
