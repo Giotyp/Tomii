@@ -134,10 +134,12 @@ int main(int argc, char** argv) {
     double mean = sum / cli.reps;
     double gb_s = static_cast<double>(bytes_total) / mean / 1e9;
 
-    std::printf(
-        "TBB STREAM %s | workers=%d | array_size=%zu | mean=%.4fs | %.2f GB/s\n",
-        cli.kernel.c_str(), W, N, mean, gb_s);
+    const std::string system_label = cli.pin ? "tbb_pinned" : "tbb";
 
-    append_csv(cli.output, "tbb", cli.kernel, N, W, mean, gb_s);
+    std::printf(
+        "%s STREAM %s | workers=%d | array_size=%zu | mean=%.4fs | %.2f GB/s\n",
+        system_label.c_str(), cli.kernel.c_str(), W, N, mean, gb_s);
+
+    append_csv(cli.output, system_label, cli.kernel, N, W, mean, gb_s);
     return 0;
 }

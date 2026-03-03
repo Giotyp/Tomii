@@ -172,12 +172,13 @@ int main(int argc, char** argv) {
     }
 
     double s_per_iter = total_s / ITERS;
+    const std::string system_label = cli.pin ? "tbb_pinned" : "tbb";
     std::printf(
-        "TBB PageRank | dataset=%s | workers=%d | iters=%d | "
+        "%s PageRank | dataset=%s | workers=%d | iters=%d | "
         "total=%.4fs | %.4fs/iter\n",
-        cli.dataset.c_str(), W, ITERS, total_s, s_per_iter);
+        system_label.c_str(), cli.dataset.c_str(), W, ITERS, total_s, s_per_iter);
 
-    append_graph_csv(cli.output, "tbb", cli.dataset, W, ITERS,
+    append_graph_csv(cli.output, system_label, cli.dataset, W, ITERS,
                      total_s, s_per_iter);
     return 0;
 }
