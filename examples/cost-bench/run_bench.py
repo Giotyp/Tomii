@@ -20,7 +20,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -34,6 +36,36 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import synstream as ss                       # noqa: E402
 from synstream._types import TypedValue      # noqa: E402  (private but stable)
+
+
+# ---------------------------------------------------------------------------
+# Timing helpers
+# ---------------------------------------------------------------------------
+
+def _parse_synstream_timing(timing_file: Path):
+    """Return (total_s, s_per_iter, iterations) from a SynStream timing CSV."""
+    text = timing_file.read_text()
+    total_m = re.search(r"Total Runtime:\s+([\d.]+)s", text)
+    avg_m   = re.search(r"Avg Time Per Stream:\s+([\d.]+)(ms|s)", text)
+    iters_m = re.search(r"Total Streams Processed:\s+(\d+)", text)
+    total_s    = float(total_m.group(1)) if total_m else 0.0
+    if avg_m:
+        val  = float(avg_m.group(1))
+        s_per_iter = val / 1000.0 if avg_m.group(2) == "ms" else val
+    else:
+        s_per_iter = 0.0
+    iterations = int(iters_m.group(1)) if iters_m else 0
+    return total_s, s_per_iter, iterations
+
+
+def _write_standard_csv(out_path: Path, dataset: str, workers: int,
+                        total_s: float, s_per_iter: float, iterations: int) -> None:
+    """Write a standard-format CSV compatible with compare_results.py."""
+    with open(out_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["system", "dataset", "workers", "iterations", "total_s", "s_per_iter"])
+        w.writerow(["synstream", dataset, workers, iterations,
+                    f"{total_s:.6f}", f"{s_per_iter:.6f}"])
 
 
 # ---------------------------------------------------------------------------
@@ -134,11 +166,13 @@ def build_pagerank_graph(damping: float, workers: int) -> ss.Graph:
         args=[nw, _index, scatter.out(0, nw)],
     )
 
-    # reduce: apply damping formula and write new ranks from N partial sums.
+    # reduce: apply damping formula — factor=nw so each instance writes its own
+    # node-range chunk [idx*chunk, (idx+1)*chunk) in parallel (no serialization).
     app.node(
         "reduce",
-        func="pr_reduce",
-        args=[ranks, damping_var, partial_gather.out(0, nw)],
+        func="pr_reduce_partial",
+        factor=nw,
+        args=[nw, _index, ranks, damping_var, partial_gather.out(0, nw)],
     )
 
     return app
@@ -159,6 +193,9 @@ def main() -> None:
         sys.exit(1)
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
+
+    # Infer dataset name from graph file stem (e.g. "livejournal", "twitter")
+    dataset = Path(args.graph_file).stem
 
     # Build plugin + binary once
     build_app = ss.Graph()
@@ -195,6 +232,12 @@ def main() -> None:
             use_rdtsc=True,
         )
         print(f"  -> {timing_file}", flush=True)
+
+        # Also write a standard-format CSV for compare_results.py
+        total_s, s_per_iter, iters = _parse_synstream_timing(timing_file)
+        std_csv = args.results_dir / f"synstream_pagerank_{dataset}_w{workers}.csv"
+        _write_standard_csv(std_csv, dataset, workers, total_s, s_per_iter, iters)
+        print(f"  -> {std_csv}", flush=True)
 
     print(f"\nDone. Results written to {args.results_dir}")
 

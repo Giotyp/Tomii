@@ -81,33 +81,81 @@ def gather_pagerank_results(results_dir: Path) -> Optional["pd.DataFrame"]:
 
 # ── plots ─────────────────────────────────────────────────────────────────────
 
-COLORS = {"synstream": "#1f77b4", "timely": "#ff7f0e", "timely_pinned": "#d62728", "tbb": "#2ca02c", "synstream_pooled": "#9467bd"}
-MARKERS = {"synstream": "o", "timely": "s", "timely_pinned": "^", "tbb": "D", "synstream_pooled": "v"}
-LABELS = {"synstream": "SynStream", "timely": "Timely (unpinned)", "timely_pinned": "Timely (taskset-pinned)", "tbb": "Intel TBB", "synstream_pooled": "SynStream (pooled)"}
+COLORS = {
+    "synstream":        "#1f77b4",
+    "synstream_pooled": "#aec7e8",
+    "timely":           "#ff7f0e",
+    "timely_pooled":    "#ffbb78",
+    "timely_pinned":    "#d62728",
+    "tbb":              "#2ca02c",
+    "tbb_pinned":       "#98df8a",
+}
+MARKERS = {
+    "synstream":        "o",
+    "synstream_pooled": "o",
+    "timely":           "s",
+    "timely_pooled":    "s",
+    "timely_pinned":    "^",
+    "tbb":              "D",
+    "tbb_pinned":       "D",
+}
+LABELS = {
+    "synstream":        "SynStream",
+    "synstream_pooled": "SynStream (pooled)",
+    "timely":           "Timely",
+    "timely_pooled":    "Timely (pooled)",
+    "timely_pinned":    "Timely (taskset-pinned)",
+    "tbb":              "Intel TBB",
+    "tbb_pinned":       "Intel TBB (pinned)",
+}
+
+
+# Series excluded from the STREAM plot (taskset-pinned Timely shown separately).
+STREAM_EXCLUDE = {"timely_pinned"}
+
+# Draw order: determines z-order and legend order (listed first = drawn first).
+STREAM_ORDER = [
+    "synstream", "synstream_pooled",
+    "timely", "timely_pooled",
+    "tbb", "tbb_pinned",
+]
+PAGERANK_ORDER = ["synstream", "timely", "tbb"]
+
+# Line styles: solid for primary series, dashed for secondary (pooled/pinned).
+LINESTYLES = {
+    "synstream":        "-",
+    "synstream_pooled": "--",
+    "timely":           "-",
+    "timely_pooled":    "--",
+    "tbb":              "-",
+    "tbb_pinned":       "--",
+}
 
 
 def plot_stream(df: "pd.DataFrame", out_dir: Path) -> None:
     kernels = ["copy", "scale", "add", "triad"]
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=False, sharey=False)
-    fig.suptitle("STREAM Benchmark: SynStream vs Timely Dataflow", fontsize=13)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9), sharex=False, sharey=False)
+    fig.suptitle("STREAM Memory Bandwidth: SynStream vs Timely vs Intel TBB", fontsize=13)
 
     for ax, kernel in zip(axes.flat, kernels):
-        sub = df[(df["kernel"] == kernel) & (df["system"] != "timely_pinned")]
-        for system, grp in sub.groupby("system"):
-            grp_sorted = grp.sort_values("workers")
+        sub = df[(df["kernel"] == kernel) & (~df["system"].isin(STREAM_EXCLUDE))]
+        present = [s for s in STREAM_ORDER if s in sub["system"].values]
+        for system in present:
+            grp = sub[sub["system"] == system].sort_values("workers")
             ax.plot(
-                grp_sorted["workers"],
-                grp_sorted["gb_s"],
+                grp["workers"],
+                grp["gb_s"],
                 label=LABELS.get(system, system),
                 color=COLORS.get(system, "gray"),
                 marker=MARKERS.get(system, "^"),
+                linestyle=LINESTYLES.get(system, "-"),
                 linewidth=1.8,
                 markersize=6,
             )
         ax.set_title(f"STREAM {kernel.capitalize()}")
         ax.set_xlabel("Workers")
         ax.set_ylabel("GB/s")
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -123,18 +171,20 @@ def plot_pagerank(df: "pd.DataFrame", out_dir: Path) -> None:
     fig, axes = plt.subplots(1, ncols, figsize=(6 * ncols, 5))
     if ncols == 1:
         axes = [axes]
-    fig.suptitle("PageRank (COST): SynStream vs Timely Dataflow", fontsize=13)
+    fig.suptitle("PageRank (COST): SynStream vs Timely vs Intel TBB", fontsize=13)
 
     for ax, dataset in zip(axes, sorted(datasets)):
         sub = df[df["dataset"] == dataset]
-        for system, grp in sub.groupby("system"):
-            grp_sorted = grp.sort_values("workers")
+        present = [s for s in PAGERANK_ORDER if s in sub["system"].values]
+        for system in present:
+            grp = sub[sub["system"] == system].sort_values("workers")
             ax.plot(
-                grp_sorted["workers"],
-                grp_sorted["s_per_iter"],
-                label=system,
+                grp["workers"],
+                grp["s_per_iter"],
+                label=LABELS.get(system, system),
                 color=COLORS.get(system, "gray"),
                 marker=MARKERS.get(system, "^"),
+                linestyle=LINESTYLES.get(system, "-"),
                 linewidth=1.8,
                 markersize=6,
             )

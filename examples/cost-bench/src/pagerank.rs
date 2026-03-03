@@ -78,3 +78,31 @@ pub fn pr_reduce(ranks: &mut Vec<f32>, damping: f32, partial_sums: &[&Vec<f32>])
         }
     }
 }
+
+/// Parallel reduce: apply the PageRank formula for one node-range chunk.
+///
+/// Instance `idx` writes `ranks_ptr[start..end]` where `start = idx * chunk`.
+/// All instances write to non-overlapping ranges → safe for concurrent execution.
+///
+/// # Safety
+/// - All instances must write to non-overlapping ranges `[idx*chunk, (idx+1)*chunk)`.
+/// - No other code may concurrently read or write `ranks_ptr` while this executes.
+/// - The pointer must remain valid (Vec not reallocated) for the call duration.
+pub unsafe fn pr_reduce_partial(
+    idx: usize,
+    n_workers: usize,
+    ranks_ptr: *mut f32,
+    n_nodes: usize,
+    damping: f32,
+    partial_sum: &[f32],
+) {
+    let chunk = (n_nodes + n_workers - 1) / n_workers;
+    let start = idx * chunk;
+    let base = (1.0 - damping) / n_nodes as f32;
+    // Use partial_sum.len() as the authoritative write length.
+    // With 1:1 factor mapping, partial_sum covers exactly [idx*chunk, (idx+1)*chunk)
+    // and its length equals end-start (handling the shorter last chunk correctly).
+    for (j, &v) in partial_sum.iter().enumerate() {
+        *ranks_ptr.add(start + j) = base + damping * v;
+    }
+}

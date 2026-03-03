@@ -82,7 +82,44 @@ for KERNEL in $KERNELS; do
 done
 
 # ---------------------------------------------------------------------------
-# 4. SynStream PageRank sweep
+# 4. TBB STREAM sweep (unpinned + pinned)
+# ---------------------------------------------------------------------------
+TBB_BIN="$REPO_ROOT/tbb-bench/stream_bench"
+if [ ! -x "$TBB_BIN" ]; then
+    echo "  [skip] TBB stream_bench not found at $TBB_BIN — run 'make' in tbb-bench/ first"
+else
+    echo ""
+    echo "=== TBB STREAM benchmarks (unpinned) ==="
+    for KERNEL in $KERNELS; do
+        for W in $WORKERS_LIST; do
+            echo "  TBB STREAM $KERNEL workers=$W"
+            "$TBB_BIN" \
+                --kernel "$KERNEL" \
+                --workers "$W" \
+                --reps "$STREAM_REPS" \
+                --warmup "$STREAM_WARMUP" \
+                --output "$RESULTS_DIR/tbb_stream_${KERNEL}_w${W}.csv"
+        done
+    done
+
+    echo ""
+    echo "=== TBB STREAM benchmarks (pinned) ==="
+    for KERNEL in $KERNELS; do
+        for W in $WORKERS_LIST; do
+            echo "  TBB STREAM (pinned) $KERNEL workers=$W"
+            "$TBB_BIN" \
+                --kernel "$KERNEL" \
+                --workers "$W" \
+                --reps "$STREAM_REPS" \
+                --warmup "$STREAM_WARMUP" \
+                --pin \
+                --output "$RESULTS_DIR/tbb_pinned_stream_${KERNEL}_w${W}.csv"
+        done
+    done
+fi
+
+# ---------------------------------------------------------------------------
+# 6. SynStream PageRank sweep
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== SynStream PageRank benchmarks ==="
@@ -102,7 +139,48 @@ for DATASET in livejournal twitter; do
 done
 
 # ---------------------------------------------------------------------------
-# 5. Timely PageRank sweep
+# 7. TBB PageRank sweep (unpinned + pinned)
+# ---------------------------------------------------------------------------
+TBB_PR_BIN="$REPO_ROOT/tbb-bench/pagerank"
+if [ ! -x "$TBB_PR_BIN" ]; then
+    echo "  [skip] TBB pagerank not found at $TBB_PR_BIN — run 'make' in tbb-bench/ first"
+else
+    for DATASET in livejournal twitter; do
+        GRAPH_FILE="$SNAP_DATA_DIR/${DATASET}.txt"
+        if [ ! -f "$GRAPH_FILE" ]; then
+            echo "  [skip] $GRAPH_FILE not found"
+            continue
+        fi
+
+        echo ""
+        echo "=== TBB PageRank $DATASET (unpinned) ==="
+        for W in $WORKERS_LIST; do
+            echo "  TBB PageRank dataset=$DATASET workers=$W"
+            "$TBB_PR_BIN" \
+                --graph "$GRAPH_FILE" \
+                --dataset "$DATASET" \
+                --workers "$W" \
+                --iterations "$PR_ITERS" \
+                --output "$RESULTS_DIR/tbb_pagerank_${DATASET}_w${W}.csv"
+        done
+
+        echo ""
+        echo "=== TBB PageRank $DATASET (pinned) ==="
+        for W in $WORKERS_LIST; do
+            echo "  TBB PageRank (pinned) dataset=$DATASET workers=$W"
+            "$TBB_PR_BIN" \
+                --graph "$GRAPH_FILE" \
+                --dataset "$DATASET" \
+                --workers "$W" \
+                --iterations "$PR_ITERS" \
+                --pin \
+                --output "$RESULTS_DIR/tbb_pinned_pagerank_${DATASET}_w${W}.csv"
+        done
+    done
+fi
+
+# ---------------------------------------------------------------------------
+# 8. Timely PageRank sweep
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Timely PageRank benchmarks ==="
@@ -124,7 +202,7 @@ for DATASET in livejournal twitter; do
 done
 
 # ---------------------------------------------------------------------------
-# 6. Generate comparison plots
+# 9. Generate comparison plots
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Generating comparison plots ==="

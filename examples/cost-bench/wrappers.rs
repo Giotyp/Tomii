@@ -119,3 +119,24 @@ pub fn pr_reduce_cm_wrap(args: &[CmTypes]) -> CmTypes {
     // args[0] = ranks, args[1] = damping, args[2..] = partial sums
     PR_REDUCE_CM_SYM(&args[0], damping, &args[2..])
 }
+
+cache_sym! {
+    pub static PR_REDUCE_PARTIAL_CM_SYM: fn(usize, usize, &CmTypes, f64, &[CmTypes]) -> CmTypes
+        = b"pr_reduce_partial_cm";
+}
+pub fn pr_reduce_partial_cm_wrap(args: &[CmTypes]) -> CmTypes {
+    let n_workers = match args[0] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("pr_reduce_partial_cm: expected Usize for n_workers"),
+    };
+    let idx = match args[1] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("pr_reduce_partial_cm: expected Usize for idx"),
+    };
+    let damping = match args[3] {
+        CmTypes::F64(x) => x,
+        _ => panic!("pr_reduce_partial_cm: expected F64 for damping"),
+    };
+    // args[0]=n_workers, args[1]=idx, args[2]=ranks, args[3]=damping, args[4..]=partial sums
+    PR_REDUCE_PARTIAL_CM_SYM(n_workers, idx, &args[2], damping, &args[4..])
+}

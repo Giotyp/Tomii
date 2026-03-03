@@ -2,7 +2,7 @@ pub mod graph_io;
 pub mod pagerank;
 
 use graph_io::{CsrGraph, PartitionedEdges};
-use pagerank::{pr_gather, pr_partial_gather, pr_reduce, pr_scatter};
+use pagerank::{pr_gather, pr_partial_gather, pr_reduce, pr_reduce_partial, pr_scatter};
 use synstream_types::CmTypes;
 
 // ---------------------------------------------------------------------------
@@ -126,6 +126,41 @@ pub fn pr_partial_gather_cm(n_workers: usize, idx: usize, contribs: &[CmTypes]) 
         .collect();
     let borrowed: Vec<&Vec<f32>> = cloned.iter().collect();
     CmTypes::from_any(pr_partial_gather(idx, n_workers, &borrowed))
+}
+
+/// Parallel reduce: apply PageRank formula for this instance's node-range chunk.
+///
+/// Each instance `idx` writes `ranks[idx*chunk .. (idx+1)*chunk]` from `partial_sums[idx]`.
+/// Instances run concurrently and write to non-overlapping ranges — no serialization.
+///
+/// args layout (via wrapper): [n_workers: Usize, idx: Usize, ranks: Any<Vec<f32>>, damping: F64, partial_0..partial_{N-1}]
+///
+/// # Safety
+/// Instances write to non-overlapping ranges. The ranks Vec is not resized while
+/// reduce executes. No concurrent writes occur (guaranteed by graph dependency order).
+#[no_mangle]
+pub fn pr_reduce_partial_cm(
+    n_workers: usize,
+    idx: usize,
+    ranks: &CmTypes,
+    damping: f64,
+    partial_sums: &[CmTypes],
+) -> CmTypes {
+    let d = damping as f32;
+    // Extract data pointer and length under a brief read lock.
+    // with_any acquires a read lock (compatible with concurrent callers).
+    let (n_nodes, data_ptr) = ranks
+        .with_any(|v: &Vec<f32>| (v.len(), v.as_ptr() as *mut f32))
+        .expect("pr_reduce_partial_cm: ranks must be Any<Vec<f32>>");
+    // SynStream 1:1 factor mapping: each reduce instance receives only its own
+    // partial_gather result (the one covering the same node range [idx*chunk, (idx+1)*chunk)).
+    let ps = partial_sums[0]
+        .with_any(|v: &Vec<f32>| v.clone())
+        .expect("pr_reduce_partial_cm: partial sum must be Vec<f32>");
+    // SAFETY: instances write non-overlapping ranges [idx*chunk, (idx+1)*chunk).
+    // Vec allocation is stable; no concurrent resizes or writes occur.
+    unsafe { pr_reduce_partial(idx, n_workers, data_ptr, n_nodes, d, &ps) };
+    CmTypes::None
 }
 
 /// Reduce: apply PageRank formula and write new ranks from N partial sums.
