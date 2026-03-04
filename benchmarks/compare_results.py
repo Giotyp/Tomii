@@ -1,8 +1,10 @@
 """Aggregate benchmark results and generate comparison plots.
 
 Reads all ``*.csv`` files from --results-dir, merges them, and produces:
-  - stream_comparison.png  — 2×2 grid of GB/s vs workers for each kernel
-  - pagerank_comparison.png — wall-clock time vs workers per dataset
+  - stream_comparison.png       — 2x2 grid of GB/s vs workers, best config per system
+  - stream_design_choices.png   — 1x4 bar chart of SynStream design variants
+  - pagerank_comparison.png     — wall-clock time vs workers per dataset, best config per system
+  - pagerank_design_choices.png — bar chart of SynStream PageRank design variants (if data present)
 
 Usage:
     python benchmarks/compare_results.py \\
@@ -23,6 +25,7 @@ try:
     import matplotlib
     matplotlib.use("Agg")                          # non-interactive backend
     import matplotlib.pyplot as plt
+    import numpy as np
     HAS_PLOT = True
 except ImportError:
     HAS_PLOT = False
@@ -79,66 +82,93 @@ def gather_pagerank_results(results_dir: Path) -> Optional["pd.DataFrame"]:
     return pd.concat(frames, ignore_index=True)
 
 
-# ── plots ─────────────────────────────────────────────────────────────────────
+# ── style ─────────────────────────────────────────────────────────────────────
 
 COLORS = {
-    "synstream":        "#1f77b4",
-    "synstream_pooled": "#aec7e8",
-    "timely":           "#ff7f0e",
-    "timely_pooled":    "#ffbb78",
-    "timely_pinned":    "#d62728",
-    "tbb":              "#2ca02c",
-    "tbb_pinned":       "#98df8a",
+    "synstream":          "#1f77b4",
+    "synstream_pooled":   "#1f77b4",   # same hue; main plot uses only pooled
+    "synstream_serial":   "#aec7e8",   # light blue for PageRank base variant
+    "timely":             "#ff7f0e",
+    "timely_pooled":      "#ffbb78",
+    "timely_pinned":      "#d62728",
+    "tbb":                "#2ca02c",
+    "tbb_pinned":         "#98df8a",
 }
 MARKERS = {
-    "synstream":        "o",
-    "synstream_pooled": "o",
-    "timely":           "s",
-    "timely_pooled":    "s",
-    "timely_pinned":    "^",
-    "tbb":              "D",
-    "tbb_pinned":       "D",
+    "synstream":          "o",
+    "synstream_pooled":   "o",
+    "synstream_serial":   "o",
+    "timely":             "s",
+    "timely_pooled":      "s",
+    "timely_pinned":      "^",
+    "tbb":                "D",
+    "tbb_pinned":         "D",
 }
+# Labels for main comparison plots (best config per system shown as the system name)
 LABELS = {
-    "synstream":        "SynStream",
-    "synstream_pooled": "SynStream (pooled)",
-    "timely":           "Timely",
-    "timely_pooled":    "Timely (pooled)",
-    "timely_pinned":    "Timely (taskset-pinned)",
-    "tbb":              "Intel TBB",
-    "tbb_pinned":       "Intel TBB (pinned)",
+    "synstream":          "SynStream",
+    "synstream_pooled":   "SynStream",
+    "synstream_serial":   "SynStream (serial)",
+    "timely":             "Timely",
+    "timely_pooled":      "Timely (pooled)",
+    "timely_pinned":      "Timely (taskset-pinned)",
+    "tbb":                "Intel TBB",
+    "tbb_pinned":         "Intel TBB (pinned)",
 }
 
+# ── main comparison plot configuration ────────────────────────────────────────
 
-# Series excluded from the STREAM plot (taskset-pinned Timely shown separately).
-STREAM_EXCLUDE = {"timely_pinned"}
-
-# Draw order: determines z-order and legend order (listed first = drawn first).
-STREAM_ORDER = [
-    "synstream", "synstream_pooled",
-    "timely", "timely_pooled",
-    "tbb", "tbb_pinned",
-]
+# Best configuration per system — these are the only series shown in the main plots.
+STREAM_ORDER   = ["synstream_pooled", "timely", "tbb"]
 PAGERANK_ORDER = ["synstream", "timely", "tbb"]
 
-# Line styles: solid for primary series, dashed for secondary (pooled/pinned).
 LINESTYLES = {
-    "synstream":        "-",
-    "synstream_pooled": "--",
-    "timely":           "-",
-    "timely_pooled":    "--",
-    "tbb":              "-",
-    "tbb_pinned":       "--",
+    "synstream":          "--",
+    "synstream_pooled":   "-",
+    "timely":             "-",
+    "timely_pooled":      "--",
+    "tbb":                "-",
+    "tbb_pinned":         "--",
+}
+
+# ── SynStream design-choice variant configuration ─────────────────────────────
+
+# STREAM variants ordered from least-optimised to best.
+# Add more entries here as new variants are benchmarked.
+SYNSTREAM_STREAM_VARIANTS_ORDER = ["synstream", "synstream_pooled"]
+SYNSTREAM_STREAM_VARIANT_LABELS = {
+    "synstream":        "Base\n(per-stream alloc)",
+    "synstream_pooled": "Pooled\n(initializations)",
+}
+SYNSTREAM_STREAM_VARIANT_COLORS = {
+    "synstream":        "#aec7e8",   # light blue
+    "synstream_pooled": "#1f77b4",   # full blue
+}
+
+# PageRank variants.  The "synstream_serial" entry requires a separate CSV with
+# system="synstream_serial" (old code: per-stream partition, serial gather/reduce).
+# If absent from data the bar chart is silently skipped.
+SYNSTREAM_PR_VARIANTS_ORDER = ["synstream_serial", "synstream"]
+SYNSTREAM_PR_VARIANT_LABELS = {
+    "synstream_serial": "Serial\n(per-stream partition)",
+    "synstream":        "Optimised\n(parallel gather+reduce)",
+}
+SYNSTREAM_PR_VARIANT_COLORS = {
+    "synstream_serial": "#aec7e8",
+    "synstream":        "#1f77b4",
 }
 
 
+# ── main comparison plots ─────────────────────────────────────────────────────
+
 def plot_stream(df: "pd.DataFrame", out_dir: Path) -> None:
+    """2x2 line plot — best configuration per system."""
     kernels = ["copy", "scale", "add", "triad"]
     fig, axes = plt.subplots(2, 2, figsize=(12, 9), sharex=False, sharey=False)
     fig.suptitle("STREAM Memory Bandwidth: SynStream vs Timely vs Intel TBB", fontsize=13)
 
     for ax, kernel in zip(axes.flat, kernels):
-        sub = df[(df["kernel"] == kernel) & (~df["system"].isin(STREAM_EXCLUDE))]
+        sub = df[df["kernel"] == kernel]
         present = [s for s in STREAM_ORDER if s in sub["system"].values]
         for system in present:
             grp = sub[sub["system"] == system].sort_values("workers")
@@ -166,6 +196,7 @@ def plot_stream(df: "pd.DataFrame", out_dir: Path) -> None:
 
 
 def plot_pagerank(df: "pd.DataFrame", out_dir: Path) -> None:
+    """Line plot — best configuration per system, one panel per dataset."""
     datasets = df["dataset"].unique()
     ncols = max(1, len(datasets))
     fig, axes = plt.subplots(1, ncols, figsize=(6 * ncols, 5))
@@ -196,6 +227,121 @@ def plot_pagerank(df: "pd.DataFrame", out_dir: Path) -> None:
 
     plt.tight_layout()
     out_path = out_dir / "pagerank_comparison.png"
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved {out_path}")
+
+
+# ── design-choice bar charts ──────────────────────────────────────────────────
+
+def _bar_group(ax, x, worker_counts, variants, variant_labels, variant_colors,
+               df_sub, metric_col):
+    """Draw grouped bars for each variant onto ax.  Returns True if any data was plotted."""
+    n = len(variants)
+    width = 0.7 / n
+    any_data = False
+    for i, system in enumerate(variants):
+        grp = df_sub[df_sub["system"] == system]
+        vals = []
+        for w in worker_counts:
+            row = grp[grp["workers"] == w][metric_col]
+            vals.append(float(row.mean()) if not row.empty else 0.0)
+        offset = (i - n / 2 + 0.5) * width
+        ax.bar(
+            x + offset,
+            vals,
+            width,
+            label=variant_labels.get(system, system),
+            color=variant_colors.get(system, "gray"),
+            alpha=0.88,
+            edgecolor="white",
+            linewidth=0.5,
+        )
+        if any(v > 0 for v in vals):
+            any_data = True
+    return any_data
+
+
+def plot_stream_design_choices(df: "pd.DataFrame", out_dir: Path) -> None:
+    """1x4 grouped bar chart comparing SynStream STREAM design variants.
+
+    Shows all four kernels side-by-side; within each panel bars are grouped by
+    worker count.  Silently skipped if fewer than two SynStream variants are
+    present in the data.
+    """
+    variants = [s for s in SYNSTREAM_STREAM_VARIANTS_ORDER if s in df["system"].values]
+    if len(variants) < 2:
+        return
+
+    kernels = ["copy", "scale", "add", "triad"]
+    worker_counts = sorted(df["workers"].unique())
+    x = np.arange(len(worker_counts))
+
+    fig, axes = plt.subplots(2, len(kernels)//2, figsize=(8, 8), sharey=False)
+    fig.suptitle("SynStream Design Choices — STREAM Benchmark", fontsize=12)
+
+    legend_done = False
+    for ax, kernel in zip(axes.flat, kernels):
+        sub = df[df["kernel"] == kernel]
+        _bar_group(ax, x, worker_counts, variants,
+                   SYNSTREAM_STREAM_VARIANT_LABELS,
+                   SYNSTREAM_STREAM_VARIANT_COLORS,
+                   sub, "gb_s")
+        ax.set_title(f"{kernel.capitalize()}", fontsize=10)
+        ax.set_xlabel("Workers")
+        ax.set_ylabel("GB/s")
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(w) for w in worker_counts])
+        ax.grid(True, alpha=0.3, axis="y")
+        if not legend_done:
+            ax.legend(fontsize=8)
+            legend_done = True
+
+    plt.tight_layout()
+    out_path = out_dir / "stream_design_choices.png"
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved {out_path}")
+
+
+def plot_pagerank_design_choices(df: "pd.DataFrame", out_dir: Path) -> None:
+    """Grouped bar chart comparing SynStream PageRank design variants per dataset.
+
+    Requires a CSV entry with system="synstream_serial" (per-stream partition,
+    serial gather/reduce).  Silently skipped if fewer than two variants present.
+    """
+    variants = [s for s in SYNSTREAM_PR_VARIANTS_ORDER if s in df["system"].values]
+    if len(variants) < 2:
+        return
+
+    datasets = sorted(df["dataset"].unique())
+    worker_counts = sorted(df["workers"].unique())
+    x = np.arange(len(worker_counts))
+
+    fig, axes = plt.subplots(1, len(datasets), figsize=(6 * len(datasets), 4), sharey=False)
+    if len(datasets) == 1:
+        axes = [axes]
+    fig.suptitle("SynStream Design Choices — PageRank Benchmark", fontsize=12)
+
+    legend_done = False
+    for ax, dataset in zip(axes, datasets):
+        sub = df[df["dataset"] == dataset]
+        _bar_group(ax, x, worker_counts, variants,
+                   SYNSTREAM_PR_VARIANT_LABELS,
+                   SYNSTREAM_PR_VARIANT_COLORS,
+                   sub, "s_per_iter")
+        ax.set_title(f"{dataset}", fontsize=10)
+        ax.set_xlabel("Workers")
+        ax.set_ylabel("Time per iteration (s)")
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(w) for w in worker_counts])
+        ax.grid(True, alpha=0.3, axis="y")
+        if not legend_done:
+            ax.legend(fontsize=8)
+            legend_done = True
+
+    plt.tight_layout()
+    out_path = out_dir / "pagerank_design_choices.png"
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"Saved {out_path}")
@@ -240,6 +386,7 @@ def main() -> None:
         print_stream_table(stream_df)
         if HAS_PLOT:
             plot_stream(stream_df, args.output_dir)
+            plot_stream_design_choices(stream_df, args.output_dir)
     else:
         print("[info] No STREAM results found.")
 
@@ -247,6 +394,7 @@ def main() -> None:
         print_pagerank_table(pr_df)
         if HAS_PLOT:
             plot_pagerank(pr_df, args.output_dir)
+            plot_pagerank_design_choices(pr_df, args.output_dir)
     else:
         print("[info] No PageRank results found.")
 
