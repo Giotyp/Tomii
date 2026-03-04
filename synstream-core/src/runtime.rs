@@ -64,7 +64,7 @@ const SPIN_ITERATIONS: u32 = 32;
 /// This eliminates the dead zone where workers idle while the system thread processes
 /// a large batch. Value tuned to balance dispatch latency (~100μs per flush at ~3μs/task)
 /// against per-flush overhead (~500ns for timing + allocation).
-const INCREMENTAL_SCHED_THRESHOLD: usize = 32;
+const INCREMENTAL_SCHED_THRESHOLD: usize = 4;
 
 // Main SynStream Runtime struct with shared context
 pub struct SynRt {
@@ -1697,12 +1697,9 @@ impl SynRt {
                             // release_slot, so it is already excluded from this count).
                             let currently_active = slot_states
                                 .iter()
-                                .filter(|&&s| {
-                                    s == SlotState::Active || s == SlotState::Buffering
-                                })
+                                .filter(|&&s| s == SlotState::Active || s == SlotState::Buffering)
                                 .count();
-                            let completed =
-                                shared.stream_complete_counter.load(Ordering::SeqCst);
+                            let completed = shared.stream_complete_counter.load(Ordering::SeqCst);
                             // Unique stream ID: completed streams + in-flight streams gives
                             // the next monotonically increasing ID, avoiding conflicts with
                             // IDs already assigned during initialisation (0..slots).
