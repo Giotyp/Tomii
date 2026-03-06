@@ -11,8 +11,13 @@ path = "src/bin/stream_bench.rs"
 name = "pagerank"
 path = "src/bin/pagerank.rs"
 
+[[bin]]
+name = "wavefront"
+path = "src/bin/wavefront.rs"
+
 [dependencies]
 timely = "0.26"
+libc = "0.2"
 clap = { version = "4.5", features = ["derive"] }
 csv = "1.3"
 memmap2 = "0.9"

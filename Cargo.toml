@@ -5,6 +5,7 @@ members = [
     "examples/matrix-compute",
     "examples/stream-bench",
     "examples/cost-bench",
+    "examples/wavefront-bench",
     "examples/mimolib",
     "timely-bench",
 ]

@@ -82,67 +82,88 @@ def gather_pagerank_results(results_dir: Path) -> Optional["pd.DataFrame"]:
     return pd.concat(frames, ignore_index=True)
 
 
+def gather_wavefront_results(results_dir: Path) -> Optional["pd.DataFrame"]:
+    """Collect all Wavefront CSV files (schema: system,n,workers,iterations,total_s,s_per_iter)."""
+    frames = []
+    for f in results_dir.glob("*.csv"):
+        df = load_stream_csv(f)
+        if df is None:
+            continue
+        if "s_per_iter" in df.columns and "n" in df.columns:
+            frames.append(df)
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
+
+
 # ── style ─────────────────────────────────────────────────────────────────────
 
 COLORS = {
-    "synstream":          "#1f77b4",
-    "synstream_pooled":   "#1f77b4",   # same hue; main plot uses only pooled
-    "synstream_serial":   "#aec7e8",   # light blue for PageRank base variant
-    "timely":             "#ff7f0e",
-    "timely_pooled":      "#ffbb78",
-    "timely_pinned":      "#d62728",
-    "tbb":                "#2ca02c",
-    "tbb_pinned":         "#98df8a",
+    "synstream":              "#1f77b4",
+    "synstream_pooled":       "#1f77b4",
+    "synstream_init_pooled":  "#1f77b4",   # same hue; main plot uses best variant
+    "synstream_serial":       "#aec7e8",   # light blue for PageRank base variant
+    "timely":                 "#ff7f0e",
+    "timely_pooled":          "#ffbb78",
+    "timely_pinned":          "#d62728",
+    "tbb":                    "#2ca02c",
+    "tbb_pinned":             "#98df8a",
 }
 MARKERS = {
-    "synstream":          "o",
-    "synstream_pooled":   "o",
-    "synstream_serial":   "o",
-    "timely":             "s",
-    "timely_pooled":      "s",
-    "timely_pinned":      "^",
-    "tbb":                "D",
-    "tbb_pinned":         "D",
+    "synstream":              "o",
+    "synstream_pooled":       "o",
+    "synstream_init_pooled":  "o",
+    "synstream_serial":       "o",
+    "timely":                 "s",
+    "timely_pooled":          "s",
+    "timely_pinned":          "^",
+    "tbb":                    "D",
+    "tbb_pinned":             "D",
 }
 # Labels for main comparison plots (best config per system shown as the system name)
 LABELS = {
-    "synstream":          "SynStream",
-    "synstream_pooled":   "SynStream",
-    "synstream_serial":   "SynStream (serial)",
-    "timely":             "Timely",
-    "timely_pooled":      "Timely (pooled)",
-    "timely_pinned":      "Timely (taskset-pinned)",
-    "tbb":                "Intel TBB",
-    "tbb_pinned":         "Intel TBB (pinned)",
+    "synstream":              "SynStream",
+    "synstream_pooled":       "SynStream",
+    "synstream_init_pooled":  "SynStream",
+    "synstream_serial":       "SynStream (serial)",
+    "timely":                 "Timely",
+    "timely_pooled":          "Timely",
+    "timely_pinned":          "Timely (taskset-pinned)",
+    "tbb":                    "Intel TBB",
+    "tbb_pinned":             "Intel TBB (pinned)",
 }
 
 # ── main comparison plot configuration ────────────────────────────────────────
 
 # Best configuration per system — these are the only series shown in the main plots.
-STREAM_ORDER   = ["synstream_pooled", "timely", "tbb"]
-PAGERANK_ORDER = ["synstream", "timely", "tbb"]
+STREAM_ORDER    = ["synstream_init_pooled", "timely_pooled", "tbb"]
+PAGERANK_ORDER  = ["synstream", "timely", "tbb"]
+WAVEFRONT_ORDER = ["synstream", "timely", "tbb_pinned"]
 
 LINESTYLES = {
-    "synstream":          "--",
-    "synstream_pooled":   "-",
-    "timely":             "-",
-    "timely_pooled":      "--",
-    "tbb":                "-",
-    "tbb_pinned":         "--",
+    "synstream":              "--",
+    "synstream_pooled":       "-",
+    "synstream_init_pooled":  "-",
+    "timely":                 "-",
+    "timely_pooled":          "--",
+    "tbb":                    "-",
+    "tbb_pinned":             "--",
 }
 
 # ── SynStream design-choice variant configuration ─────────────────────────────
 
 # STREAM variants ordered from least-optimised to best.
 # Add more entries here as new variants are benchmarked.
-SYNSTREAM_STREAM_VARIANTS_ORDER = ["synstream", "synstream_pooled"]
+SYNSTREAM_STREAM_VARIANTS_ORDER = ["synstream", "synstream_pooled", "synstream_init_pooled"]
 SYNSTREAM_STREAM_VARIANT_LABELS = {
-    "synstream":        "Base\n(per-stream alloc)",
-    "synstream_pooled": "Pooled\n(initializations)",
+    "synstream":              "Base\n(per-stream alloc)",
+    "synstream_pooled":       "Pooled\n(Mutex pools)",
+    "synstream_init_pooled":  "Init-Pooled\n(per-worker init)",
 }
 SYNSTREAM_STREAM_VARIANT_COLORS = {
-    "synstream":        "#aec7e8",   # light blue
-    "synstream_pooled": "#1f77b4",   # full blue
+    "synstream":              "#aec7e8",   # light blue
+    "synstream_pooled":       "#6baed6",   # medium blue
+    "synstream_init_pooled":  "#1f77b4",   # full blue
 }
 
 # PageRank variants.  The "synstream_serial" entry requires a separate CSV with
@@ -161,7 +182,7 @@ SYNSTREAM_PR_VARIANT_COLORS = {
 
 # ── main comparison plots ─────────────────────────────────────────────────────
 
-def plot_stream(df: "pd.DataFrame", out_dir: Path) -> None:
+def plot_stream(df: "pd.DataFrame", out_dir: Path, peak_bw: float = None) -> None:
     """2x2 line plot — best configuration per system."""
     kernels = ["copy", "scale", "add", "triad"]
     fig, axes = plt.subplots(2, 2, figsize=(12, 9), sharex=False, sharey=False)
@@ -182,11 +203,17 @@ def plot_stream(df: "pd.DataFrame", out_dir: Path) -> None:
                 linewidth=1.8,
                 markersize=6,
             )
+        if peak_bw is not None:
+            ax.plot([], [], color="black", linestyle=":", linewidth=1.2,
+                    label=f"Peak ({peak_bw:.0f} GB/s)")
         ax.set_title(f"STREAM {kernel.capitalize()}")
         ax.set_xlabel("Workers")
         ax.set_ylabel("GB/s")
         ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
+        worker_ticks = sorted(sub["workers"].unique())
+        ax.set_xticks(worker_ticks)
+        ax.set_xticklabels([str(w) for w in worker_ticks])
 
     plt.tight_layout()
     out_path = out_dir / "stream_comparison.png"
@@ -195,7 +222,7 @@ def plot_stream(df: "pd.DataFrame", out_dir: Path) -> None:
     print(f"Saved {out_path}")
 
 
-def plot_pagerank(df: "pd.DataFrame", out_dir: Path) -> None:
+def plot_pagerank(df: "pd.DataFrame", out_dir: Path, peak_bw: float = None) -> None:
     """Line plot — best configuration per system, one panel per dataset."""
     datasets = df["dataset"].unique()
     ncols = max(1, len(datasets))
@@ -304,6 +331,54 @@ def plot_stream_design_choices(df: "pd.DataFrame", out_dir: Path) -> None:
     print(f"Saved {out_path}")
 
 
+def plot_wavefront(df: "pd.DataFrame", out_dir: Path) -> None:
+    """Line plot — time per iteration vs workers, one panel per grid size N."""
+    n_vals = sorted(df["n"].unique())
+    ncols  = max(1, len(n_vals))
+    fig, axes = plt.subplots(1, ncols, figsize=(6 * ncols, 5))
+    if ncols == 1:
+        axes = [axes]
+    fig.suptitle("Wavefront: SynStream vs Timely vs Intel TBB", fontsize=13)
+
+    for ax, n in zip(axes, n_vals):
+        sub = df[df["n"] == n]
+        present = [s for s in WAVEFRONT_ORDER if s in sub["system"].values]
+        for system in present:
+            grp = sub[sub["system"] == system].sort_values("workers")
+            ax.plot(
+                grp["workers"],
+                grp["s_per_iter"],
+                label=LABELS.get(system, system),
+                color=COLORS.get(system, "gray"),
+                marker=MARKERS.get(system, "^"),
+                linestyle=LINESTYLES.get(system, "-"),
+                linewidth=1.8,
+                markersize=6,
+            )
+        ax.set_title(f"Wavefront N={n}")
+        ax.set_xlabel("Workers")
+        ax.set_ylabel("Time per sweep (s)")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        worker_ticks = sorted(sub["workers"].unique())
+        ax.set_xticks(worker_ticks)
+        ax.set_xticklabels([str(w) for w in worker_ticks])
+
+    plt.tight_layout()
+    out_path = out_dir / "wavefront_comparison.png"
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved {out_path}")
+
+
+def print_wavefront_table(df: "pd.DataFrame") -> None:
+    print("\n── Wavefront Benchmark Summary ──")
+    pivot = df.pivot_table(
+        values="s_per_iter", index=["n", "workers"], columns="system", aggfunc="mean"
+    )
+    print(pivot.to_string())
+
+
 def plot_pagerank_design_choices(df: "pd.DataFrame", out_dir: Path) -> None:
     """Grouped bar chart comparing SynStream PageRank design variants per dataset.
 
@@ -371,6 +446,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Generate benchmark comparison plots")
     p.add_argument("--results-dir", type=Path, default=Path("benchmarks/results"))
     p.add_argument("--output-dir",  type=Path, default=Path("benchmarks/results"))
+    p.add_argument("--peak-bw", type=float, default=None, metavar="GB_S",
+                   help="theoretical peak memory bandwidth in GB/s (adds ceiling line to plots)")
     args = p.parse_args()
 
     if not HAS_PANDAS:
@@ -379,13 +456,14 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    stream_df = gather_stream_results(args.results_dir)
-    pr_df     = gather_pagerank_results(args.results_dir)
+    stream_df    = gather_stream_results(args.results_dir)
+    pr_df        = gather_pagerank_results(args.results_dir)
+    wavefront_df = gather_wavefront_results(args.results_dir)
 
     if stream_df is not None and not stream_df.empty:
         print_stream_table(stream_df)
         if HAS_PLOT:
-            plot_stream(stream_df, args.output_dir)
+            plot_stream(stream_df, args.output_dir, peak_bw=args.peak_bw)
             plot_stream_design_choices(stream_df, args.output_dir)
     else:
         print("[info] No STREAM results found.")
@@ -393,10 +471,17 @@ def main() -> None:
     if pr_df is not None and not pr_df.empty:
         print_pagerank_table(pr_df)
         if HAS_PLOT:
-            plot_pagerank(pr_df, args.output_dir)
+            plot_pagerank(pr_df, args.output_dir, peak_bw=args.peak_bw)
             plot_pagerank_design_choices(pr_df, args.output_dir)
     else:
         print("[info] No PageRank results found.")
+
+    if wavefront_df is not None and not wavefront_df.empty:
+        print_wavefront_table(wavefront_df)
+        if HAS_PLOT:
+            plot_wavefront(wavefront_df, args.output_dir)
+    else:
+        print("[info] No Wavefront results found.")
 
 
 if __name__ == "__main__":

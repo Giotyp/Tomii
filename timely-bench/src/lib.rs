@@ -56,6 +56,34 @@ pub fn append_csv(
         .expect("write row");
 }
 
+/// Append one CSV row for wavefront benchmark results.
+pub fn append_wavefront_csv(
+    path: &str,
+    system: &str,
+    n: usize,
+    workers: usize,
+    iterations: usize,
+    total_s: f64,
+    s_per_iter: f64,
+) {
+    let needs_header = !std::path::Path::new(path).exists();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap_or_else(|e| panic!("Cannot open CSV '{}': {}", path, e));
+
+    if needs_header {
+        writeln!(file, "system,n,workers,iterations,total_s,s_per_iter")
+            .expect("write header");
+    }
+    writeln!(
+        file, "{},{},{},{},{:.6},{:.6}",
+        system, n, workers, iterations, total_s, s_per_iter
+    )
+    .expect("write row");
+}
+
 /// Append one CSV row for graph benchmark results.
 pub fn append_graph_csv(
     path: &str,
