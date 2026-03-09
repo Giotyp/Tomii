@@ -8,8 +8,8 @@ Reads all ``*.csv`` files from --results-dir, merges them, and produces:
 
 Usage:
     python benchmarks/compare_results.py \\
-        --results-dir benchmarks/results \\
-        --output-dir  benchmarks/results
+        --results-dir benchmarks/results/csvs \\
+        --output-dir  benchmarks/results/plots
 """
 
 from __future__ import annotations
@@ -23,9 +23,11 @@ from typing import Optional
 # ── optional deps: gracefully degrade if matplotlib/pandas not installed ──────
 try:
     import matplotlib
-    matplotlib.use("Agg")                          # non-interactive backend
+
+    matplotlib.use("Agg")  # non-interactive backend
     import matplotlib.pyplot as plt
     import numpy as np
+
     HAS_PLOT = True
 except ImportError:
     HAS_PLOT = False
@@ -33,6 +35,7 @@ except ImportError:
 
 try:
     import pandas as pd
+
     HAS_PANDAS = True
 except ImportError:
     HAS_PANDAS = False
@@ -40,6 +43,7 @@ except ImportError:
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
 
 def load_stream_csv(path: Path) -> Optional["pd.DataFrame"]:
     """Load a single STREAM result CSV if it exists and has data rows."""
@@ -99,71 +103,91 @@ def gather_wavefront_results(results_dir: Path) -> Optional["pd.DataFrame"]:
 # ── style ─────────────────────────────────────────────────────────────────────
 
 COLORS = {
-    "synstream":              "#1f77b4",
-    "synstream_pooled":       "#1f77b4",
-    "synstream_init_pooled":  "#1f77b4",   # same hue; main plot uses best variant
-    "synstream_serial":       "#aec7e8",   # light blue for PageRank base variant
-    "timely":                 "#ff7f0e",
-    "timely_pooled":          "#ffbb78",
-    "timely_pinned":          "#d62728",
-    "tbb":                    "#2ca02c",
-    "tbb_pinned":             "#98df8a",
+    "synstream": "#1f77b4",
+    "synstream_pooled": "#1f77b4",
+    "synstream_init_pooled": "#1f77b4",  # same hue; main plot uses best variant
+    "synstream_serial": "#aec7e8",  # light blue for PageRank base variant
+    "synstream_st1": "#aec7e8",    # light blue — 1 system thread
+    "synstream_st2": "#6baed6",    # medium blue — 2 system threads
+    "synstream_st4": "#1f77b4",    # full blue — 4 system threads
+    "timely": "#ff7f0e",
+    "timely_pooled": "#ffbb78",
+    "timely_pinned": "#d62728",
+    "tbb": "#2ca02c",
+    "tbb_pinned": "#98df8a",
+    "taskflow_pinned": "#9467bd",  # purple
 }
 MARKERS = {
-    "synstream":              "o",
-    "synstream_pooled":       "o",
-    "synstream_init_pooled":  "o",
-    "synstream_serial":       "o",
-    "timely":                 "s",
-    "timely_pooled":          "s",
-    "timely_pinned":          "^",
-    "tbb":                    "D",
-    "tbb_pinned":             "D",
+    "synstream": "o",
+    "synstream_pooled": "o",
+    "synstream_init_pooled": "o",
+    "synstream_serial": "o",
+    "synstream_st1": "o",
+    "synstream_st2": "o",
+    "synstream_st4": "o",
+    "timely": "s",
+    "timely_pooled": "s",
+    "timely_pinned": "^",
+    "tbb": "D",
+    "tbb_pinned": "D",
+    "taskflow_pinned": "P",  # plus marker
 }
 # Labels for main comparison plots (best config per system shown as the system name)
 LABELS = {
-    "synstream":              "SynStream",
-    "synstream_pooled":       "SynStream",
-    "synstream_init_pooled":  "SynStream",
-    "synstream_serial":       "SynStream (serial)",
-    "timely":                 "Timely",
-    "timely_pooled":          "Timely",
-    "timely_pinned":          "Timely (taskset-pinned)",
-    "tbb":                    "Intel TBB",
-    "tbb_pinned":             "Intel TBB (pinned)",
+    "synstream": "SynStream",
+    "synstream_pooled": "SynStream",
+    "synstream_init_pooled": "SynStream",
+    "synstream_serial": "SynStream (serial)",
+    "synstream_st1": "SynStream",
+    "synstream_st2": "SynStream (2 sys-threads)",
+    "synstream_st4": "SynStream (4 sys-threads)",
+    "timely": "Timely",
+    "timely_pooled": "Timely",
+    "timely_pinned": "Timely (taskset-pinned)",
+    "tbb": "Intel TBB",
+    "tbb_pinned": "Intel TBB (pinned)",
+    "taskflow_pinned": "Taskflow (pinned)",
 }
 
 # ── main comparison plot configuration ────────────────────────────────────────
 
 # Best configuration per system — these are the only series shown in the main plots.
-STREAM_ORDER    = ["synstream_init_pooled", "timely_pooled", "tbb"]
-PAGERANK_ORDER  = ["synstream", "timely", "tbb"]
-WAVEFRONT_ORDER = ["synstream", "timely", "tbb_pinned"]
+STREAM_ORDER = ["synstream_init_pooled", "timely_pooled", "tbb"]
+PAGERANK_ORDER = ["synstream", "timely", "tbb"]
+WAVEFRONT_ORDER = ["synstream_st1", "timely", "tbb_pinned", "taskflow_pinned"]
 
 LINESTYLES = {
-    "synstream":              "--",
-    "synstream_pooled":       "-",
-    "synstream_init_pooled":  "-",
-    "timely":                 "-",
-    "timely_pooled":          "--",
-    "tbb":                    "-",
-    "tbb_pinned":             "--",
+    "synstream": "--",
+    "synstream_pooled": "-",
+    "synstream_init_pooled": "-",
+    "synstream_st1": ":",
+    "synstream_st2": "--",
+    "synstream_st4": "-",
+    "timely": "-",
+    "timely_pooled": "--",
+    "tbb": "-",
+    "tbb_pinned": "--",
+    "taskflow_pinned": "-.",
 }
 
 # ── SynStream design-choice variant configuration ─────────────────────────────
 
 # STREAM variants ordered from least-optimised to best.
 # Add more entries here as new variants are benchmarked.
-SYNSTREAM_STREAM_VARIANTS_ORDER = ["synstream", "synstream_pooled", "synstream_init_pooled"]
+SYNSTREAM_STREAM_VARIANTS_ORDER = [
+    "synstream",
+    "synstream_pooled",
+    "synstream_init_pooled",
+]
 SYNSTREAM_STREAM_VARIANT_LABELS = {
-    "synstream":              "Base\n(per-stream alloc)",
-    "synstream_pooled":       "Pooled\n(Mutex pools)",
-    "synstream_init_pooled":  "Init-Pooled\n(per-worker init)",
+    "synstream": "Base\n(per-stream alloc)",
+    "synstream_pooled": "Pooled\n(Mutex pools)",
+    "synstream_init_pooled": "Init-Pooled\n(per-worker init)",
 }
 SYNSTREAM_STREAM_VARIANT_COLORS = {
-    "synstream":              "#aec7e8",   # light blue
-    "synstream_pooled":       "#6baed6",   # medium blue
-    "synstream_init_pooled":  "#1f77b4",   # full blue
+    "synstream": "#aec7e8",  # light blue
+    "synstream_pooled": "#6baed6",  # medium blue
+    "synstream_init_pooled": "#1f77b4",  # full blue
 }
 
 # PageRank variants.  The "synstream_serial" entry requires a separate CSV with
@@ -172,21 +196,24 @@ SYNSTREAM_STREAM_VARIANT_COLORS = {
 SYNSTREAM_PR_VARIANTS_ORDER = ["synstream_serial", "synstream"]
 SYNSTREAM_PR_VARIANT_LABELS = {
     "synstream_serial": "Serial\n(per-stream partition)",
-    "synstream":        "Optimised\n(parallel gather+reduce)",
+    "synstream": "Optimised\n(parallel gather+reduce)",
 }
 SYNSTREAM_PR_VARIANT_COLORS = {
     "synstream_serial": "#aec7e8",
-    "synstream":        "#1f77b4",
+    "synstream": "#1f77b4",
 }
 
 
 # ── main comparison plots ─────────────────────────────────────────────────────
 
+
 def plot_stream(df: "pd.DataFrame", out_dir: Path, peak_bw: float = None) -> None:
     """2x2 line plot — best configuration per system."""
     kernels = ["copy", "scale", "add", "triad"]
     fig, axes = plt.subplots(2, 2, figsize=(12, 9), sharex=False, sharey=False)
-    fig.suptitle("STREAM Memory Bandwidth: SynStream vs Timely vs Intel TBB", fontsize=13)
+    fig.suptitle(
+        "STREAM Memory Bandwidth: SynStream vs Timely vs Intel TBB", fontsize=13
+    )
 
     for ax, kernel in zip(axes.flat, kernels):
         sub = df[df["kernel"] == kernel]
@@ -204,8 +231,14 @@ def plot_stream(df: "pd.DataFrame", out_dir: Path, peak_bw: float = None) -> Non
                 markersize=6,
             )
         if peak_bw is not None:
-            ax.plot([], [], color="black", linestyle=":", linewidth=1.2,
-                    label=f"Peak ({peak_bw:.0f} GB/s)")
+            ax.plot(
+                [],
+                [],
+                color="black",
+                linestyle=":",
+                linewidth=1.2,
+                label=f"Peak ({peak_bw:.0f} GB/s)",
+            )
         ax.set_title(f"STREAM {kernel.capitalize()}")
         ax.set_xlabel("Workers")
         ax.set_ylabel("GB/s")
@@ -261,8 +294,10 @@ def plot_pagerank(df: "pd.DataFrame", out_dir: Path, peak_bw: float = None) -> N
 
 # ── design-choice bar charts ──────────────────────────────────────────────────
 
-def _bar_group(ax, x, worker_counts, variants, variant_labels, variant_colors,
-               df_sub, metric_col):
+
+def _bar_group(
+    ax, x, worker_counts, variants, variant_labels, variant_colors, df_sub, metric_col
+):
     """Draw grouped bars for each variant onto ax.  Returns True if any data was plotted."""
     n = len(variants)
     width = 0.7 / n
@@ -304,16 +339,22 @@ def plot_stream_design_choices(df: "pd.DataFrame", out_dir: Path) -> None:
     worker_counts = sorted(df["workers"].unique())
     x = np.arange(len(worker_counts))
 
-    fig, axes = plt.subplots(2, len(kernels)//2, figsize=(8, 8), sharey=False)
+    fig, axes = plt.subplots(2, len(kernels) // 2, figsize=(8, 8), sharey=False)
     fig.suptitle("SynStream Design Choices — STREAM Benchmark", fontsize=12)
 
     legend_done = False
     for ax, kernel in zip(axes.flat, kernels):
         sub = df[df["kernel"] == kernel]
-        _bar_group(ax, x, worker_counts, variants,
-                   SYNSTREAM_STREAM_VARIANT_LABELS,
-                   SYNSTREAM_STREAM_VARIANT_COLORS,
-                   sub, "gb_s")
+        _bar_group(
+            ax,
+            x,
+            worker_counts,
+            variants,
+            SYNSTREAM_STREAM_VARIANT_LABELS,
+            SYNSTREAM_STREAM_VARIANT_COLORS,
+            sub,
+            "gb_s",
+        )
         ax.set_title(f"{kernel.capitalize()}", fontsize=10)
         ax.set_xlabel("Workers")
         ax.set_ylabel("GB/s")
@@ -332,22 +373,31 @@ def plot_stream_design_choices(df: "pd.DataFrame", out_dir: Path) -> None:
 
 
 def plot_wavefront(df: "pd.DataFrame", out_dir: Path) -> None:
-    """Line plot — time per iteration vs workers, one panel per grid size N."""
-    n_vals = sorted(df["n"].unique())
-    ncols  = max(1, len(n_vals))
-    fig, axes = plt.subplots(1, ncols, figsize=(6 * ncols, 5))
-    if ncols == 1:
-        axes = [axes]
-    fig.suptitle("Wavefront: SynStream vs Timely vs Intel TBB", fontsize=13)
+    """Line plot — time per iteration vs workers, one panel per grid size N.
 
-    for ax, n in zip(axes, n_vals):
+    Uses log-scale y-axis because SynStream is orders of magnitude slower than
+    TBB/Timely/Taskflow on this fine-grained benchmark.
+    """
+    n_vals = sorted(df["n"].unique())
+    nrows = (len(n_vals) + 1) // 2
+    ncols = min(2, len(n_vals))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(12, 5 * nrows))
+    if len(n_vals) == 1:
+        axes = np.array([axes])
+    axes_flat = axes.flat if hasattr(axes, 'flat') else [axes]
+    fig.suptitle(
+        "Wavefront: SynStream vs Timely vs Intel TBB vs Taskflow",
+        fontsize=14,
+    )
+
+    for ax, n in zip(axes_flat, n_vals):
         sub = df[df["n"] == n]
         present = [s for s in WAVEFRONT_ORDER if s in sub["system"].values]
         for system in present:
             grp = sub[sub["system"] == system].sort_values("workers")
             ax.plot(
                 grp["workers"],
-                grp["s_per_iter"],
+                grp["s_per_iter"] * 1000,  # Convert to milliseconds
                 label=LABELS.get(system, system),
                 color=COLORS.get(system, "gray"),
                 marker=MARKERS.get(system, "^"),
@@ -355,11 +405,12 @@ def plot_wavefront(df: "pd.DataFrame", out_dir: Path) -> None:
                 linewidth=1.8,
                 markersize=6,
             )
-        ax.set_title(f"Wavefront N={n}")
+        ax.set_title(f"N={n}")
         ax.set_xlabel("Workers")
-        ax.set_ylabel("Time per sweep (s)")
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3)
+        ax.set_ylabel("Time per sweep (ms)")
+        ax.set_yscale("log")
+        ax.legend(fontsize=7, loc="best")
+        ax.grid(True, alpha=0.3, which="both")
         worker_ticks = sorted(sub["workers"].unique())
         ax.set_xticks(worker_ticks)
         ax.set_xticklabels([str(w) for w in worker_ticks])
@@ -393,7 +444,9 @@ def plot_pagerank_design_choices(df: "pd.DataFrame", out_dir: Path) -> None:
     worker_counts = sorted(df["workers"].unique())
     x = np.arange(len(worker_counts))
 
-    fig, axes = plt.subplots(1, len(datasets), figsize=(6 * len(datasets), 4), sharey=False)
+    fig, axes = plt.subplots(
+        1, len(datasets), figsize=(6 * len(datasets), 4), sharey=False
+    )
     if len(datasets) == 1:
         axes = [axes]
     fig.suptitle("SynStream Design Choices — PageRank Benchmark", fontsize=12)
@@ -401,10 +454,16 @@ def plot_pagerank_design_choices(df: "pd.DataFrame", out_dir: Path) -> None:
     legend_done = False
     for ax, dataset in zip(axes, datasets):
         sub = df[df["dataset"] == dataset]
-        _bar_group(ax, x, worker_counts, variants,
-                   SYNSTREAM_PR_VARIANT_LABELS,
-                   SYNSTREAM_PR_VARIANT_COLORS,
-                   sub, "s_per_iter")
+        _bar_group(
+            ax,
+            x,
+            worker_counts,
+            variants,
+            SYNSTREAM_PR_VARIANT_LABELS,
+            SYNSTREAM_PR_VARIANT_COLORS,
+            sub,
+            "s_per_iter",
+        )
         ax.set_title(f"{dataset}", fontsize=10)
         ax.set_xlabel("Workers")
         ax.set_ylabel("Time per iteration (s)")
@@ -424,6 +483,7 @@ def plot_pagerank_design_choices(df: "pd.DataFrame", out_dir: Path) -> None:
 
 # ── tables ────────────────────────────────────────────────────────────────────
 
+
 def print_stream_table(df: "pd.DataFrame") -> None:
     print("\n── STREAM Benchmark Summary ──")
     pivot = df.pivot_table(
@@ -435,19 +495,28 @@ def print_stream_table(df: "pd.DataFrame") -> None:
 def print_pagerank_table(df: "pd.DataFrame") -> None:
     print("\n── PageRank Benchmark Summary ──")
     pivot = df.pivot_table(
-        values="s_per_iter", index=["dataset", "workers"], columns="system", aggfunc="mean"
+        values="s_per_iter",
+        index=["dataset", "workers"],
+        columns="system",
+        aggfunc="mean",
     )
     print(pivot.to_string())
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Generate benchmark comparison plots")
-    p.add_argument("--results-dir", type=Path, default=Path("benchmarks/results"))
-    p.add_argument("--output-dir",  type=Path, default=Path("benchmarks/results"))
-    p.add_argument("--peak-bw", type=float, default=None, metavar="GB_S",
-                   help="theoretical peak memory bandwidth in GB/s (adds ceiling line to plots)")
+    p.add_argument("--results-dir", type=Path, default=Path("benchmarks/results/csvs"))
+    p.add_argument("--output-dir", type=Path, default=Path("benchmarks/results/plots"))
+    p.add_argument(
+        "--peak-bw",
+        type=float,
+        default=None,
+        metavar="GB_S",
+        help="theoretical peak memory bandwidth in GB/s (adds ceiling line to plots)",
+    )
     args = p.parse_args()
 
     if not HAS_PANDAS:
@@ -456,8 +525,8 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    stream_df    = gather_stream_results(args.results_dir)
-    pr_df        = gather_pagerank_results(args.results_dir)
+    stream_df = gather_stream_results(args.results_dir)
+    pr_df = gather_pagerank_results(args.results_dir)
     wavefront_df = gather_wavefront_results(args.results_dir)
 
     if stream_df is not None and not stream_df.empty:

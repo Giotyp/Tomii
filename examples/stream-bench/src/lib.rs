@@ -1,6 +1,7 @@
 pub mod functions;
 
 use functions::*;
+#[allow(unused_imports)]
 use std::sync::Mutex;
 use synstream_types::CmTypes;
 
@@ -49,6 +50,74 @@ pub fn sink_cm(result: &CmTypes) -> CmTypes {
                 .unwrap_or(CmTypes::None)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Init-pooled _cm wrappers (per-worker buffers via init factor, no locks)
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub fn generate_mut_array_cm(n: usize) -> CmTypes {
+    CmTypes::from_any(generate_mut_array(n))
+}
+
+#[no_mangle]
+pub fn stream_copy_init_pooled_cm(a: &CmTypes, b: &CmTypes) -> CmTypes {
+    a.with_any_mut(|av: &mut Vec<f64>| {
+        b.with_any(|bv: &Vec<f64>| {
+            stream_copy_pooled(av, bv);
+        })
+        .expect("stream_copy_init_pooled_cm: expected Vec<f64> for b");
+    })
+    .expect("stream_copy_init_pooled_cm: expected Vec<f64> for a");
+    CmTypes::None
+}
+
+#[no_mangle]
+pub fn stream_scale_init_pooled_cm(a: &CmTypes, b: &CmTypes, scalar: f64) -> CmTypes {
+    a.with_any_mut(|av: &mut Vec<f64>| {
+        b.with_any(|bv: &Vec<f64>| {
+            stream_scale_pooled(av, bv, scalar);
+        })
+        .expect("stream_scale_init_pooled_cm: expected Vec<f64> for b");
+    })
+    .expect("stream_scale_init_pooled_cm: expected Vec<f64> for a");
+    CmTypes::None
+}
+
+#[no_mangle]
+pub fn stream_add_init_pooled_cm(a: &CmTypes, b: &CmTypes, c: &CmTypes) -> CmTypes {
+    a.with_any_mut(|av: &mut Vec<f64>| {
+        b.with_any(|bv: &Vec<f64>| {
+            c.with_any(|cv: &Vec<f64>| {
+                stream_add_pooled(av, bv, cv);
+            })
+            .expect("stream_add_init_pooled_cm: expected Vec<f64> for c");
+        })
+        .expect("stream_add_init_pooled_cm: expected Vec<f64> for b");
+    })
+    .expect("stream_add_init_pooled_cm: expected Vec<f64> for a");
+    CmTypes::None
+}
+
+#[no_mangle]
+pub fn stream_triad_init_pooled_cm(
+    a: &CmTypes,
+    b: &CmTypes,
+    c: &CmTypes,
+    scalar: f64,
+) -> CmTypes {
+    a.with_any_mut(|av: &mut Vec<f64>| {
+        b.with_any(|bv: &Vec<f64>| {
+            c.with_any(|cv: &Vec<f64>| {
+                stream_triad_pooled(av, bv, cv, scalar);
+            })
+            .expect("stream_triad_init_pooled_cm: expected Vec<f64> for c");
+        })
+        .expect("stream_triad_init_pooled_cm: expected Vec<f64> for b");
+    })
+    .expect("stream_triad_init_pooled_cm: expected Vec<f64> for a");
+    CmTypes::None
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,52 @@
+{
+    "initializations": [
+        {
+            "name": "array_size",
+            "args": [{"type": "usize", "value": "268435456"}]
+        },
+        {
+            "name": "fill_val",
+            "args": [{"type": "f64", "value": "2.0"}]
+        },
+        {
+            "name": "scalar",
+            "args": [{"type": "f64", "value": "3.0"}]
+        },
+        {
+            "name": "buf_b",
+            "factor": "$workers",
+            "function": "generate_array",
+            "args": [
+                {"type": "usize", "value": "array_size"},
+                {"type": "f64", "value": "fill_val"}
+            ]
+        },
+        {
+            "name": "buf_a",
+            "factor": "$workers",
+            "function": "generate_mut_array",
+            "args": [
+                {"type": "usize", "value": "array_size"}
+            ]
+        }
+    ],
+    "nodes": [
+        {
+            "name": "scale_op",
+            "factor": "$workers",
+            "function": "stream_scale_init_pooled",
+            "args": [
+                {"type": "$ref", "value": "buf_a"},
+                {"type": "$ref", "value": "buf_b"},
+                {"type": "$ref", "value": "scalar"}
+            ]
+        },
+        {
+            "name": "sink",
+            "function": "sink",
+            "args": [
+                {"type": "$barrier", "predecessor": {"name": "scale_op", "indexes": "0-$workers"}}
+            ]
+        }
+    ]
+}

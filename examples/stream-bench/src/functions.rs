@@ -83,6 +83,12 @@ pub fn create_mutable_buffer_pool(
         .collect()
 }
 
+/// Generate a mutable Vec<f64> of length n, zero-initialised.
+/// Used as an init-factor element: each worker gets its own buffer.
+pub fn generate_mut_array(n: usize) -> Vec<f64> {
+    vec![0.0f64; n]
+}
+
 /// STREAM Copy in-place: a[i] = b[i]
 pub fn stream_copy_pooled(a: &mut Vec<f64>, b: &Vec<f64>) {
     let n = b.len();

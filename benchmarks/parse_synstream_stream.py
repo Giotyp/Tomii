@@ -26,14 +26,6 @@ import re
 import sys
 from pathlib import Path
 
-# Kernel → task node name in the graph
-_TASK_NAME = {
-    "copy":  "copy_op",
-    "scale": "scale_op",
-    "add":   "add_op",
-    "triad": "triad_op",
-}
-
 # Number of arrays accessed per element (reads + writes)
 _ARRAYS = {
     "copy":  2,  # read B, write A
@@ -43,6 +35,7 @@ _ARRAYS = {
 }
 
 _TIME_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*(ns|µs|us|ms|s)\b")
+_AVG_STREAM_TIME_RE = re.compile(r"Avg Time Per Stream:\s*(\S+)")
 
 
 def _parse_seconds(token: str) -> float:
@@ -68,25 +61,18 @@ def check_sufficient_streams(txt: str, path: Path) -> None:
         )
 
 
-def extract_kernel_avg_task(txt: str, task_name: str) -> float:
-    """Return Avg/Task (seconds) for the named task from a timing .txt file.
+def extract_stream_avg_time(txt: str) -> float:
+    """Return Avg Time Per Stream (seconds) from the Aggregated Statistics section.
 
-    Avg/Task is the mean wall-clock time per individual task instance.  With
-    factor=N parallel instances running on N workers, Avg/Task ≈ the parallel
-    wall-clock duration of one batch, so total GB/s = N*bytes / Avg/Task.
-    (Avg/Stream is the SUM of all N instance times — a CPU-time metric, not
-    wall-clock — and must not be used for bandwidth calculation.)
+    This is the wall-clock time for one complete stream (task dispatch + parallel
+    kernel execution + result propagation), matching the timing window that TBB's
+    arena.execute() wall-clock measures.  Using Avg/Task (per-worker average) was
+    previously used but is optimistic: it excludes dispatch latency and uses the
+    average rather than the max worker time.
     """
-    # Timing line format:
-    #   Timing - Avg/Stream: 3.9328s, Avg/Task: 983.2026ms, Min: ...
-    header_pat = re.compile(
-        rf"Task\s+'{re.escape(task_name)}'[^\n]*\n"
-        rf"\s+Timing\s+-\s+Avg/Stream:\s*\S+\s*,\s*Avg/Task:\s*(\S+)",
-        re.MULTILINE,
-    )
-    m = header_pat.search(txt)
+    m = _AVG_STREAM_TIME_RE.search(txt)
     if not m:
-        raise ValueError(f"Task '{task_name}' not found in timing output")
+        raise ValueError("'Avg Time Per Stream' not found in timing output")
     return _parse_seconds(m.group(1))
 
 
@@ -105,7 +91,7 @@ def convert_file(
         print(f"[skip] Unexpected filename: {txt_path.name}", file=sys.stderr)
         return
     kernel = parts[2]
-    if kernel not in _TASK_NAME:
+    if kernel not in _ARRAYS:
         print(f"[skip] Unknown kernel '{kernel}': {txt_path.name}", file=sys.stderr)
         return
     try:
@@ -115,10 +101,9 @@ def convert_file(
         return
 
     txt = txt_path.read_text(encoding="utf-8")
-    task_name = _TASK_NAME[kernel]
     try:
         check_sufficient_streams(txt, txt_path)
-        elapsed_s = extract_kernel_avg_task(txt, task_name)
+        elapsed_s = extract_stream_avg_time(txt)
     except ValueError as e:
         print(f"[skip] {txt_path.name}: {e}", file=sys.stderr)
         return

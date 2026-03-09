@@ -1,7 +1,8 @@
 """SynStream Wavefront benchmark.
 
 Runs 20 iterations of an N×N anti-diagonal wavefront sweep, sweeping worker
-counts.  Each "stream" is one complete wavefront pass over the grid.
+counts and system-thread counts.  Each "stream" is one complete wavefront pass
+over the grid.
 
 The graph has 2N-1 nodes (one per anti-diagonal), each with factor equal to
 the anti-diagonal width.  A $barrier dependency between consecutive diagonals
@@ -15,6 +16,7 @@ Usage:
     # Custom parameters
     python examples/wavefront-bench/run_bench.py \\
         --workers 1 2 4 8 \\
+        --system-threads 1 2 4 \\
         --n 64 128 256 512 \\
         --iterations 20 \\
         --no-clean
@@ -56,13 +58,13 @@ def _parse_synstream_timing(timing_file: Path):
     return total_s, s_per_iter, iterations
 
 
-def _write_wavefront_csv(out_path: Path, n: int, workers: int,
+def _write_wavefront_csv(out_path: Path, system: str, n: int, workers: int,
                          total_s: float, s_per_iter: float, iterations: int) -> None:
     """Write a standard-format wavefront CSV compatible with compare_results.py."""
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["system", "n", "workers", "iterations", "total_s", "s_per_iter"])
-        w.writerow(["synstream", n, workers, iterations,
+        w.writerow([system, n, workers, iterations,
                     f"{total_s:.6f}", f"{s_per_iter:.6f}"])
 
 
@@ -76,9 +78,9 @@ def _parse_args() -> argparse.Namespace:
         "--workers",
         type=int,
         nargs="+",
-        default=[1, 2, 4, 8],
+        default=[1, 2, 4, 8, 16, 32],
         metavar="N",
-        help="worker counts to sweep (default: 1 2 4 8)",
+        help="worker counts to sweep (default: 1 2 4 8 16 32)",
     )
     p.add_argument(
         "--n",
@@ -105,6 +107,14 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         default=HERE / "results",
         help="output directory for timing CSVs",
+    )
+    p.add_argument(
+        "--system-threads",
+        type=int,
+        nargs="+",
+        default=[1, 2, 4],
+        metavar="N",
+        help="system thread counts to sweep (default: 1 2 4)",
     )
     p.add_argument(
         "--no-clean",
@@ -182,29 +192,33 @@ def main() -> None:
 
     for n in args.n:
         for workers in args.workers:
-            timing_file = args.results_dir / f"synstream_wavefront_n{n}_w{workers}.csv"
-            print(f"\n=== SynStream Wavefront | n={n} workers={workers} ===", flush=True)
+            for st in args.system_threads:
+                system_label = f"synstream_st{st}"
+                timing_file = args.results_dir / f"synstream_wavefront_n{n}_w{workers}_st{st}.csv"
+                print(f"\n=== SynStream Wavefront | n={n} workers={workers} system_threads={st} ===", flush=True)
 
-            graph = build_wavefront_graph(n)
+                graph = build_wavefront_graph(n)
 
-            graph.run(
-                dylib=dylib,
-                workers=workers,
-                core_offset=1,
-                system_threads=1,
-                slots=1,
-                max_streams=total_streams,
-                exclude_streams=args.warmup,
-                batching_size=1,
-                timing=str(timing_file),
-                use_rdtsc=True,
-            )
-            print(f"  -> {timing_file}", flush=True)
+                graph.run(
+                    dylib=dylib,
+                    workers=workers,
+                    core_offset=1,
+                    system_threads=st,
+                    slots=1,
+                    max_streams=total_streams,
+                    exclude_streams=args.warmup,
+                    batching_size=1,
+                    timing=str(timing_file),
+                    use_rdtsc=True,
+                    custom=True,
+                    coalesce_barriers=True,
+                )
+                print(f"  -> {timing_file}", flush=True)
 
-            total_s, s_per_iter, iters = _parse_synstream_timing(timing_file)
-            std_csv = args.results_dir / f"synstream_wavefront_n{n}_w{workers}_result.csv"
-            _write_wavefront_csv(std_csv, n, workers, total_s, s_per_iter, iters)
-            print(f"  -> {std_csv}", flush=True)
+                total_s, s_per_iter, iters = _parse_synstream_timing(timing_file)
+                std_csv = args.results_dir / f"synstream_wavefront_n{n}_w{workers}_st{st}_result.csv"
+                _write_wavefront_csv(std_csv, system_label, n, workers, total_s, s_per_iter, iters)
+                print(f"  -> {std_csv}", flush=True)
 
     print(f"\nDone. Results written to {args.results_dir}")
 

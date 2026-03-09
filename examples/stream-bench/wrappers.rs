@@ -83,6 +83,53 @@ pub fn sink_cm_wrap(args: &[CmTypes]) -> CmTypes {
 }
 
 cache_sym! {
+    pub static GENERATE_MUT_ARRAY_CM_SYM: fn(usize) -> CmTypes = b"generate_mut_array_cm";
+}
+pub fn generate_mut_array_cm_wrap(args: &[CmTypes]) -> CmTypes {
+    let n = match args[0] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("generate_mut_array_cm: expected Usize for n"),
+    };
+    GENERATE_MUT_ARRAY_CM_SYM(n)
+}
+
+cache_sym! {
+    pub static STREAM_COPY_INIT_POOLED_CM_SYM: fn(&CmTypes, &CmTypes) -> CmTypes = b"stream_copy_init_pooled_cm";
+}
+pub fn stream_copy_init_pooled_cm_wrap(args: &[CmTypes]) -> CmTypes {
+    STREAM_COPY_INIT_POOLED_CM_SYM(&args[0], &args[1])
+}
+
+cache_sym! {
+    pub static STREAM_SCALE_INIT_POOLED_CM_SYM: fn(&CmTypes, &CmTypes, f64) -> CmTypes = b"stream_scale_init_pooled_cm";
+}
+pub fn stream_scale_init_pooled_cm_wrap(args: &[CmTypes]) -> CmTypes {
+    let scalar = match args[2] {
+        CmTypes::F64(x) => x,
+        _ => panic!("stream_scale_init_pooled_cm: expected F64 for scalar"),
+    };
+    STREAM_SCALE_INIT_POOLED_CM_SYM(&args[0], &args[1], scalar)
+}
+
+cache_sym! {
+    pub static STREAM_ADD_INIT_POOLED_CM_SYM: fn(&CmTypes, &CmTypes, &CmTypes) -> CmTypes = b"stream_add_init_pooled_cm";
+}
+pub fn stream_add_init_pooled_cm_wrap(args: &[CmTypes]) -> CmTypes {
+    STREAM_ADD_INIT_POOLED_CM_SYM(&args[0], &args[1], &args[2])
+}
+
+cache_sym! {
+    pub static STREAM_TRIAD_INIT_POOLED_CM_SYM: fn(&CmTypes, &CmTypes, &CmTypes, f64) -> CmTypes = b"stream_triad_init_pooled_cm";
+}
+pub fn stream_triad_init_pooled_cm_wrap(args: &[CmTypes]) -> CmTypes {
+    let scalar = match args[3] {
+        CmTypes::F64(x) => x,
+        _ => panic!("stream_triad_init_pooled_cm: expected F64 for scalar"),
+    };
+    STREAM_TRIAD_INIT_POOLED_CM_SYM(&args[0], &args[1], &args[2], scalar)
+}
+
+cache_sym! {
     pub static CREATE_BUFFER_POOL_CM_SYM: fn(usize, usize, f64) -> CmTypes = b"create_buffer_pool_cm";
 }
 pub fn create_buffer_pool_cm_wrap(args: &[CmTypes]) -> CmTypes {

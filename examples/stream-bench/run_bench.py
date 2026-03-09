@@ -85,6 +85,12 @@ def _parse_args() -> argparse.Namespace:
         help="use pre-allocated buffer pools (eliminates per-stream allocation overhead)",
     )
     p.add_argument(
+        "--init-pooled",
+        action="store_true",
+        default=False,
+        help="use init-factor pooled design (per-worker buffers via init, no locks)",
+    )
+    p.add_argument(
         "--no-clean",
         dest="clean",
         action="store_false",
@@ -257,6 +263,85 @@ _POOLED_GRAPH_BUILDERS = {
 
 
 # ---------------------------------------------------------------------------
+# Init-pooled graph builders (per-worker buffers via init factor, no locks)
+# ---------------------------------------------------------------------------
+
+
+def build_copy_graph_init_pooled(array_size: int, workers: int) -> ss.Graph:
+    app = ss.Graph()
+    nw     = app.var("num_workers", ss.usize(workers))
+    n      = app.var("array_size",  ss.usize(array_size))
+    fill_b = app.var("fill_b",      ss.f64(2.0))
+
+    buf_b = app.var("buf_b", func="generate_array",     factor=nw, args=[n, fill_b])
+    buf_a = app.var("buf_a", func="generate_mut_array",  factor=nw, args=[n])
+
+    copy_op = app.node("copy_op", func="stream_copy_init_pooled", factor=nw,
+                       args=[buf_a, buf_b])
+    app.node("sink", func="sink", args=[copy_op.wait(0, nw)])
+    return app
+
+
+def build_scale_graph_init_pooled(array_size: int, workers: int) -> ss.Graph:
+    app = ss.Graph()
+    nw     = app.var("num_workers", ss.usize(workers))
+    n      = app.var("array_size",  ss.usize(array_size))
+    fill_b = app.var("fill_b",      ss.f64(2.0))
+    scalar = app.var("scalar",      ss.f64(3.0))
+
+    buf_b = app.var("buf_b", func="generate_array",     factor=nw, args=[n, fill_b])
+    buf_a = app.var("buf_a", func="generate_mut_array",  factor=nw, args=[n])
+
+    scale_op = app.node("scale_op", func="stream_scale_init_pooled", factor=nw,
+                        args=[buf_a, buf_b, scalar])
+    app.node("sink", func="sink", args=[scale_op.wait(0, nw)])
+    return app
+
+
+def build_add_graph_init_pooled(array_size: int, workers: int) -> ss.Graph:
+    app = ss.Graph()
+    nw     = app.var("num_workers", ss.usize(workers))
+    n      = app.var("array_size",  ss.usize(array_size))
+    fill_b = app.var("fill_b",      ss.f64(2.0))
+    fill_c = app.var("fill_c",      ss.f64(1.0))
+
+    buf_b = app.var("buf_b", func="generate_array",     factor=nw, args=[n, fill_b])
+    buf_c = app.var("buf_c", func="generate_array",     factor=nw, args=[n, fill_c])
+    buf_a = app.var("buf_a", func="generate_mut_array",  factor=nw, args=[n])
+
+    add_op = app.node("add_op", func="stream_add_init_pooled", factor=nw,
+                      args=[buf_a, buf_b, buf_c])
+    app.node("sink", func="sink", args=[add_op.wait(0, nw)])
+    return app
+
+
+def build_triad_graph_init_pooled(array_size: int, workers: int) -> ss.Graph:
+    app = ss.Graph()
+    nw     = app.var("num_workers", ss.usize(workers))
+    n      = app.var("array_size",  ss.usize(array_size))
+    fill_b = app.var("fill_b",      ss.f64(2.0))
+    fill_c = app.var("fill_c",      ss.f64(1.0))
+    scalar = app.var("scalar",      ss.f64(3.0))
+
+    buf_b = app.var("buf_b", func="generate_array",     factor=nw, args=[n, fill_b])
+    buf_c = app.var("buf_c", func="generate_array",     factor=nw, args=[n, fill_c])
+    buf_a = app.var("buf_a", func="generate_mut_array",  factor=nw, args=[n])
+
+    triad_op = app.node("triad_op", func="stream_triad_init_pooled", factor=nw,
+                        args=[buf_a, buf_b, buf_c, scalar])
+    app.node("sink", func="sink", args=[triad_op.wait(0, nw)])
+    return app
+
+
+_INIT_POOLED_GRAPH_BUILDERS = {
+    "copy":  build_copy_graph_init_pooled,
+    "scale": build_scale_graph_init_pooled,
+    "add":   build_add_graph_init_pooled,
+    "triad": build_triad_graph_init_pooled,
+}
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -264,10 +349,20 @@ _POOLED_GRAPH_BUILDERS = {
 def main() -> None:
     args = _parse_args()
     if args.results_dir is None:
-        args.results_dir = HERE / ("results_pooled" if args.pooled else "results")
+        if args.init_pooled:
+            args.results_dir = HERE / "results_init_pooled"
+        elif args.pooled:
+            args.results_dir = HERE / "results_pooled"
+        else:
+            args.results_dir = HERE / "results"
     args.results_dir.mkdir(parents=True, exist_ok=True)
 
-    builders = _POOLED_GRAPH_BUILDERS if args.pooled else _GRAPH_BUILDERS
+    if args.init_pooled:
+        builders = _INIT_POOLED_GRAPH_BUILDERS
+    elif args.pooled:
+        builders = _POOLED_GRAPH_BUILDERS
+    else:
+        builders = _GRAPH_BUILDERS
 
     # Build plugin + binary once
     build_app = ss.Graph()
