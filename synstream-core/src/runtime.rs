@@ -85,6 +85,7 @@ impl SynRt {
         async_recorder: Option<Arc<AsyncRecorder>>, // Optional shared recorder from caller
         target_batch_size: usize,
         batch_timeout_us: u64,
+        coalesce_barriers: bool,
     ) -> SynRt {
         // Initialize stream completion counters
         let stream_completion_counts = Arc::new(RwLock::new(Vec::new()));
@@ -382,6 +383,7 @@ impl SynRt {
             slot_stream_id: Arc::new((0..slots).map(|_| AtomicUsize::new(usize::MAX)).collect()),
             // Active-slot bitmap for lock-free check_slots
             active_slots_bitmap: Arc::new(AtomicU64::new(0)),
+            coalesce_barriers,
         });
 
         SynRt { shared }

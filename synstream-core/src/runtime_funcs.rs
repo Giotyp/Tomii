@@ -448,6 +448,53 @@ pub struct SharedData {
     // Bitmap of slots currently in Active state — avoids per-slot RwLock read in check_slots.
     // Bit i is set iff slot i is Active. Updated under slot_states write lock.
     pub active_slots_bitmap: Arc<AtomicU64>,
+
+    /// When true, barrier fan-outs with N > workers ready instances are chunked into
+    /// `workers` bulk tasks instead of N individual ones.  Only enable for fine-grained
+    /// workloads (per-task compute << spawn overhead, e.g. wavefront ~5 ns/cell).
+    /// Leave false (default) for coarse-grained workloads (MIMO, PageRank) where
+    /// serialising instances inside a bulk task would increase latency.
+    pub coalesce_barriers: bool,
+}
+
+/// When a barrier node's instances all become ready simultaneously, this helper
+/// creates `min(ready.len(), num_workers)` bulk `NodeInfo`s instead of one per instance.
+/// Requires that ready indices form a contiguous range (guaranteed for single-group barriers).
+/// Falls back to individual dispatch for small fan-outs or non-contiguous indices.
+fn push_ready_chunked(
+    ready: &[usize],
+    succ_id: IdType,
+    slot: usize,
+    pred_index: usize,
+    num_workers: usize,
+    coalesce: bool,
+    sched: &mut Vec<NodeInfo>,
+) {
+    if ready.is_empty() {
+        return;
+    }
+    let start = ready[0];
+    let contiguous = ready.iter().enumerate().all(|(i, &r)| r == start + i);
+
+    if coalesce && contiguous && num_workers > 0 && ready.len() > num_workers {
+        // Chunk into num_workers bulk tasks
+        let total = ready.len();
+        let num_chunks = num_workers;
+        let base = total / num_chunks;
+        let extra = total % num_chunks;
+        let mut offset = start;
+        for c in 0..num_chunks {
+            let count = base + if c < extra { 1 } else { 0 };
+            let mut ni = NodeInfo::new(succ_id, slot, offset, pred_index);
+            ni.bulk_count = count;
+            sched.push(ni);
+            offset += count;
+        }
+    } else {
+        for &idx in ready {
+            sched.push(NodeInfo::new(succ_id, slot, idx, pred_index));
+        }
+    }
 }
 
 /// Worker-side dependency resolution: resolves successors directly on the worker
@@ -469,11 +516,12 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
     }
 
     // Step 3: Decrement task counters (Phase 2 equivalent).
+    // For bulk tasks, decrement by bulk_count to account for all instances handled.
     let node_cache_entry = &shared.node_cache[node_info.id as usize];
     if node_cache_entry.is_condition {
-        shared.slot_pending_cond_tasks[slot].fetch_sub(1, Ordering::SeqCst);
+        shared.slot_pending_cond_tasks[slot].fetch_sub(node_info.bulk_count, Ordering::SeqCst);
     } else if !node_cache_entry.is_initial {
-        shared.slot_pending_tasks[slot].fetch_sub(1, Ordering::SeqCst);
+        shared.slot_pending_tasks[slot].fetch_sub(node_info.bulk_count, Ordering::SeqCst);
     }
 
     // Steps 4-6: Collect successors, resolve dependencies, schedule ready nodes.
@@ -502,18 +550,19 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
                             succ_node_id,
                             slot_gen,
                             *pred_group,
-                            1,
+                            node_info.bulk_count,
                             &mut ready,
                         );
 
-                        for &ready_index in ready.iter() {
-                            sched.push(NodeInfo::new(
-                                succ_node_id as IdType,
-                                slot,
-                                ready_index,
-                                node_info.index,
-                            ));
-                        }
+                        push_ready_chunked(
+                            &ready,
+                            succ_node_id as IdType,
+                            slot,
+                            node_info.index,
+                            shared.workers,
+                            shared.coalesce_barriers,
+                            &mut sched,
+                        );
                     }
 
                     // Step 6: Schedule ready successors.
@@ -557,6 +606,55 @@ fn execute_task(
             });
             return;
         }
+    }
+
+    // Bulk execute path: run multiple consecutive instances in a tight loop on this worker.
+    // Spawned by push_ready_chunked when a barrier fan-out produces N > num_workers ready
+    // instances simultaneously (e.g. wavefront diagonal completion).  Each bulk task covers
+    // a contiguous range `index..index+bulk_count`, eliminating O(N) individual Rayon spawns.
+    if node_info.bulk_count > 1 {
+        // Set stale-detection TLS context — required by populate_cached_args_into.
+        STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = false);
+        EXECUTING_SLOT.with(|s| *s.borrow_mut() = node_info.slot);
+        EXECUTING_GEN.with(|g| *g.borrow_mut() = node_info.gen);
+
+        let node_cache = &shared.node_cache[node_info.id as usize];
+        ARG_BUF.with(|buf_cell| {
+            let mut buf = buf_cell.borrow_mut();
+            for inst_idx in node_info.index..node_info.index + node_info.bulk_count {
+                buf.clear();
+                populate_cached_args_into(
+                    &mut buf,
+                    shared,
+                    &node_cache.arg_cache,
+                    node_info.id,
+                    inst_idx,
+                    node_info.slot,
+                    node_info.pred_index,
+                );
+                if STALE_TASK_DETECTED.with(|f| *f.borrow()) {
+                    buf.clear();
+                    return; // Slot recycled mid-bulk — drop remaining instances
+                }
+                let result = func(&buf);
+                buf.clear(); // release Arc refs promptly
+                // Store result for this specific instance using a per-instance NodeInfo
+                let mut inst_info = node_info.clone();
+                inst_info.index = inst_idx;
+                inst_info.bulk_count = 1;
+                shared.node_results.set(&inst_info, result);
+            }
+        });
+
+        // Stale check: if slot was recycled during bulk execution, skip completion accounting
+        if STALE_TASK_DETECTED.with(|f| *f.borrow()) {
+            return;
+        }
+
+        // Single call to worker_resolve_successors accounts for all bulk_count instances
+        // via the bulk_count-aware counter decrements and decrease_and_get_ready_into call.
+        worker_resolve_successors(shared, node_info);
+        return;
     }
 
     // Initialize stale-detection context for collect_arg_result.

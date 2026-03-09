@@ -44,6 +44,10 @@ pub struct NodeInfo {
     pub gen: u32,
     pub slot: usize,
     pub index: usize,
+    /// Number of consecutive instances this task handles starting at `index`.
+    /// 1 = single instance (default). >1 = bulk task covering `index..index+bulk_count`.
+    /// Excluded from PartialEq/Hash like `gen` (scheduling metadata, not identity).
+    pub bulk_count: usize,
     pub pred_index: usize,
     pub post_node: bool,
 }
@@ -55,6 +59,7 @@ impl NodeInfo {
             gen: 0,
             slot,
             index,
+            bulk_count: 1,
             pred_index,
             post_node: false,
         }
@@ -92,8 +97,8 @@ impl std::fmt::Debug for NodeInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "NodeID {{ id: {}, index: {}, slot: {}, post_node: {} }}",
-            self.id, self.index, self.slot, self.post_node
+            "NodeID {{ id: {}, index: {}, bulk_count: {}, slot: {}, post_node: {} }}",
+            self.id, self.index, self.bulk_count, self.slot, self.post_node
         )
     }
 }
