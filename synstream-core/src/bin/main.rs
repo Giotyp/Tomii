@@ -104,6 +104,11 @@ struct Args {
     slot_priority: bool,
     #[clap(
         long,
+        help = "Coalesce barrier fan-outs into bulk tasks (min(N, workers) tasks instead of N). Only enable for fine-grained workloads where per-task compute << spawn overhead (e.g. wavefront). Disabled by default to avoid serialising coarse-grained tasks (MIMO, PageRank)."
+    )]
+    coalesce_barriers: bool,
+    #[clap(
+        long,
         value_name = "EXCLUDE_STREAMS",
         required = false,
         default_value = "0",
@@ -188,6 +193,7 @@ fn main() {
         args.batching_size,
         args.batching_limit,
         args.slot_priority,
+        args.coalesce_barriers,
     );
 
     let time_file = args.timing;
@@ -227,6 +233,7 @@ pub fn run_graph(
     batching_size: usize,
     batching_limit: u64,
     slot_priority_enabled: bool,
+    coalesce_barriers: bool,
 ) -> SynRt {
     let receiver_threads = if graph.network_config().is_some() {
         receiver_threads
@@ -323,6 +330,7 @@ pub fn run_graph(
         shared_recorder,
         batching_size,
         batching_limit,
+        coalesce_barriers,
     );
 
     synrt.run();

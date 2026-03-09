@@ -1,14 +1,5 @@
 [workspace]
-members = [
-    "synstream-core",
-    "synstream-types",
-    "examples/matrix-compute",
-    "examples/stream-bench",
-    "examples/cost-bench",
-    "examples/wavefront-bench",
-    "examples/mimolib",
-    "timely-bench",
-]
+members = ["synstream-core", "synstream-types", "examples/*"]
 resolver = "3"
 
 [profile.release]

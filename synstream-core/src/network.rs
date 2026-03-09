@@ -42,8 +42,6 @@ pub struct PacketMessage {
     pub socket_id: usize,
     /// Reception timestamp (rdtsc or micros)
     pub timestamp: Instant,
-    /// Receiver thread ID (for recording)
-    pub receiver_thread_id: usize,
     /// Receiver core ID (for recording)
     pub receiver_core_id: usize,
 }
@@ -214,7 +212,6 @@ pub fn single_socket_receiver_loop(
                     packet_bytes,
                     socket_id,
                     timestamp: Instant::now(),
-                    receiver_thread_id: socket_id,
                     receiver_core_id: core_id,
                 };
 
@@ -358,7 +355,6 @@ pub fn multi_socket_receiver_loop(
                         packet_bytes,
                         socket_id,
                         timestamp: packet_timestamp,
-                        receiver_thread_id: thread_id,
                         receiver_core_id: core_id,
                     };
 
