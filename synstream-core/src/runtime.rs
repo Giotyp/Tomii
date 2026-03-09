@@ -15,7 +15,7 @@ use crate::network::{
     bind_udp_socket_range, multi_socket_receiver_loop, single_socket_receiver_loop, NetworkSocket,
     PacketMessage,
 };
-use crate::resolution_state::{MultiThreadedState, ResolutionState, SingleThreadedState};
+use crate::resolution_state::{MultiThreadedState, ResolutionState};
 use crate::runtime_funcs::*;
 use crate::scheduler::SchedulerImpl;
 use crate::time_buffer::{TimeBufferManager, TimingMethod};
@@ -42,11 +42,9 @@ thread_local! {
     // Flushed incrementally via preparation() every INCREMENTAL_SCHED_THRESHOLD items
     // so workers receive tasks while the system thread is still processing the batch.
     static BATCH_SCHED_BUF: RefCell<Vec<NodeInfo>> = RefCell::new(Vec::with_capacity(256));
-    // Reusable buffers for preparation() — eliminates vec![None; N] heap allocation
-    // on every incremental flush (~77 flushes/stream × 2 vecs = ~154 allocs/stream saved).
+    // Reusable buffer for preparation() — eliminates vec![None; N] heap allocation
+    // on every incremental flush (~77 flushes/stream).
     static PREP_ARGS_BUF: RefCell<Vec<Option<Vec<synstream_types::CmTypes>>>> =
-        RefCell::new(Vec::with_capacity(64));
-    static PREP_FUNCS_BUF: RefCell<Vec<Option<synstream_types::CmPtr>>> =
         RefCell::new(Vec::with_capacity(64));
     // Reusable staging buffer for task completion batches: converts Vec<NodeInfo> (from the
     // batch_queue) into Vec<(NodeInfo, Option<CmTypes>)> without per-batch heap allocation.
@@ -120,6 +118,21 @@ impl SynRt {
             }
         }
 
+        // Compute worker_resolvable: true if ALL successors are non-condition nodes.
+        // Worker-side resolution bypasses the batch_queue → resolution thread round-trip
+        // by resolving dependencies directly on the completing worker thread.
+        for node_id in 0..node_cache.len() {
+            if node_id < app_graph.successors.len() {
+                let all_succs_non_condition = app_graph.successors[node_id].iter().all(|&succ_id| {
+                    node_cache[succ_id as usize].node_condition.is_none()
+                });
+                node_cache[node_id].worker_resolvable = all_succs_non_condition;
+            } else {
+                // No successors → eligible (just decrement pending_tasks)
+                node_cache[node_id].worker_resolvable = true;
+            }
+        }
+
         // Pre-compute scheduler priority and affinity group per node.
         // Avoids per-task node.name.clone(), node.use_workers.clone(), and
         // priority conversion in the hot send_to_scheduler loop.
@@ -185,17 +198,10 @@ impl SynRt {
         let max_factor = node_cache.iter().map(|n| n.factor).max().unwrap_or(1);
         let num_nodes = app_graph.nodes.len();
 
-        // Choose resolution state implementation based on system_threads
-        let resolution_state: Arc<dyn ResolutionState> = if system_threads == 1 {
-            println!("Using single-threaded resolution state (no locks)");
-            Arc::new(SingleThreadedState::new(
-                num_nodes,
-                slots,
-                max_factor,
-                dependency_count_vec.clone(),
-                &app_graph.nodes,
-            ))
-        } else {
+        // Always use MultiThreadedState: worker-side dependency resolution means
+        // multiple worker threads call decrease_and_get_ready_into concurrently,
+        // requiring thread-safe atomics regardless of system_threads count.
+        let resolution_state: Arc<dyn ResolutionState> = {
             println!("Using multi-threaded resolution state (lock-free atomics)");
             Arc::new(MultiThreadedState::new(
                 num_nodes,
@@ -369,6 +375,13 @@ impl SynRt {
             // Per-group dependency support
             pred_index_filter: Arc::new(pred_index_filter),
             pred_group_by: Arc::new(pred_group_by),
+            // Graph-constant slot completion thresholds
+            total_tasks,
+            total_cond_tasks,
+            // Per-slot stream ID for lock-free should_record_slot
+            slot_stream_id: Arc::new((0..slots).map(|_| AtomicUsize::new(usize::MAX)).collect()),
+            // Active-slot bitmap for lock-free check_slots
+            active_slots_bitmap: Arc::new(AtomicU64::new(0)),
         });
 
         SynRt { shared }
@@ -550,7 +563,7 @@ impl SynRt {
             sleep(RUN_SLEEP);
             let mut finish: bool = false;
             loop {
-                let completed_streams = self.shared.stream_complete_counter.load(Ordering::SeqCst);
+                let completed_streams = self.shared.stream_complete_counter.load(Ordering::Acquire);
 
                 let completed = { completed_streams == self.shared.max_streams };
 
@@ -650,18 +663,13 @@ impl SynRt {
         let start_ns = shared.base_instant.elapsed().as_nanos();
 
         // Schedule Task - args will be built in the worker thread.
-        // Reuse thread-local buffers to avoid vec![None; N] heap allocation per flush.
+        // Reuse thread-local buffer to avoid vec![None; N] heap allocation per flush.
         PREP_ARGS_BUF.with(|abuf| {
-            PREP_FUNCS_BUF.with(|fbuf| {
-                let mut args_buf = abuf.borrow_mut();
-                let mut funcs_buf = fbuf.borrow_mut();
-                let n = nodes_to_schedule.len();
-                args_buf.clear();
-                args_buf.resize(n, None);
-                funcs_buf.clear();
-                funcs_buf.resize(n, None);
-                send_to_scheduler(shared, nodes_to_schedule, &*args_buf, &*funcs_buf);
-            });
+            let mut args_buf = abuf.borrow_mut();
+            let n = nodes_to_schedule.len();
+            args_buf.clear();
+            args_buf.resize(n, None);
+            send_to_scheduler(shared, nodes_to_schedule, &*args_buf, None);
         });
 
         if let Some(tb) = &shared.time_buffer {
@@ -759,16 +767,19 @@ impl SynRt {
         // Packet Process Function
         let network_config_opt = shared.graph.network_config();
 
-        let receive_timeout = Duration::from_micros(shared.batch_timeout_us);
+        let _receive_timeout = Duration::from_micros(shared.batch_timeout_us);
 
         // Reusable drain buffer — allocated once, keeps capacity across loop iterations.
         // Avoids a Vec<PacketMessage> allocation on every drain call.
         let mut packet_buf: Vec<PacketMessage> = Vec::new();
 
+        // Reusable batch buffer — keeps capacity warm in L1 cache across iterations.
+        let mut batch_buf: Vec<NodeInfo> = Vec::with_capacity(shared.target_batch_size);
+
         // Process completed nodes with dynamic batching from scheduler
         loop {
             // Check shutdown flag first to exit immediately when signaled
-            if shared.shutdown_flag.load(Ordering::SeqCst) {
+            if shared.shutdown_flag.load(Ordering::Acquire) {
                 println!(
                     "Thread {} detected shutdown signal, exiting resolution loop",
                     thread_id
@@ -778,7 +789,7 @@ impl SynRt {
 
             // Poll packet channels if there is a network config AND receivers are still active
             let should_poll_packets =
-                network_config_opt.is_some() && !shared.receive_finished.load(Ordering::SeqCst);
+                network_config_opt.is_some() && !shared.receive_finished.load(Ordering::Acquire);
 
             if should_poll_packets {
                 if let Some(network_config) = network_config_opt.as_ref() {
@@ -948,10 +959,8 @@ impl SynRt {
                             continue;
                         }
 
-                        let slot_is_active = {
-                            let states = shared.slot_states.read();
-                            states[node_info.slot] == SlotState::Active
-                        };
+                        let slot_is_active = shared.active_slots_bitmap.load(Ordering::Acquire)
+                            & (1u64 << node_info.slot) != 0;
 
                         if slot_is_active {
                             active_packet_batch.push((node_info.clone(), Some(packet_cm)));
@@ -1007,7 +1016,7 @@ impl SynRt {
                                 // Increment total streams received counter
                                 let completed_streams = shared
                                     .streams_receive_counter
-                                    .fetch_add(1, Ordering::SeqCst)
+                                    .fetch_add(1, Ordering::AcqRel)
                                     + 1;
 
                                 // Check if all expected streams have been received
@@ -1017,7 +1026,7 @@ impl SynRt {
                                         shared.max_streams, stream_packets
                                     );
                                     // Signal receivers to stop, but NOT resolution threads
-                                    shared.receive_finished.store(true, Ordering::SeqCst);
+                                    shared.receive_finished.store(true, Ordering::Release);
                                 }
                             } else {
                                 print_debug(|| {
@@ -1057,17 +1066,30 @@ impl SynRt {
                 }
             }
 
-            // Pull up to target_batch_size items; block for the first if none ready.
-            // A short spin catches burst completions that land just after try_iter() returns empty,
-            // avoiding unnecessary blocking and the round-trip latency of recv_timeout.
-            let batch = Self::receive_batch(
-                &shared.batch_queue_rx,
-                shared.target_batch_size,
-                receive_timeout,
-            );
+            // Pull up to target_batch_size items from batch_queue.
+            // With worker-side resolution, most compute completions bypass batch_queue,
+            // so we must not block here — check_slots needs to run promptly to detect
+            // slot completion. Use non-blocking try_iter only; the spin+recv_timeout
+            // path is only taken when no worker-resolvable nodes exist (all traffic
+            // flows through batch_queue).
+            batch_buf.clear();
+            batch_buf.extend(shared.batch_queue_rx.try_iter().take(shared.target_batch_size));
+            if batch_buf.is_empty() {
+                // Brief spin to catch burst completions landing just after try_iter()
+                for _ in 0..SPIN_ITERATIONS {
+                    std::hint::spin_loop();
+                    if let Ok(item) = shared.batch_queue_rx.try_recv() {
+                        batch_buf.push(item);
+                        batch_buf.extend(
+                            shared.batch_queue_rx.try_iter().take(shared.target_batch_size - 1),
+                        );
+                        break;
+                    }
+                }
+            }
 
             // Check shutdown immediately after blocking call returns
-            if shared.shutdown_flag.load(Ordering::SeqCst) {
+            if shared.shutdown_flag.load(Ordering::Acquire) {
                 println!(
                     "Thread {} detected shutdown after receive, exiting",
                     thread_id
@@ -1078,7 +1100,7 @@ impl SynRt {
             // Also check stream completion here (before processing batch)
             // This ensures threads exit promptly even if shutdown_flag hasn't been set yet
             {
-                let completed_streams = shared.stream_complete_counter.load(Ordering::SeqCst);
+                let completed_streams = shared.stream_complete_counter.load(Ordering::Acquire);
                 if completed_streams >= shared.max_streams {
                     println!(
                         "Thread {} detected all streams completed (after recv_batch), exiting",
@@ -1088,7 +1110,7 @@ impl SynRt {
                 }
             }
 
-            let empty_batch = batch.is_empty();
+            let empty_batch = batch_buf.is_empty();
 
             // Process the entire batch of compute task completions.
             // Reuse TASK_COMP_BUF to stage NodeInfo → (NodeInfo, None) without allocation.
@@ -1108,13 +1130,19 @@ impl SynRt {
                     // before the slot's generation was bumped will complete and submit to
                     // batch_queue with the old gen. Processing these would corrupt the new
                     // stream's pending counters and dependency state (Bug #31).
-                    comp_batch.extend(batch.into_iter().filter(|n| {
-                        let current_gen = shared.slot_generation[n.slot].load(Ordering::SeqCst) as u32;
-                        if n.gen != current_gen {
+                    // Cache per-slot generation locally — reduces ~256 SeqCst loads to ~1-2 per unique slot.
+                    let mut gen_cache: [u32; 64] = [0; 64];
+                    let mut gen_loaded: u64 = 0;
+                    comp_batch.extend(batch_buf.drain(..).filter(|n| {
+                        if gen_loaded & (1u64 << n.slot) == 0 {
+                            gen_cache[n.slot] = shared.slot_generation[n.slot].load(Ordering::SeqCst) as u32;
+                            gen_loaded |= 1u64 << n.slot;
+                        }
+                        if n.gen != gen_cache[n.slot] {
                             print_debug(|| {
                                 format!(
                                     "Stale batch completion dropped: node {} slot {} index {} gen {} (current {})",
-                                    n.id, n.slot, n.index, n.gen, current_gen
+                                    n.id, n.slot, n.index, n.gen, gen_cache[n.slot]
                                 )
                             });
                             return false;
@@ -1163,7 +1191,7 @@ impl SynRt {
             }
 
             // Check for completion of all streams
-            let completed_streams = shared.stream_complete_counter.load(Ordering::SeqCst);
+            let completed_streams = shared.stream_complete_counter.load(Ordering::Acquire);
 
             if completed_streams >= shared.max_streams {
                 println!(
@@ -1178,36 +1206,6 @@ impl SynRt {
 
 // Helper Functions
 impl SynRt {
-    fn receive_batch<T>(
-        rx: &crossbeam_channel::Receiver<T>,
-        target_batch_size: usize,
-        receive_timeout: Duration,
-    ) -> Vec<T> {
-        let mut b: Vec<T> = rx.try_iter().take(target_batch_size).collect();
-        if b.is_empty() {
-            // Spin briefly before committing to a blocking wait
-            for _ in 0..SPIN_ITERATIONS {
-                std::hint::spin_loop();
-                if let Ok(item) = rx.try_recv() {
-                    b.push(item);
-                    b.extend(rx.try_iter().take(target_batch_size - 1));
-                    break;
-                }
-            }
-        }
-        if !b.is_empty() {
-            b
-        } else {
-            match rx.recv_timeout(receive_timeout) {
-                Ok(first) => {
-                    let mut b = vec![first];
-                    b.extend(rx.try_iter().take(target_batch_size - 1));
-                    b
-                }
-                Err(_) => Vec::new(),
-            }
-        }
-    }
 
     /// Process a batch of completed nodes: store results, update dependencies, schedule successors
     /// Returns true if work was performed (for timing/recording purposes)
@@ -1513,9 +1511,16 @@ impl SynRt {
         // This prevents redundant checking while ensuring we don't miss completions
         stream_slot_activity.clear();
 
+        // Load active bitmap once — avoids per-slot RwLock read.
+        let active_bitmap = if shared.slot_priority_enabled {
+            shared.active_slots_bitmap.load(Ordering::Acquire)
+        } else {
+            u64::MAX // all bits set — no filtering when slot_priority is off
+        };
+
         for proc_slot in cached_slots.iter().copied() {
             // Skip buffering slots - they cannot complete until activated
-            if shared.slot_priority_enabled && !is_slot_active(&shared, proc_slot) {
+            if active_bitmap & (1u64 << proc_slot) == 0 {
                 continue;
             }
 
@@ -1567,27 +1572,13 @@ impl SynRt {
                 // This ensures the network node index starts at 0 for the new stream
                 shared.slot_packet_counters[proc_slot].store(0, Ordering::SeqCst);
 
-                // Compute total_tasks and total_cond_tasks from node_cache (O(nodes), not O(N×F))
-                let total_tasks: usize = shared
-                    .node_cache
-                    .iter()
-                    .filter(|nc| !nc.is_initial && !nc.is_condition)
-                    .map(|nc| nc.factor)
-                    .sum();
-                let total_cond_tasks: usize = shared
-                    .node_cache
-                    .iter()
-                    .filter(|nc| nc.is_condition)
-                    .map(|nc| nc.factor)
-                    .sum();
-
-                shared.slot_pending_tasks[proc_slot].store(total_tasks, Ordering::SeqCst);
-                shared.slot_pending_cond_tasks[proc_slot].store(total_cond_tasks, Ordering::SeqCst);
+                shared.slot_pending_tasks[proc_slot].store(shared.total_tasks, Ordering::SeqCst);
+                shared.slot_pending_cond_tasks[proc_slot].store(shared.total_cond_tasks, Ordering::SeqCst);
 
                 print_debug(|| {
                     format!(
                         "RESET slot {} counters: slot_pending_tasks={}, slot_pending_cond_tasks={}",
-                        proc_slot, total_tasks, total_cond_tasks
+                        proc_slot, shared.total_tasks, shared.total_cond_tasks
                     )
                 });
 
@@ -1702,12 +1693,14 @@ impl SynRt {
                                 })
                                 .count();
                             let completed =
-                                shared.stream_complete_counter.load(Ordering::SeqCst);
+                                shared.stream_complete_counter.load(Ordering::Acquire);
                             // Unique stream ID: completed streams + in-flight streams gives
                             // the next monotonically increasing ID, avoiding conflicts with
                             // IDs already assigned during initialisation (0..slots).
                             let next_stream_id = completed + currently_active;
                             slot_states[proc_slot] = SlotState::Active;
+                            shared.active_slots_bitmap.fetch_or(1u64 << proc_slot, Ordering::Release);
+                            shared.slot_stream_id[proc_slot].store(next_stream_id, Ordering::Relaxed);
                             running_streams.push((next_stream_id, proc_slot));
                         }
                         // slots_dirty is already true (set after process_slot_completion)
@@ -1756,7 +1749,7 @@ impl SynRt {
                     functions.push(func);
                     post_schedule.push(node_info);
                 }
-                send_to_scheduler(&self.shared, &post_schedule, &pre_build_args, &functions);
+                send_to_scheduler(&self.shared, &post_schedule, &pre_build_args, Some(&functions));
                 print_debug(|| format!("Added post node: {}", post_node.name));
                 // Wait until all are completed by checking node_results
                 let mut completed_count = 0;

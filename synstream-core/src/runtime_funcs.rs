@@ -24,6 +24,14 @@ thread_local! {
     static STALE_TASK_DETECTED: RefCell<bool> = RefCell::new(false);
     static EXECUTING_SLOT: RefCell<usize> = RefCell::new(usize::MAX);
     static EXECUTING_GEN: RefCell<u32> = RefCell::new(0);
+
+    // Worker-side dependency resolution buffers.
+    // Used by worker_resolve_successors to avoid heap allocation on the hot path.
+    static WORKER_SUCC_BUF: RefCell<Vec<(NodeInfo, bool, IdType, Option<usize>)>> =
+        RefCell::new(Vec::with_capacity(32));
+    static WORKER_READY_BUF: RefCell<Vec<usize>> = RefCell::new(Vec::with_capacity(32));
+    static WORKER_SCHED_BUF: RefCell<Vec<NodeInfo>> = RefCell::new(Vec::with_capacity(32));
+    static WORKER_ARGS_BUF: RefCell<Vec<Option<Vec<CmTypes>>>> = RefCell::new(Vec::with_capacity(32));
 }
 
 /// Slot state for priority-based processing
@@ -57,6 +65,10 @@ pub struct NodeCacheEntry {
     pub priority: crate::custom_scheduler::Priority,
     // Pre-computed scheduler affinity group (avoids per-task use_workers.clone() + lookup)
     pub affinity_group: usize,
+    // Pre-computed flag: true if all successors are non-condition nodes,
+    // meaning worker threads can resolve dependencies directly without
+    // going through the resolution thread's batch_queue.
+    pub worker_resolvable: bool,
 }
 
 #[derive(Clone)]
@@ -142,6 +154,7 @@ pub fn node_cache_entry(
             node_condition: None,
             priority: crate::custom_scheduler::Priority::Normal,
             affinity_group: 0,
+            worker_resolvable: false,
         };
     }
 
@@ -318,6 +331,7 @@ pub fn node_cache_entry(
         // Defaults; overwritten in SynRt::new after scheduler is available
         priority: crate::custom_scheduler::Priority::Normal,
         affinity_group: 0,
+        worker_resolvable: false, // Computed in SynRt::new after successors are known
     }
 }
 
@@ -422,6 +436,99 @@ pub struct SharedData {
     /// pred_group_by[succ_id][pred_id] = Some(group_size) means predecessor instances are grouped
     /// by group_size for per-group barrier tracking. None means global (all groups decremented).
     pub pred_group_by: Arc<Vec<Vec<Option<usize>>>>,
+
+    // Graph-constant slot completion thresholds — computed once at init, used in check_slots.
+    pub total_tasks: usize,
+    pub total_cond_tasks: usize,
+
+    // Per-slot stream ID for lock-free should_record_slot — avoids running_streams RwLock.
+    // usize::MAX means no stream assigned.
+    pub slot_stream_id: Arc<Vec<AtomicUsize>>,
+
+    // Bitmap of slots currently in Active state — avoids per-slot RwLock read in check_slots.
+    // Bit i is set iff slot i is Active. Updated under slot_states write lock.
+    pub active_slots_bitmap: Arc<AtomicU64>,
+}
+
+/// Worker-side dependency resolution: resolves successors directly on the worker
+/// thread that completed the task, bypassing the batch_queue → resolution thread
+/// round-trip. Only called for nodes where all successors are non-condition
+/// (worker_resolvable == true), ensuring correctness without condition evaluation.
+#[inline]
+fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
+    let slot = node_info.slot;
+
+    // Step 1: Increment processing_count to prevent premature completion detection.
+    shared.slot_processing_count[slot].fetch_add(1, Ordering::SeqCst);
+
+    // Step 2: Verify generation — if slot was recycled, bail out.
+    let current_gen = shared.slot_generation[slot].load(Ordering::SeqCst) as u32;
+    if current_gen != node_info.gen {
+        shared.slot_processing_count[slot].fetch_sub(1, Ordering::SeqCst);
+        return;
+    }
+
+    // Step 3: Decrement task counters (Phase 2 equivalent).
+    let node_cache_entry = &shared.node_cache[node_info.id as usize];
+    if node_cache_entry.is_condition {
+        shared.slot_pending_cond_tasks[slot].fetch_sub(1, Ordering::SeqCst);
+    } else if !node_cache_entry.is_initial {
+        shared.slot_pending_tasks[slot].fetch_sub(1, Ordering::SeqCst);
+    }
+
+    // Steps 4-6: Collect successors, resolve dependencies, schedule ready nodes.
+    WORKER_SUCC_BUF.with(|sbuf| {
+        WORKER_READY_BUF.with(|rbuf| {
+            WORKER_SCHED_BUF.with(|tbuf| {
+                WORKER_ARGS_BUF.with(|abuf| {
+                    let mut succ_buf = sbuf.borrow_mut();
+                    let mut ready = rbuf.borrow_mut();
+                    let mut sched = tbuf.borrow_mut();
+                    let mut args_buf = abuf.borrow_mut();
+                    sched.clear();
+
+                    // Step 4: Collect successors.
+                    collect_successors_for_node_into(shared, node_info, &mut succ_buf);
+
+                    // Load slot generation once for all successors.
+                    let slot_gen = shared.slot_generation[slot].load(Ordering::SeqCst) as u32;
+
+                    // Step 5: Resolve dependencies for each successor (all non-condition).
+                    for (_succ_info, _has_cond, succ_id, pred_group) in succ_buf.iter() {
+                        let succ_node_id = *succ_id as usize;
+
+                        shared.resolution_state.decrease_and_get_ready_into(
+                            slot,
+                            succ_node_id,
+                            slot_gen,
+                            *pred_group,
+                            1,
+                            &mut ready,
+                        );
+
+                        for &ready_index in ready.iter() {
+                            sched.push(NodeInfo::new(
+                                succ_node_id as IdType,
+                                slot,
+                                ready_index,
+                                node_info.index,
+                            ));
+                        }
+                    }
+
+                    // Step 6: Schedule ready successors.
+                    if !sched.is_empty() {
+                        args_buf.clear();
+                        args_buf.resize(sched.len(), None);
+                        send_to_scheduler(shared, &sched, &args_buf, None);
+                    }
+                });
+            });
+        });
+    });
+
+    // Step 7: Decrement processing_count AFTER all successor processing.
+    shared.slot_processing_count[slot].fetch_sub(1, Ordering::SeqCst);
 }
 
 #[inline(always)]
@@ -439,7 +546,7 @@ fn execute_task(
     // Post-nodes are exempt (gen is always 0 and they run after all streams finish).
     if !node_info.post_node {
         let current_gen =
-            shared.slot_generation[node_info.slot].load(Ordering::SeqCst) as u32;
+            shared.slot_generation[node_info.slot].load(Ordering::Acquire) as u32;
         if current_gen != node_info.gen {
             print_debug(|| {
                 format!(
@@ -544,26 +651,33 @@ fn execute_task(
         }
     }
 
-    // Pre-store result in node_results before sending the completion token.
-    // The crossbeam bounded channel's internal ordering ensures the resolution
-    // thread sees the stored result after it receives the NodeInfo token.
+    // Pre-store result in node_results before resolving or sending completion token.
     shared.node_results.set(node_info, result);
-    // Send the lightweight NodeInfo token. Use blocking send (not try_send) so that
-    // a full queue causes the worker to wait rather than silently dropping the token.
-    // Dropping a token would leave slot_pending_tasks > 0 forever → hang.
-    let _ = shared.batch_queue_tx.send(node_info.clone());
+
+    // Worker-side dependency resolution: if all successors are non-condition,
+    // resolve dependencies and schedule successors directly on this worker thread,
+    // bypassing the batch_queue → resolution thread round-trip (~5-15μs → ~100-500ns).
+    if !node_info.post_node && shared.node_cache[node_info.id as usize].worker_resolvable {
+        worker_resolve_successors(shared, node_info);
+    } else {
+        // Send the lightweight NodeInfo token. Use blocking send (not try_send) so that
+        // a full queue causes the worker to wait rather than silently dropping the token.
+        // Dropping a token would leave slot_pending_tasks > 0 forever → hang.
+        let _ = shared.batch_queue_tx.send(node_info.clone());
+    }
 }
 
 #[inline]
 pub fn send_to_scheduler(
     shared: &Arc<SharedData>,
     nodes_to_schedule: &Vec<NodeInfo>,
-    pre_built_args_vec: &Vec<Option<Vec<CmTypes>>>,
-    custom_func_vec: &Vec<Option<CmPtr>>,
+    pre_built_args_vec: &[Option<Vec<CmTypes>>],
+    custom_func_vec: Option<&[Option<CmPtr>]>,
 ) {
     for (i, node_info) in nodes_to_schedule.iter().enumerate() {
         // Look up func_ptr, priority, and affinity from pre-computed cache.
         // Post-nodes use the cold path since they're rare (end-of-run only).
+        let custom_func = custom_func_vec.and_then(|v| v[i]);
         let (func_ptr, task_priority, affinity_group) = if node_info.post_node {
             let nodes = &shared
                 .graph
@@ -572,7 +686,7 @@ pub fn send_to_scheduler(
                 .expect("Post nodes not initialized");
             let node = &nodes[node_info.id as usize];
 
-            let func = custom_func_vec[i]
+            let func = custom_func
                 .unwrap_or_else(|| node.func_ptr.expect("Post node function pointer is None"));
 
             use crate::custom_scheduler::Priority;
@@ -588,7 +702,7 @@ pub fn send_to_scheduler(
             (func, priority, group)
         } else {
             let cache = &shared.node_cache[node_info.id as usize];
-            let func = custom_func_vec[i].unwrap_or(cache.func_ptr);
+            let func = custom_func.unwrap_or(cache.func_ptr);
             (func, cache.priority, cache.affinity_group)
         };
 
@@ -600,7 +714,7 @@ pub fn send_to_scheduler(
         // Post-nodes are exempt: they run after all streams complete and have no generation risk.
         if !node_info.post_node {
             node_info.gen =
-                shared.slot_generation[node_info.slot].load(Ordering::SeqCst) as u32;
+                shared.slot_generation[node_info.slot].load(Ordering::Acquire) as u32;
         }
         let pre_built_args = pre_built_args_vec[i].clone();
 
@@ -774,7 +888,9 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
     // Check last assigned first
     if slot_states[last_slot_assigned] == SlotState::Inactive {
         slot_states[last_slot_assigned] = SlotState::Active; // Mark slot as active immediately
+        shared.active_slots_bitmap.fetch_or(1u64 << last_slot_assigned, Ordering::Release);
         running_streams.push((stream, last_slot_assigned));
+        shared.slot_stream_id[last_slot_assigned].store(stream, Ordering::Relaxed);
         print_debug(|| {
             format!(
                 "Assigned stream {} to slot {} (Inactive) -> Active (last assigned)",
@@ -804,6 +920,7 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
         if *state == SlotState::Inactive {
             *state = SlotState::Buffering; // Mark slot as Buffering
             running_streams.push((stream, slot_id));
+            shared.slot_stream_id[slot_id].store(stream, Ordering::Relaxed);
             shared.last_slot_assigned.store(slot_id, Ordering::SeqCst);
             print_debug(|| {
                 format!(
@@ -836,6 +953,8 @@ pub fn release_slot(shared: &Arc<SharedData>, slot: usize) {
 
     let old_state = slot_states[slot];
     slot_states[slot] = SlotState::Inactive; // Mark as inactive
+    shared.active_slots_bitmap.fetch_and(!(1u64 << slot), Ordering::Release);
+    shared.slot_stream_id[slot].store(usize::MAX, Ordering::Relaxed);
 
     // Remove from running streams
     if let Some(pos) = running_streams.iter().position(|&(_, s_id)| s_id == slot) {
@@ -1127,6 +1246,7 @@ fn spin_wait_for_result(
     shared: &Arc<SharedData>,
     node_info: &NodeInfo,
 ) -> Option<synstream_types::CmTypes> {
+    let mut spin_count: u32 = 0;
     loop {
         if let Some(result) = shared.node_results.get(node_info) {
             return Some(result);
@@ -1135,13 +1255,20 @@ fn spin_wait_for_result(
         let exec_gen = EXECUTING_GEN.with(|g| *g.borrow());
         if exec_slot != usize::MAX {
             let current_gen =
-                shared.slot_generation[exec_slot].load(Ordering::SeqCst) as u32;
+                shared.slot_generation[exec_slot].load(Ordering::Acquire) as u32;
             if exec_gen != current_gen {
                 STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = true);
                 return None;
             }
         }
-        std::hint::spin_loop();
+        spin_count += 1;
+        if spin_count < 64 {
+            std::hint::spin_loop();
+        } else if spin_count < 256 {
+            std::thread::yield_now();
+        } else {
+            std::thread::park_timeout(std::time::Duration::from_nanos(100));
+        }
     }
 }
 
@@ -1305,6 +1432,7 @@ pub fn activate_next_slot(
         for (stream, slot) in running_streams.iter() {
             if states[*slot] == SlotState::Buffering {
                 states[*slot] = SlotState::Active;
+                shared.active_slots_bitmap.fetch_or(1u64 << *slot, Ordering::Release);
                 shared.last_slot_assigned.store(*slot, Ordering::SeqCst);
                 print_debug(|| {
                     format!(
@@ -1375,14 +1503,7 @@ pub fn should_record_slot(shared: &Arc<SharedData>, slot: usize) -> bool {
     match shared.record_stream {
         None => true, // Record all streams
         Some(target_stream) => {
-            // Get current stream for this slot
-            let running_streams = shared.running_streams.read();
-            for (stream_id, slot_id) in running_streams.iter() {
-                if *slot_id == slot {
-                    return *stream_id == target_stream;
-                }
-            }
-            false
+            shared.slot_stream_id[slot].load(Ordering::Relaxed) == target_stream
         }
     }
 }
