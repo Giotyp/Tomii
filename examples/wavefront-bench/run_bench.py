@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import re
 import sys
 from pathlib import Path
@@ -45,15 +46,15 @@ from synstream._types import TypedValue      # noqa: E402
 def _parse_synstream_timing(timing_file: Path):
     """Return (total_s, s_per_iter, iterations) from a SynStream timing CSV."""
     text = timing_file.read_text()
-    total_m = re.search(r"Total Runtime:\s+([\d.]+)s", text)
-    avg_m   = re.search(r"Avg Time Per Stream:\s+([\d.]+)(ms|s)", text)
+    total_m = re.search(r"Total Runtime:\s+([\d.]+)(ms|µs|us|s)", text)
+    avg_m   = re.search(r"Avg Time Per Stream:\s+([\d.]+)(ms|µs|us|s)", text)
     iters_m = re.search(r"Total Streams Processed:\s+(\d+)", text)
-    total_s    = float(total_m.group(1)) if total_m else 0.0
-    if avg_m:
-        val  = float(avg_m.group(1))
-        s_per_iter = val / 1000.0 if avg_m.group(2) == "ms" else val
-    else:
-        s_per_iter = 0.0
+    def to_seconds(val: float, unit: str) -> float:
+        if unit in ("ms",):      return val / 1e3
+        if unit in ("µs", "us"): return val / 1e6
+        return val  # "s"
+    total_s    = to_seconds(float(total_m.group(1)), total_m.group(2)) if total_m else 0.0
+    s_per_iter = to_seconds(float(avg_m.group(1)),   avg_m.group(2))   if avg_m   else 0.0
     iterations = int(iters_m.group(1)) if iters_m else 0
     return total_s, s_per_iter, iterations
 
@@ -112,9 +113,17 @@ def _parse_args() -> argparse.Namespace:
         "--system-threads",
         type=int,
         nargs="+",
-        default=[1, 2, 4],
+        default=[1],
         metavar="N",
-        help="system thread counts to sweep (default: 1 2 4)",
+        help="system thread counts to sweep (default: 1)",
+    )
+    p.add_argument(
+        "--tile-sizes",
+        type=int,
+        nargs="+",
+        default=[1, 8, 32],
+        metavar="T",
+        help="tile sizes to sweep (default: 1 8 32); 1=one task per cell",
     )
     p.add_argument(
         "--no-clean",
@@ -130,40 +139,50 @@ def _parse_args() -> argparse.Namespace:
 # Graph definition
 # ---------------------------------------------------------------------------
 
-def build_wavefront_graph(n: int) -> ss.Graph:
+def build_wavefront_graph(n: int, tile_size: int = 1) -> ss.Graph:
     """Build the anti-diagonal wavefront graph for an N×N grid.
 
-    Graph structure:
-      - 1 initialisation: grid (N×N f64 with boundary values)
-      - 2N-1 compute nodes: diag_0 .. diag_{2N-2}
-        - diag_d has factor = anti-diagonal width = min(d+1, N, 2N-1-d)
-        - diag_d has $barrier on diag_{d-1} (all instances) for d > 0
-        - Each instance computes one cell: grid[i][j] = 0.5*(grid[i-1][j]+grid[i][j-1])
+    When tile_size == 1 (default), one task per cell (original behaviour):
+      - diag_d has factor = width = min(d+1, N, 2N-1-d)
+      - each instance computes one cell via wf_cell
+
+    When tile_size > 1, tile-coarsened graph:
+      - diag_d has factor = ceil(width / tile_size) tiles
+      - each instance computes tile_size consecutive cells via wf_tile
+      - total tasks reduced by ~tile_size, eliminating scheduler overhead
 
     One SynStream stream = one full N×N wavefront sweep.
     """
     app = ss.Graph()
 
-    n_var  = app.var("n", ss.usize(n))
-    grid   = app.var("grid", func="init_grid", args=[n_var])
+    n_var = app.var("n", ss.usize(n))
+    grid  = app.var("grid", func="init_grid", args=[n_var])
 
     # $index is resolved at runtime to the instance index within the diagonal
     _index = TypedValue("$ref", "$index")
 
-    prev       = None
-    prev_width = 0
+    prev         = None
+    prev_factor  = 0  # number of tasks (tiles or cells) in the previous diagonal
 
     for d in range(2 * n - 1):
         width = min(d + 1, n, 2 * n - 1 - d)
 
-        args = [grid, n_var, ss.usize(d), _index]
-        if prev is not None:
-            # $barrier: wait for ALL prev_width instances of the previous diagonal
-            args.append(prev.wait(0, prev_width))
+        if tile_size > 1:
+            factor = math.ceil(width / tile_size)
+            args   = [grid, n_var, ss.usize(d), _index, ss.usize(tile_size)]
+            func   = "wf_tile"
+        else:
+            factor = width
+            args   = [grid, n_var, ss.usize(d), _index]
+            func   = "wf_cell"
 
-        cur = app.node(f"diag_{d}", func="wf_cell", factor=width, args=args)
-        prev       = cur
-        prev_width = width
+        if prev is not None:
+            # $barrier: wait for ALL prev_factor tasks of the previous diagonal
+            args.append(prev.wait(0, prev_factor))
+
+        cur         = app.node(f"diag_{d}", func=func, factor=factor, args=args)
+        prev        = cur
+        prev_factor = factor
 
     return app
 
@@ -193,32 +212,39 @@ def main() -> None:
     for n in args.n:
         for workers in args.workers:
             for st in args.system_threads:
-                system_label = f"synstream_st{st}"
-                timing_file = args.results_dir / f"synstream_wavefront_n{n}_w{workers}_st{st}.csv"
-                print(f"\n=== SynStream Wavefront | n={n} workers={workers} system_threads={st} ===", flush=True)
+                for tile_size in args.tile_sizes:
+                    tile_tag    = f"t{tile_size}"
+                    system_label = f"synstream_st{st}_{tile_tag}"
+                    timing_file  = args.results_dir / f"synstream_wavefront_n{n}_w{workers}_st{st}_{tile_tag}.csv"
+                    print(
+                        f"\n=== SynStream Wavefront | n={n} workers={workers} "
+                        f"system_threads={st} tile_size={tile_size} ===",
+                        flush=True,
+                    )
 
-                graph = build_wavefront_graph(n)
+                    graph = build_wavefront_graph(n, tile_size=tile_size)
 
-                graph.run(
-                    dylib=dylib,
-                    workers=workers,
-                    core_offset=1,
-                    system_threads=st,
-                    slots=1,
-                    max_streams=total_streams,
-                    exclude_streams=args.warmup,
-                    batching_size=1,
-                    timing=str(timing_file),
-                    use_rdtsc=True,
-                    custom=True,
-                    coalesce_barriers=True,
-                )
-                print(f"  -> {timing_file}", flush=True)
+                    graph.run(
+                        dylib=dylib,
+                        workers=workers,
+                        core_offset=1,
+                        system_threads=st,
+                        slots=1,
+                        max_streams=total_streams,
+                        exclude_streams=args.warmup,
+                        batching_size=1,
+                        timing=str(timing_file),
+                        use_rdtsc=True,
+                        custom=True,
+                        coalesce_barriers=True,
+                        inline_continuation=True,
+                    )
+                    print(f"  -> {timing_file}", flush=True)
 
-                total_s, s_per_iter, iters = _parse_synstream_timing(timing_file)
-                std_csv = args.results_dir / f"synstream_wavefront_n{n}_w{workers}_st{st}_result.csv"
-                _write_wavefront_csv(std_csv, system_label, n, workers, total_s, s_per_iter, iters)
-                print(f"  -> {std_csv}", flush=True)
+                    total_s, s_per_iter, iters = _parse_synstream_timing(timing_file)
+                    std_csv = args.results_dir / f"synstream_wavefront_n{n}_w{workers}_st{st}_{tile_tag}_result.csv"
+                    _write_wavefront_csv(std_csv, system_label, n, workers, total_s, s_per_iter, iters)
+                    print(f"  -> {std_csv}", flush=True)
 
     print(f"\nDone. Results written to {args.results_dir}")
 

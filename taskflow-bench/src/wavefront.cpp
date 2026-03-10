@@ -175,8 +175,12 @@ int main(int argc, char** argv) {
 
     tf::Task prev;
     for (size_t idx = 0; idx < diags.size(); ++idx) {
+        // StaticPartitioner matches TBB's static_partitioner approach:
+        // divides each diagonal into exactly W chunks, eliminating
+        // per-task scheduling overhead. Consistently faster than the
+        // default DynamicPartitioner for this fixed-width workload.
         tf::Task cur = taskflow.for_each_index(
-            0, diags[idx].width, 1, fns[idx]
+            0, diags[idx].width, 1, fns[idx], tf::StaticPartitioner{}
         );
         if (idx > 0) {
             prev.precede(cur);

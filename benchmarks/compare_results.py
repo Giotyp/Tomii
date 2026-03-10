@@ -107,7 +107,10 @@ COLORS = {
     "synstream_pooled": "#1f77b4",
     "synstream_init_pooled": "#1f77b4",  # same hue; main plot uses best variant
     "synstream_serial": "#aec7e8",  # light blue for PageRank base variant
-    "synstream_st1": "#aec7e8",    # light blue — 1 system thread
+    "synstream_st1": "#aec7e8",       # light blue — 1 system thread (untiled, legacy)
+    "synstream_st1_t1": "#aec7e8",   # tile=1 (same as untiled)
+    "synstream_st1_t8": "#6baed6",   # tile=8
+    "synstream_st1_t32": "#1f77b4",  # tile=32 (best config)
     "synstream_st2": "#6baed6",    # medium blue — 2 system threads
     "synstream_st4": "#1f77b4",    # full blue — 4 system threads
     "timely": "#ff7f0e",
@@ -123,6 +126,9 @@ MARKERS = {
     "synstream_init_pooled": "o",
     "synstream_serial": "o",
     "synstream_st1": "o",
+    "synstream_st1_t1": "o",
+    "synstream_st1_t8": "o",
+    "synstream_st1_t32": "o",
     "synstream_st2": "o",
     "synstream_st4": "o",
     "timely": "s",
@@ -138,7 +144,10 @@ LABELS = {
     "synstream_pooled": "SynStream",
     "synstream_init_pooled": "SynStream",
     "synstream_serial": "SynStream (serial)",
-    "synstream_st1": "SynStream",
+    "synstream_st1": "SynStream (no tiling)",
+    "synstream_st1_t1": "SynStream (tile=1)",
+    "synstream_st1_t8": "SynStream (tile=8)",
+    "synstream_st1_t32": "SynStream (tile=32)",
     "synstream_st2": "SynStream (2 sys-threads)",
     "synstream_st4": "SynStream (4 sys-threads)",
     "timely": "Timely",
@@ -154,13 +163,16 @@ LABELS = {
 # Best configuration per system — these are the only series shown in the main plots.
 STREAM_ORDER = ["synstream_init_pooled", "timely_pooled", "tbb"]
 PAGERANK_ORDER = ["synstream", "timely", "tbb"]
-WAVEFRONT_ORDER = ["synstream_st1", "timely", "tbb_pinned", "taskflow_pinned"]
+WAVEFRONT_ORDER = ["synstream_st1_t32", "timely", "tbb_pinned", "taskflow_pinned"]
 
 LINESTYLES = {
     "synstream": "--",
     "synstream_pooled": "-",
     "synstream_init_pooled": "-",
     "synstream_st1": ":",
+    "synstream_st1_t1": ":",
+    "synstream_st1_t8": "--",
+    "synstream_st1_t32": "-",
     "synstream_st2": "--",
     "synstream_st4": "-",
     "timely": "-",
@@ -378,7 +390,12 @@ def plot_wavefront(df: "pd.DataFrame", out_dir: Path) -> None:
     Uses log-scale y-axis because SynStream is orders of magnitude slower than
     TBB/Timely/Taskflow on this fine-grained benchmark.
     """
-    n_vals = sorted(df["n"].unique())
+    # Only plot N values that have at least one non-SynStream baseline result,
+    # to avoid empty/partial subplots from ad-hoc test runs (e.g. N=8 debug runs).
+    baseline_systems = {"tbb", "tbb_pinned", "taskflow", "taskflow_pinned", "timely",
+                        "timely_pooled", "timely_pinned"}
+    n_with_baselines = set(df[df["system"].isin(baseline_systems)]["n"].unique())
+    n_vals = sorted(n for n in df["n"].unique() if n in n_with_baselines)
     nrows = (len(n_vals) + 1) // 2
     ncols = min(2, len(n_vals))
     fig, axes = plt.subplots(nrows, ncols, figsize=(12, 5 * nrows))

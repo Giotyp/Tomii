@@ -1,5 +1,6 @@
 [workspace]
-members = ["synstream-core", "synstream-types", "examples/*"]
+members = ["synstream-core", "synstream-types", "examples/*", "bilateral-bench/synstream"]
+exclude = ["timely-bench", "tbb-bench", "taskflow-bench"]
 resolver = "3"
 
 [profile.release]
