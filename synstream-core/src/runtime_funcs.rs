@@ -73,6 +73,10 @@ pub struct NodeCacheEntry {
     // meaning worker threads can resolve dependencies directly without
     // going through the resolution thread's batch_queue.
     pub worker_resolvable: bool,
+    // Pre-computed flag: true if any successor reads this node's result via $res.
+    // When false, no successor consumes the result and the node_results.set() call
+    // can be elided entirely, saving a hash-map write on the hot path.
+    pub needs_result_store: bool,
 }
 
 #[derive(Clone)]
@@ -159,6 +163,7 @@ pub fn node_cache_entry(
             priority: crate::custom_scheduler::Priority::Normal,
             affinity_group: 0,
             worker_resolvable: false,
+            needs_result_store: false, // Computed later in SynRt::new
         };
     }
 
@@ -336,6 +341,7 @@ pub fn node_cache_entry(
         priority: crate::custom_scheduler::Priority::Normal,
         affinity_group: 0,
         worker_resolvable: false, // Computed in SynRt::new after successors are known
+        needs_result_store: false, // Computed in SynRt::new after successors are known
     }
 }
 
@@ -472,6 +478,12 @@ pub struct SharedData {
     /// subgraphs (factor=1 chains A→B→C→…).  Must NOT enable for coarse-grained
     /// workloads (MIMO) where serialising a successor increases slot-window latency.
     pub inline_continuation: bool,
+
+    /// When slots == 1, only one stream runs at a time — no cross-stream ordering races
+    /// are possible.  Enables AcqRel instead of SeqCst for the per-task hot-path atomics
+    /// in worker_resolve_successors, and skips the stale-task TLS writes in execute_task.
+    /// Multi-slot mode keeps SeqCst unconditionally for correctness.
+    pub single_slot_mode: bool,
 }
 
 /// When a barrier node's instances all become ready simultaneously, this helper
@@ -514,6 +526,30 @@ fn push_ready_chunked(
     }
 }
 
+/// Returns the appropriate load ordering for slot completion counters.
+///
+/// With `single_slot_mode` (slots == 1) only one stream runs at a time, so AcqRel
+/// pairwise synchronisation is sufficient.  Multi-slot mode requires SeqCst for total
+/// ordering across concurrent slot reinitialisation.
+#[inline(always)]
+fn slot_load_ordering(shared: &SharedData) -> Ordering {
+    if shared.single_slot_mode {
+        Ordering::Acquire
+    } else {
+        Ordering::SeqCst
+    }
+}
+
+/// Returns the appropriate read-modify-write ordering for slot completion counters.
+#[inline(always)]
+fn slot_rmw_ordering(shared: &SharedData) -> Ordering {
+    if shared.single_slot_mode {
+        Ordering::AcqRel
+    } else {
+        Ordering::SeqCst
+    }
+}
+
 /// Worker-side dependency resolution: resolves successors directly on the worker
 /// thread that completed the task, bypassing the batch_queue → resolution thread
 /// round-trip. Only called for nodes where all successors are non-condition
@@ -523,12 +559,12 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
     let slot = node_info.slot;
 
     // Step 1: Increment processing_count to prevent premature completion detection.
-    shared.slot_processing_count[slot].fetch_add(1, Ordering::SeqCst);
+    shared.slot_processing_count[slot].fetch_add(1, slot_rmw_ordering(shared));
 
     // Step 2: Verify generation — if slot was recycled, bail out.
-    let current_gen = shared.slot_generation[slot].load(Ordering::SeqCst) as u32;
+    let current_gen = shared.slot_generation[slot].load(slot_load_ordering(shared)) as u32;
     if current_gen != node_info.gen {
-        shared.slot_processing_count[slot].fetch_sub(1, Ordering::SeqCst);
+        shared.slot_processing_count[slot].fetch_sub(1, slot_rmw_ordering(shared));
         return;
     }
 
@@ -536,9 +572,9 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
     // For bulk tasks, decrement by bulk_count to account for all instances handled.
     let node_cache_entry = &shared.node_cache[node_info.id as usize];
     if node_cache_entry.is_condition {
-        shared.slot_pending_cond_tasks[slot].fetch_sub(node_info.bulk_count, Ordering::SeqCst);
+        shared.slot_pending_cond_tasks[slot].fetch_sub(node_info.bulk_count, slot_rmw_ordering(shared));
     } else if !node_cache_entry.is_initial {
-        shared.slot_pending_tasks[slot].fetch_sub(node_info.bulk_count, Ordering::SeqCst);
+        shared.slot_pending_tasks[slot].fetch_sub(node_info.bulk_count, slot_rmw_ordering(shared));
     }
 
     // Steps 4-6: Collect successors, resolve dependencies, schedule ready nodes.
@@ -556,7 +592,7 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
                     collect_successors_for_node_into(shared, node_info, &mut succ_buf);
 
                     // Load slot generation once for all successors.
-                    let slot_gen = shared.slot_generation[slot].load(Ordering::SeqCst) as u32;
+                    let slot_gen = shared.slot_generation[slot].load(slot_load_ordering(shared)) as u32;
 
                     // Step 5: Resolve dependencies for each successor (all non-condition).
                     for (_succ_info, _has_cond, succ_id, pred_group) in succ_buf.iter() {
@@ -619,7 +655,7 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
     });
 
     // Step 7: Decrement processing_count AFTER all successor processing.
-    shared.slot_processing_count[slot].fetch_sub(1, Ordering::SeqCst);
+    shared.slot_processing_count[slot].fetch_sub(1, slot_rmw_ordering(shared));
 }
 
 #[inline(always)]
@@ -656,9 +692,12 @@ fn execute_task(
     // a contiguous range `index..index+bulk_count`, eliminating O(N) individual Rayon spawns.
     if node_info.bulk_count > 1 {
         // Set stale-detection TLS context — required by populate_cached_args_into.
-        STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = false);
-        EXECUTING_SLOT.with(|s| *s.borrow_mut() = node_info.slot);
-        EXECUTING_GEN.with(|g| *g.borrow_mut() = node_info.gen);
+        // In single_slot_mode mid-execution slot recycling is impossible; skip TLS writes.
+        if !shared.single_slot_mode {
+            STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = false);
+            EXECUTING_SLOT.with(|s| *s.borrow_mut() = node_info.slot);
+            EXECUTING_GEN.with(|g| *g.borrow_mut() = node_info.gen);
+        }
 
         let node_cache = &shared.node_cache[node_info.id as usize];
         ARG_BUF.with(|buf_cell| {
@@ -674,22 +713,24 @@ fn execute_task(
                     node_info.slot,
                     node_info.pred_index,
                 );
-                if STALE_TASK_DETECTED.with(|f| *f.borrow()) {
+                if !shared.single_slot_mode && STALE_TASK_DETECTED.with(|f| *f.borrow()) {
                     buf.clear();
                     return; // Slot recycled mid-bulk — drop remaining instances
                 }
                 let result = func(&buf);
                 buf.clear(); // release Arc refs promptly
                 // Store result for this specific instance using a per-instance NodeInfo
-                let mut inst_info = node_info.clone();
-                inst_info.index = inst_idx;
-                inst_info.bulk_count = 1;
-                shared.node_results.set(&inst_info, result);
+                if node_cache.needs_result_store {
+                    let mut inst_info = node_info.clone();
+                    inst_info.index = inst_idx;
+                    inst_info.bulk_count = 1;
+                    shared.node_results.set(&inst_info, result);
+                }
             }
         });
 
         // Stale check: if slot was recycled during bulk execution, skip completion accounting
-        if STALE_TASK_DETECTED.with(|f| *f.borrow()) {
+        if !shared.single_slot_mode && STALE_TASK_DETECTED.with(|f| *f.borrow()) {
             return;
         }
 
@@ -700,10 +741,12 @@ fn execute_task(
     }
 
     // Initialize stale-detection context for collect_arg_result.
-    // Must be set before any call to populate_cached_args_into.
-    STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = false);
-    EXECUTING_SLOT.with(|s| *s.borrow_mut() = node_info.slot);
-    EXECUTING_GEN.with(|g| *g.borrow_mut() = node_info.gen);
+    // In single_slot_mode, mid-execution slot recycling is impossible; skip TLS writes.
+    if !shared.single_slot_mode {
+        STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = false);
+        EXECUTING_SLOT.with(|s| *s.borrow_mut() = node_info.slot);
+        EXECUTING_GEN.with(|g| *g.borrow_mut() = node_info.gen);
+    }
 
     // Capture execution start timestamp immediately
     let exec_start_ns = shared.base_instant.elapsed().as_nanos();
@@ -759,7 +802,7 @@ fn execute_task(
                 node_info.pred_index,
             );
             // Check stale BEFORE calling func (result missing due to reinit_slot race)
-            if STALE_TASK_DETECTED.with(|f| *f.borrow()) {
+            if !shared.single_slot_mode && STALE_TASK_DETECTED.with(|f| *f.borrow()) {
                 buf.clear();
                 return None::<CmTypes>;
             }
@@ -792,7 +835,10 @@ fn execute_task(
     }
 
     // Pre-store result in node_results before resolving or sending completion token.
-    shared.node_results.set(node_info, result);
+    // Skip the store when no successor reads this result via $res (barrier-only successors).
+    if shared.node_cache[node_info.id as usize].needs_result_store {
+        shared.node_results.set(node_info, result);
+    }
 
     // Worker-side dependency resolution: if all successors are non-condition,
     // resolve dependencies and schedule successors directly on this worker thread,
@@ -1411,7 +1457,9 @@ fn spin_wait_for_result(
             let current_gen =
                 shared.slot_generation[exec_slot].load(Ordering::Acquire) as u32;
             if exec_gen != current_gen {
-                STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = true);
+                if !shared.single_slot_mode {
+                    STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = true);
+                }
                 return None;
             }
         }
@@ -1449,7 +1497,7 @@ pub fn collect_arg_result(
         }
         CmTypes::Res(res_node_id) => {
             // Short-circuit: if a previous arg already detected stale, skip remaining
-            if STALE_TASK_DETECTED.with(|f| *f.borrow()) {
+            if !shared.single_slot_mode && STALE_TASK_DETECTED.with(|f| *f.borrow()) {
                 return None;
             }
 
