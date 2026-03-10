@@ -29,14 +29,15 @@ _INT_FLAGS: Dict[str, str] = {
 }
 
 _BOOL_FLAGS: Dict[str, str] = {
-    "fifo":               "--fifo",
-    "custom":             "--custom",
-    "inits":              "--inits",
-    "debug":              "--debug",
-    "record":             "--record",
-    "use_rdtsc":          "--use-rdtsc",
-    "slot_priority":      "--slot-priority",
-    "coalesce_barriers":  "--coalesce-barriers",
+    "fifo":                 "--fifo",
+    "custom":               "--custom",
+    "inits":                "--inits",
+    "debug":                "--debug",
+    "record":               "--record",
+    "use_rdtsc":            "--use-rdtsc",
+    "slot_priority":        "--slot-priority",
+    "coalesce_barriers":    "--coalesce-barriers",
+    "inline_continuation":  "--inline-continuation",
 }
 
 _STR_FLAGS: Dict[str, str] = {

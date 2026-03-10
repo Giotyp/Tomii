@@ -135,6 +135,25 @@ impl SynRt {
             }
         }
 
+        // Compute needs_result_store: true if any successor reads this node via $res (not $barrier).
+        // When false, no successor consumes the result and node_results.set() can be elided.
+        for node_id in 0..node_cache.len() {
+            let has_res_succ = if node_id < app_graph.successors.len() {
+                app_graph.successors[node_id].iter().any(|&succ_id| {
+                    app_graph.nodes[succ_id as usize].args.iter().any(|arg| {
+                        !arg.is_barrier()
+                            && arg
+                                .predecessor
+                                .as_ref()
+                                .map_or(false, |p| p.id == node_id as IdType)
+                    })
+                })
+            } else {
+                false
+            };
+            node_cache[node_id].needs_result_store = has_res_succ;
+        }
+
         // Pre-compute scheduler priority and affinity group per node.
         // Avoids per-task node.name.clone(), node.use_workers.clone(), and
         // priority conversion in the hot send_to_scheduler loop.
@@ -406,6 +425,7 @@ impl SynRt {
             active_slots_bitmap: Arc::new(AtomicU64::new(0)),
             coalesce_barriers,
             inline_continuation,
+            single_slot_mode: slots == 1,
         });
 
         SynRt { shared }
