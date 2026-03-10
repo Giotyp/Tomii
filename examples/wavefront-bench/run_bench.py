@@ -132,12 +132,52 @@ def _parse_args() -> argparse.Namespace:
         default=True,
         help="skip cargo clean before build",
     )
+    p.add_argument(
+        "--block-dag",
+        action="store_true",
+        default=False,
+        help="also run the 2D block DAG variant (tile_size=32 explicit B×B node graph)",
+    )
     return p.parse_args()
 
 
 # ---------------------------------------------------------------------------
 # Graph definition
 # ---------------------------------------------------------------------------
+
+def build_wavefront_block_dag(n: int, tile_size: int = 32) -> ss.Graph:
+    """Build the 2D block DAG wavefront for an N×N grid with T×T blocks.
+
+    Creates B×B nodes (B = ceil(N/T)), each with factor=1, computing one T×T
+    block.  Each interior block receives a ``$res`` from its top neighbour
+    (block_row-1, block_col) and its left neighbour (block_row, block_col-1),
+    so the scheduler fires it as soon as both predecessors complete — no global
+    anti-diagonal barrier required.
+
+    This matches Taskflow's optimal wavefront implementation (per-block DAG with
+    left+top dependencies) while remaining fully expressible in SynStream's
+    ``$res`` dependency model.
+    """
+    B = math.ceil(n / tile_size)
+
+    app = ss.Graph()
+    n_var = app.var("n", ss.usize(n))
+    grid  = app.var("grid", func="init_grid", args=[n_var])
+
+    blocks: dict = {}
+    for i in range(B):
+        for j in range(B):
+            args = [grid, n_var, ss.usize(i), ss.usize(j), ss.usize(tile_size)]
+            if i > 0:
+                args.append(blocks[(i - 1, j)].out(0))   # $res from top neighbour
+            if j > 0:
+                args.append(blocks[(i, j - 1)].out(0))   # $res from left neighbour
+            blocks[(i, j)] = app.node(
+                f"block_{i}_{j}", func="wf_block", factor=1, args=args
+            )
+
+    return app
+
 
 def build_wavefront_graph(n: int, tile_size: int = 1) -> ss.Graph:
     """Build the anti-diagonal wavefront graph for an N×N grid.
@@ -245,6 +285,42 @@ def main() -> None:
                     std_csv = args.results_dir / f"synstream_wavefront_n{n}_w{workers}_st{st}_{tile_tag}_result.csv"
                     _write_wavefront_csv(std_csv, system_label, n, workers, total_s, s_per_iter, iters)
                     print(f"  -> {std_csv}", flush=True)
+
+    if args.block_dag:
+        tile_size = 32  # fixed: block DAG always uses T=32 blocks
+        for n in args.n:
+            B = math.ceil(n / tile_size)
+            for workers in args.workers:
+                system_label = f"synstream_block_t{tile_size}"
+                timing_file  = args.results_dir / f"synstream_wavefront_block_n{n}_w{workers}_t{tile_size}.csv"
+                print(
+                    f"\n=== SynStream Block DAG | n={n} B={B}×{B} workers={workers} "
+                    f"tile_size={tile_size} ===",
+                    flush=True,
+                )
+
+                graph = build_wavefront_block_dag(n, tile_size=tile_size)
+
+                graph.run(
+                    dylib=dylib,
+                    workers=workers,
+                    core_offset=1,
+                    system_threads=1,
+                    slots=1,
+                    max_streams=total_streams,
+                    exclude_streams=args.warmup,
+                    batching_size=1,
+                    timing=str(timing_file),
+                    use_rdtsc=True,
+                    custom=True,
+                    inline_continuation=True,
+                )
+                print(f"  -> {timing_file}", flush=True)
+
+                total_s, s_per_iter, iters = _parse_synstream_timing(timing_file)
+                std_csv = args.results_dir / f"synstream_wavefront_block_n{n}_w{workers}_t{tile_size}_result.csv"
+                _write_wavefront_csv(std_csv, system_label, n, workers, total_s, s_per_iter, iters)
+                print(f"  -> {std_csv}", flush=True)
 
     print(f"\nDone. Results written to {args.results_dir}")
 

@@ -110,7 +110,8 @@ COLORS = {
     "synstream_st1": "#aec7e8",       # light blue — 1 system thread (untiled, legacy)
     "synstream_st1_t1": "#aec7e8",   # tile=1 (same as untiled)
     "synstream_st1_t8": "#6baed6",   # tile=8
-    "synstream_st1_t32": "#1f77b4",  # tile=32 (best config)
+    "synstream_st1_t32": "#1f77b4",  # tile=32 (best anti-diagonal config)
+    "synstream_block_t32": "#2171b5",  # 2D block DAG, tile=32
     "synstream_st2": "#6baed6",    # medium blue — 2 system threads
     "synstream_st4": "#1f77b4",    # full blue — 4 system threads
     "timely": "#ff7f0e",
@@ -119,6 +120,7 @@ COLORS = {
     "tbb": "#2ca02c",
     "tbb_pinned": "#98df8a",
     "taskflow_pinned": "#9467bd",  # purple
+    "taskflow_block_pinned": "#7b2d8b",  # dark purple — block DAG variant
 }
 MARKERS = {
     "synstream": "o",
@@ -129,6 +131,7 @@ MARKERS = {
     "synstream_st1_t1": "o",
     "synstream_st1_t8": "o",
     "synstream_st1_t32": "o",
+    "synstream_block_t32": "o",
     "synstream_st2": "o",
     "synstream_st4": "o",
     "timely": "s",
@@ -137,6 +140,7 @@ MARKERS = {
     "tbb": "D",
     "tbb_pinned": "D",
     "taskflow_pinned": "P",  # plus marker
+    "taskflow_block_pinned": "P",
 }
 # Labels for main comparison plots (best config per system shown as the system name)
 LABELS = {
@@ -148,6 +152,7 @@ LABELS = {
     "synstream_st1_t1": "SynStream (tile=1)",
     "synstream_st1_t8": "SynStream (tile=8)",
     "synstream_st1_t32": "SynStream (tile=32)",
+    "synstream_block_t32": "SynStream (block DAG, tile=32)",
     "synstream_st2": "SynStream (2 sys-threads)",
     "synstream_st4": "SynStream (4 sys-threads)",
     "timely": "Timely",
@@ -156,6 +161,7 @@ LABELS = {
     "tbb": "Intel TBB",
     "tbb_pinned": "Intel TBB (pinned)",
     "taskflow_pinned": "Taskflow (pinned)",
+    "taskflow_block_pinned": "Taskflow (block DAG, tile=32)",
 }
 
 # ── main comparison plot configuration ────────────────────────────────────────
@@ -163,7 +169,10 @@ LABELS = {
 # Best configuration per system — these are the only series shown in the main plots.
 STREAM_ORDER = ["synstream_init_pooled", "timely_pooled", "tbb"]
 PAGERANK_ORDER = ["synstream", "timely", "tbb"]
-WAVEFRONT_ORDER = ["synstream_st1_t32", "timely", "tbb_pinned", "taskflow_pinned"]
+# Main comparison: best implementation per system
+WAVEFRONT_ORDER = ["synstream_block_t32", "taskflow_block_pinned", "tbb_pinned", "timely"]
+# SynStream internal variants for the programmability subplot
+SYNSTREAM_WF_VARIANT_ORDER = ["synstream_st1_t1", "synstream_st1_t8", "synstream_st1_t32", "synstream_block_t32"]
 
 LINESTYLES = {
     "synstream": "--",
@@ -173,6 +182,7 @@ LINESTYLES = {
     "synstream_st1_t1": ":",
     "synstream_st1_t8": "--",
     "synstream_st1_t32": "-",
+    "synstream_block_t32": "--",
     "synstream_st2": "--",
     "synstream_st4": "-",
     "timely": "-",
@@ -180,6 +190,7 @@ LINESTYLES = {
     "tbb": "-",
     "tbb_pinned": "--",
     "taskflow_pinned": "-.",
+    "taskflow_block_pinned": "--",
 }
 
 # ── SynStream design-choice variant configuration ─────────────────────────────
@@ -200,6 +211,20 @@ SYNSTREAM_STREAM_VARIANT_COLORS = {
     "synstream": "#aec7e8",  # light blue
     "synstream_pooled": "#6baed6",  # medium blue
     "synstream_init_pooled": "#1f77b4",  # full blue
+}
+
+# Wavefront SynStream variants — for the programmability subplot.
+SYNSTREAM_WF_VARIANT_LABELS = {
+    "synstream_st1_t1":   "Anti-diag\n(tile=1)",
+    "synstream_st1_t8":   "Anti-diag\n(tile=8)",
+    "synstream_st1_t32":  "Anti-diag\n(tile=32)",
+    "synstream_block_t32": "Block DAG\n(tile=32)",
+}
+SYNSTREAM_WF_VARIANT_COLORS = {
+    "synstream_st1_t1":   "#c6dbef",
+    "synstream_st1_t8":   "#6baed6",
+    "synstream_st1_t32":  "#2171b5",
+    "synstream_block_t32": "#08306b",
 }
 
 # PageRank variants.  The "synstream_serial" entry requires a separate CSV with
@@ -392,8 +417,8 @@ def plot_wavefront(df: "pd.DataFrame", out_dir: Path) -> None:
     """
     # Only plot N values that have at least one non-SynStream baseline result,
     # to avoid empty/partial subplots from ad-hoc test runs (e.g. N=8 debug runs).
-    baseline_systems = {"tbb", "tbb_pinned", "taskflow", "taskflow_pinned", "timely",
-                        "timely_pooled", "timely_pinned"}
+    baseline_systems = {"tbb", "tbb_pinned", "taskflow", "taskflow_pinned",
+                        "taskflow_block_pinned", "timely", "timely_pooled", "timely_pinned"}
     n_with_baselines = set(df[df["system"].isin(baseline_systems)]["n"].unique())
     n_vals = sorted(n for n in df["n"].unique() if n in n_with_baselines)
     nrows = (len(n_vals) + 1) // 2
@@ -434,6 +459,63 @@ def plot_wavefront(df: "pd.DataFrame", out_dir: Path) -> None:
 
     plt.tight_layout()
     out_path = out_dir / "wavefront_comparison.png"
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved {out_path}")
+
+
+def plot_wavefront_synstream_variants(df: "pd.DataFrame", out_dir: Path) -> None:
+    """Grouped bar chart showing SynStream wavefront variant performance.
+
+    Shows tile=1, tile=8, tile=32 (anti-diagonal) and block-DAG at fixed N values,
+    across worker counts.  Illustrates programmability: different graph definitions
+    yield 10-100× performance differences with no runtime changes.
+    """
+    variants = [s for s in SYNSTREAM_WF_VARIANT_ORDER if s in df["system"].values]
+    if len(variants) < 2:
+        return
+
+    n_vals = [256, 512]
+    n_vals = [n for n in n_vals if n in df["n"].unique()]
+    if not n_vals:
+        n_vals = sorted(df["n"].unique())[-2:]
+
+    worker_counts = sorted(df[df["system"].isin(variants)]["workers"].unique())
+    x = np.arange(len(worker_counts))
+    width = 0.8 / len(variants)
+
+    fig, axes = plt.subplots(1, len(n_vals), figsize=(7 * len(n_vals), 5))
+    if len(n_vals) == 1:
+        axes = [axes]
+    fig.suptitle("SynStream Wavefront: Graph Configuration Comparison", fontsize=13)
+
+    for ax, n in zip(axes, n_vals):
+        sub = df[df["n"] == n]
+        for vi, system in enumerate(variants):
+            grp = sub[sub["system"] == system].sort_values("workers")
+            worker_map = {row.workers: row.s_per_iter * 1000 for row in grp.itertuples()}
+            vals = [worker_map.get(w, float("nan")) for w in worker_counts]
+            offset = (vi - (len(variants) - 1) / 2) * width
+            ax.bar(
+                x + offset,
+                vals,
+                width,
+                label=SYNSTREAM_WF_VARIANT_LABELS.get(system, system),
+                color=SYNSTREAM_WF_VARIANT_COLORS.get(system, "gray"),
+                edgecolor="white",
+                linewidth=0.5,
+            )
+        ax.set_title(f"N={n}")
+        ax.set_xlabel("Workers")
+        ax.set_ylabel("Time per sweep (ms)")
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(w) for w in worker_counts])
+        ax.set_yscale("log")
+        ax.grid(True, alpha=0.3, axis="y", which="both")
+        ax.legend(fontsize=8)
+
+    plt.tight_layout()
+    out_path = out_dir / "wavefront_synstream_variants.png"
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"Saved {out_path}")
@@ -566,6 +648,7 @@ def main() -> None:
         print_wavefront_table(wavefront_df)
         if HAS_PLOT:
             plot_wavefront(wavefront_df, args.output_dir)
+            plot_wavefront_synstream_variants(wavefront_df, args.output_dir)
     else:
         print("[info] No Wavefront results found.")
 

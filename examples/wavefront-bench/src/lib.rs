@@ -83,3 +83,57 @@ pub fn wf_cell_cm(grid: &CmTypes, n: usize, diag: usize, idx: usize) -> CmTypes 
 
     CmTypes::None
 }
+
+/// Compute a T×T block of cells starting at grid row `block_row*tile_size`,
+/// col `block_col*tile_size`.  Used for the 2D block DAG wavefront variant.
+///
+/// Arguments (via wrapper args array):
+///   args[0] = grid       (CmTypes::Any(Vec<f64>))
+///   args[1] = n          (CmTypes::Usize)
+///   args[2] = block_row  (CmTypes::Usize — compile-time constant from graph)
+///   args[3] = block_col  (CmTypes::Usize — compile-time constant from graph)
+///   args[4] = tile_size  (CmTypes::Usize — compile-time constant from graph)
+///   args[5..] = $res sync signals from left/top neighbours (CmTypes::None, ignored)
+///
+/// Processes cells in row-major order so intra-block dependencies are satisfied:
+///   cell(i, j) reads cell(i-1, j) [top, from top-neighbour block or prev row]
+///              and cell(i, j-1) [left, from left-neighbour block or prev col].
+///
+/// Safety invariants (upheld by $res graph edges):
+///   - Block (block_row-1, block_col) has fully completed before this runs.
+///   - Block (block_row, block_col-1) has fully completed before this runs.
+///
+/// Returns: CmTypes::None
+#[no_mangle]
+pub fn wf_block_cm(grid: &CmTypes, n: usize, block_row: usize, block_col: usize, tile_size: usize) -> CmTypes {
+    let data_ptr = grid
+        .with_any(|v: &Vec<f64>| v.as_ptr() as *mut f64)
+        .expect("wf_block_cm: expected CmTypes::Any(Vec<f64>) for grid");
+
+    let row_start = block_row * tile_size;
+    let col_start = block_col * tile_size;
+    let row_end   = (row_start + tile_size).min(n);
+    let col_end   = (col_start + tile_size).min(n);
+
+    // Row-major order ensures intra-block reads of (i-1,j) and (i,j-1) are
+    // always satisfied before the corresponding write.
+    for i in row_start..row_end {
+        for j in col_start..col_end {
+            if i == 0 || j == 0 {
+                continue; // boundary cells — pre-initialised, skip
+            }
+            // SAFETY:
+            // Cross-block reads: (i-1,j) in top neighbour block, guaranteed done
+            // by $res dep on block(block_row-1, block_col); (i,j-1) in left
+            // neighbour block, guaranteed done by $res dep on block(block_row,
+            // block_col-1).  Intra-block reads: covered by row-major loop order.
+            unsafe {
+                let left = *data_ptr.add(i * n + (j - 1));
+                let top  = *data_ptr.add((i - 1) * n + j);
+                *data_ptr.add(i * n + j) = 0.5 * (left + top);
+            }
+        }
+    }
+
+    CmTypes::None
+}

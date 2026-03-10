@@ -6,6 +6,7 @@ pub fn get_func(func_name: &str) -> Option<CmPtr> {
         "init_grid" => Some(init_grid_cm_wrap),
         "wf_cell"   => Some(wf_cell_cm_wrap),
         "wf_tile"   => Some(wf_tile_cm_wrap),
+        "wf_block"  => Some(wf_block_cm_wrap),
         _ => {
             println!("Function {} not found", func_name);
             panic!("Panicking...");

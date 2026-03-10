@@ -88,3 +88,32 @@ pub fn wf_tile_cm_wrap(args: &[CmTypes]) -> CmTypes {
     };
     WF_TILE_CM_SYM(&args[0], n, diag, tile_idx, tile_size)
 }
+
+cache_sym! {
+    pub static WF_BLOCK_CM_SYM: fn(&CmTypes, usize, usize, usize, usize) -> CmTypes = b"wf_block_cm";
+}
+pub fn wf_block_cm_wrap(args: &[CmTypes]) -> CmTypes {
+    // args[0] = grid      ($ref → CmTypes::Any(Vec<f64>))
+    // args[1] = n         (CmTypes::Usize, from $ref "n")
+    // args[2] = block_row (CmTypes::Usize, compile-time constant from graph)
+    // args[3] = block_col (CmTypes::Usize, compile-time constant from graph)
+    // args[4] = tile_size (CmTypes::Usize, compile-time constant from graph)
+    // args[5..] = $res signals from top/left neighbours (CmTypes::None, ignored)
+    let n = match args[1] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("wf_block_cm: expected CmTypes::Usize for n"),
+    };
+    let block_row = match args[2] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("wf_block_cm: expected CmTypes::Usize for block_row"),
+    };
+    let block_col = match args[3] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("wf_block_cm: expected CmTypes::Usize for block_col"),
+    };
+    let tile_size = match args[4] {
+        CmTypes::Usize(x) => x,
+        _ => panic!("wf_block_cm: expected CmTypes::Usize for tile_size"),
+    };
+    WF_BLOCK_CM_SYM(&args[0], n, block_row, block_col, tile_size)
+}
