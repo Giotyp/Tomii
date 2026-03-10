@@ -78,10 +78,12 @@ pub trait ResolutionState: Send + Sync {
     }
 
     // Hot-path variant: writes ready indices into caller-supplied buffer (no allocation).
+    // `specific_succ_idx`: when Some(i), fire exactly instance i (1:1 non-barrier dispatch).
     // Default delegates to the Vec-returning version for backward compatibility.
-    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
+    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize, specific_succ_idx: Option<usize>, ready: &mut Vec<usize>) {
         ready.clear();
         ready.extend(self.decrease_and_get_ready(slot, node_id, slot_gen, group, count));
+        let _ = specific_succ_idx; // default impl ignores specific_succ_idx
     }
 
     // Debug info for trait object printing
@@ -144,7 +146,7 @@ impl StNodeDepEntry {
     }
 
     /// Decrement by count with generational lazy reinit; write newly-ready indices into `ready`.
-    fn decrease_and_get_ready_into(&mut self, slot_gen: u32, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
+    fn decrease_and_get_ready_into(&mut self, slot_gen: u32, group: Option<usize>, count: usize, specific_succ_idx: Option<usize>, ready: &mut Vec<usize>) {
         use crate::buffers::{gen_pack, gen_unpack_gen, gen_unpack_val};
         ready.clear();
 
@@ -179,6 +181,17 @@ impl StNodeDepEntry {
                             self.instances_sent[idx] = gen_pack(slot_gen, 1);
                             ready.push(idx);
                         }
+                    }
+                }
+            } else if let Some(specific_idx) = specific_succ_idx {
+                // 1:1 specific-instance dispatch (single-threaded path)
+                if specific_idx < self.factor {
+                    let s = self.instances_sent[specific_idx];
+                    let s_gen = gen_unpack_gen(s);
+                    let s_sent = gen_unpack_val(s) != 0;
+                    if !(s_gen == slot_gen && s_sent) {
+                        self.instances_sent[specific_idx] = gen_pack(slot_gen, 1);
+                        ready.push(specific_idx);
                     }
                 }
             } else {
@@ -378,14 +391,14 @@ impl ResolutionState for SingleThreadedState {
 
     fn decrease_and_get_ready(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize) -> Vec<usize> {
         let mut ready = Vec::new();
-        self.decrease_and_get_ready_into(slot, node_id, slot_gen, group, count, &mut ready);
+        self.decrease_and_get_ready_into(slot, node_id, slot_gen, group, count, None, &mut ready);
         ready
     }
 
-    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
+    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize, specific_succ_idx: Option<usize>, ready: &mut Vec<usize>) {
         let deps = self.node_deps.get_mut();
         if slot < deps.len() && node_id < deps[slot].len() {
-            deps[slot][node_id].decrease_and_get_ready_into(slot_gen, group, count, ready);
+            deps[slot][node_id].decrease_and_get_ready_into(slot_gen, group, count, specific_succ_idx, ready);
         } else {
             ready.clear();
         }
@@ -503,13 +516,13 @@ impl ResolutionState for MultiThreadedState {
     #[inline]
     fn decrease_and_get_ready(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize) -> Vec<usize> {
         let mut ready = Vec::new();
-        self.node_dep_map.decrease_and_get_ready_into(slot, node_id, slot_gen, group, count, &mut ready);
+        self.node_dep_map.decrease_and_get_ready_into(slot, node_id, slot_gen, group, count, None, &mut ready);
         ready
     }
 
     #[inline]
-    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize, ready: &mut Vec<usize>) {
-        self.node_dep_map.decrease_and_get_ready_into(slot, node_id, slot_gen, group, count, ready);
+    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize, specific_succ_idx: Option<usize>, ready: &mut Vec<usize>) {
+        self.node_dep_map.decrease_and_get_ready_into(slot, node_id, slot_gen, group, count, specific_succ_idx, ready);
     }
 
     fn debug_info(&self) -> String {
