@@ -32,6 +32,10 @@ thread_local! {
     static WORKER_READY_BUF: RefCell<Vec<usize>> = RefCell::new(Vec::with_capacity(32));
     static WORKER_SCHED_BUF: RefCell<Vec<NodeInfo>> = RefCell::new(Vec::with_capacity(32));
     static WORKER_ARGS_BUF: RefCell<Vec<Option<Vec<CmTypes>>>> = RefCell::new(Vec::with_capacity(32));
+
+    /// Set by worker_resolve_successors when inline_continuation is enabled.
+    /// Consumed by the send_to_scheduler trampoline after execute_task returns.
+    static INLINE_CONTINUATION: RefCell<Option<NodeInfo>> = RefCell::new(None);
 }
 
 /// Slot state for priority-based processing
@@ -437,6 +441,12 @@ pub struct SharedData {
     /// by group_size for per-group barrier tracking. None means global (all groups decremented).
     pub pred_group_by: Arc<Vec<Vec<Option<usize>>>>,
 
+    /// pred_succ_1to1_offset[succ_id][pred_id] = Some(k) for non-barrier, single-index $res deps
+    /// where succ_factor == pred_factor. k = indexes[0]. Used to compute the specific successor
+    /// instance that reads a completing predecessor: specific_idx = (pred_idx - k + f) % f.
+    /// This ensures 1:1 pipelines dispatch the correct successor without spin_wait deadlock.
+    pub pred_succ_1to1_offset: Arc<Vec<Vec<Option<isize>>>>,
+
     // Graph-constant slot completion thresholds — computed once at init, used in check_slots.
     pub total_tasks: usize,
     pub total_cond_tasks: usize,
@@ -455,6 +465,13 @@ pub struct SharedData {
     /// Leave false (default) for coarse-grained workloads (MIMO, PageRank) where
     /// serialising instances inside a bulk task would increase latency.
     pub coalesce_barriers: bool,
+
+    /// When true, after resolving successors in worker_resolve_successors, one ready
+    /// successor is reserved for inline execution on the current worker thread instead of
+    /// spawning all via the scheduler.  Eliminates scheduler round-trip for chain-dominant
+    /// subgraphs (factor=1 chains A→B→C→…).  Must NOT enable for coarse-grained
+    /// workloads (MIMO) where serialising a successor increases slot-window latency.
+    pub inline_continuation: bool,
 }
 
 /// When a barrier node's instances all become ready simultaneously, this helper
@@ -545,12 +562,25 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
                     for (_succ_info, _has_cond, succ_id, pred_group) in succ_buf.iter() {
                         let succ_node_id = *succ_id as usize;
 
+                        // For 1:1 non-barrier deps, fire the specific successor instance
+                        // that reads this predecessor (result guaranteed available).
+                        let specific_succ_idx = shared
+                            .pred_succ_1to1_offset
+                            .get(succ_node_id)
+                            .and_then(|v| v.get(node_info.id as usize))
+                            .and_then(|o| *o)
+                            .map(|k| {
+                                let f = shared.node_cache[succ_node_id].factor;
+                                ((node_info.index as isize - k).rem_euclid(f as isize)) as usize
+                            });
+
                         shared.resolution_state.decrease_and_get_ready_into(
                             slot,
                             succ_node_id,
                             slot_gen,
                             *pred_group,
                             node_info.bulk_count,
+                            specific_succ_idx,
                             &mut ready,
                         );
 
@@ -565,11 +595,23 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
                         );
                     }
 
-                    // Step 6: Schedule ready successors.
+                    // Inline continuation: reserve one ready successor for this worker
+                    // thread instead of spawning it through the scheduler.
+                    let inline = if shared.inline_continuation && !sched.is_empty() {
+                        sched.pop()
+                    } else {
+                        None
+                    };
+
+                    // Step 6: Schedule remaining ready successors.
                     if !sched.is_empty() {
                         args_buf.clear();
                         args_buf.resize(sched.len(), None);
                         send_to_scheduler(shared, &sched, &args_buf, None);
+                    }
+
+                    if let Some(ni) = inline {
+                        INLINE_CONTINUATION.with(|c| *c.borrow_mut() = Some(ni));
                     }
                 });
             });
@@ -819,7 +861,21 @@ pub fn send_to_scheduler(
         // Per-task spawn timestamp for accurate scheduling latency measurement.
         let spawn_ns = shared.base_instant.elapsed().as_nanos();
         let task = move || {
-            execute_task(&shared_clone, func_ptr, &node_info, pre_built_args, spawn_ns)
+            let mut current = node_info;
+            let mut current_func = func_ptr;
+            let mut first = true;
+            loop {
+                let args = if first { pre_built_args.clone() } else { None };
+                first = false;
+                execute_task(&shared_clone, current_func, &current, args, spawn_ns);
+                match INLINE_CONTINUATION.with(|c| c.borrow_mut().take()) {
+                    Some(next) => {
+                        current_func = shared_clone.node_cache[next.id as usize].func_ptr;
+                        current = next;
+                    }
+                    None => break,
+                }
+            }
         };
 
         if affinity_group > 0 {

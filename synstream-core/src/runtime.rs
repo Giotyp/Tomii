@@ -86,6 +86,7 @@ impl SynRt {
         target_batch_size: usize,
         batch_timeout_us: u64,
         coalesce_barriers: bool,
+        inline_continuation: bool,
     ) -> SynRt {
         // Initialize stream completion counters
         let stream_completion_counts = Arc::new(RwLock::new(Vec::new()));
@@ -270,12 +271,18 @@ impl SynRt {
             buffer_return_receivers,
         ) = prepare_network_infrastructure(app_graph);
 
-        // Precompute pred_index_filter and pred_group_by for per-group dependency support
+        // Precompute pred_index_filter, pred_group_by, and pred_succ_1to1_offset.
         let num_nodes = app_graph.nodes.len();
-        let (pred_index_filter, pred_group_by) = {
+        let (pred_index_filter, pred_group_by, pred_succ_1to1_offset) = {
             let mut filter: Vec<Vec<Option<(usize, usize)>>> =
                 vec![vec![None; num_nodes]; num_nodes];
             let mut group_by: Vec<Vec<Option<usize>>> = vec![vec![None; num_nodes]; num_nodes];
+            // For 1:1 non-barrier single-index $res deps with equal succ/pred factors:
+            // stores indexes[0] offset k so caller can compute specific_succ_idx =
+            // (pred_idx - k + succ_factor) % succ_factor, firing the exact successor
+            // instance that reads this predecessor (eliminates spin_wait deadlock).
+            let mut succ_1to1_offset: Vec<Vec<Option<isize>>> =
+                vec![vec![None; num_nodes]; num_nodes];
 
             for succ_node in &app_graph.nodes {
                 let succ_id = succ_node.id as usize;
@@ -315,10 +322,23 @@ impl SynRt {
                         if let Some(gb) = pred.group_by {
                             group_by[succ_id][pred_id] = Some(gb);
                         }
+
+                        // 1:1 non-barrier single-index $res dep with equal factors:
+                        // store the indexes offset so we can fire the exact successor
+                        // instance that reads this predecessor (avoids ordinal mismatch).
+                        let succ_factor = succ_node.factor;
+                        if !arg.is_barrier()
+                            && pred.group_by.is_none()
+                            && pred.indexes.len() == 1
+                            && succ_factor == pred_factor
+                            && succ_factor > 1
+                        {
+                            succ_1to1_offset[succ_id][pred_id] = Some(pred.indexes[0]);
+                        }
                     }
                 }
             }
-            (filter, group_by)
+            (filter, group_by, succ_1to1_offset)
         };
 
         let shared = Arc::new(SharedData {
@@ -376,6 +396,7 @@ impl SynRt {
             // Per-group dependency support
             pred_index_filter: Arc::new(pred_index_filter),
             pred_group_by: Arc::new(pred_group_by),
+            pred_succ_1to1_offset: Arc::new(pred_succ_1to1_offset),
             // Graph-constant slot completion thresholds
             total_tasks,
             total_cond_tasks,
@@ -384,6 +405,7 @@ impl SynRt {
             // Active-slot bitmap for lock-free check_slots
             active_slots_bitmap: Arc::new(AtomicU64::new(0)),
             coalesce_barriers,
+            inline_continuation,
         });
 
         SynRt { shared }
@@ -1333,13 +1355,27 @@ impl SynRt {
                                     }
                                 }
 
-                                // Decrement dependency counter; ready indices written into `ready`
+                                // Decrement dependency counter; ready indices written into `ready`.
+                                // For 1:1 non-barrier deps, pass specific_succ_idx so the
+                                // exact successor instance that reads this predecessor fires,
+                                // guaranteeing its result is available (no spin_wait needed).
+                                let specific_succ_idx = shared
+                                    .pred_succ_1to1_offset
+                                    .get(succ_node_id)
+                                    .and_then(|v| v.get(node_info.id as usize))
+                                    .and_then(|o| *o)
+                                    .map(|k| {
+                                        let f = shared.node_cache[succ_node_id].factor;
+                                        ((node_info.index as isize - k).rem_euclid(f as isize))
+                                            as usize
+                                    });
                                 shared.resolution_state.decrease_and_get_ready_into(
                                     node_info.slot,
                                     succ_node_id,
                                     slot_gen,
                                     *pred_group,
                                     1,
+                                    specific_succ_idx,
                                     &mut ready,
                                 );
 

@@ -109,6 +109,11 @@ struct Args {
     coalesce_barriers: bool,
     #[clap(
         long,
+        help = "Reserve one ready successor for inline execution on the completing worker thread instead of spawning via the scheduler. Eliminates scheduler round-trip for chain-dominant graphs (factor=1 chains). Disabled by default; must NOT enable for coarse-grained workloads (MIMO) where serialising a successor increases latency."
+    )]
+    inline_continuation: bool,
+    #[clap(
+        long,
         value_name = "EXCLUDE_STREAMS",
         required = false,
         default_value = "0",
@@ -194,6 +199,7 @@ fn main() {
         args.batching_limit,
         args.slot_priority,
         args.coalesce_barriers,
+        args.inline_continuation,
     );
 
     let time_file = args.timing;
@@ -234,6 +240,7 @@ pub fn run_graph(
     batching_limit: u64,
     slot_priority_enabled: bool,
     coalesce_barriers: bool,
+    inline_continuation: bool,
 ) -> SynRt {
     let receiver_threads = if graph.network_config().is_some() {
         receiver_threads
@@ -331,6 +338,7 @@ pub fn run_graph(
         batching_size,
         batching_limit,
         coalesce_barriers,
+        inline_continuation,
     );
 
     synrt.run();

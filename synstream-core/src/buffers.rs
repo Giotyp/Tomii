@@ -653,12 +653,17 @@ impl NodeDependencyEntry {
     /// `slot_gen`: current slot generation (u32); stale entries are lazily reinitialised.
     /// `group`: None → decrement ALL group counters, Some(g) → decrement group g only.
     /// `count`: number of decrements to apply (aggregated from same-batch predecessors).
+    /// `specific_succ_idx`: when Some(i), fire exactly successor instance i (1:1 dispatch)
+    ///   instead of doing the ordinal threshold scan. Used for non-barrier, equal-factor,
+    ///   single-index $res deps where succ[i] always reads pred[i], ensuring the result
+    ///   is available before the successor is dispatched (prevents spin_wait deadlock).
     /// Writes newly-ready instance indices into `ready` (cleared before use).
     pub fn decrease_and_get_ready_into(
         &self,
         slot_gen: u32,
         group: Option<usize>,
         count: usize,
+        specific_succ_idx: Option<usize>,
         ready: &mut Vec<usize>,
     ) {
         ready.clear();
@@ -727,8 +732,31 @@ impl NodeDependencyEntry {
                         }
                     }
                 }
+            } else if let Some(specific_idx) = specific_succ_idx {
+                // 1:1 dispatch: fire the exact successor instance that reads this predecessor.
+                // The caller computed specific_idx = (pred_idx - k + factor) % factor so that
+                // succ[specific_idx] reads pred[pred_idx] — result is guaranteed available.
+                // This prevents spin_wait_for_result deadlock when all Rayon workers block.
+                if specific_idx < self.factor {
+                    loop {
+                        let cur = self.instances_sent[specific_idx].load(Ordering::SeqCst);
+                        let cur_gen = gen_unpack_gen(cur);
+                        let cur_sent = gen_unpack_val(cur) != 0;
+                        if cur_gen == slot_gen && cur_sent {
+                            break; // Already sent this generation
+                        }
+                        let new_packed = gen_pack(slot_gen, 1);
+                        if self.instances_sent[specific_idx]
+                            .compare_exchange(cur, new_packed, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                        {
+                            ready.push(specific_idx);
+                            break;
+                        }
+                    }
+                }
             } else {
-                // Threshold-based: check instances in this group
+                // Ordinal threshold-based: check instances in this group
                 let max_threshold = self.group_size * self.deps_per_instance;
                 if new_remaining <= max_threshold {
                     for idx in start..end {
@@ -769,7 +797,7 @@ impl NodeDependencyEntry {
         count: usize,
     ) -> Vec<usize> {
         let mut ready = Vec::new();
-        self.decrease_and_get_ready_into(slot_gen, group, count, &mut ready);
+        self.decrease_and_get_ready_into(slot_gen, group, count, None, &mut ready);
         ready
     }
 
@@ -921,6 +949,7 @@ impl NodeDepMap {
 
     /// Get ready instances for a node in a slot by decrementing dependencies by count.
     /// `slot_gen`: current slot generation for lazy generational reinit.
+    /// `specific_succ_idx`: when Some(i), fire exactly instance i (1:1 dispatch).
     /// Writes results into `ready` (cleared before use). No allocation on the hot path.
     #[inline]
     pub fn decrease_and_get_ready_into(
@@ -930,10 +959,17 @@ impl NodeDepMap {
         slot_gen: u32,
         group: Option<usize>,
         count: usize,
+        specific_succ_idx: Option<usize>,
         ready: &mut Vec<usize>,
     ) {
         if slot < self.slots.len() && node_id < self.slots[slot].len() {
-            self.slots[slot][node_id].decrease_and_get_ready_into(slot_gen, group, count, ready);
+            self.slots[slot][node_id].decrease_and_get_ready_into(
+                slot_gen,
+                group,
+                count,
+                specific_succ_idx,
+                ready,
+            );
         } else {
             ready.clear();
         }
@@ -953,7 +989,7 @@ impl NodeDepMap {
         count: usize,
     ) -> Vec<usize> {
         let mut ready = Vec::new();
-        self.decrease_and_get_ready_into(slot, node_id, slot_gen, group, count, &mut ready);
+        self.decrease_and_get_ready_into(slot, node_id, slot_gen, group, count, None, &mut ready);
         ready
     }
 
