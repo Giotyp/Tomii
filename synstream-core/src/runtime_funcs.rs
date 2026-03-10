@@ -633,8 +633,9 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
 
                     // Inline continuation: reserve one ready successor for this worker
                     // thread instead of spawning it through the scheduler.
+                    // Stamp slot_gen so the trampoline's stale check passes on streams > 0.
                     let inline = if shared.inline_continuation && !sched.is_empty() {
-                        sched.pop()
+                        sched.pop().map(|mut ni| { ni.gen = slot_gen; ni })
                     } else {
                         None
                     };
