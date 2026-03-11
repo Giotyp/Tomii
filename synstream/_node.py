@@ -25,6 +25,19 @@ class NodeOutput:
         return f"NodeOutput({self.node.name!r}, {idx!r})"
 
 
+class NodeDep(NodeOutput):
+    """An ordering-only dependency on a predecessor node (serializes as ``$dep``).
+
+    Like ``NodeOutput`` but signals to the runtime that the result value is not
+    needed — only the completion ordering matters.  The runtime skips result
+    storage for nodes whose only non-barrier successors are ordering-only deps.
+    """
+
+    def __repr__(self) -> str:
+        idx = _format_indexes(self.start, self.end)
+        return f"NodeDep({self.node.name!r}, {idx!r})"
+
+
 class NodeBarrier:
     """A barrier dependency on a predecessor node (serializes as ``$barrier``)."""
 
@@ -93,6 +106,20 @@ class Node:
     ) -> NodeOutput:
         """Return a result dependency on this node."""
         return NodeOutput(self, start, end, group_by=group_by)
+
+    def dep(
+        self,
+        start: Union[int, str, list] = 0,
+        end: Optional[Union[int, str, "Var"]] = None,
+        *,
+        group_by: Optional[int] = None,
+    ) -> NodeDep:
+        """Return an ordering-only dependency on this node (serializes as ``$dep``).
+
+        The predecessor edge is tracked for scheduling but the result value is not
+        fetched from the result buffer — the arg slot receives ``None`` instead.
+        """
+        return NodeDep(self, start, end, group_by=group_by)
 
     def wait(
         self,

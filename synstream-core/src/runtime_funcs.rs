@@ -204,7 +204,7 @@ pub fn node_cache_entry(
                     }
                 }
             }
-            CmTypes::Res(_) => {
+            CmTypes::Res(_) | CmTypes::Dep(_) => {
                 res_indexes.push(idx_count);
                 real_res_indexes.push(idx);
                 let pred = arg
@@ -292,7 +292,7 @@ pub fn node_cache_entry(
                         }
                     }
                 }
-                CmTypes::Res(_) => {
+                CmTypes::Res(_) | CmTypes::Dep(_) => {
                     cond_res_indexes.push(cond_idx_count);
                     cond_real_res_indexes.push(idx);
                 }
@@ -1495,6 +1495,12 @@ pub fn collect_arg_result(
 
             let obj_vec = &shared.graph.init_objects.as_ref().unwrap()[obj_id as usize];
             Some(vec![get_object_value(obj_vec, node_index)])
+        }
+        CmTypes::Dep(_) => {
+            // Ordering-only dep: no result fetch needed, provide None directly.
+            // The predecessor edge is tracked for scheduling purposes but the
+            // result value is not consumed by this successor.
+            return Some(vec![CmTypes::None]);
         }
         CmTypes::Res(res_node_id) => {
             // Short-circuit: if a previous arg already detected stale, skip remaining

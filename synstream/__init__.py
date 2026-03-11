@@ -20,6 +20,7 @@ Typical usage::
 
 from ._graph import Graph
 from ._loop import Condition, IndexFunc, Loop
+from ._node import NodeDep, NodeOutput
 from ._types import (
     Complex32,
     Complex64,
@@ -47,6 +48,9 @@ from ._types import (
 __all__ = [
     # Core
     "Graph",
+    # Node dependency helpers
+    "NodeOutput",
+    "NodeDep",
     # Helpers
     "Loop",
     "Condition",
