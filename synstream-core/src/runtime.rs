@@ -430,6 +430,12 @@ impl SynRt {
             spin_wait_yield_iters,
             spin_wait_park_ns,
             recv_pool_size,
+            dropped_streams: Arc::new(AtomicUsize::new(0)),
+            frame_dropped: Arc::new(
+                (0..max_streams + slots)
+                    .map(|_| AtomicBool::new(false))
+                    .collect(),
+            ),
         });
 
         SynRt { shared }
@@ -683,6 +689,13 @@ impl SynRt {
                     );
                 }
             }
+
+            // Report dropped frame statistics (frames discarded due to full slot table)
+            let dropped_frames = self.shared.dropped_streams.load(Ordering::SeqCst);
+            if dropped_frames > 0 {
+                println!("\nDropped Frame Statistics:");
+                println!("  TOTAL: {} frames dropped (no available slots)", dropped_frames);
+            }
         }
 
         // Finish timing for system thread slots only
@@ -790,7 +803,11 @@ impl SynRt {
                     // run assign_stream_to_available_slot for each stream to set slot state to Active
                     let assigned_slots: Vec<usize> = activate_streams
                         .iter()
-                        .map(|&stream_id| assign_stream_to_available_slot(&shared, stream_id).0)
+                        .map(|&stream_id| {
+                            assign_stream_to_available_slot(&shared, stream_id)
+                                .expect("initial slot assignment must succeed")
+                                .0
+                        })
                         .collect();
 
                     let compute_nodes = initial_nodes(&shared, assigned_slots);
@@ -931,6 +948,14 @@ impl SynRt {
                         }
 
                         if let Some(new_stream) = new_stream_opt {
+                            // Fast-path: if this frame was already dropped, discard all
+                            // subsequent packets for it without touching any shared state.
+                            if new_stream < shared.frame_dropped.len()
+                                && shared.frame_dropped[new_stream].load(Ordering::Acquire)
+                            {
+                                continue;
+                            }
+
                             // Assign stream to an available slot
                             let start_sa = if let Some(tb) = &shared.time_buffer {
                                 tb.measure_time()
@@ -938,8 +963,29 @@ impl SynRt {
                                 TimingMethod::Instant(Instant::now())
                             };
 
-                            let (assigned_slot, newly_activated) =
-                                assign_stream_to_available_slot(&shared, new_stream);
+                            let (assigned_slot, newly_activated) = match assign_stream_to_available_slot(&shared, new_stream) {
+                                Some(v) => v,
+                                None => {
+                                    // All slots occupied — drop this frame gracefully.
+                                    // Mark exactly once so only the first packet increments counters.
+                                    if new_stream < shared.frame_dropped.len() {
+                                        let already_marked = shared.frame_dropped[new_stream]
+                                            .swap(true, Ordering::AcqRel);
+                                        if !already_marked {
+                                            shared.stream_complete_counter
+                                                .fetch_add(1, Ordering::SeqCst);
+                                            let dropped =
+                                                shared.dropped_streams.fetch_add(1, Ordering::Relaxed)
+                                                    + 1;
+                                            eprintln!(
+                                                "Frame {} dropped: no available slots ({} dropped total)",
+                                                new_stream, dropped
+                                            );
+                                        }
+                                    }
+                                    continue;
+                                }
+                            };
                             node_info.slot = assigned_slot;
 
                             if let Some(tb) = &shared.time_buffer {
@@ -1915,9 +1961,11 @@ fn prepare_network_infrastructure(
 ) {
     if let Some(config_spec) = graph.network_config() {
         let num_sockets = config_spec.num_sockets;
-        let channel_cap = num_sockets * 512;
-        // Bounded channel: ring-buffer internals, no dynamic growth under load.
-        // 512 slots per socket absorbs bursts; drop_counters handle overflow gracefully.
+        // Size the channel to absorb 4× stream_packets worth of data per socket.
+        // stream_packets × num_sockets ≈ one full frame across all sockets; ×4 gives
+        // headroom for multiple concurrent frames and resolution-thread stalls.
+        // Minimum 65536 ensures adequate buffering even for small packet counts.
+        let channel_cap = (config_spec.stream_packets * 4).max(65536);
         let (packet_sender, packet_receiver) = flume::bounded(channel_cap);
 
         let receiver_sockets = bind_udp_socket_range(

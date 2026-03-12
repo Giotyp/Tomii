@@ -63,6 +63,13 @@ impl NetworkSocket {
             NetworkSocket::Udp(sock) => sock.set_read_timeout(timeout),
         }
     }
+
+    /// Set non-blocking mode — use for dedicated busy-poll receiver threads.
+    pub fn set_nonblocking(&self, nonblocking: bool) -> std::io::Result<()> {
+        match self {
+            NetworkSocket::Udp(sock) => sock.set_nonblocking(nonblocking),
+        }
+    }
 }
 
 /// Set the SO_RCVBUF size on a raw socket fd.

@@ -497,6 +497,16 @@ pub struct SharedData {
     /// in worker_resolve_successors, and skips the stale-task TLS writes in execute_task.
     /// Multi-slot mode keeps SeqCst unconditionally for correctness.
     pub single_slot_mode: bool,
+
+    /// Counts frames dropped because no slot was available when they arrived.
+    /// Incremented exactly once per dropped frame (deduplicated by frame_dropped bitmap).
+    /// Also incremented into stream_complete_counter so termination accounting stays correct.
+    pub dropped_streams: Arc<AtomicUsize>,
+
+    /// Per-frame drop bitmap — true once a frame has been marked dropped.
+    /// Indexed by frame_id. Size = max_streams + slots covers all live frame IDs in the window.
+    /// Lock-free; prevents multiple packets of the same dropped frame from double-counting.
+    pub frame_dropped: Arc<Vec<AtomicBool>>,
 }
 
 /// When a barrier node's instances all become ready simultaneously, this helper
@@ -1087,14 +1097,19 @@ pub fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
 }
 
 #[inline]
-pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) -> (usize, bool) {
+/// Returns `Some((slot, newly_activated))` on success, or `None` when all slots are occupied.
+/// Callers must handle `None` gracefully (drop the packet) instead of panicking.
+pub fn assign_stream_to_available_slot(
+    shared: &Arc<SharedData>,
+    stream: usize,
+) -> Option<(usize, bool)> {
     // Get write access to have updated view of running streams
     let mut running_streams = shared.running_streams.write();
 
     // Check if this stream is already mapped to a slot
     for (stream_id, slot_id) in running_streams.iter() {
         if *stream_id == stream {
-            return (*slot_id, false); // Already assigned, not newly activated
+            return Some((*slot_id, false)); // Already assigned, not newly activated
         }
     }
 
@@ -1128,7 +1143,7 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
             tb.start_slot_processing(last_slot_assigned);
         }
 
-        return (last_slot_assigned, true); // Newly activated from Inactive → Active
+        return Some((last_slot_assigned, true)); // Newly activated from Inactive → Active
     }
 
     for i in 1..shared.slots {
@@ -1157,11 +1172,12 @@ pub fn assign_stream_to_available_slot(shared: &Arc<SharedData>, stream: usize) 
             if let Some(tb) = &shared.time_buffer {
                 tb.start_slot_processing(slot_id);
             }
-            return (slot_id, false); // Assigned but Buffering, not Active
+            return Some((slot_id, false)); // Assigned but Buffering, not Active
         }
     }
 
-    panic!("No available slots to assign stream: {}", stream);
+    // All slots are occupied — signal caller to drop this frame gracefully.
+    None
 }
 
 pub fn release_slot(shared: &Arc<SharedData>, slot: usize) {
