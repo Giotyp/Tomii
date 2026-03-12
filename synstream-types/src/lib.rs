@@ -41,6 +41,7 @@ pub enum CmTypes {
     // Special types
     Ref(usize),
     Res(usize),
+    Dep(usize),
     Barrier(Arc<str>),
     None,
     Init,
@@ -83,6 +84,7 @@ impl<'de> Deserialize<'de> for CmTypes {
             String(std::string::String),
             Ref(usize),
             Res(usize),
+            Dep(usize),
             Barrier(std::string::String),
             Complex32(C32),
             Complex64(C64),
@@ -111,6 +113,7 @@ impl<'de> Deserialize<'de> for CmTypes {
             CmTypesHelper::String(v) => CmTypes::String(Arc::from(v.as_str())),
             CmTypesHelper::Ref(v) => CmTypes::Ref(v),
             CmTypesHelper::Res(v) => CmTypes::Res(v),
+            CmTypesHelper::Dep(v) => CmTypes::Dep(v),
             CmTypesHelper::Barrier(v) => CmTypes::Barrier(Arc::from(v.as_str())),
             CmTypesHelper::Complex32(v) => CmTypes::Complex32(Arc::new(v)),
             CmTypesHelper::Complex64(v) => CmTypes::Complex64(Arc::new(v)),
@@ -582,6 +585,10 @@ impl CmTypes {
 
     pub fn is_result(&self) -> bool {
         matches!(self, CmTypes::Res(_))
+    }
+
+    pub fn is_dep(&self) -> bool {
+        matches!(self, CmTypes::Dep(_))
     }
 
     pub fn is_reference(&self) -> bool {
@@ -1130,6 +1137,7 @@ impl PartialEq for CmTypes {
             (CmTypes::VecCmt(a), CmTypes::VecCmt(b)) => **a == **b,
             (CmTypes::Ref(a), CmTypes::Ref(b)) => a == b,
             (CmTypes::Res(a), CmTypes::Res(b)) => a == b,
+            (CmTypes::Dep(a), CmTypes::Dep(b)) => a == b,
             (CmTypes::Barrier(a), CmTypes::Barrier(b)) => **a == **b,
             (CmTypes::Complex32(a), CmTypes::Complex32(b)) => **a == **b,
             (CmTypes::Complex64(a), CmTypes::Complex64(b)) => **a == **b,
@@ -1164,6 +1172,7 @@ impl std::fmt::Debug for CmTypes {
             CmTypes::String(val) => write!(f, "String({:?})", &**val),
             CmTypes::Ref(val) => write!(f, "Ref({:?})", val),
             CmTypes::Res(val) => write!(f, "Res({:?})", val),
+            CmTypes::Dep(val) => write!(f, "Dep({:?})", val),
             CmTypes::Barrier(val) => write!(f, "Barrier({:?})", &**val),
             CmTypes::Complex32(val) => write!(f, "Complex32({:?})", **val),
             CmTypes::Complex64(val) => write!(f, "Complex64({:?})", **val),
@@ -1203,6 +1212,7 @@ impl fmt::Display for CmTypes {
             CmTypes::String(x) => write!(f, "{}", &**x),
             CmTypes::Ref(x) => write!(f, "{}", x),
             CmTypes::Res(x) => write!(f, "{}", x),
+            CmTypes::Dep(x) => write!(f, "{}", x),
             CmTypes::Barrier(x) => write!(f, "{}", &**x),
             CmTypes::Complex32(x) => {
                 if x.0.im >= 0.0 {
@@ -1400,6 +1410,7 @@ lazy_static! {
         add!("Complex64",  |s| parse_complex64(s).map(|v| CmTypes::Complex64(Arc::new(v))).map_err(|e| CustomError::new(&format!("Complex64 parse error for '{}': {}", s, e))));
         add!("$ref",    |s| s.parse::<usize>().map(CmTypes::Ref).map_err(|_| CustomError::new(&format!("invalid ref: '{}'", s))));
         add!("$res",    |s| s.parse::<usize>().map(CmTypes::Res).map_err(|_| CustomError::new(&format!("invalid res: '{}'", s))));
+        add!("$dep",    |s| s.parse::<usize>().map(CmTypes::Dep).map_err(|_| CustomError::new(&format!("invalid dep: '{}'", s))));
         add!("$factor", |_| Ok(CmTypes::Ref(0)));  // Runtime node index
         add!("$worker", |_| Ok(CmTypes::Ref(1)));  // Runtime worker count
         add!("$barrier", |s| Ok(CmTypes::Barrier(Arc::from(s))));

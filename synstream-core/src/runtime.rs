@@ -135,13 +135,15 @@ impl SynRt {
             }
         }
 
-        // Compute needs_result_store: true if any successor reads this node via $res (not $barrier).
+        // Compute needs_result_store: true if any successor reads this node via $res.
+        // $barrier and $dep args are excluded: barriers carry no value; $dep is an
+        // ordering-only dependency whose result is not fetched from the buffer.
         // When false, no successor consumes the result and node_results.set() can be elided.
         for node_id in 0..node_cache.len() {
             let has_res_succ = if node_id < app_graph.successors.len() {
                 app_graph.successors[node_id].iter().any(|&succ_id| {
                     app_graph.nodes[succ_id as usize].args.iter().any(|arg| {
-                        !arg.is_barrier()
+                        arg.type_.is_result()
                             && arg
                                 .predecessor
                                 .as_ref()

@@ -25,7 +25,7 @@ from ._generated import (
     PredJson,
 )
 from ._loop import Condition, IndexFunc, Loop
-from ._node import Node, NodeBarrier, NodeOutput
+from ._node import Node, NodeBarrier, NodeDep, NodeOutput
 from ._types import TypedValue, infer_type
 from ._var import Var
 
@@ -55,6 +55,14 @@ def _arg(a: Any) -> ArgJson:
     """Convert a node argument to an ArgJson model."""
     if isinstance(a, Var):
         return ArgJson(type_="$ref", value=a.name)
+
+    if isinstance(a, NodeDep):
+        pred = PredJson(
+            name=a.node.name,
+            indexes=_indexes(a.start, a.end),
+            group_by=a.group_by,
+        )
+        return ArgJson(type_="$dep", predecessor=pred)
 
     if isinstance(a, NodeOutput):
         pred = PredJson(
