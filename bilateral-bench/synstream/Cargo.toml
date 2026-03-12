@@ -1,0 +1,12 @@
+[package]
+name = "bilateral-bench"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bilateral_bench"
+crate-type = ["dylib", "rlib"]
+
+[dependencies]
+synstream-types = { path = "../../synstream-types" }
+
