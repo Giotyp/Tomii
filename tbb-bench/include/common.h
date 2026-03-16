@@ -99,7 +99,8 @@ public:
         observe(true);
     }
 
-    void on_scheduler_entry(bool /*is_worker*/) override {
+    void on_scheduler_entry(bool is_worker) override {
+        if (!is_worker) return;  // don't re-pin the external calling thread
         int id = next_id_.fetch_add(1, std::memory_order_relaxed);
         cpu_set_t cs;
         CPU_ZERO(&cs);

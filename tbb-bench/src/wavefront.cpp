@@ -104,7 +104,16 @@ int main(int argc, char** argv) {
 
     tbb::task_arena arena(W);
     std::unique_ptr<PinningObserver> obs;
-    if (cli.pin) obs = std::make_unique<PinningObserver>(arena, 1);
+    if (cli.pin) {
+        // Pin the calling (main) thread to core 0 so it stays schedulable
+        // across all arena.execute() calls without OS migration.
+        // Worker threads are pinned to cores 1..W via PinningObserver.
+        cpu_set_t cs;
+        CPU_ZERO(&cs);
+        CPU_SET(0, &cs);
+        sched_setaffinity(0, sizeof(cs), &cs);
+        obs = std::make_unique<PinningObserver>(arena, 1);
+    }
 
     // One full sweep: iterate all 2N-1 anti-diagonals
     auto run_sweep = [&]() {

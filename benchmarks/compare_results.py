@@ -423,13 +423,13 @@ def plot_wavefront(df: "pd.DataFrame", out_dir: Path) -> None:
     n_vals = sorted(n for n in df["n"].unique() if n in n_with_baselines)
     nrows = (len(n_vals) + 1) // 2
     ncols = min(2, len(n_vals))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(12, 5 * nrows))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(14, 5.5 * nrows))
     if len(n_vals) == 1:
         axes = np.array([axes])
     axes_flat = axes.flat if hasattr(axes, 'flat') else [axes]
     fig.suptitle(
         "Wavefront: SynStream vs Timely vs Intel TBB vs Taskflow",
-        fontsize=14,
+        fontsize=16,
     )
 
     for ax, n in zip(axes_flat, n_vals):
@@ -444,22 +444,23 @@ def plot_wavefront(df: "pd.DataFrame", out_dir: Path) -> None:
                 color=COLORS.get(system, "gray"),
                 marker=MARKERS.get(system, "^"),
                 linestyle=LINESTYLES.get(system, "-"),
-                linewidth=1.8,
-                markersize=6,
+                linewidth=2.2,
+                markersize=8,
             )
-        ax.set_title(f"N={n}")
-        ax.set_xlabel("Workers")
-        ax.set_ylabel("Time per sweep (ms)")
+        ax.set_title(f"N={n}", fontsize=16, fontweight="bold")
+        ax.set_xlabel("Workers", fontsize=15)
+        ax.set_ylabel("Time per sweep (ms)", fontsize=15)
         ax.set_yscale("log")
-        ax.legend(fontsize=7, loc="best")
+        ax.legend(fontsize=11, loc="best")
+        ax.tick_params(axis="both", labelsize=13)
         ax.grid(True, alpha=0.3, which="both")
         worker_ticks = sorted(sub["workers"].unique())
         ax.set_xticks(worker_ticks)
-        ax.set_xticklabels([str(w) for w in worker_ticks])
+        ax.set_xticklabels([str(w) for w in worker_ticks], fontsize=13)
 
     plt.tight_layout()
     out_path = out_dir / "wavefront_comparison.png"
-    fig.savefig(out_path, dpi=150)
+    fig.savefig(out_path, dpi=200)
     plt.close(fig)
     print(f"Saved {out_path}")
 
@@ -484,10 +485,10 @@ def plot_wavefront_synstream_variants(df: "pd.DataFrame", out_dir: Path) -> None
     x = np.arange(len(worker_counts))
     width = 0.8 / len(variants)
 
-    fig, axes = plt.subplots(1, len(n_vals), figsize=(7 * len(n_vals), 5))
+    fig, axes = plt.subplots(1, len(n_vals), figsize=(8 * len(n_vals), 5.5))
     if len(n_vals) == 1:
         axes = [axes]
-    fig.suptitle("SynStream Wavefront: Graph Configuration Comparison", fontsize=13)
+    fig.suptitle("SynStream Wavefront: Graph Configuration Comparison", fontsize=17)
 
     for ax, n in zip(axes, n_vals):
         sub = df[df["n"] == n]
@@ -505,18 +506,19 @@ def plot_wavefront_synstream_variants(df: "pd.DataFrame", out_dir: Path) -> None
                 edgecolor="white",
                 linewidth=0.5,
             )
-        ax.set_title(f"N={n}")
-        ax.set_xlabel("Workers")
-        ax.set_ylabel("Time per sweep (ms)")
+        ax.set_title(f"N={n}", fontsize=16, fontweight="bold")
+        ax.set_xlabel("Workers", fontsize=15)
+        ax.set_ylabel("Time per sweep (ms)", fontsize=15)
         ax.set_xticks(x)
-        ax.set_xticklabels([str(w) for w in worker_counts])
+        ax.set_xticklabels([str(w) for w in worker_counts], fontsize=13)
+        ax.tick_params(axis="y", labelsize=13)
         ax.set_yscale("log")
         ax.grid(True, alpha=0.3, axis="y", which="both")
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=13)
 
     plt.tight_layout()
     out_path = out_dir / "wavefront_synstream_variants.png"
-    fig.savefig(out_path, dpi=150)
+    fig.savefig(out_path, dpi=200)
     plt.close(fig)
     print(f"Saved {out_path}")
 
