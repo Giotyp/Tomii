@@ -104,12 +104,13 @@ def plot_speedup(
     ax.set_xticks(thread_counts)
     ax.get_xaxis().set_major_formatter(matplotlib.ticker.ScalarFormatter())
     ax.set_xlabel("Threads")
-    ax.set_ylabel("Speedup (relative to 1 thread)")
+    ax.set_ylabel("Speedup (relative to 1 thread)", fontsize=20)
     ax.set_title(
         f"Bilateral Denoising Speedup\n"
-        f"image={image_size}×{image_size}, tile={tile_size}, r={kernel_radius}"
+        f"image={image_size}x{image_size}, tile={tile_size}, r={kernel_radius}",
+        fontsize=20
     )
-    ax.legend(loc="upper left", fontsize=9)
+    ax.legend(loc="upper left", fontsize=18)
     ax.grid(True, which="both", alpha=0.3)
     fig.tight_layout()
 

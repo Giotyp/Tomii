@@ -35,14 +35,14 @@ LABEL_SSIC = r"SynStream (+IC)"
 
 RC = {
     "font.family":       "sans-serif",
-    "font.size":         8,
-    "axes.titlesize":    8,
-    "axes.labelsize":    8,
-    "xtick.labelsize":   7,
-    "ytick.labelsize":   7,
-    "legend.fontsize":   7,
+    "font.size":         13,
+    "axes.titlesize":    20,
+    "axes.labelsize":    18,
+    "xtick.labelsize":   18,
+    "ytick.labelsize":   18,
+    "legend.fontsize":   18,
     "lines.linewidth":   1.4,
-    "lines.markersize":  4.5,
+    "lines.markersize":  6.0,
     "axes.linewidth":    0.7,
     "xtick.major.width": 0.7,
     "ytick.major.width": 0.7,
@@ -102,7 +102,7 @@ def plot_comparison(tf_rows: list[dict], ss_rows: list[dict], out_path: Path) ->
     ]
 
     with plt.rc_context(RC):
-        fig, axes = plt.subplots(1, 3, figsize=(7.5, 2.6), sharey=False)
+        fig, axes = plt.subplots(1, 3, figsize=(16, 5.5), sharey=False)
 
         for ax, (img, tile, workers, title) in zip(axes, panels):
             # Taskflow
@@ -136,7 +136,7 @@ def plot_comparison(tf_rows: list[dict], ss_rows: list[dict], out_path: Path) ->
                    bbox_to_anchor=(0.5, -0.05), frameon=True, framealpha=0.9)
 
         fig.suptitle("Bilateral Denoising: SynStream vs Taskflow  (kernel radius $r{=}4$)",
-                     fontsize=8, y=1.02)
+                     fontsize=22, y=1.02)
         fig.tight_layout(rect=[0, 0.12, 1, 1])
         fig.savefig(out_path, bbox_inches="tight", dpi=200)
         plt.close(fig)
@@ -164,7 +164,7 @@ def plot_optims(tf_rows: list[dict], ss_rows: list[dict], out_path: Path) -> Non
     offsets = np.linspace(-(n_cfg - 1) / 2, (n_cfg - 1) / 2, n_cfg) * width
 
     with plt.rc_context(RC):
-        fig, ax = plt.subplots(figsize=(6.5, 2.6))
+        fig, ax = plt.subplots(figsize=(12, 5))
 
         for (cfg_lbl, ic, dep, color), offset in zip(configs, offsets):
             overheads = []
@@ -188,7 +188,7 @@ def plot_optims(tf_rows: list[dict], ss_rows: list[dict], out_path: Path) -> Non
                         ypos + sign * 0.4,
                         f"{val:+.1f}%",
                         ha="center", va="bottom" if ypos >= 0 else "top",
-                        fontsize=5.5, color="black")
+                        fontsize=7.0, color="black")
 
         ax.axhline(0, color="black", linewidth=0.8, zorder=4)
         ax.set_xticks(x)
@@ -197,8 +197,8 @@ def plot_optims(tf_rows: list[dict], ss_rows: list[dict], out_path: Path) -> Non
         ax.set_ylabel("Overhead vs Taskflow (%)")
         ax.set_title(
             r"SynStream optimisation variants — $4096{\times}4096$, tile=256, $r{=}4$",
-            pad=3)
-        ax.legend(loc="upper left", ncol=2, framealpha=0.9)
+            pad=3, fontsize=22)
+        ax.legend(loc="lower left", ncol=2, framealpha=0.9)
         ax.grid(True, axis="y", alpha=0.35)
         ax.tick_params(axis="both", direction="in")
         fig.tight_layout()

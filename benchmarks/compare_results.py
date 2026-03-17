@@ -97,7 +97,11 @@ def gather_wavefront_results(results_dir: Path) -> Optional["pd.DataFrame"]:
             frames.append(df)
     if not frames:
         return None
-    return pd.concat(frames, ignore_index=True)
+    combined = pd.concat(frames, ignore_index=True)
+    # Keep only the last row per (system, n, workers) to handle append-mode duplicates
+    # from repeated benchmark runs.
+    combined = combined.groupby(["system", "n", "workers"], as_index=False).last()
+    return combined
 
 
 # ── style ─────────────────────────────────────────────────────────────────────
@@ -429,10 +433,10 @@ def plot_wavefront(df: "pd.DataFrame", out_dir: Path) -> None:
     axes_flat = axes.flat if hasattr(axes, 'flat') else [axes]
     fig.suptitle(
         "Wavefront: SynStream vs Timely vs Intel TBB vs Taskflow",
-        fontsize=16,
+        fontsize=22,
     )
 
-    for ax, n in zip(axes_flat, n_vals):
+    for ai, (ax, n) in enumerate(zip(axes_flat, n_vals)):
         sub = df[df["n"] == n]
         present = [s for s in WAVEFRONT_ORDER if s in sub["system"].values]
         for system in present:
@@ -445,22 +449,41 @@ def plot_wavefront(df: "pd.DataFrame", out_dir: Path) -> None:
                 marker=MARKERS.get(system, "^"),
                 linestyle=LINESTYLES.get(system, "-"),
                 linewidth=2.2,
-                markersize=8,
+                markersize=12,
             )
-        ax.set_title(f"N={n}", fontsize=16, fontweight="bold")
-        ax.set_xlabel("Workers", fontsize=15)
-        ax.set_ylabel("Time per sweep (ms)", fontsize=15)
+        ax.set_title(f"N={n}", fontsize=20, fontweight="bold")
+        ax.set_xlabel("Workers", fontsize=20)
+        if ai % ncols == 0:
+            ax.set_ylabel("Time per sweep (ms)", fontsize=20)
         ax.set_yscale("log")
-        ax.legend(fontsize=11, loc="best")
-        ax.tick_params(axis="both", labelsize=13)
+        ax.tick_params(axis="both", labelsize=18)
         ax.grid(True, alpha=0.3, which="both")
         worker_ticks = sorted(sub["workers"].unique())
         ax.set_xticks(worker_ticks)
-        ax.set_xticklabels([str(w) for w in worker_ticks], fontsize=13)
+        ax.set_xticklabels([str(w) for w in worker_ticks], fontsize=18)
 
-    plt.tight_layout()
+    # Shared legend centred below all subplots (avoids per-panel clutter)
+    handles, labels = [], []
+    seen = set()
+    for ax in fig.axes:
+        for h, l in zip(*ax.get_legend_handles_labels()):
+            if l not in seen:
+                handles.append(h)
+                labels.append(l)
+                seen.add(l)
+    if handles:
+        fig.legend(
+            handles,
+            labels,
+            loc="lower center",
+            ncol=min(len(handles), 4),
+            fontsize=18,
+            frameon=True,
+            bbox_to_anchor=(0.5, 0.0),
+        )
+    plt.tight_layout(rect=[0, 0.08, 1, 1])
     out_path = out_dir / "wavefront_comparison.png"
-    fig.savefig(out_path, dpi=200)
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {out_path}")
 
@@ -488,9 +511,9 @@ def plot_wavefront_synstream_variants(df: "pd.DataFrame", out_dir: Path) -> None
     fig, axes = plt.subplots(1, len(n_vals), figsize=(8 * len(n_vals), 5.5))
     if len(n_vals) == 1:
         axes = [axes]
-    fig.suptitle("SynStream Wavefront: Graph Configuration Comparison", fontsize=17)
+    fig.suptitle("SynStream Wavefront: Graph Configuration Comparison", fontsize=22)
 
-    for ax, n in zip(axes, n_vals):
+    for ai, (ax, n) in enumerate(zip(axes, n_vals)):
         sub = df[df["n"] == n]
         for vi, system in enumerate(variants):
             grp = sub[sub["system"] == system].sort_values("workers")
@@ -506,19 +529,30 @@ def plot_wavefront_synstream_variants(df: "pd.DataFrame", out_dir: Path) -> None
                 edgecolor="white",
                 linewidth=0.5,
             )
-        ax.set_title(f"N={n}", fontsize=16, fontweight="bold")
-        ax.set_xlabel("Workers", fontsize=15)
-        ax.set_ylabel("Time per sweep (ms)", fontsize=15)
+        ax.set_title(f"N={n}", fontsize=20, fontweight="bold")
+        ax.set_xlabel("Workers", fontsize=20)
+        if ai == 0:
+            ax.set_ylabel("Time per sweep (ms)", fontsize=20)
         ax.set_xticks(x)
-        ax.set_xticklabels([str(w) for w in worker_counts], fontsize=13)
-        ax.tick_params(axis="y", labelsize=13)
+        ax.set_xticklabels([str(w) for w in worker_counts], fontsize=18)
+        ax.tick_params(axis="y", labelsize=18)
         ax.set_yscale("log")
         ax.grid(True, alpha=0.3, axis="y", which="both")
-        ax.legend(fontsize=13)
 
-    plt.tight_layout()
+    # Shared legend centred below all subplots
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="lower center",
+        ncol=min(len(handles), 4),
+        fontsize=18,
+        frameon=True,
+        bbox_to_anchor=(0.5, 0.0),
+    )
+    plt.tight_layout(rect=[0, 0.12, 1, 1])
     out_path = out_dir / "wavefront_synstream_variants.png"
-    fig.savefig(out_path, dpi=200)
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {out_path}")
 
