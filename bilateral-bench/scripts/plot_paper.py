@@ -15,6 +15,7 @@ import csv
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
@@ -23,37 +24,38 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Colour / style palette (match existing wavefront figures in the paper)
 # ---------------------------------------------------------------------------
-TF_COLOR   = "#2166ac"   # blue  — Taskflow
-SS_COLOR   = "#d6604d"   # red   — SynStream baseline
-SSIC_COLOR = "#1a9850"   # green — SynStream + IC
-DEP_COLOR  = "#f4a582"   # light orange — $dep only
-IC_DEP_CLR = "#762a83"   # purple — IC+$dep
+TF_COLOR = "#2166ac"  # blue  — Taskflow
+SS_COLOR = "#d6604d"  # red   — SynStream baseline
+SSIC_COLOR = "#1a9850"  # green — SynStream + IC
+DEP_COLOR = "#f4a582"  # light orange — $dep only
+IC_DEP_CLR = "#762a83"  # purple — IC+$dep
 
-LABEL_TF   = "Taskflow (C++)"
-LABEL_SS   = r"SynStream (baseline)"
+LABEL_TF = "Taskflow (C++)"
+LABEL_SS = r"SynStream (baseline)"
 LABEL_SSIC = r"SynStream (+IC)"
 
 RC = {
-    "font.family":       "sans-serif",
-    "font.size":         13,
-    "axes.titlesize":    20,
-    "axes.labelsize":    18,
-    "xtick.labelsize":   18,
-    "ytick.labelsize":   18,
-    "legend.fontsize":   18,
-    "lines.linewidth":   1.4,
-    "lines.markersize":  6.0,
-    "axes.linewidth":    0.7,
+    "font.family": "sans-serif",
+    "font.size": 13,
+    "axes.titlesize": 20,
+    "axes.labelsize": 18,
+    "xtick.labelsize": 18,
+    "ytick.labelsize": 18,
+    "legend.fontsize": 18,
+    "lines.linewidth": 1.4,
+    "lines.markersize": 6.0,
+    "axes.linewidth": 0.7,
     "xtick.major.width": 0.7,
     "ytick.major.width": 0.7,
-    "grid.linewidth":    0.4,
-    "grid.alpha":        0.35,
-    "figure.dpi":        200,
+    "grid.linewidth": 0.4,
+    "grid.alpha": 0.35,
+    "figure.dpi": 200,
 }
 
 # ---------------------------------------------------------------------------
 # Data helpers
 # ---------------------------------------------------------------------------
+
 
 def load_csv(path: Path) -> list[dict]:
     if not path.exists():
@@ -63,24 +65,40 @@ def load_csv(path: Path) -> list[dict]:
         return list(csv.DictReader(f))
 
 
-def tf_time(rows: list[dict], img: int, tile: int, kr: int, workers: int) -> float | None:
+def tf_time(
+    rows: list[dict], img: int, tile: int, kr: int, workers: int
+) -> float | None:
     for r in rows:
-        if (int(r["image_size"]) == img and int(r["tile_size"]) == tile
-                and int(r["kernel_radius"]) == kr and int(r["threads"]) == workers):
+        if (
+            int(r["image_size"]) == img
+            and int(r["tile_size"]) == tile
+            and int(r["kernel_radius"]) == kr
+            and int(r["threads"]) == workers
+        ):
             return float(r["time_ms"])
     return None
 
 
-def ss_time(rows: list[dict], img: int, tile: int, kr: int,
-            workers: int, st: int, ic: bool, dep: bool) -> float | None:
-    ic_s  = "_ic"  if ic  else ""
+def ss_time(
+    rows: list[dict],
+    img: int,
+    tile: int,
+    kr: int,
+    workers: int,
+    st: int,
+    ic: bool,
+    dep: bool,
+) -> float | None:
+    ic_s = "_ic" if ic else ""
     dep_s = "_dep" if dep else ""
     label = f"synstream_w{workers}_st{st}{ic_s}{dep_s}"
     for r in rows:
-        if (r["system"] == label
-                and int(r["image_size"]) == img
-                and int(r["tile_size"])  == tile
-                and int(r["kernel_radius"]) == kr):
+        if (
+            r["system"] == label
+            and int(r["image_size"]) == img
+            and int(r["tile_size"]) == tile
+            and int(r["kernel_radius"]) == kr
+        ):
             return float(r["time_ms"])
     return None
 
@@ -92,13 +110,14 @@ def ss_time(rows: list[dict], img: int, tile: int, kr: int,
 #   Panel C: 8192×8192, tile=256 (scaling, W=2–16 only)
 # ---------------------------------------------------------------------------
 
+
 def plot_comparison(tf_rows: list[dict], ss_rows: list[dict], out_path: Path) -> None:
     kr = 4
     panels = [
         # (img, tile, workers, title_extra)
         (4096, 256, [1, 2, 4, 8, 16], r"$4096{\times}4096$, tile=256  (16$\times$16)"),
         (4096, 128, [1, 2, 4, 8, 16], r"$4096{\times}4096$, tile=128  (32$\times$32)"),
-        (8192, 256, [2, 4, 8, 16],    r"$8192{\times}8192$, tile=256  (32$\times$32)"),
+        (8192, 256, [2, 4, 8, 16], r"$8192{\times}8192$, tile=256  (32$\times$32)"),
     ]
 
     with plt.rc_context(RC):
@@ -113,13 +132,23 @@ def plot_comparison(tf_rows: list[dict], ss_rows: list[dict], out_path: Path) ->
                 ax.plot(wx, wy, color=TF_COLOR, marker="o", label=LABEL_TF, zorder=3)
 
             # SynStream baseline (st=1, no IC/dep)
-            ss_pts = [(w, ss_time(ss_rows, img, tile, kr, w, 1, False, False))
-                      for w in workers]
+            ss_pts = [
+                (w, ss_time(ss_rows, img, tile, kr, w, 1, False, False))
+                for w in workers
+            ]
             ss_pts = [(w, v) for w, v in ss_pts if v is not None]
             if ss_pts:
                 wx, wy = zip(*ss_pts)
-                ax.plot(wx, wy, color=SS_COLOR, marker="s", linestyle="--",
-                        label=LABEL_SS, zorder=2, alpha=0.85)
+                ax.plot(
+                    wx,
+                    wy,
+                    color=SS_COLOR,
+                    marker="s",
+                    linestyle="--",
+                    label=LABEL_SS,
+                    zorder=2,
+                    alpha=0.85,
+                )
 
             ax.set_title(title, pad=3)
             ax.set_xscale("log", base=2)
@@ -132,11 +161,21 @@ def plot_comparison(tf_rows: list[dict], ss_rows: list[dict], out_path: Path) ->
         axes[0].set_ylabel("Wall-clock time (ms)")
 
         handles, labels = axes[0].get_legend_handles_labels()
-        fig.legend(handles, labels, loc="lower center", ncol=2,
-                   bbox_to_anchor=(0.5, -0.05), frameon=True, framealpha=0.9)
+        fig.legend(
+            handles,
+            labels,
+            loc="lower center",
+            ncol=2,
+            bbox_to_anchor=(0.5, -0.05),
+            frameon=True,
+            framealpha=0.9,
+        )
 
-        fig.suptitle("Bilateral Denoising: SynStream vs Taskflow  (kernel radius $r{=}4$)",
-                     fontsize=22, y=1.02)
+        fig.suptitle(
+            "Bilateral Denoising: SynStream vs Taskflow  (kernel radius $r{=}4$)",
+            fontsize=22,
+            y=1.02,
+        )
         fig.tight_layout(rect=[0, 0.12, 1, 1])
         fig.savefig(out_path, bbox_inches="tight", dpi=200)
         plt.close(fig)
@@ -147,20 +186,21 @@ def plot_comparison(tf_rows: list[dict], ss_rows: list[dict], out_path: Path) ->
 # Figure 2: overhead bar chart (4096/tile=256, all four SS configs)
 # ---------------------------------------------------------------------------
 
+
 def plot_optims(tf_rows: list[dict], ss_rows: list[dict], out_path: Path) -> None:
     img, tile, kr = 4096, 256, 4
     workers = [1, 2, 4, 8, 16]
 
     configs = [
-        ("Baseline",   False, False, SS_COLOR),
-        ("+IC",        True,  False, SSIC_COLOR),
-        (r"+\$dep",    False, True,  DEP_COLOR),
-        (r"+IC+\$dep", True,  True,  IC_DEP_CLR),
+        ("Baseline", False, False, SS_COLOR),
+        ("+IC", True, False, SSIC_COLOR),
+        (r"+\$dep", False, True, DEP_COLOR),
+        (r"+IC+\$dep", True, True, IC_DEP_CLR),
     ]
 
-    x      = np.arange(len(workers))
-    n_cfg  = len(configs)
-    width  = 0.16
+    x = np.arange(len(workers))
+    n_cfg = len(configs)
+    width = 0.16
     offsets = np.linspace(-(n_cfg - 1) / 2, (n_cfg - 1) / 2, n_cfg) * width
 
     with plt.rc_context(RC):
@@ -178,17 +218,29 @@ def plot_optims(tf_rows: list[dict], ss_rows: list[dict], out_path: Path) -> Non
 
             valid_x = [x[i] + offset for i, v in enumerate(overheads) if not (v != v)]
             valid_v = [v for v in overheads if v == v]
-            bars = ax.bar(valid_x, valid_v, width, label=cfg_lbl,
-                          color=color, alpha=0.88, zorder=3, edgecolor="white",
-                          linewidth=0.4)
+            bars = ax.bar(
+                valid_x,
+                valid_v,
+                width,
+                label=cfg_lbl,
+                color=color,
+                alpha=0.88,
+                zorder=3,
+                edgecolor="white",
+                linewidth=0.4,
+            )
             for bar, val in zip(bars, valid_v):
                 ypos = bar.get_height()
                 sign = 1 if ypos >= 0 else -1
-                ax.text(bar.get_x() + bar.get_width() / 2,
-                        ypos + sign * 0.4,
-                        f"{val:+.1f}%",
-                        ha="center", va="bottom" if ypos >= 0 else "top",
-                        fontsize=7.0, color="black")
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    ypos + sign * 0.4,
+                    f"{val:+.1f}%",
+                    ha="center",
+                    va="bottom" if ypos >= 0 else "top",
+                    fontsize=11,
+                    color="black",
+                )
 
         ax.axhline(0, color="black", linewidth=0.8, zorder=4)
         ax.set_xticks(x)
@@ -197,7 +249,9 @@ def plot_optims(tf_rows: list[dict], ss_rows: list[dict], out_path: Path) -> Non
         ax.set_ylabel("Overhead vs Taskflow (%)")
         ax.set_title(
             r"SynStream optimisation variants — $4096{\times}4096$, tile=256, $r{=}4$",
-            pad=3, fontsize=22)
+            pad=3,
+            fontsize=22,
+        )
         ax.legend(loc="lower left", ncol=2, framealpha=0.9)
         ax.grid(True, axis="y", alpha=0.35)
         ax.tick_params(axis="both", direction="in")
@@ -211,12 +265,17 @@ def plot_optims(tf_rows: list[dict], ss_rows: list[dict], out_path: Path) -> Non
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--bench-dir", type=Path,
-                   default=Path(__file__).resolve().parents[1])
-    p.add_argument("--out-dir", type=Path,
-                   default=Path(__file__).resolve().parents[2] / "paper" / "figs")
+    p.add_argument(
+        "--bench-dir", type=Path, default=Path(__file__).resolve().parents[1]
+    )
+    p.add_argument(
+        "--out-dir",
+        type=Path,
+        default=Path(__file__).resolve().parents[2] / "paper" / "figs",
+    )
     args = p.parse_args()
 
     tf_csv = args.bench_dir / "taskflow/results/tf_bilateral_combined.csv"
@@ -230,7 +289,7 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     plot_comparison(tf_rows, ss_rows, args.out_dir / "bilateral_comparison.png")
-    plot_optims(tf_rows, ss_rows,     args.out_dir / "bilateral_optims.png")
+    plot_optims(tf_rows, ss_rows, args.out_dir / "bilateral_optims.png")
     print("Done.")
 
 
