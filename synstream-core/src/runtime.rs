@@ -1850,6 +1850,25 @@ impl SynRt {
         }
     }
 
+    pub fn write_json_report(&self, path: &str, exclude_streams: usize) {
+        if let Some(tb) = &self.shared.time_buffer {
+            let graph_edges: Vec<(String, Vec<String>)> = self
+                .shared
+                .graph
+                .nodes
+                .iter()
+                .map(|node| {
+                    let succs: Vec<String> = self.shared.graph.successors[node.id as usize]
+                        .iter()
+                        .map(|&sid| self.shared.graph.nodes[sid as usize].name.clone())
+                        .collect();
+                    (node.name.clone(), succs)
+                })
+                .collect();
+            tb.write_json_report(&graph_edges, path, exclude_streams);
+        }
+    }
+
     pub fn write_record(&self, path: &str) {
         self.shared.scheduler.write_record(path);
         self.write_runtime_record(path);
