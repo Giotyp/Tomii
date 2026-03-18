@@ -1858,10 +1858,15 @@ impl SynRt {
                 .nodes
                 .iter()
                 .map(|node| {
-                    let succs: Vec<String> = self.shared.graph.successors[node.id as usize]
-                        .iter()
-                        .map(|&sid| self.shared.graph.nodes[sid as usize].name.clone())
-                        .collect();
+                    let node_id = node.id as usize;
+                    let succs: Vec<String> = if node_id < self.shared.graph.successors.len() {
+                        self.shared.graph.successors[node_id]
+                            .iter()
+                            .map(|&sid| self.shared.graph.nodes[sid as usize].name.clone())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     (node.name.clone(), succs)
                 })
                 .collect();
