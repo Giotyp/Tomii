@@ -162,6 +162,9 @@ def main() -> None:
     out_file.unlink(missing_ok=True)
     timing_file.unlink(missing_ok=True)
 
+    report_file = HERE / "report.txt"
+    report_file.unlink(missing_ok=True)
+
     app = build_graph()
 
     # SCRIPT_DIR is read by get_out_file() to locate the result file
@@ -194,6 +197,7 @@ def main() -> None:
         inits=args.inits,
         slot_priority=args.slot_priority,
         debug=args.debug,
+        report=str(report_file)
     )
 
 
