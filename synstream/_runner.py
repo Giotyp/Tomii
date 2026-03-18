@@ -43,6 +43,7 @@ _BOOL_FLAGS: Dict[str, str] = {
 _STR_FLAGS: Dict[str, str] = {
     "output": "--output",
     "timing": "--timing",
+    "report": "--report",
 }
 
 
