@@ -1,5 +1,12 @@
 [workspace]
-members = ["synstream-core", "synstream-types", "examples/*", "bilateral-bench/synstream"]
+members = [
+    "synstream-core",
+    "synstream-types",
+    "synstream-macro",
+    "synstream-converter",
+    "examples/*",
+    "bilateral-bench/synstream",
+]
 exclude = ["timely-bench", "tbb-bench", "taskflow-bench"]
 resolver = "3"
 

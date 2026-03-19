@@ -3,54 +3,46 @@ pub mod kernel_perf;
 pub mod validation;
 pub mod wrap;
 
-/// Functions that Return CmTypes and will be wrapped
-use functions::*;
-use nalgebra::*;
+use nalgebra::DMatrix;
 use num_complex::Complex32;
 use rustfft::Fft;
 use std::sync::Arc;
+use synstream_macro::synstream_export;
 use synstream_types::CmTypes;
 
-#[no_mangle]
-pub fn generate_vector_cm(n: usize) -> CmTypes {
-    let vector = generate_vector(n);
-    CmTypes::from_any(vector)
+/// Generate a vector of complex samples.
+#[synstream_export]
+pub fn generate_vector(n: usize) -> Vec<Complex32> {
+    functions::generate_vector(n)
 }
 
-#[no_mangle]
-pub fn fft_planner_cm(buf_size: usize) -> CmTypes {
-    CmTypes::from_any(fft_planner(buf_size))
+/// Create an FFT planner for the given buffer size.
+#[synstream_export]
+pub fn fft_planner(buf_size: usize) -> Arc<dyn Fft<f32>> {
+    functions::fft_planner(buf_size)
 }
 
-#[no_mangle]
-pub fn compute_fft_cm(fft_planner: &CmTypes, buffer: &CmTypes) {
-    fft_planner
-        .with_any(|fft_planner_ref: &Arc<dyn Fft<f32>>| {
-            buffer
-                .with_any_mut(|buffer_mut: &mut Vec<Complex32>| {
-                    compute_fft(fft_planner_ref.clone(), buffer_mut);
-                })
-                .expect("Failed to access buffer struct or wrong type")
-        })
-        .expect("Failed to access fft_planner struct or wrong type")
+/// Run an in-place FFT on `buffer` using the provided planner.
+#[synstream_export]
+pub fn compute_fft(fft_planner: &Arc<dyn Fft<f32>>, buffer: &mut Vec<Complex32>) {
+    functions::compute_fft(fft_planner.clone(), buffer)
 }
 
-#[no_mangle]
-pub fn vec_to_mat_cm(vector: &CmTypes) -> CmTypes {
-    vector
-        .with_any(|vector_ref: &Vec<Complex32>| CmTypes::from_any(vec_to_mat(vector_ref)))
-        .expect("Failed to access vector or wrong type")
+/// Convert a flat complex vector into a square matrix.
+#[synstream_export]
+pub fn vec_to_mat(vector: &Vec<Complex32>) -> DMatrix<Complex32> {
+    functions::vec_to_mat(vector)
 }
 
-#[no_mangle]
-pub fn mat_mul_cm(a: &CmTypes, b: &CmTypes) -> CmTypes {
-    a.with_any(|a_ref: &DMatrix<Complex32>| {
-        b.with_any(|b_ref: &DMatrix<Complex32>| CmTypes::from_any(mat_mul(a_ref, b_ref)))
-            .expect("Failed to access matrix b or wrong type")
-    })
-    .expect("Failed to access matrix a or wrong type")
+/// Multiply two complex matrices.
+#[synstream_export]
+pub fn mat_mul(a: &DMatrix<Complex32>, b: &DMatrix<Complex32>) -> DMatrix<Complex32> {
+    functions::mat_mul(a, b)
 }
 
+// ---- Manually-written _cm functions (no proc-macro equivalent) ----
+
+/// Return the path of the output file, creating it if necessary.
 #[no_mangle]
 pub fn get_out_file(env_var: &str, out_file: &str) -> String {
     let curr_dir = std::env::var(env_var).unwrap_or_else(|_| {
@@ -66,6 +58,7 @@ pub fn get_out_file(env_var: &str, out_file: &str) -> String {
     out_file_path
 }
 
+/// Append the contents of each buffer in `buffers` to the file at `file_path`.
 #[no_mangle]
 pub fn write_to_file(file_path: &str, buffers: &Vec<CmTypes>) {
     use std::fs::OpenOptions;
@@ -84,7 +77,6 @@ pub fn write_to_file(file_path: &str, buffers: &Vec<CmTypes>) {
             .with_any(|matrix_ref: &DMatrix<Complex32>| {
                 write!(file, "{{").expect("Failed to write opening brace");
 
-                // Write each element of the matrix
                 for (i, elem) in matrix_ref.iter().enumerate() {
                     if i > 0 {
                         write!(file, ", ").expect("Failed to write separator");
