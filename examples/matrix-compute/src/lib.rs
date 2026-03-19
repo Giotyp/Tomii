@@ -8,7 +8,6 @@ use num_complex::Complex32;
 use rustfft::Fft;
 use std::sync::Arc;
 use synstream_macro::synstream_export;
-use synstream_types::CmTypes;
 
 /// Generate a vector of complex samples.
 #[synstream_export]
@@ -40,10 +39,10 @@ pub fn mat_mul(a: &DMatrix<Complex32>, b: &DMatrix<Complex32>) -> DMatrix<Comple
     functions::mat_mul(a, b)
 }
 
-// ---- Manually-written _cm functions (no proc-macro equivalent) ----
+// ---- Manually-written: write_to_file takes &Vec<CmTypes> (variadic), unsupported by the macro ----
 
 /// Return the path of the output file, creating it if necessary.
-#[no_mangle]
+#[synstream_export]
 pub fn get_out_file(env_var: &str, out_file: &str) -> String {
     let curr_dir = std::env::var(env_var).unwrap_or_else(|_| {
         panic!(
@@ -58,9 +57,9 @@ pub fn get_out_file(env_var: &str, out_file: &str) -> String {
     out_file_path
 }
 
-/// Append the contents of each buffer in `buffers` to the file at `file_path`.
-#[no_mangle]
-pub fn write_to_file(file_path: &str, buffers: &Vec<CmTypes>) {
+/// Append the contents of each matrix in `buffers` to the file at `file_path`.
+#[synstream_export(variadic)]
+pub fn write_to_file(file_path: &str, buffers: Vec<DMatrix<Complex32>>) {
     use std::fs::OpenOptions;
     use std::io::Write;
 
@@ -70,25 +69,15 @@ pub fn write_to_file(file_path: &str, buffers: &Vec<CmTypes>) {
         .open(file_path)
         .expect("Failed to open or create output file");
 
-    for (idx, buffer) in buffers.iter().enumerate() {
+    for (idx, matrix) in buffers.iter().enumerate() {
         writeln!(file, "Buffer-{}:", idx).expect("Failed to write buffer header");
-
-        buffer
-            .with_any(|matrix_ref: &DMatrix<Complex32>| {
-                write!(file, "{{").expect("Failed to write opening brace");
-
-                for (i, elem) in matrix_ref.iter().enumerate() {
-                    if i > 0 {
-                        write!(file, ", ").expect("Failed to write separator");
-                    }
-                    write!(file, "{}+{}i", elem.re, elem.im).expect("Failed to write element");
-                }
-
-                writeln!(file, "}}").expect("Failed to write closing brace");
-            })
-            .unwrap_or_else(|| {
-                eprintln!("Failed to access buffer as DMatrix<Complex32> or wrong type");
-                writeln!(file, "{{Error: Unable to read buffer}}").expect("Failed to write error");
-            });
+        write!(file, "{{").expect("Failed to write opening brace");
+        for (i, elem) in matrix.iter().enumerate() {
+            if i > 0 {
+                write!(file, ", ").expect("Failed to write separator");
+            }
+            write!(file, "{}+{}i", elem.re, elem.im).expect("Failed to write element");
+        }
+        writeln!(file, "}}").expect("Failed to write closing brace");
     }
 }

@@ -1,0 +1,92 @@
+{
+  "bottleneck_hints": [
+    "worker 0 utilization (0.0%) is 14.3% below average — possible load imbalance",
+    "worker 1 utilization (0.0%) is 14.3% below average — possible load imbalance",
+    "worker 2 utilization (0.0%) is 14.3% below average — possible load imbalance",
+    "worker 3 utilization (0.0%) is 14.3% below average — possible load imbalance",
+    "worker 4 utilization (0.0%) is 14.3% below average — possible load imbalance",
+    "worker 5 utilization (0.3%) is 14.0% below average — possible load imbalance",
+    "critical path accounts for 99.3% of average stream latency — limited parallelism gains from adding workers"
+  ],
+  "critical_path": {
+    "estimated_latency_us": 190901.82,
+    "length_nodes": 5,
+    "nodes": [
+      "gen_vec",
+      "compute_fft",
+      "vec_mat",
+      "mat_mul",
+      "write_res"
+    ]
+  },
+  "per_node": [
+    {
+      "factor": 1,
+      "invocations": 1,
+      "mean_exec_us": 190896.95,
+      "name": "write_res",
+      "on_critical_path": true,
+      "p99_exec_us": 190896.95,
+      "pct_of_total": 14.2,
+      "total_exec_us": 190896.95
+    },
+    {
+      "factor": 200,
+      "invocations": 200,
+      "mean_exec_us": 2.14,
+      "name": "mat_mul",
+      "on_critical_path": true,
+      "p99_exec_us": 7.76,
+      "pct_of_total": 0.0,
+      "total_exec_us": 427.02
+    },
+    {
+      "factor": 200,
+      "invocations": 200,
+      "mean_exec_us": 1.21,
+      "name": "compute_fft",
+      "on_critical_path": true,
+      "p99_exec_us": 2.87,
+      "pct_of_total": 0.0,
+      "total_exec_us": 242.79
+    },
+    {
+      "factor": 200,
+      "invocations": 200,
+      "mean_exec_us": 1.04,
+      "name": "vec_mat",
+      "on_critical_path": true,
+      "p99_exec_us": 7.06,
+      "pct_of_total": 0.0,
+      "total_exec_us": 208.9
+    },
+    {
+      "factor": 200,
+      "invocations": 200,
+      "mean_exec_us": 0.47,
+      "name": "gen_vec",
+      "on_critical_path": true,
+      "p99_exec_us": 3.91,
+      "pct_of_total": 0.0,
+      "total_exec_us": 94.46
+    }
+  ],
+  "resource_utilization": {
+    "worker_busy_pct": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.3,
+      99.5
+    ]
+  },
+  "summary": {
+    "avg_latency_us": 192326.77,
+    "p50_latency_us": 192326.77,
+    "p99_latency_us": 192326.77,
+    "throughput_streams_per_sec": 5.2,
+    "total_streams": 1
+  }
+}

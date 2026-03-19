@@ -1,0 +1,5 @@
+cargo:rerun-if-env-changed=MKLROOT
+cargo:rustc-link-search=/opt/intel/oneapi/mkl/2024.0/lib
+cargo:rustc-link-lib=dylib=mkl_intel_lp64
+cargo:rustc-link-lib=dylib=mkl_sequential
+cargo:rustc-link-lib=dylib=mkl_core

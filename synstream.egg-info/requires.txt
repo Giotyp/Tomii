@@ -1,0 +1,7 @@
+pydantic>=2.0
+matplotlib>=3.0
+
+[dev]
+datamodel-code-generator>=0.25
+pytest>=7.0
+mypy>=1.0

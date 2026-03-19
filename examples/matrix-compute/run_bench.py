@@ -172,8 +172,7 @@ def main() -> None:
 
     # Step 1: build SynStream + plugin library (mirrors: cargo build + cargo build --manifest-path)
     app.build(
-        wrap_path=str(HERE / "wrappers.rs"),
-        reg_path=str(HERE / "reg.rs"),
+        func_path=str(HERE / "src" / "lib.rs"),
         plugin_manifest=str(HERE / "Cargo.toml"),
         release=True,
         clean=args.clean,
