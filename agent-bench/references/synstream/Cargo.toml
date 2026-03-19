@@ -1,3 +1,5 @@
+[workspace]
+
 [package]
 name = "wavefront-bench"
 version = "0.1.0"
@@ -8,5 +10,5 @@ name = "wavefront_bench"
 crate-type = ["dylib", "rlib"]
 
 [dependencies]
-synstream-types = { path = "../../synstream-types" }
-synstream-macro = { path = "../../synstream-macro" }
+synstream-types = { path = "../../../synstream-types" }
+synstream-macro = { path = "../../../synstream-macro" }

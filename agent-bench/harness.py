@@ -101,17 +101,13 @@ def _setup_workspace(cfg: ExperimentConfig, trial_dir: Path) -> Path:
     if cargo_toml.exists():
         text = cargo_toml.read_text()
         synstream_types_abs = REPO_ROOT / "synstream-types"
-        if '"../../synstream-types"' in text:
-            text = text.replace(
-                '"../../synstream-types"',
-                f'"{synstream_types_abs}"',
-            )
+        for pat in ('"../../synstream-types"', '"../../../synstream-types"'):
+            if pat in text:
+                text = text.replace(pat, f'"{synstream_types_abs}"')
         synstream_macro_abs = REPO_ROOT / "synstream-macro"
-        if '"../../synstream-macro"' in text:
-            text = text.replace(
-                '"../../synstream-macro"',
-                f'"{synstream_macro_abs}"',
-            )
+        for pat in ('"../../synstream-macro"', '"../../../synstream-macro"'):
+            if pat in text:
+                text = text.replace(pat, f'"{synstream_macro_abs}"')
         if "[workspace]" not in text:
             text = "[workspace]\n\n" + text
         cargo_toml.write_text(text)
