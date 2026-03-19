@@ -530,8 +530,7 @@ fn try_extract(func: &ItemFn) -> Option<ExportedFn> {
 fn build_sym_type(entry: &ExportedFn) -> String {
     let mut param_types: Vec<String> = Vec::new();
 
-    for (i, p) in entry.cm_params.iter().enumerate() {
-        let is_last = i == entry.cm_params.len() - 1;
+    for (_i, p) in entry.cm_params.iter().enumerate() {
         let ty = match &p.kind {
             CmParamKind::CmTypesRef => "&CmTypes".to_string(),
             CmParamKind::Primitive(pk) => pk.rust_type().to_string(),

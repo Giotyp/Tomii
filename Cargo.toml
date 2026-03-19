@@ -7,7 +7,7 @@ members = [
     "examples/*",
     "bilateral-bench/synstream",
 ]
-exclude = ["timely-bench", "tbb-bench", "taskflow-bench"]
+exclude = ["timely-bench", "tbb-bench", "taskflow-bench", "agent-bench/results"]
 resolver = "3"
 
 [profile.release]

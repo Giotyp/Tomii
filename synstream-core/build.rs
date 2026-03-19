@@ -5,6 +5,12 @@ use std::{env, fs};
 use synstream_converter::generate_from_file;
 
 fn main() {
+    // Re-run the build script whenever the wrapper/registry/func env vars change
+    // so that cargo detects the new paths and recompiles with the correct functions.
+    println!("cargo:rerun-if-env-changed=WRAP_PATH");
+    println!("cargo:rerun-if-env-changed=REG_PATH");
+    println!("cargo:rerun-if-env-changed=FUNC_PATH");
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     let name_funcs = "funcs.rs";

@@ -39,8 +39,6 @@ pub fn mat_mul(a: &DMatrix<Complex32>, b: &DMatrix<Complex32>) -> DMatrix<Comple
     functions::mat_mul(a, b)
 }
 
-// ---- Manually-written: write_to_file takes &Vec<CmTypes> (variadic), unsupported by the macro ----
-
 /// Return the path of the output file, creating it if necessary.
 #[synstream_export]
 pub fn get_out_file(env_var: &str, out_file: &str) -> String {
