@@ -140,6 +140,12 @@ class Graph:
     ) -> Any:
         """Compile synstream-core and the plugin library.
 
+        Recommended: use ``func_path`` pointing at your Rust source file.
+        The build system auto-generates FFI wrappers from ``#[synstream_export]``
+        annotations — no need to write wrappers.rs or reg.rs by hand.
+
+        Legacy: ``wrap_path`` + ``reg_path`` for pre-written wrapper files.
+
         Returns a BuildResult with the path to the compiled .so.
         """
         from ._builder import BuildConfig, build as _build

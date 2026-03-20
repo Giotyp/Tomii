@@ -388,6 +388,21 @@ impl AsyncTimeBuffer {
         }
     }
 
+    /// Write a JSON performance report (synchronous, bypasses async channel).
+    pub fn write_json_report(
+        &self,
+        graph_edges: &[(String, Vec<String>)],
+        path: &str,
+        exclude_streams: usize,
+    ) -> Result<(), &'static str> {
+        if let Ok(buf) = self.time_buffer.lock() {
+            buf.write_json_report(graph_edges, path, exclude_streams);
+            Ok(())
+        } else {
+            Err("Failed to acquire lock on time buffer")
+        }
+    }
+
     /// Shutdown the controller and wait for it to finish
     pub fn shutdown(mut self) {
         if let Err(_) = self.request_tx.send(TimingRequest::Shutdown) {
@@ -952,6 +967,373 @@ impl TimeBuffer {
         }
     }
 
+    /// Write a JSON performance report to the given path.
+    ///
+    /// `graph_edges` – `(node_name, Vec<successor_names>)` pairs describing the DAG.
+    /// `exclude_streams` – number of leading streams to skip (warm-up exclusion, mirrors `print_stats`).
+    pub fn write_json_report(
+        &self,
+        graph_edges: &[(String, Vec<String>)],
+        path: &str,
+        exclude_streams: usize,
+    ) {
+        use serde_json::json;
+        use std::collections::HashMap;
+
+        // ── 1. Determine slot ranges (same split as print_stats) ──────────────────
+        let worker_slots_end = self.slots.saturating_sub(self.system_threads);
+
+        // ── 2. Collect per-stream total times and per-stream task data ─────────────
+        let mut stream_total_times: Vec<Duration> = Vec::new();
+        let mut per_stream_tasks: Vec<HashMap<String, Vec<(usize, Duration)>>> = Vec::new();
+
+        for slot_id in 0..worker_slots_end {
+            for stats in &self.slot_statistics[slot_id] {
+                stream_total_times.push(stats.total_time);
+                let mut m: HashMap<String, Vec<(usize, Duration)>> = HashMap::new();
+                for (name, entries) in &stats.task_times {
+                    m.insert(name.clone(), entries.clone());
+                }
+                per_stream_tasks.push(m);
+            }
+        }
+
+        let total_streams = stream_total_times.len();
+
+        // ── 3. Apply exclusion ─────────────────────────────────────────────────────
+        let excluded = exclude_streams.min(total_streams);
+        let included_total_times: Vec<Duration> = stream_total_times
+            .iter()
+            .skip(excluded)
+            .copied()
+            .collect();
+        let included_tasks: Vec<&HashMap<String, Vec<(usize, Duration)>>> =
+            per_stream_tasks.iter().skip(excluded).collect();
+        let num_included = included_total_times.len();
+
+        if num_included == 0 {
+            eprintln!("[SynStream] No streams to report after exclusion.");
+            return;
+        }
+
+        // ── 4. Stream-level latency statistics ────────────────────────────────────
+        let mut sorted_latencies: Vec<f64> = included_total_times
+            .iter()
+            .map(|d| d.as_nanos() as f64 / 1_000.0)
+            .collect();
+        sorted_latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let avg_latency_us: f64 =
+            sorted_latencies.iter().sum::<f64>() / num_included as f64;
+
+        let percentile = |pct: f64| -> f64 {
+            let idx = ((pct / 100.0) * (num_included as f64 - 1.0)).round() as usize;
+            sorted_latencies[idx.min(num_included - 1)]
+        };
+        let p50_latency_us = percentile(50.0);
+        let p99_latency_us = percentile(99.0);
+
+        let total_wall_us: f64 = included_total_times
+            .iter()
+            .map(|d| d.as_nanos() as f64 / 1_000.0)
+            .sum();
+        let throughput_streams_per_sec = if total_wall_us > 0.0 {
+            (num_included as f64) / (total_wall_us / 1_000_000.0)
+        } else {
+            0.0
+        };
+
+        // ── 5. Aggregate per-node timing across included streams ───────────────────
+        let mut node_entries: HashMap<String, Vec<(usize, f64)>> = HashMap::new();
+        let mut worker_busy_us: HashMap<usize, f64> = HashMap::new();
+
+        for stream_map in &included_tasks {
+            for (name, entries) in *stream_map {
+                let bucket = node_entries.entry(name.clone()).or_default();
+                for &(wid, dur) in entries {
+                    let us = dur.as_nanos() as f64 / 1_000.0;
+                    bucket.push((wid, us));
+                    if wid != usize::MAX {
+                        *worker_busy_us.entry(wid).or_insert(0.0) += us;
+                    }
+                }
+            }
+        }
+
+        // ── 6. Per-node aggregated stats ─────────────────────────────────────────
+        struct NodeStats {
+            invocations: usize,
+            mean_exec_us: f64,
+            p99_exec_us: f64,
+            total_exec_us: f64,
+            pct_of_total: f64,
+        }
+
+        let num_workers = {
+            let max_w = worker_busy_us.keys().copied().max().unwrap_or(0);
+            max_w + 1
+        };
+        let denominator_us = total_wall_us * (num_workers as f64).max(1.0);
+
+        let mut node_stats_map: HashMap<String, NodeStats> = HashMap::new();
+        for (name, entries) in &node_entries {
+            let invocations = entries.len();
+            let total_exec_us: f64 = entries.iter().map(|(_, us)| us).sum();
+            let mean_exec_us = total_exec_us / invocations as f64;
+            let pct_of_total = if denominator_us > 0.0 {
+                total_exec_us / denominator_us * 100.0
+            } else {
+                0.0
+            };
+            let mut sorted_us: Vec<f64> = entries.iter().map(|(_, us)| *us).collect();
+            sorted_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let p99_idx =
+                ((0.99 * (sorted_us.len() as f64 - 1.0)).round() as usize)
+                    .min(sorted_us.len() - 1);
+            let p99_exec_us = sorted_us[p99_idx];
+            node_stats_map.insert(
+                name.clone(),
+                NodeStats {
+                    invocations,
+                    mean_exec_us,
+                    p99_exec_us,
+                    total_exec_us,
+                    pct_of_total,
+                },
+            );
+        }
+
+        // ── 7. Critical path via Kahn's topo-sort + DP ────────────────────────────
+        struct CriticalPath {
+            length_nodes: usize,
+            estimated_latency_us: f64,
+            nodes: Vec<String>,
+        }
+
+        let critical_path: Option<CriticalPath> = if !graph_edges.is_empty() {
+            let mut name_to_idx: HashMap<&str, usize> = HashMap::new();
+            for (i, (name, _)) in graph_edges.iter().enumerate() {
+                name_to_idx.insert(name.as_str(), i);
+            }
+            let n = graph_edges.len();
+
+            let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+            let mut in_degree: Vec<usize> = vec![0; n];
+            for (i, (_, succs)) in graph_edges.iter().enumerate() {
+                for succ_name in succs {
+                    if let Some(&j) = name_to_idx.get(succ_name.as_str()) {
+                        adj[i].push(j);
+                        in_degree[j] += 1;
+                    }
+                }
+            }
+
+            let mut queue: std::collections::VecDeque<usize> = in_degree
+                .iter()
+                .enumerate()
+                .filter(|(_, &d)| d == 0)
+                .map(|(i, _)| i)
+                .collect();
+            let mut topo_order: Vec<usize> = Vec::with_capacity(n);
+            let mut in_deg = in_degree.clone();
+            while let Some(u) = queue.pop_front() {
+                topo_order.push(u);
+                for &v in &adj[u] {
+                    in_deg[v] -= 1;
+                    if in_deg[v] == 0 {
+                        queue.push_back(v);
+                    }
+                }
+            }
+
+            let weights: Vec<f64> = graph_edges
+                .iter()
+                .map(|(name, _)| {
+                    node_stats_map
+                        .get(name.as_str())
+                        .map_or(0.0, |s| s.mean_exec_us)
+                })
+                .collect();
+
+            let mut dist: Vec<f64> = weights.clone();
+            let mut prev: Vec<Option<usize>> = vec![None; n];
+
+            for &u in &topo_order {
+                for &v in &adj[u] {
+                    let new_dist = dist[u] + weights[v];
+                    if new_dist > dist[v] {
+                        dist[v] = new_dist;
+                        prev[v] = Some(u);
+                    }
+                }
+            }
+
+            let (end_node, &max_dist) = dist
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .unwrap_or((0, &0.0));
+
+            let mut path: Vec<usize> = Vec::new();
+            let mut cur = end_node;
+            loop {
+                path.push(cur);
+                match prev[cur] {
+                    Some(p) => cur = p,
+                    None => break,
+                }
+            }
+            path.reverse();
+
+            let path_names: Vec<String> = path
+                .iter()
+                .map(|&i| graph_edges[i].0.clone())
+                .collect();
+
+            Some(CriticalPath {
+                length_nodes: path.len(),
+                estimated_latency_us: max_dist,
+                nodes: path_names,
+            })
+        } else {
+            None
+        };
+
+        // ── 8. Worker utilization ─────────────────────────────────────────────────
+        let worker_denom = avg_latency_us * num_included as f64;
+        let max_worker_id = worker_busy_us.keys().copied().max().unwrap_or(0);
+        let worker_busy_pct: Vec<f64> = (0..=max_worker_id)
+            .map(|wid| {
+                let busy = worker_busy_us.get(&wid).copied().unwrap_or(0.0);
+                if worker_denom > 0.0 {
+                    busy / worker_denom * 100.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+
+        // ── 9. Bottleneck hints ───────────────────────────────────────────────────
+        let mut hints: Vec<String> = Vec::new();
+
+        let critical_path_node_set: std::collections::HashSet<&str> = critical_path
+            .as_ref()
+            .map(|cp| cp.nodes.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+
+        for (name, stats) in &node_stats_map {
+            if critical_path_node_set.contains(name.as_str()) && stats.pct_of_total > 20.0 {
+                hints.push(format!(
+                    "node '{}' is on the critical path and accounts for {:.1}% of total compute time",
+                    name, stats.pct_of_total
+                ));
+            }
+        }
+
+        if !worker_busy_pct.is_empty() {
+            let max_pct = worker_busy_pct
+                .iter()
+                .cloned()
+                .fold(f64::NEG_INFINITY, f64::max);
+            let avg_pct = worker_busy_pct.iter().sum::<f64>() / worker_busy_pct.len() as f64;
+            for (wid, &pct) in worker_busy_pct.iter().enumerate() {
+                let diff = max_pct - pct;
+                if diff > 10.0 {
+                    hints.push(format!(
+                        "worker {} utilization ({:.1}%) is {:.1}% below average — possible load imbalance",
+                        wid, pct, avg_pct - pct
+                    ));
+                }
+            }
+        }
+
+        if let Some(ref cp) = critical_path {
+            if avg_latency_us > 0.0 {
+                let ratio = cp.estimated_latency_us / avg_latency_us;
+                if ratio > 0.8 {
+                    hints.push(format!(
+                        "critical path accounts for {:.1}% of average stream latency — limited parallelism gains from adding workers",
+                        ratio * 100.0
+                    ));
+                }
+            }
+        }
+
+        // ── 10. Build per_node JSON array ─────────────────────────────────────────
+        let on_critical: std::collections::HashSet<&str> = critical_path_node_set;
+
+        let mut per_node_entries: Vec<serde_json::Value> = node_stats_map
+            .iter()
+            .map(|(name, stats)| {
+                let factor = if num_included > 0 {
+                    stats.invocations / num_included
+                } else {
+                    0
+                };
+                json!({
+                    "name": name,
+                    "factor": factor,
+                    "invocations": stats.invocations,
+                    "mean_exec_us": (stats.mean_exec_us * 100.0).round() / 100.0,
+                    "p99_exec_us": (stats.p99_exec_us * 100.0).round() / 100.0,
+                    "total_exec_us": (stats.total_exec_us * 100.0).round() / 100.0,
+                    "pct_of_total": (stats.pct_of_total * 10.0).round() / 10.0,
+                    "on_critical_path": on_critical.contains(name.as_str()),
+                })
+            })
+            .collect();
+        per_node_entries.sort_by(|a, b| {
+            let ta = a["total_exec_us"].as_f64().unwrap_or(0.0);
+            let tb = b["total_exec_us"].as_f64().unwrap_or(0.0);
+            tb.partial_cmp(&ta).unwrap()
+        });
+
+        // ── 11. Assemble final JSON ───────────────────────────────────────────────
+        let critical_path_json = match &critical_path {
+            Some(cp) => json!({
+                "length_nodes": cp.length_nodes,
+                "estimated_latency_us": (cp.estimated_latency_us * 100.0).round() / 100.0,
+                "nodes": cp.nodes,
+            }),
+            None => json!(null),
+        };
+
+        let worker_busy_pct_rounded: Vec<f64> = worker_busy_pct
+            .iter()
+            .map(|&p| (p * 10.0).round() / 10.0)
+            .collect();
+
+        let report = json!({
+            "summary": {
+                "total_streams": num_included,
+                "avg_latency_us": (avg_latency_us * 100.0).round() / 100.0,
+                "p50_latency_us": (p50_latency_us * 100.0).round() / 100.0,
+                "p99_latency_us": (p99_latency_us * 100.0).round() / 100.0,
+                "throughput_streams_per_sec": (throughput_streams_per_sec * 10.0).round() / 10.0,
+            },
+            "per_node": per_node_entries,
+            "critical_path": critical_path_json,
+            "resource_utilization": {
+                "worker_busy_pct": worker_busy_pct_rounded,
+            },
+            "bottleneck_hints": hints,
+        });
+
+        // ── 12. Write to file ─────────────────────────────────────────────────────
+        match std::fs::File::create(path) {
+            Ok(file) => {
+                if let Err(e) = serde_json::to_writer_pretty(file, &report) {
+                    eprintln!("[SynStream] Failed to write JSON report: {}", e);
+                } else {
+                    println!("[SynStream] Report written to {}", path);
+                }
+            }
+            Err(e) => {
+                eprintln!("[SynStream] Failed to create report file '{}': {}", path, e);
+            }
+        }
+    }
+
     /// Clear all statistics and reset the buffer
     pub fn reset(&mut self) {
         self.slot_start_times = vec![None; self.slots];
@@ -1108,6 +1490,26 @@ impl TimeBufferManager {
                 if let Ok(buf) = sync_buf.lock() {
                     buf.print_stats(bench_name, out_file, exclude_streams);
                 }
+            }
+        }
+    }
+
+    /// Write a JSON performance report — blocking in both async and sync modes.
+    pub fn write_json_report(
+        &self,
+        graph_edges: &[(String, Vec<String>)],
+        path: &str,
+        exclude_streams: usize,
+    ) {
+        if self.is_async {
+            if let Some(ref async_buf) = self.async_buffer {
+                if let Err(e) = async_buf.write_json_report(graph_edges, path, exclude_streams) {
+                    eprintln!("Failed to write JSON report: {}", e);
+                }
+            }
+        } else if let Some(ref sync_buf) = self.sync_buffer {
+            if let Ok(buf) = sync_buf.lock() {
+                buf.write_json_report(graph_edges, path, exclude_streams);
             }
         }
     }

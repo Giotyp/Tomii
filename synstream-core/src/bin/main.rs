@@ -120,6 +120,8 @@ struct Args {
         help = "Number of initial streams to exclude from timing statistics (for steady-state measurement)"
     )]
     exclude_streams: usize,
+    #[clap(long, value_name = "FILE", required = false, help = "Write JSON performance report to FILE")]
+    report: Option<String>,
 }
 
 fn main() {
@@ -219,6 +221,10 @@ fn main() {
         if args.record {
             synrt.write_record("scheduler_record.csv");
         }
+    }
+
+    if let Some(report_path) = &args.report {
+        synrt.write_json_report(report_path, args.exclude_streams);
     }
 }
 

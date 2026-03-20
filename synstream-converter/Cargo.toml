@@ -1,0 +1,15 @@
+[package]
+name = "synstream-converter"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "synstream_converter"
+
+[[bin]]
+name = "synstream-converter"
+path = "src/bin/main.rs"
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
