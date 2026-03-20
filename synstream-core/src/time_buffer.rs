@@ -814,6 +814,20 @@ impl TimeBuffer {
                 Duration::ZERO
             };
 
+            let std_dev_stream = if !steady_state_times.is_empty() {
+                let mean_ns = avg_total_time.as_nanos() as f64;
+                Duration::from_nanos(
+                    (steady_state_times
+                        .iter()
+                        .map(|d| { let diff = d.as_nanos() as f64 - mean_ns; diff * diff })
+                        .sum::<f64>()
+                        / steady_state_times.len() as f64)
+                        .sqrt() as u64,
+                )
+            } else {
+                Duration::ZERO
+            };
+
             let min_total_time = if !steady_state_times.is_empty() {
                 steady_state_times.iter().min().unwrap()
             } else {
@@ -842,7 +856,10 @@ impl TimeBuffer {
             };
 
             output_buffer.push_str(&format!("  Total Runtime: {:.4?}\n", global_total));
-            output_buffer.push_str(&format!("  Avg Time Per Stream: {:.4?}\n", avg_total_time));
+            output_buffer.push_str(&format!(
+                "  Avg Time Per Stream: {:.4?} (std: {:.4?})\n",
+                avg_total_time, std_dev_stream
+            ));
             output_buffer.push_str(&format!(
                 "  Min/Max Per Stream: {:.4?} / {:.4?}\n",
                 min_total_time, max_total_time
@@ -883,6 +900,15 @@ impl TimeBuffer {
                 let avg_task = total_time / total_executions as u32;
                 let min_time = task_times.iter().min().unwrap();
                 let max_time = task_times.iter().max().unwrap();
+                let mean_nanos = avg_task.as_nanos() as f64;
+                let std_dev_task = Duration::from_nanos(
+                    (task_times
+                        .iter()
+                        .map(|d| { let diff = d.as_nanos() as f64 - mean_nanos; diff * diff })
+                        .sum::<f64>()
+                        / total_executions as f64)
+                        .sqrt() as u64,
+                );
 
                 let worker_counts = global_per_worker_counts.get(&task_name).unwrap();
                 let worker_totals = global_per_worker_totals.get(&task_name).unwrap();
@@ -895,8 +921,8 @@ impl TimeBuffer {
                 ));
 
                 output_buffer.push_str(&format!(
-                    "    Timing - Avg/Stream: {:.4?}, Avg/Task: {:.4?}, Min: {:.4?}, Max: {:.4?}, Total: {:.4?}\n",
-                    avg_time, avg_task, min_time, max_time, total_time
+                    "    Timing - Avg/Stream: {:.4?}, Avg/Task: {:.4?}, Std: {:.4?}, Min: {:.4?}, Max: {:.4?}, Total: {:.4?}\n",
+                    avg_time, avg_task, std_dev_task, min_time, max_time, total_time
                 ));
 
                 // Tasks and time per worker combined
@@ -949,10 +975,19 @@ impl TimeBuffer {
                             let max_time = task_times.iter().max().unwrap();
                             let total_time: Duration = task_times.iter().sum();
                             let avg_time = total_time / total_executions as u32;
+                            let mean_nanos = avg_time.as_nanos() as f64;
+                            let std_dev = Duration::from_nanos(
+                                (task_times
+                                    .iter()
+                                    .map(|d| { let diff = d.as_nanos() as f64 - mean_nanos; diff * diff })
+                                    .sum::<f64>()
+                                    / total_executions as f64)
+                                    .sqrt() as u64,
+                            );
 
                             output_buffer.push_str(&format!(
-                                "    Task '{}' - Executions: {}, Avg: {:.4?}, Min: {:.4?}, Max: {:.4?}, Total: {:.4?}\n",
-                                task_name, total_executions, avg_time, min_time, max_time, total_time
+                                "    Task '{}' - Executions: {}, Avg: {:.4?}, Std: {:.4?}, Min: {:.4?}, Max: {:.4?}, Total: {:.4?}\n",
+                                task_name, total_executions, avg_time, std_dev, min_time, max_time, total_time
                             ));
                         }
                     }

@@ -440,6 +440,19 @@ pub struct SharedData {
     /// Per-slot in-flight batch processing counter - prevents premature slot completion
     pub slot_processing_count: Arc<Vec<AtomicUsize>>,
 
+    /// Per-slot dirty flag: set whenever a completion-critical counter is decremented.
+    /// check_slots reads this before the 3 SeqCst counter loads, skipping slots with no
+    /// activity since the last check. Release/AcqRel ordering pairs with the decrements.
+    pub slot_needs_check: Arc<Vec<AtomicBool>>,
+
+    // ── Tuning knobs ──────────────────────────────────────────────────────────
+    pub spin_iterations: u32,
+    pub sched_flush_threshold: usize,
+    pub spin_wait_spin_iters: u32,
+    pub spin_wait_yield_iters: u32,
+    pub spin_wait_park_ns: u64,
+    pub recv_pool_size: usize,
+
     /// Per-group dependency support:
     pub pred_index_filter: Arc<Vec<Vec<Option<(usize, usize)>>>>,
 
@@ -575,6 +588,7 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
     let current_gen = shared.slot_generation[slot].load(slot_load_ordering(shared)) as u32;
     if current_gen != node_info.gen {
         shared.slot_processing_count[slot].fetch_sub(1, slot_rmw_ordering(shared));
+        shared.slot_needs_check[slot].store(true, Ordering::Release);
         return;
     }
 
@@ -667,6 +681,7 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
 
     // Step 7: Decrement processing_count AFTER all successor processing.
     shared.slot_processing_count[slot].fetch_sub(1, slot_rmw_ordering(shared));
+    shared.slot_needs_check[slot].store(true, Ordering::Release);
 }
 
 #[inline(always)]
@@ -1105,6 +1120,7 @@ pub fn assign_stream_to_available_slot(
     if slot_states[last_slot_assigned] == SlotState::Inactive {
         slot_states[last_slot_assigned] = SlotState::Active; // Mark slot as active immediately
         shared.active_slots_bitmap.fetch_or(1u64 << last_slot_assigned, Ordering::Release);
+        shared.slot_needs_check[last_slot_assigned].store(true, Ordering::Release);
         running_streams.push((stream, last_slot_assigned));
         shared.slot_stream_id[last_slot_assigned].store(stream, Ordering::Relaxed);
         print_debug(|| {
@@ -1481,12 +1497,12 @@ fn spin_wait_for_result(
             }
         }
         spin_count += 1;
-        if spin_count < 64 {
+        if spin_count < shared.spin_wait_spin_iters {
             std::hint::spin_loop();
-        } else if spin_count < 256 {
+        } else if spin_count < shared.spin_wait_yield_iters {
             std::thread::yield_now();
         } else {
-            std::thread::park_timeout(std::time::Duration::from_nanos(100));
+            std::thread::park_timeout(std::time::Duration::from_nanos(shared.spin_wait_park_ns));
         }
     }
 }
@@ -1658,6 +1674,7 @@ pub fn activate_next_slot(
             if states[*slot] == SlotState::Buffering {
                 states[*slot] = SlotState::Active;
                 shared.active_slots_bitmap.fetch_or(1u64 << *slot, Ordering::Release);
+                shared.slot_needs_check[*slot].store(true, Ordering::Release);
                 shared.last_slot_assigned.store(*slot, Ordering::SeqCst);
                 print_debug(|| {
                     format!(

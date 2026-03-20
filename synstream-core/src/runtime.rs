@@ -26,9 +26,6 @@ use synstream_types::*;
 
 pub const RUN_SLEEP: Duration = Duration::from_secs(10);
 
-/// Capacity for the bounded crossbeam batch_queue (ring-buffer; no per-send allocation).
-const BATCH_QUEUE_CAPACITY: usize = 65536;
-
 // Per-resolution-thread reusable buffers — avoids heap allocation on the hot path.
 thread_local! {
     // Successor descriptors collected for a single node being processed.
@@ -39,7 +36,7 @@ thread_local! {
     // Ready instance indices returned by decrease_and_get_ready_into.
     static READY_BUF: RefCell<Vec<usize>> = RefCell::new(Vec::with_capacity(16));
     // Accumulates scheduled successor nodes during batch processing.
-    // Flushed incrementally via preparation() every INCREMENTAL_SCHED_THRESHOLD items
+    // Flushed incrementally via preparation() every sched_flush_threshold items
     // so workers receive tasks while the system thread is still processing the batch.
     static BATCH_SCHED_BUF: RefCell<Vec<NodeInfo>> = RefCell::new(Vec::with_capacity(256));
     // Reusable buffer for preparation() — eliminates vec![None; N] heap allocation
@@ -52,17 +49,6 @@ thread_local! {
     static TASK_COMP_BUF: RefCell<Vec<(NodeInfo, Option<synstream_types::CmTypes>)>> =
         RefCell::new(Vec::with_capacity(256));
 }
-
-/// Spin iterations before falling back to blocking recv_timeout.
-/// Catches burst completions that land in the queue just after try_iter() returned empty.
-const SPIN_ITERATIONS: u32 = 32;
-
-/// When BATCH_SCHED_BUF reaches this many accumulated successors, flush them to the
-/// scheduler immediately instead of waiting for the entire batch to finish processing.
-/// This eliminates the dead zone where workers idle while the system thread processes
-/// a large batch. Value tuned to balance dispatch latency (~100μs per flush at ~3μs/task)
-/// against per-flush overhead (~500ns for timing + allocation).
-const INCREMENTAL_SCHED_THRESHOLD: usize = 32;
 
 // Main SynStream Runtime struct with shared context
 pub struct SynRt {
@@ -87,6 +73,14 @@ impl SynRt {
         batch_timeout_us: u64,
         coalesce_barriers: bool,
         inline_continuation: bool,
+        batch_queue_capacity: usize,
+        spin_iterations: u32,
+        sched_flush_threshold: usize,
+        socket_recv_buf_bytes: usize,
+        recv_pool_size: usize,
+        spin_wait_spin_iters: u32,
+        spin_wait_yield_iters: u32,
+        spin_wait_park_ns: u64,
     ) -> SynRt {
         // Initialize stream completion counters
         let stream_completion_counts = Arc::new(RwLock::new(Vec::new()));
@@ -212,7 +206,7 @@ impl SynRt {
         let (batch_queue_tx, batch_queue_rx): (
             crate::runtime_funcs::BatchQueueTx,
             crate::runtime_funcs::BatchQueueRx,
-        ) = cb_bounded(BATCH_QUEUE_CAPACITY);
+        ) = cb_bounded(batch_queue_capacity);
 
         // Initialize shared dependency tracking structures
         let dependency_count_vec: Vec<usize> = app_graph.dependency_count_vec();
@@ -290,7 +284,7 @@ impl SynRt {
             packet_drop_counters,
             buffer_return_senders,
             buffer_return_receivers,
-        ) = prepare_network_infrastructure(app_graph);
+        ) = prepare_network_infrastructure(app_graph, socket_recv_buf_bytes, recv_pool_size);
 
         // Precompute pred_index_filter, pred_group_by, and pred_succ_1to1_offset.
         let num_nodes = app_graph.nodes.len();
@@ -414,6 +408,7 @@ impl SynRt {
             slot_packet_complete: Arc::new((0..slots).map(|_| AtomicBool::new(false)).collect()),
             // Initialize in-flight batch processing counter to 0 for all slots
             slot_processing_count: Arc::new((0..slots).map(|_| AtomicUsize::new(0)).collect()),
+            slot_needs_check: Arc::new((0..slots).map(|_| AtomicBool::new(false)).collect()),
             // Per-group dependency support
             pred_index_filter: Arc::new(pred_index_filter),
             pred_group_by: Arc::new(pred_group_by),
@@ -434,6 +429,13 @@ impl SynRt {
                     .map(|_| AtomicBool::new(false))
                     .collect(),
             ),
+            // Tuning knobs
+            spin_iterations,
+            sched_flush_threshold,
+            spin_wait_spin_iters,
+            spin_wait_yield_iters,
+            spin_wait_park_ns,
+            recv_pool_size,
         });
 
         SynRt { shared }
@@ -1168,7 +1170,7 @@ impl SynRt {
             batch_buf.extend(shared.batch_queue_rx.try_iter().take(shared.target_batch_size));
             if batch_buf.is_empty() {
                 // Brief spin to catch burst completions landing just after try_iter()
-                for _ in 0..SPIN_ITERATIONS {
+                for _ in 0..shared.spin_iterations {
                     std::hint::spin_loop();
                     if let Ok(item) = shared.batch_queue_rx.try_recv() {
                         batch_buf.push(item);
@@ -1540,7 +1542,7 @@ impl SynRt {
                             // as soon as we have enough, rather than waiting for the entire
                             // batch to finish. This eliminates the dead zone where workers
                             // idle while the system thread processes a large batch.
-                            if batch_sched.len() >= INCREMENTAL_SCHED_THRESHOLD {
+                            if batch_sched.len() >= shared.sched_flush_threshold {
                                 Self::preparation(&shared, &*batch_sched, thread_core, thread_slot);
                                 batch_sched.clear();
                             }
@@ -1590,6 +1592,7 @@ impl SynRt {
                 let slot = bits.trailing_zeros() as usize;
                 bits &= bits - 1;
                 shared.slot_processing_count[slot].fetch_sub(1, Ordering::SeqCst);
+                shared.slot_needs_check[slot].store(true, Ordering::Release);
             }
         }
     }
@@ -1627,6 +1630,13 @@ impl SynRt {
         for proc_slot in cached_slots.iter().copied() {
             // Skip buffering slots - they cannot complete until activated
             if active_bitmap & (1u64 << proc_slot) == 0 {
+                continue;
+            }
+
+            // Skip if no task activity since last check.
+            // Preserves Bug #21 fix: check_slots is still called unconditionally every
+            // iteration; we only skip the expensive SeqCst loads for idle slots.
+            if !shared.slot_needs_check[proc_slot].swap(false, Ordering::AcqRel) {
                 continue;
             }
 
@@ -1680,6 +1690,7 @@ impl SynRt {
 
                 shared.slot_pending_tasks[proc_slot].store(shared.total_tasks, Ordering::SeqCst);
                 shared.slot_pending_cond_tasks[proc_slot].store(shared.total_cond_tasks, Ordering::SeqCst);
+                shared.slot_needs_check[proc_slot].store(false, Ordering::SeqCst);
 
                 print_debug(|| {
                     format!(
@@ -1938,6 +1949,8 @@ impl SynRt {
 
 fn prepare_network_infrastructure(
     graph: &Graph,
+    socket_recv_buf_bytes: usize,
+    recv_pool_size: usize,
 ) -> (
     Vec<NetworkSocket>,
     Sender<PacketMessage>,
@@ -1955,20 +1968,24 @@ fn prepare_network_infrastructure(
         let channel_cap = (config_spec.stream_packets * 4).max(65536);
         let (packet_sender, packet_receiver) = flume::bounded(channel_cap);
 
-        let receiver_sockets =
-            bind_udp_socket_range(&config_spec.address, config_spec.start_port, num_sockets);
+        let receiver_sockets = bind_udp_socket_range(
+            &config_spec.address,
+            config_spec.start_port,
+            num_sockets,
+            socket_recv_buf_bytes,
+        );
 
         let packet_drop_counters = (0..num_sockets).map(|_| AtomicUsize::new(0)).collect();
 
         // Create one SPSC return channel per socket.
         // Resolution thread sends reclaimed buffers to the originating receiver thread,
         // eliminating the shared mutex that was the hot-path contention point.
-        // Capacity matches RECEIVER_LOCAL_POOL_SIZE — if full, buffer drops and
+        // Capacity matches recv_pool_size — if full, buffer drops and
         // the receiver falls back to fresh allocation (burst safety valve).
         let mut buffer_return_senders = Vec::with_capacity(num_sockets);
         let mut buffer_return_receivers = Vec::with_capacity(num_sockets);
         for _ in 0..num_sockets {
-            let (tx, rx) = flume::bounded::<Vec<u8>>(crate::network::RECEIVER_LOCAL_POOL_SIZE);
+            let (tx, rx) = flume::bounded::<Vec<u8>>(recv_pool_size);
             buffer_return_senders.push(tx);
             buffer_return_receivers.push(parking_lot::Mutex::new(Some(rx)));
         }
