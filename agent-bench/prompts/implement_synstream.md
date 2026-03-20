@@ -17,8 +17,6 @@ Implement an N×N anti-diagonal wavefront sweep.
 - All cells within one diagonal are independent and can be computed in parallel
 - Diagonal d+1 depends on diagonal d
 
-**Correctness tolerance:** 1e-9 relative error.
-
 ## Framework
 
 SynStream is a Rust task-graph framework with a Python API. The package is at:
@@ -35,14 +33,19 @@ In `<WORKSPACE>`, create from scratch:
 
 - `Cargo.toml` — Cargo manifest for the plugin dylib
 - `src/lib.rs` — Rust kernel implementation
-- `run_wavefront.py` — Python script that builds the graph, runs the benchmark, verifies correctness, and writes `report.json`
+- `run_wavefront.py` — Python script that builds the graph, runs the benchmark, and writes `report.json`
 
 No other files are required, but you may create additional source files if needed.
 
 ## Output requirements
 
-- Print `PASS` if grid correctness check passes (tolerance 1e-9), `FAIL` otherwise
 - Write `report.json` containing at minimum `{"summary": {"avg_latency_us": <float>}}`
+- Call the provided verifier to print `PASS`:
+  ```python
+  import subprocess, sys
+  subprocess.run([sys.executable, "<REPO_ROOT>/agent-bench/tools/verify_wavefront.py",
+                  "--n", str(n)], check=True)
+  ```
 
 ## Verification
 

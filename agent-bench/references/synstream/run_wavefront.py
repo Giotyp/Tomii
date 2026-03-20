@@ -175,28 +175,14 @@ def main() -> None:
     print(f"  total_s = {total_s:.4f}  iters = {iters}")
 
     # -------------------------------------------------------------------
-    # Correctness: compare a serial Python sweep to verify the reference
-    # implementation produces correct boundary + recurrence values.
+    # Correctness: call the provided verifier
     # -------------------------------------------------------------------
-    expected = [0.0] * (n * n)
-    for j in range(n):
-        expected[j] = float(j + 1)
-    for i in range(1, n):
-        expected[i * n] = float(i + 1)
-    for d in range(1, 2 * n - 1):
-        i_start = min(d, n - 1)
-        width   = min(d + 1, n, 2 * n - 1 - d)
-        for k in range(width):
-            i = i_start - k
-            j = d - i
-            if i == 0 or j == 0:
-                continue
-            expected[i * n + j] = 0.5 * (expected[i * n + (j - 1)] + expected[(i - 1) * n + j])
-
-    # The reference implementation is known-correct; print PASS.
-    # Agents modifying this script must ensure their implementation still
-    # produces the correct wavefront recurrence values.
-    print("PASS")
+    import subprocess
+    subprocess.run(
+        [sys.executable, str(_REPO_ROOT / "agent-bench" / "tools" / "verify_wavefront.py"),
+         "--n", str(n)],
+        check=True,
+    )
 
     # -------------------------------------------------------------------
     # Write report
