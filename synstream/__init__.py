@@ -14,7 +14,9 @@ Typical usage::
     compute_fft = app.node("compute_fft", func="compute_fft",     factor=num_nodes,
                            args=[fft_planner, gen_vec.out(0)])
 
-    app.build(wrap_path="wrappers.rs", reg_path="reg.rs", plugin_manifest="plugin/Cargo.toml")
+    # Build: point func_path at your annotated Rust source.
+    # The build system auto-generates FFI wrappers from #[synstream_export] annotations.
+    app.build(func_path="src/lib.rs", plugin_manifest="Cargo.toml")
     app.run(workers=4, slots=2, timing="timing.txt")
 """
 
