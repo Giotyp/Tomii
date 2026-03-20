@@ -23,16 +23,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Socket receive buffer size (16 MB).
-/// Prevents kernel from dropping UDP packets when bursts exceed the default ~208 KB buffer.
-/// Requires: sudo sysctl -w net.core.rmem_max=16777216
-const SOCKET_RECV_BUF_SIZE: usize = 16 * 1024 * 1024;
-
-/// Number of packet buffers pre-allocated per receiver thread at startup.
-/// Matches the old shared pool allocation of channel_cap / num_sockets (512 per socket).
-/// Buffers are recycled via the per-socket return channel; fresh allocation only on burst.
-pub const RECEIVER_LOCAL_POOL_SIZE: usize = 1024;
-
 use crate::runtime_funcs::SharedData;
 
 /// Raw packet message forwarded from receiver thread to resolution
@@ -98,7 +88,12 @@ fn set_socket_recv_buffer(socket: &UdpSocket, size: usize) {
     }
 }
 
-pub fn bind_udp_socket_range(address: &str, start_port: usize, count: usize) -> Vec<NetworkSocket> {
+pub fn bind_udp_socket_range(
+    address: &str,
+    start_port: usize,
+    count: usize,
+    socket_recv_buf_bytes: usize,
+) -> Vec<NetworkSocket> {
     let mut sockets = Vec::with_capacity(count);
     for i in 0..count {
         let port = start_port + i;
@@ -112,7 +107,7 @@ pub fn bind_udp_socket_range(address: &str, start_port: usize, count: usize) -> 
             .expect("Failed to set blocking mode");
 
         // Increase kernel receive buffer to absorb packet bursts
-        set_socket_recv_buffer(&socket, SOCKET_RECV_BUF_SIZE);
+        set_socket_recv_buffer(&socket, socket_recv_buf_bytes);
 
         sockets.push(NetworkSocket::Udp(socket));
     }
@@ -121,7 +116,7 @@ pub fn bind_udp_socket_range(address: &str, start_port: usize, count: usize) -> 
         start_port,
         start_port + count - 1,
         address,
-        SOCKET_RECV_BUF_SIZE / (1024 * 1024)
+        socket_recv_buf_bytes / (1024 * 1024)
     );
     sockets
 }
@@ -162,7 +157,7 @@ pub fn single_socket_receiver_loop(
 
     // Pre-allocate local buffer pool — no shared mutex on the hot path.
     // Resolution thread returns used buffers via return_rx; fresh allocation is the burst fallback.
-    let mut local_pool: Vec<Vec<u8>> = (0..RECEIVER_LOCAL_POOL_SIZE)
+    let mut local_pool: Vec<Vec<u8>> = (0..shared.recv_pool_size)
         .map(|_| {
             let mut v = Vec::with_capacity(packet_length);
             // SAFETY: recv() overwrites exactly packet_length bytes before any read.
@@ -279,7 +274,7 @@ pub fn multi_socket_receiver_loop(
     let range_len = socket_range.end - socket_range.start;
     let mut local_pools: Vec<Vec<Vec<u8>>> = (0..range_len)
         .map(|_| {
-            (0..RECEIVER_LOCAL_POOL_SIZE)
+            (0..shared.recv_pool_size)
                 .map(|_| {
                     let mut v = Vec::with_capacity(packet_length);
                     // SAFETY: recv() overwrites exactly packet_length bytes before any read.

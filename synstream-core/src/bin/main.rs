@@ -122,6 +122,30 @@ struct Args {
     exclude_streams: usize,
     #[clap(long, value_name = "FILE", required = false, help = "Write JSON performance report to FILE")]
     report: Option<String>,
+    #[clap(long, value_name = "N", required = false, default_value = "65536",
+        help = "Capacity of the lock-free task-completion ring-buffer")]
+    batch_queue_capacity: usize,
+    #[clap(long, value_name = "N", required = false, default_value = "32",
+        help = "Spin iterations before blocking recv in resolution threads")]
+    spin_iterations: u32,
+    #[clap(long, value_name = "N", required = false, default_value = "32",
+        help = "Flush accumulated successors to workers every N items during batch processing")]
+    sched_flush_threshold: usize,
+    #[clap(long, value_name = "BYTES", required = false, default_value = "16777216",
+        help = "UDP socket kernel receive buffer size in bytes")]
+    socket_recv_buf_bytes: usize,
+    #[clap(long, value_name = "N", required = false, default_value = "1024",
+        help = "Pre-allocated packet buffer pool size per receiver thread")]
+    recv_pool_size: usize,
+    #[clap(long, value_name = "N", required = false, default_value = "64",
+        help = "spin_wait: iterations of spin_loop() before switching to yield_now()")]
+    spin_wait_spin_iters: u32,
+    #[clap(long, value_name = "N", required = false, default_value = "256",
+        help = "spin_wait: iterations of yield_now() before switching to park_timeout()")]
+    spin_wait_yield_iters: u32,
+    #[clap(long, value_name = "NS", required = false, default_value = "100",
+        help = "spin_wait: park_timeout duration in nanoseconds")]
+    spin_wait_park_ns: u64,
 }
 
 fn main() {
@@ -202,6 +226,14 @@ fn main() {
         args.slot_priority,
         args.coalesce_barriers,
         args.inline_continuation,
+        args.batch_queue_capacity,
+        args.spin_iterations,
+        args.sched_flush_threshold,
+        args.socket_recv_buf_bytes,
+        args.recv_pool_size,
+        args.spin_wait_spin_iters,
+        args.spin_wait_yield_iters,
+        args.spin_wait_park_ns,
     );
 
     let time_file = args.timing;
@@ -247,6 +279,14 @@ pub fn run_graph(
     slot_priority_enabled: bool,
     coalesce_barriers: bool,
     inline_continuation: bool,
+    batch_queue_capacity: usize,
+    spin_iterations: u32,
+    sched_flush_threshold: usize,
+    socket_recv_buf_bytes: usize,
+    recv_pool_size: usize,
+    spin_wait_spin_iters: u32,
+    spin_wait_yield_iters: u32,
+    spin_wait_park_ns: u64,
 ) -> SynRt {
     let receiver_threads = if graph.network_config().is_some() {
         receiver_threads
@@ -345,6 +385,14 @@ pub fn run_graph(
         batching_limit,
         coalesce_barriers,
         inline_continuation,
+        batch_queue_capacity,
+        spin_iterations,
+        sched_flush_threshold,
+        socket_recv_buf_bytes,
+        recv_pool_size,
+        spin_wait_spin_iters,
+        spin_wait_yield_iters,
+        spin_wait_park_ns,
     );
 
     synrt.run();
