@@ -1,3 +1,0 @@
-cargo:warning=[2K   [1m[32minfo:[0m Generating wrappers for functions in /home/george/SynStream/.worktrees/converter/examples/matrix-compute/src
-cargo:warning=[2K   [1m[32minfo:[0m File name: lib.rs
-cargo:warning=[2K   [1m[32minfo:[0m Generated wrappers at /home/george/SynStream/.worktrees/converter/target/release/build/synstream-core-0e7453f3660747ad/out/wrappers.rs and registry at /home/george/SynStream/.worktrees/converter/target/release/build/synstream-core-0e7453f3660747ad/out/func_reg.rs
