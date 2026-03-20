@@ -29,29 +29,6 @@ SynStream is a Rust task-graph framework with a Python API. The package is at:
 
 Read `AGENT.md` at `<REPO_ROOT>/AGENT.md` for a quick-reference on the plugin API, then read the package source for full details.
 
-## Plugin functions
-
-Annotate Rust functions with `#[synstream_export]` — the build system auto-generates all FFI
-bridging. For functions that mutate shared opaque state via raw pointers, use
-`#[no_mangle] pub fn foo_cm(args: &[CmTypes]) -> CmTypes` with manual CmTypes extraction instead.
-
-Dependencies (in Cargo.toml):
-```toml
-synstream-types = { path = "../../synstream-types" }
-synstream-macro = { path = "../../synstream-macro" }
-```
-
-Build call in run_wavefront.py:
-```python
-build_result = graph.build(
-    func_path="src/lib.rs",
-    plugin_manifest="Cargo.toml",
-    env={"CARGO_TARGET_DIR": _TARGET_DIR},
-    release=True,
-    clean=False,
-)
-```
-
 ## What to create
 
 In `<WORKSPACE>`, create from scratch:
