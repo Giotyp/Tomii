@@ -1,0 +1,16 @@
+{
+  "summary": {
+    "avg_latency_us": 684.459,
+    "p99_latency_us": null,
+    "min_latency_us": null,
+    "total_streams": 8,
+    "worker_busy_pct": null
+  },
+  "config": {
+    "n": 64,
+    "workers": 4,
+    "tile_size": 1
+  },
+  "bottleneck_hints": [],
+  "critical_path": []
+}
