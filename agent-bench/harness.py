@@ -343,6 +343,63 @@ def _run_taskflow(workspace: Path, cfg: ExperimentConfig, iter_dir: Path) -> Tup
 
 
 # ---------------------------------------------------------------------------
+# Post-run harness validation
+# ---------------------------------------------------------------------------
+
+def _harness_checks(
+    workspace: Path,
+    cfg: ExperimentConfig,
+    iter_dir: Path,
+    run_exit: int,
+    correct: bool,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Apply sanity checks after a run. Returns (correct, extra_metrics)."""
+    extra: Dict[str, Any] = {}
+    report_path = iter_dir / "report.json"
+
+    if run_exit == 0 and report_path.exists():
+        try:
+            report = json.loads(report_path.read_text())
+        except Exception:
+            report = {}
+
+        # Check 1: N mismatch — agent used a different problem size
+        reported_n = report.get("config", {}).get("n")
+        if reported_n is not None and reported_n != cfg.n:
+            correct = False
+            with open(iter_dir / "run.log", "a") as f:
+                f.write(f"\nHARNESS_FAIL: n_mismatch (expected {cfg.n}, got {reported_n})\n")
+
+        # Check 2: Suspiciously low latency (computation hoisted out of hot path)
+        avg_us = report.get("summary", {}).get("avg_latency_us", 0)
+        serial_floor_us = cfg.n * cfg.n * 0.5e-3  # 0.5 ns/cell serial lower bound
+        if avg_us > 0 and avg_us < serial_floor_us / 10:
+            extra["suspicious_latency"] = True
+            with open(iter_dir / "run.log", "a") as f:
+                f.write(
+                    f"\nHARNESS_WARN: suspicious_latency "
+                    f"({avg_us:.1f} µs < threshold {serial_floor_us / 10:.1f} µs)\n"
+                )
+
+    # Check 3: Single-task collapse — all work in one emplace(), no dependencies
+    if cfg.framework == "taskflow":
+        for cpp_file in workspace.glob("*.cpp"):
+            try:
+                content = cpp_file.read_text()
+                if (
+                    "taskflow.emplace" in content
+                    and "for_each_index" not in content
+                    and "precede" not in content
+                ):
+                    extra["single_task_collapse"] = True
+                    break
+            except Exception:
+                pass
+
+    return correct, extra
+
+
+# ---------------------------------------------------------------------------
 # Per-iteration execution helper
 # ---------------------------------------------------------------------------
 
@@ -393,11 +450,15 @@ def _execute_iteration(
         else:
             run_exit, _ = _run_taskflow(workspace, cfg, iter_dir)
             correct = verify_taskflow_correctness(iter_dir)
+        correct, extra_flags = _harness_checks(workspace, cfg, iter_dir, run_exit, correct)
         print(f"  Run: {'OK' if run_exit == 0 else 'FAIL'} | correct={correct}")
+    else:
+        extra_flags = {}
 
     m = collect_iteration_metrics(
         iter_dir, cfg.framework, build_exit, run_exit, wall_time, correct
     )
+    m.update(extra_flags)
     (iter_dir / "metrics.json").write_text(json.dumps(m, indent=2))
     return m, iter_dir
 

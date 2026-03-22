@@ -9,10 +9,10 @@ bridging automatically (no `wrappers.rs` or `reg.rs` required).
 use synstream_macro::synstream_export;
 
 #[synstream_export]
-pub fn init_grid(n: usize) -> Vec<f64> { ... }
+pub fn init_data(n: usize) -> Vec<f64> { ... }
 
 #[synstream_export]
-pub fn compute_cell(grid: &Vec<f64>, n: usize, diag: usize, idx: usize) -> f64 { ... }
+pub fn process_item(data: &Vec<f64>, idx: usize) -> f64 { ... }
 ```
 
 **When NOT to use `#[synstream_export]`**: functions that mutate shared state via raw pointers
@@ -35,7 +35,7 @@ synstream-types = { path = "../../synstream-types" }
 synstream-macro = { path = "../../synstream-macro" }
 ```
 
-## run_wavefront.py skeleton
+## Python script skeleton
 
 ```python
 import synstream as ss
@@ -59,26 +59,18 @@ build_result = graph.build(
 graph.run(
     dylib=build_result.dylib,
     workers=4,
-    core_offset=1,
-    slots=1,
     max_streams=10,
-    timing="timing.csv",
-    coalesce_barriers=True,
-    inline_continuation=True,
-    use_rdtsc=True,
 )
 ```
 
 ## Key `graph.run()` flags
 
-| Flag | What it does | When to enable |
-|------|-------------|----------------|
-| `workers=N` | Rayon worker threads | Match physical cores |
-| `core_offset=1` | Pin workers starting at CPU 1 | Always (leaves CPU 0 for OS) |
-| `slots=N` | Concurrent in-flight streams | 1 for latency, >1 for throughput |
-| `coalesce_barriers=True` | Batch barrier fan-outs into bulk tasks | Fine-grained graphs (wavefront) |
-| `inline_continuation=True` | Run single-successor tasks inline | Reduces scheduling overhead |
-| `use_rdtsc=True` | Use TSC for sub-µs timing | x86 only; improves timer precision |
-| `system_threads=N` | Resolution threads | Default 1; rarely needs changing |
+| Flag | What it does |
+|------|-------------|
+| `workers=N` | Rayon worker threads |
+| `core_offset=1` | Pin workers starting at CPU 1 |
+| `slots=N` | Concurrent in-flight streams |
+| `max_streams=N` | Total streams to process |
+| `timing="timing.csv"` | Write per-node timing CSV |
 
 Run `python -m synstream --list-knobs` to see all available `graph.run()` options. Full Python API: `README.md`.
