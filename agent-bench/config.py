@@ -17,7 +17,7 @@ class ExperimentConfig:
     max_iterations: int = 8
     max_budget_usd: float = 5.00
     timeout_s: int = 400
-    n: int = 64                        # grid size for quick runs
+    n: int = 256                       # grid size
     workers: int = 4
     iterations: int = 5              # benchmark iterations
 

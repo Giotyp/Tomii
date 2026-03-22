@@ -232,6 +232,11 @@ def _run_synstream(workspace: Path, cfg: ExperimentConfig, iter_dir: Path, dylib
 
 def _build_taskflow(workspace: Path, _cfg: ExperimentConfig) -> Tuple[int, str]:
     """Build Taskflow binary. Try make, fall back to g++ on any .cpp files."""
+    # If run_wavefront.py already exists, delegate build+run to it.
+    runner = workspace / "run_wavefront.py"
+    if runner.exists():
+        return 0, "run_wavefront.py present; build delegated to run step."
+
     taskflow_include = REPO_ROOT / "taskflow-bench" / "taskflow-lib"
 
     if (workspace / "Makefile").exists():
@@ -258,8 +263,42 @@ def _build_taskflow(workspace: Path, _cfg: ExperimentConfig) -> Tuple[int, str]:
 
 
 def _run_taskflow(workspace: Path, cfg: ExperimentConfig, iter_dir: Path) -> Tuple[int, str]:
-    """Run Taskflow binary. Search for executable, retry without --pin if needed."""
-    # Find executable (agent may have named it differently)
+    """Run Taskflow benchmark. Delegates to run_wavefront.py if present, else binary."""
+    report_path = iter_dir / "report.json"
+
+    # Delegate to Python wrapper if the agent created one
+    runner = workspace / "run_wavefront.py"
+    if runner.exists():
+        env = _get_env_with_exports()
+        base_cmd = [
+            sys.executable, str(runner),
+            "--n",          str(cfg.n),
+            "--workers",    str(cfg.workers),
+            "--iterations", str(cfg.iterations),
+            "--report",     str(report_path),
+        ]
+        try:
+            result = subprocess.run(base_cmd, cwd=workspace, capture_output=True, text=True,
+                                    env=env, timeout=900)
+            log = result.stdout + result.stderr
+            if result.returncode != 0 and "unrecognized" in log.lower():
+                result = subprocess.run(
+                    base_cmd[:-2],  # drop --report <path>
+                    cwd=workspace, capture_output=True, text=True, env=env, timeout=900,
+                )
+                log = result.stdout + result.stderr
+        except subprocess.TimeoutExpired as e:
+            log = (e.stdout or b"").decode(errors="replace") + (e.stderr or b"").decode(errors="replace")
+            log += "\n[harness] run_wavefront.py timed out after 900s"
+            (iter_dir / "run.log").write_text(log)
+            return 1, log
+        (iter_dir / "run.log").write_text(log)
+        for candidate in [workspace / "report.json"]:
+            if candidate.exists() and not report_path.exists():
+                shutil.copy(candidate, report_path)
+        return result.returncode, log
+
+    # Binary path — find executable (agent may have named it differently)
     candidates = ["wavefront", "wavefront_bench", "main"]
     exe = None
     for name in candidates:
@@ -268,7 +307,6 @@ def _run_taskflow(workspace: Path, cfg: ExperimentConfig, iter_dir: Path) -> Tup
             exe = p
             break
     if exe is None:
-        # Try any executable in workspace
         for p in workspace.iterdir():
             if p.is_file() and os.access(p, os.X_OK) and p.suffix == "":
                 exe = p
@@ -276,14 +314,13 @@ def _run_taskflow(workspace: Path, cfg: ExperimentConfig, iter_dir: Path) -> Tup
     if exe is None:
         return 1, "No executable found in workspace."
 
-    output_csv = iter_dir / "run_output.csv"
     base_cmd = [
         str(exe),
         "--n",          str(cfg.n),
         "--workers",    str(cfg.workers),
         "--iterations", str(cfg.iterations),
         "--warmup",     "2",
-        "--output",     str(output_csv),
+        "--report",     str(report_path),
     ]
 
     # Try with --pin first
@@ -299,6 +336,9 @@ def _run_taskflow(workspace: Path, cfg: ExperimentConfig, iter_dir: Path) -> Tup
         log = result.stdout + result.stderr
 
     (iter_dir / "run.log").write_text(log)
+    for candidate in [workspace / "report.json"]:
+        if candidate.exists() and not report_path.exists():
+            shutil.copy(candidate, report_path)
     return result.returncode, log
 
 
@@ -411,10 +451,10 @@ def run_trial(
         elif cfg.framework == "taskflow":
             _build_taskflow(workspace, cfg)
             _run_taskflow(workspace, cfg, baseline_dir)
-            baseline_csv = baseline_dir / "run_output.csv"
-            if baseline_csv.exists():
+            baseline_report = baseline_dir / "report.json"
+            if baseline_report.exists():
                 import shutil as _shutil
-                _shutil.copy(baseline_csv, workspace / "baseline_results.csv")
+                _shutil.copy(baseline_report, workspace / "report.json")
 
     for iteration in range(cfg.max_iterations):
         print(f"\n--- Trial {trial_idx} | Iteration {iteration} ---")

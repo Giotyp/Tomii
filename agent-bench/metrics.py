@@ -89,19 +89,17 @@ def verify_synstream_correctness(iter_dir: Path) -> bool:
 
 
 def verify_taskflow_correctness(iter_dir: Path) -> bool:
-    """Check if the Taskflow run produced valid CSV output."""
+    """Check if the Taskflow run printed PASS."""
     run_log = iter_dir / "run.log"
-    csv_path = iter_dir / "run_output.csv"
-
-    log_text = run_log.read_text() if run_log.exists() else ""
-    if "error" in log_text.lower() or "fail" in log_text.lower():
-        return False
-
-    # CSV must exist and have data rows
-    if not csv_path.exists():
-        return False
-    lines = [l for l in csv_path.read_text().strip().splitlines() if l.strip()]
-    return len(lines) >= 2  # header + at least one data row
+    if run_log.exists():
+        content = run_log.read_text()
+        if "PASS" in content:
+            return True
+        if "FAIL" in content:
+            return False
+    # Fallback: report.json exists and is non-empty
+    report = iter_dir / "report.json"
+    return report.exists() and report.stat().st_size > 10
 
 
 def collect_iteration_metrics(
@@ -125,11 +123,8 @@ def collect_iteration_metrics(
     if resp_file.exists():
         m.update(parse_claude_response(resp_file.read_text()))
 
-    # Parse performance
-    if framework == "synstream":
-        perf = parse_synstream_report(iter_dir / "report.json")
-    else:
-        perf = parse_taskflow_csv(iter_dir / "run_output.csv")
+    # Parse performance — both frameworks now write report.json
+    perf = parse_synstream_report(iter_dir / "report.json")
     m.update(perf)
 
     return m

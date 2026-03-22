@@ -40,12 +40,8 @@ No other files are required, but you may create additional source files if neede
 ## Output requirements
 
 - Write `report.json` containing at minimum `{"summary": {"avg_latency_us": <float>}}`
-- Call the provided verifier to print `PASS`:
-  ```python
-  import subprocess, sys
-  subprocess.run([sys.executable, "<REPO_ROOT>/agent-bench/tools/verify_wavefront.py",
-                  "--n", str(n)], check=True)
-  ```
+- Call the verifier at `<REPO_ROOT>/agent-bench/tools/verify_wavefront.py --n N`
+  and confirm it prints `PASS`.
 
 ## Verification
 

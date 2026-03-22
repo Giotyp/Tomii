@@ -81,4 +81,4 @@ graph.run(
 | `use_rdtsc=True` | Use TSC for sub-µs timing | x86 only; improves timer precision |
 | `system_threads=N` | Resolution threads | Default 1; rarely needs changing |
 
-Full flag list: `synstream/_runner.py`. Full Python API: `README.md`.
+Run `python -m synstream --list-knobs` to see all available `graph.run()` options. Full Python API: `README.md`.
