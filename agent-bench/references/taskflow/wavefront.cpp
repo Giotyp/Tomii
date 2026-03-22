@@ -213,6 +213,9 @@ int main(int argc, char** argv) {
         "%s Wavefront | n=%d | workers=%d | iters=%d | total=%.4fs | %.4fs/iter\n",
         system_label.c_str(), N, W, ITERS, total_s, s_per_iter);
 
+    // Print corner value so the Python wrapper can call the verifier
+    std::printf("CORNER: %.15f\n", grid[static_cast<std::size_t>(N - 1) * N + (N - 1)]);
+
     append_wavefront_csv(cli.output, system_label, N, W, ITERS, total_s, s_per_iter);
     return 0;
 }

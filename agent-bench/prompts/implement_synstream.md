@@ -40,9 +40,12 @@ No other files are required, but you may create additional source files if neede
 ## Output requirements
 
 - Write `report.json` containing at minimum `{"summary": {"avg_latency_us": <float>}}`
-- Call the verifier at `<REPO_ROOT>/agent-bench/tools/verify_wavefront.py --n N`
-  and confirm it prints `PASS`.
+- After running, expose `grid[N-1][N-1]` (the bottom-right corner cell) and call:
+  ```
+  python <REPO_ROOT>/agent-bench/tools/verify_wavefront.py --n N --corner VALUE
+  ```
+  where `VALUE` is your computed `grid[N-1][N-1]`.  Confirm it prints `PASS`.
 
 ## Verification
 
-After completing your implementation, run it and confirm it prints `PASS`.
+After completing your implementation, run it and confirm the verifier prints `PASS`.

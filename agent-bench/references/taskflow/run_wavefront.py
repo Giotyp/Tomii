@@ -70,9 +70,19 @@ def main() -> None:
     m = re.search(r'\|\s*([\d.]+)s/iter', r.stdout)
     avg_latency_us = float(m.group(1)) * 1e6 if m else None
 
+    # Parse corner value for verifier: "CORNER: 1.234567890123456"
+    m_corner = re.search(r'CORNER:\s*([\d.e+\-]+)', r.stdout)
+    if not m_corner:
+        print("ERROR: CORNER not found in binary stdout", file=sys.stderr)
+        sys.exit(1)
+    corner_val = float(m_corner.group(1))
+
     # Verify correctness (prints PASS to stdout → captured in run.log)
     verifier = _find_verifier()
-    subprocess.run([sys.executable, str(verifier), "--n", str(args.n)], check=True)
+    subprocess.run(
+        [sys.executable, str(verifier), "--n", str(args.n), "--corner", str(corner_val)],
+        check=True,
+    )
 
     # Write report.json
     report = {"summary": {"avg_latency_us": avg_latency_us}}

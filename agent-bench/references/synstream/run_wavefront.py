@@ -69,6 +69,11 @@ def build_wavefront_graph(n: int, tile_size: int = 1) -> ss.Graph:
         prev        = cur
         prev_factor = factor
 
+    # Terminal node: write grid[N-1][N-1] to wf_corner.txt after all diagonals
+    if prev is not None:
+        app.node("print_corner", func="print_corner", factor=1,
+                 args=[grid, n_var, prev.wait(0, prev_factor)])
+
     return app
 
 
@@ -175,12 +180,19 @@ def main() -> None:
     print(f"  total_s = {total_s:.4f}  iters = {iters}")
 
     # -------------------------------------------------------------------
-    # Correctness: call the provided verifier
+    # Correctness: read wf_corner.txt written by print_corner_cm, then verify
     # -------------------------------------------------------------------
     import subprocess
+    # Rust writes wf_corner.txt relative to cwd (= workspace when run by harness)
+    corner_file = Path.cwd() / "wf_corner.txt"
+    if not corner_file.exists():
+        print("ERROR: wf_corner.txt not found — print_corner node did not run",
+              file=sys.stderr)
+        sys.exit(1)
+    corner_val = float(corner_file.read_text().strip())
     subprocess.run(
         [sys.executable, str(_REPO_ROOT / "agent-bench" / "tools" / "verify_wavefront.py"),
-         "--n", str(n)],
+         "--n", str(n), "--corner", str(corner_val)],
         check=True,
     )
 

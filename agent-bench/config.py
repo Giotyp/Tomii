@@ -17,7 +17,7 @@ class ExperimentConfig:
     max_iterations: int = 8
     max_budget_usd: float = 5.00
     timeout_s: int = 400
-    n: int = 256                       # grid size
+    n: int = 512                       # grid size
     workers: int = 4
     iterations: int = 5                # benchmark iterations
     # Pipeline-only fields

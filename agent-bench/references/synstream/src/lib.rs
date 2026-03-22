@@ -4,6 +4,28 @@ use wavefront::compute_cell;
 use synstream_macro::synstream_export;
 use synstream_types::CmTypes;
 
+/// Write grid[N-1][N-1] to "wf_corner.txt" in the current working directory.
+///
+/// Called as a single terminal node in the wavefront graph after the last
+/// diagonal barrier.  The Python wrapper reads this file and passes the value
+/// to the verifier with `--corner VALUE`.
+///
+/// Arguments (via wrapper args array):
+///   args[0] = grid    (CmTypes::Any(Vec<f64>))
+///   args[1] = n       (CmTypes::Usize)
+///   args[2] = barrier from last diagonal (CmTypes::None — ignored, sync only)
+///
+/// Returns: CmTypes::None
+#[no_mangle]
+pub fn print_corner_cm(grid: &CmTypes, n: usize, _barrier: &CmTypes) -> CmTypes {
+    let corner = grid
+        .with_any(|v: &Vec<f64>| v[(n - 1) * n + (n - 1)])
+        .expect("print_corner_cm: expected CmTypes::Any(Vec<f64>) for grid");
+    std::fs::write("wf_corner.txt", format!("{:.15e}\n", corner))
+        .expect("print_corner_cm: failed to write wf_corner.txt");
+    CmTypes::None
+}
+
 /// Initialise the N×N wavefront grid (called once at graph initialisation).
 ///
 /// Returns the N×N grid with boundary values.
