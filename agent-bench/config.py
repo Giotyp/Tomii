@@ -11,7 +11,7 @@ AGENT_BENCH = Path(__file__).resolve().parent
 class ExperimentConfig:
     name: str                          # e.g. "implement_synstream"
     framework: str                     # "synstream" or "taskflow"
-    task: str                          # "implement" or "optimize"
+    task: str                          # "implement", "optimize", or "pipeline"
     prompt_file: str                   # relative to prompts/
     reference_dir: str                 # relative to references/
     max_iterations: int = 8
@@ -19,7 +19,10 @@ class ExperimentConfig:
     timeout_s: int = 400
     n: int = 256                       # grid size
     workers: int = 4
-    iterations: int = 5              # benchmark iterations
+    iterations: int = 5                # benchmark iterations
+    # Pipeline-only fields
+    optimize_prompt_file: str = ""     # optimize prompt for pipeline task
+    max_optimize_iters: int = 3        # optimize phase iterations in pipeline
 
 
 EXPERIMENTS = [
@@ -56,5 +59,28 @@ EXPERIMENTS = [
         reference_dir="taskflow",
         max_iterations=5,
         timeout_s=300,   # read + explore + edit only; harness does build+run
+    ),
+    # Pipeline: implement from scratch, then optimize the resulting workspace
+    ExperimentConfig(
+        name="pipeline_synstream",
+        framework="synstream",
+        task="pipeline",
+        prompt_file="implement_synstream.md",
+        optimize_prompt_file="optimize_synstream.md",
+        reference_dir="synstream",
+        max_iterations=5,       # implement phase budget
+        max_optimize_iters=3,   # optimize phase budget
+        timeout_s=600,
+    ),
+    ExperimentConfig(
+        name="pipeline_taskflow",
+        framework="taskflow",
+        task="pipeline",
+        prompt_file="implement_taskflow.md",
+        optimize_prompt_file="optimize_taskflow.md",
+        reference_dir="taskflow",
+        max_iterations=5,
+        max_optimize_iters=3,
+        timeout_s=400,
     ),
 ]

@@ -343,6 +343,66 @@ def _run_taskflow(workspace: Path, cfg: ExperimentConfig, iter_dir: Path) -> Tup
 
 
 # ---------------------------------------------------------------------------
+# Per-iteration execution helper
+# ---------------------------------------------------------------------------
+
+def _execute_iteration(
+    cfg: ExperimentConfig,
+    workspace: Path,
+    trial_dir: Path,
+    iter_label: str,
+    prompt: str,
+    dry_run: bool,
+    dylib_cache: Dict,
+) -> Tuple[Dict[str, Any], Path]:
+    """Invoke Claude, build, run, collect metrics for one iteration.
+
+    Returns (metrics_dict, iter_dir).
+    """
+    iter_dir = trial_dir / iter_label
+    iter_dir.mkdir(exist_ok=True)
+
+    t0 = time.monotonic()
+    _invoke_claude(prompt, workspace, cfg, iter_dir, dry_run=dry_run)
+    wall_time = time.monotonic() - t0
+
+    _save_diff(workspace, iter_dir)
+    subprocess.run(["git", "add", "-A"], cwd=workspace, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", iter_label],
+        cwd=workspace, capture_output=True,
+        env={**os.environ, "GIT_AUTHOR_NAME": "agent", "GIT_AUTHOR_EMAIL": "a@a",
+             "GIT_COMMITTER_NAME": "agent", "GIT_COMMITTER_EMAIL": "a@a"},
+    )
+
+    print("  Building...")
+    if cfg.framework == "synstream":
+        build_exit, build_log = _build_synstream(workspace, cfg, dylib_cache)
+    else:
+        build_exit, build_log = _build_taskflow(workspace, cfg)
+    (iter_dir / "build.log").write_text(build_log)
+    print(f"  Build: {'OK' if build_exit == 0 else 'FAIL'}")
+
+    run_exit = 1
+    correct = False
+    if build_exit == 0:
+        print("  Running...")
+        if cfg.framework == "synstream":
+            run_exit, _ = _run_synstream(workspace, cfg, iter_dir, dylib_cache)
+            correct = verify_synstream_correctness(iter_dir)
+        else:
+            run_exit, _ = _run_taskflow(workspace, cfg, iter_dir)
+            correct = verify_taskflow_correctness(iter_dir)
+        print(f"  Run: {'OK' if run_exit == 0 else 'FAIL'} | correct={correct}")
+
+    m = collect_iteration_metrics(
+        iter_dir, cfg.framework, build_exit, run_exit, wall_time, correct
+    )
+    (iter_dir / "metrics.json").write_text(json.dumps(m, indent=2))
+    return m, iter_dir
+
+
+# ---------------------------------------------------------------------------
 # Claude invocation
 # ---------------------------------------------------------------------------
 
@@ -434,8 +494,7 @@ def run_trial(
     prev_metrics: Optional[Dict] = None
 
     # For optimize experiments, pre-run the baseline so report.json exists in
-    # the workspace when Claude is invoked on iteration 0.  Without this,
-    # the optimize prompt's "Read report.json" instruction finds nothing.
+    # the workspace when Claude is invoked on iteration 0.
     if cfg.task == "optimize" and not dry_run:
         print("  Pre-running baseline to generate report.json...")
         _build_synstream(workspace, cfg, dylib_cache) if cfg.framework == "synstream" else None
@@ -443,77 +502,82 @@ def run_trial(
         baseline_dir.mkdir(exist_ok=True)
         if cfg.framework == "synstream":
             _run_synstream(workspace, cfg, baseline_dir, dylib_cache)
-            # Copy report.json into workspace root so the agent can find it
-            baseline_report = baseline_dir / "report.json"
-            if baseline_report.exists():
-                import shutil as _shutil
-                _shutil.copy(baseline_report, workspace / "report.json")
         elif cfg.framework == "taskflow":
             _build_taskflow(workspace, cfg)
             _run_taskflow(workspace, cfg, baseline_dir)
-            baseline_report = baseline_dir / "report.json"
-            if baseline_report.exists():
-                import shutil as _shutil
-                _shutil.copy(baseline_report, workspace / "report.json")
+        baseline_report = baseline_dir / "report.json"
+        if baseline_report.exists():
+            shutil.copy(baseline_report, workspace / "report.json")
 
-    for iteration in range(cfg.max_iterations):
-        print(f"\n--- Trial {trial_idx} | Iteration {iteration} ---")
-        iter_dir = trial_dir / f"iter_{iteration}"
-        iter_dir.mkdir(exist_ok=True)
+    if cfg.task in ("implement", "optimize"):
+        # ----------------------------------------------------------------
+        # Standard single-phase loop
+        # ----------------------------------------------------------------
+        for iteration in range(cfg.max_iterations):
+            print(f"\n--- Trial {trial_idx} | Iteration {iteration} ---")
+            prompt = _build_prompt(base_prompt, iteration, prev_metrics)
+            m, _ = _execute_iteration(
+                cfg, workspace, trial_dir, f"iter_{iteration}",
+                prompt, dry_run, dylib_cache,
+            )
+            iter_metrics.append(m)
+            prev_metrics = m
+            if m.get("correct") and cfg.task == "implement":
+                print("  Implementation correct — stopping early.")
+                break
 
-        prompt = _build_prompt(base_prompt, iteration, prev_metrics)
+        summary = aggregate_trial_metrics(iter_metrics)
 
-        # Invoke Claude
-        t0 = time.monotonic()
-        _invoke_claude(prompt, workspace, cfg, iter_dir, dry_run=dry_run)
-        wall_time = time.monotonic() - t0
+    else:
+        # ----------------------------------------------------------------
+        # Pipeline: implement until correct, then optimize same workspace
+        # ----------------------------------------------------------------
+        implement_metrics: List[Dict[str, Any]] = []
+        optimize_metrics:  List[Dict[str, Any]] = []
+        implement_succeeded = False
 
-        # Save diff
-        _save_diff(workspace, iter_dir)
-        subprocess.run(["git", "add", "-A"], cwd=workspace, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "--allow-empty", "-m", f"iter {iteration}"],
-            cwd=workspace, capture_output=True,
-            env={**os.environ, "GIT_AUTHOR_NAME": "agent", "GIT_AUTHOR_EMAIL": "a@a",
-                 "GIT_COMMITTER_NAME": "agent", "GIT_COMMITTER_EMAIL": "a@a"},
-        )
+        # Phase 1 — implement
+        for iteration in range(cfg.max_iterations):
+            print(f"\n--- Trial {trial_idx} | Implement {iteration} ---")
+            prompt = _build_prompt(base_prompt, iteration, prev_metrics)
+            m, iter_dir = _execute_iteration(
+                cfg, workspace, trial_dir, f"impl_{iteration}",
+                prompt, dry_run, dylib_cache,
+            )
+            implement_metrics.append(m)
+            prev_metrics = m
+            if m.get("correct"):
+                implement_succeeded = True
+                # Ensure report.json sits in workspace root for optimize prompt
+                report_src = iter_dir / "report.json"
+                if report_src.exists():
+                    shutil.copy(report_src, workspace / "report.json")
+                print("  Implementation correct — starting optimize phase.")
+                break
 
-        # Build
-        print("  Building...")
-        if cfg.framework == "synstream":
-            build_exit, build_log = _build_synstream(workspace, cfg, dylib_cache)
-        else:
-            build_exit, build_log = _build_taskflow(workspace, cfg)
-        (iter_dir / "build.log").write_text(build_log)
-        print(f"  Build: {'OK' if build_exit == 0 else 'FAIL'}")
+        # Phase 2 — optimize (only when implement produced a correct solution)
+        if implement_succeeded and cfg.optimize_prompt_file:
+            opt_base = (
+                (HERE / "prompts" / cfg.optimize_prompt_file).read_text()
+                .replace("<REPO_ROOT>", str(REPO_ROOT))
+                .replace("<WORKSPACE>", str(workspace))
+            )
+            prev_metrics = None  # fresh feedback context
+            for opt_iter in range(cfg.max_optimize_iters):
+                print(f"\n--- Trial {trial_idx} | Optimize {opt_iter} ---")
+                prompt = _build_prompt(opt_base, opt_iter, prev_metrics)
+                m, _ = _execute_iteration(
+                    cfg, workspace, trial_dir, f"opt_{opt_iter}",
+                    prompt, dry_run, dylib_cache,
+                )
+                optimize_metrics.append(m)
+                prev_metrics = m
 
-        # Run
-        run_exit = 1
-        correct = False
-        if build_exit == 0:
-            print("  Running...")
-            if cfg.framework == "synstream":
-                run_exit, _ = _run_synstream(workspace, cfg, iter_dir, dylib_cache)
-                correct = verify_synstream_correctness(iter_dir)
-            else:
-                run_exit, _ = _run_taskflow(workspace, cfg, iter_dir)
-                correct = verify_taskflow_correctness(iter_dir)
-            print(f"  Run: {'OK' if run_exit == 0 else 'FAIL'} | correct={correct}")
+        summary = {
+            "implement": aggregate_trial_metrics(implement_metrics),
+            "optimize":  aggregate_trial_metrics(optimize_metrics) if optimize_metrics else None,
+        }
 
-        # Collect metrics
-        m = collect_iteration_metrics(
-            iter_dir, cfg.framework, build_exit, run_exit, wall_time, correct
-        )
-        (iter_dir / "metrics.json").write_text(json.dumps(m, indent=2))
-        iter_metrics.append(m)
-        prev_metrics = m
-
-        if correct and cfg.task == "implement":
-            print("  Implementation correct — stopping early.")
-            break
-
-    # Aggregate
-    summary = aggregate_trial_metrics(iter_metrics)
     (trial_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     print(f"\nTrial {trial_idx} summary: {json.dumps(summary, indent=2)}")
     return summary
