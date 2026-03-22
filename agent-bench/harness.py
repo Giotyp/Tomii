@@ -663,6 +663,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+    args.results = args.results.resolve()  # ensure absolute so workspace paths don't double
     cfg  = next(e for e in EXPERIMENTS if e.name == args.experiment)
     args.results.mkdir(parents=True, exist_ok=True)
 
