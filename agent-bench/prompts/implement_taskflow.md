@@ -1,4 +1,4 @@
-# Task: Implement Wavefront in SynStream
+# Task: Implement Wavefront in Taskflow
 
 ## Problem Description
 
@@ -19,34 +19,29 @@ Implement an N×N anti-diagonal wavefront sweep.
 
 ## Framework
 
-SynStream is a Rust task-graph framework with a Python API. The package is at:
+Taskflow is a header-only C++17 library. The headers are at:
 
 ```
-<REPO_ROOT>/synstream/
+<REPO_ROOT>/taskflow-bench/taskflow-lib/
 ```
 
-Read `AGENT.md` at `<REPO_ROOT>/AGENT.md` for a quick-reference on the plugin API.
+Read the headers to learn the API. Compile with:
 
-Run these discovery commands to understand the full API before writing code:
-
-```bash
-python -m synstream --schema          # graph construction: node options, arg types
-python -m synstream --list-knobs-json # all graph.run() runtime flags with search hints
+```
+g++ -O3 -std=c++17 -I<path-to-taskflow-lib> -lpthread
 ```
 
 ## What to create
 
 In `<WORKSPACE>`, create from scratch:
 
-- `Cargo.toml` — Cargo manifest for the plugin dylib
-- `src/lib.rs` — Rust kernel implementation
-- `run_wavefront.py` — Python script that builds the graph, runs the benchmark, and writes `report.json`
-
-No other files are required, but you may create additional source files if needed.
+- `wavefront.cpp` — C++ implementation
+- Optionally a `Makefile`
 
 ## Output requirements
 
 - Write `report.json` containing at minimum `{"summary": {"avg_latency_us": <float>}}`
+- Print per-iteration timing to stdout
 - After running, expose `grid[N-1][N-1]` (the bottom-right corner cell) and call:
   ```
   python <REPO_ROOT>/agent-bench/tools/verify_wavefront.py --n N --corner VALUE
@@ -55,4 +50,5 @@ No other files are required, but you may create additional source files if neede
 
 ## Verification
 
-After completing your implementation, run it and confirm the verifier prints `PASS`.
+After completing your implementation, build and run it.
+Confirm the verifier prints `PASS`.

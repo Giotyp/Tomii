@@ -75,9 +75,25 @@ _KNOB_DESCRIPTIONS: Dict[str, str] = {
     "report":  "Path for JSON summary report (avg/p99 latency, bottleneck hints)",
 }
 
+_KNOB_SEARCH_HINTS: Dict[str, str] = {
+    "workers":           "unimodal; binary search 1–physical_cores; diminishing returns past core count",
+    "slots":             "1 minimizes latency; >1 increases throughput; try 1,2,4,8",
+    "batching_size":     "unimodal; binary search 1–512; larger reduces scheduling overhead for fine-grained graphs",
+    "batching_limit":    "unimodal; try 1,2,4; higher allows more outstanding work",
+    "core_offset":       "set to 1 to leave CPU 0 for OS; rarely needs tuning otherwise",
+    "system_threads":    "leave at default 1 unless profiling shows scheduler bottleneck",
+    "max_streams":       "benchmark parameter; set to fixed value for fair comparison",
+    "exclude_streams":   "skip warmup streams; set to 1–3 to exclude JIT effects from timing",
+    "inline_continuation": "try both; often reduces latency for linear chains or low-fan-out graphs",
+    "coalesce_barriers": "helpful when node factor >> worker count (reduces barrier overhead)",
+    "slot_priority":     "try both when slots > 1; can reduce tail latency under imbalanced graphs",
+    "fifo":              "try both; depth-first (default) usually better for latency",
+    "use_rdtsc":         "enable for sub-us timing precision on x86; no effect on performance",
+}
+
 
 def list_knobs() -> str:
-    """Return a human+machine-readable list of all graph.run() options."""
+    """Return a human-readable list of all graph.run() options."""
     lines = ["graph.run() options", "=" * 40]
 
     def _section(title: str, flags: Dict[str, str], typ: str) -> None:
@@ -92,6 +108,35 @@ def list_knobs() -> str:
     _section("Boolean flags", _BOOL_FLAGS, "bool")
     _section("String flags", _STR_FLAGS, "str")
     return "\n".join(lines)
+
+
+def list_knobs_json() -> dict:
+    """Return a machine-readable dict of all graph.run() options with search hints."""
+    knobs = []
+    for key, flag in _INT_FLAGS.items():
+        knobs.append({
+            "name": key,
+            "type": "int",
+            "cli": flag,
+            "description": _KNOB_DESCRIPTIONS.get(key, ""),
+            "search_hint": _KNOB_SEARCH_HINTS.get(key, ""),
+        })
+    for key, flag in _BOOL_FLAGS.items():
+        knobs.append({
+            "name": key,
+            "type": "bool",
+            "cli": flag,
+            "description": _KNOB_DESCRIPTIONS.get(key, ""),
+            "search_hint": _KNOB_SEARCH_HINTS.get(key, "try both True and False"),
+        })
+    for key, flag in _STR_FLAGS.items():
+        knobs.append({
+            "name": key,
+            "type": "str",
+            "cli": flag,
+            "description": _KNOB_DESCRIPTIONS.get(key, ""),
+        })
+    return {"knobs": knobs}
 
 
 def build_command(

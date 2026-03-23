@@ -13,7 +13,8 @@ class ExperimentConfig:
     framework: str                     # "synstream" or "taskflow"
     task: str                          # "implement", "optimize", or "pipeline"
     prompt_file: str                   # relative to prompts/
-    reference_dir: str                 # relative to references/
+    reference_dir: str                 # relative to references/ (correctness baseline only)
+    seed_dir: str = ""                 # relative to seeds/ (agent starting point; falls back to reference_dir)
     max_iterations: int = 8
     max_budget_usd: float = 5.00
     timeout_s: int = 400
@@ -48,6 +49,7 @@ EXPERIMENTS = [
         task="optimize",
         prompt_file="optimize_synstream.md",
         reference_dir="synstream",
+        seed_dir="synstream",          # naive cell-by-cell seed, no tile_size hint
         max_iterations=5,
         timeout_s=300,   # read + explore + edit only; harness does build+run
     ),
@@ -57,6 +59,7 @@ EXPERIMENTS = [
         task="optimize",
         prompt_file="optimize_taskflow.md",
         reference_dir="taskflow",
+        seed_dir="taskflow",           # same as reference; already naive
         max_iterations=5,
         timeout_s=300,   # read + explore + edit only; harness does build+run
     ),

@@ -72,5 +72,7 @@ graph.run(
 | `slots=N` | Concurrent in-flight streams |
 | `max_streams=N` | Total streams to process |
 | `timing="timing.csv"` | Write per-node timing CSV |
+| `report="report.json"` | Write JSON performance report (per-node stats, critical path, bottleneck hints) |
 
-Run `python -m synstream --list-knobs` to see all available `graph.run()` options. Full Python API: `README.md`.
+Run `python -m synstream --list-knobs-json` for all `graph.run()` options with search hints (machine-readable JSON).
+Run `python -m synstream --schema` for graph construction parameters (node options, arg types).

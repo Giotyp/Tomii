@@ -64,8 +64,11 @@ def _build_prompt(base_prompt: str, iteration: int, prev: Optional[Dict[str, Any
         if prev.get("bottleneck_hints"):
             feedback_parts.append(f"Bottleneck hints: {json.dumps(prev['bottleneck_hints'], indent=2)}\n")
         if prev.get("critical_path"):
-            cp = prev["critical_path"][:5]  # top 5
-            feedback_parts.append(f"Critical path (top nodes): {json.dumps(cp, indent=2)}\n")
+            cp = prev["critical_path"]
+            # critical_path may be a list (legacy) or a dict (native synstream report)
+            if isinstance(cp, list):
+                cp = cp[:5]
+            feedback_parts.append(f"Critical path: {json.dumps(cp, indent=2)}\n")
     return "".join(feedback_parts)
 
 
@@ -78,10 +81,14 @@ def _setup_workspace(cfg: ExperimentConfig, trial_dir: Path) -> Path:
     workspace.mkdir(parents=True, exist_ok=True)
 
     if cfg.task == "optimize":
-        # Seed with working reference solution so agent has a baseline to optimize
-        reference = HERE / "references" / cfg.reference_dir
-        if reference.exists():
-            shutil.copytree(reference, workspace, dirs_exist_ok=True)
+        # Seed workspace from seeds/ (no optimization hints) when available,
+        # otherwise fall back to references/ for backward compatibility.
+        if cfg.seed_dir:
+            seed = HERE / "seeds" / cfg.seed_dir
+        else:
+            seed = HERE / "references" / cfg.reference_dir
+        if seed.exists():
+            shutil.copytree(seed, workspace, dirs_exist_ok=True)
 
     # For taskflow experiments, symlink the taskflow-lib headers into the workspace
     # so the Makefile's -Itaskflow-lib resolves correctly from any working directory.
@@ -374,10 +381,11 @@ def _harness_checks(
         avg_us = report.get("summary", {}).get("avg_latency_us", 0)
         serial_floor_us = cfg.n * cfg.n * 0.5e-3  # 0.5 ns/cell serial lower bound
         if avg_us > 0 and avg_us < serial_floor_us / 10:
+            correct = False
             extra["suspicious_latency"] = True
             with open(iter_dir / "run.log", "a") as f:
                 f.write(
-                    f"\nHARNESS_WARN: suspicious_latency "
+                    f"\nHARNESS_FAIL: suspicious_latency "
                     f"({avg_us:.1f} µs < threshold {serial_floor_us / 10:.1f} µs)\n"
                 )
 
@@ -397,6 +405,22 @@ def _harness_checks(
                 pass
 
     return correct, extra
+
+
+# ---------------------------------------------------------------------------
+# Baseline helpers
+# ---------------------------------------------------------------------------
+
+def _read_baseline_latency(trial_dir: Path) -> Optional[float]:
+    """Return avg_latency_us from the pre-run baseline, or None if unavailable."""
+    baseline_report = trial_dir / "baseline" / "report.json"
+    if not baseline_report.exists():
+        return None
+    try:
+        data = json.loads(baseline_report.read_text())
+        return data.get("summary", {}).get("avg_latency_us")
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -587,7 +611,8 @@ def run_trial(
                 print("  Implementation correct — stopping early.")
                 break
 
-        summary = aggregate_trial_metrics(iter_metrics)
+        baseline_latency = _read_baseline_latency(trial_dir)
+        summary = aggregate_trial_metrics(iter_metrics, baseline_latency_us=baseline_latency)
 
     else:
         # ----------------------------------------------------------------
@@ -634,9 +659,11 @@ def run_trial(
                 optimize_metrics.append(m)
                 prev_metrics = m
 
+        impl_summary = aggregate_trial_metrics(implement_metrics)
+        impl_baseline = impl_summary.get("best_latency_us")
         summary = {
-            "implement": aggregate_trial_metrics(implement_metrics),
-            "optimize":  aggregate_trial_metrics(optimize_metrics) if optimize_metrics else None,
+            "implement": impl_summary,
+            "optimize":  aggregate_trial_metrics(optimize_metrics, baseline_latency_us=impl_baseline) if optimize_metrics else None,
         }
 
     (trial_dir / "summary.json").write_text(json.dumps(summary, indent=2))

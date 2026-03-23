@@ -130,7 +130,10 @@ def collect_iteration_metrics(
     return m
 
 
-def aggregate_trial_metrics(iter_metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
+def aggregate_trial_metrics(
+    iter_metrics: List[Dict[str, Any]],
+    baseline_latency_us: Optional[float] = None,
+) -> Dict[str, Any]:
     """Aggregate per-iteration metrics into per-trial summary."""
     total_tokens      = sum(m.get("total_tokens", 0)  for m in iter_metrics)
     total_wall_time   = sum(m.get("wall_time_s", 0)   for m in iter_metrics)
@@ -145,13 +148,22 @@ def aggregate_trial_metrics(iter_metrics: List[Dict[str, Any]]) -> Dict[str, Any
     ]
     best_latency = min(latencies) if latencies else None
     naive_latency = latencies[0] if latencies else None
+    # within-session improvement: first correct attempt → best attempt
     improvement = (naive_latency / best_latency) if (naive_latency and best_latency) else None
+    # improvement vs pre-optimization baseline (more meaningful for optimize experiments)
+    improvement_vs_baseline = (
+        (baseline_latency_us / best_latency)
+        if (baseline_latency_us and best_latency)
+        else None
+    )
 
     return {
-        "iterations_to_correct": first_correct,
-        "compile_errors_total":  compile_errors,
-        "best_latency_us":       best_latency,
-        "improvement_ratio":     improvement,
-        "total_tokens":          total_tokens,
-        "total_wall_time_s":     round(total_wall_time, 1),
+        "iterations_to_correct":    first_correct,
+        "compile_errors_total":     compile_errors,
+        "baseline_latency_us":      baseline_latency_us,
+        "best_latency_us":          best_latency,
+        "improvement_ratio":        improvement,
+        "improvement_vs_baseline":  improvement_vs_baseline,
+        "total_tokens":             total_tokens,
+        "total_wall_time_s":        round(total_wall_time, 1),
     }
