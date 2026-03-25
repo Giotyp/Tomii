@@ -97,26 +97,31 @@ If `overhead_pct < 20%`, fix the kernel. In between, try scheduling knobs first
 
 ### Graph Coarsening Recipe
 
-When `overhead_pct` is high, reduce task count by grouping cells into tiles:
+When `overhead_pct` is high, the graph has too many fine-grained tasks. Reduce task count
+by grouping work units into tiles — replace one task per unit with one task per tile:
 
 ```python
-# Before: 512 tasks per diagonal (fine-grained, high overhead)
-for d in range(2 * n - 1):
-    width = min(d + 1, n, 2 * n - 1 - d)
-    diag = graph.node(f"diag_{d}", func="wf_cell_cm",
-                      factor=width, args=[grid, n_var, d])
+# Before: factor = full width (many small tasks, high scheduling overhead)
+for step in range(num_steps):
+    width = compute_width(step)          # e.g. cells in this diagonal / row / chunk
+    node = graph.node(f"step_{step}", func="your_unit_fn",
+                      factor=width, args=[data, step])
 
-# After: ceil(512/64) = 8 tasks per diagonal (coarse, low overhead)
-tile_size = 64
-for d in range(2 * n - 1):
-    width = min(d + 1, n, 2 * n - 1 - d)
+# After: factor = ceil(width / tile_size)  (fewer, larger tasks, lower overhead)
+tile_size = 64                           # start here; tune based on report feedback
+for step in range(num_steps):
+    width = compute_width(step)
     n_tiles = (width + tile_size - 1) // tile_size
-    diag = graph.node(f"diag_{d}", func="wf_tile_cm",
-                      factor=n_tiles, args=[grid, n_var, d, tile_size])
+    node = graph.node(f"step_{step}", func="your_tile_fn",
+                      factor=n_tiles, args=[data, step, tile_size])
 ```
 
-`tile_size = max_node_factor / 8` from `critical_path.max_node_factor` is a good starting point.
-Then sweep: 16, 32, 64, 128 and pick the knee of the latency curve.
+The Rust kernel for `your_tile_fn` receives the tile index and `tile_size` and loops over
+`[index * tile_size, min((index+1) * tile_size, width))` internally.
+
+**Choosing tile_size**: use `critical_path.max_node_factor` from `report.json` as the
+current per-node factor. Target `tile_size = max_node_factor / 8` as a starting point,
+then sweep 16 → 32 → 64 → 128 and pick the knee of the latency curve.
 
 ### Applying `optimization_suggestions`
 
