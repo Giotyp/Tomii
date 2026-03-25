@@ -76,3 +76,50 @@ graph.run(
 
 Run `python -m synstream --list-knobs-json` for all `graph.run()` options with search hints (machine-readable JSON).
 Run `python -m synstream --schema` for graph construction parameters (node options, arg types).
+
+## Performance Model
+
+### Reading `report.json`
+
+The two most useful fields for directing optimization effort:
+
+```
+summary.scheduling_overhead_diagnostic.overhead_pct   # % of latency that is scheduling, not compute
+summary.scheduling_overhead_diagnostic.interpretation  # plain-English diagnosis
+optimization_suggestions                               # ranked list: what to change and why
+critical_path.max_node_factor                          # highest factor on critical path
+summary.total_tasks_per_stream                         # total tasks spawned per stream
+```
+
+**Decision rule**: if `overhead_pct > 60%`, fix graph topology first (tile_size / group_size).
+If `overhead_pct < 20%`, fix the kernel. In between, try scheduling knobs first
+(`coalesce_barriers`, `batching_size`, `inline_continuation`).
+
+### Graph Coarsening Recipe
+
+When `overhead_pct` is high, reduce task count by grouping cells into tiles:
+
+```python
+# Before: 512 tasks per diagonal (fine-grained, high overhead)
+for d in range(2 * n - 1):
+    width = min(d + 1, n, 2 * n - 1 - d)
+    diag = graph.node(f"diag_{d}", func="wf_cell_cm",
+                      factor=width, args=[grid, n_var, d])
+
+# After: ceil(512/64) = 8 tasks per diagonal (coarse, low overhead)
+tile_size = 64
+for d in range(2 * n - 1):
+    width = min(d + 1, n, 2 * n - 1 - d)
+    n_tiles = (width + tile_size - 1) // tile_size
+    diag = graph.node(f"diag_{d}", func="wf_tile_cm",
+                      factor=n_tiles, args=[grid, n_var, d, tile_size])
+```
+
+`tile_size = max_node_factor / 8` from `critical_path.max_node_factor` is a good starting point.
+Then sweep: 16, 32, 64, 128 and pick the knee of the latency curve.
+
+### Applying `optimization_suggestions`
+
+Each entry has `priority`, `knob`, `action`, and `estimated_speedup`. Apply priority-1 first,
+rebuild, and re-read the report before applying lower-priority suggestions — coarsening often
+makes runtime-flag suggestions obsolete.

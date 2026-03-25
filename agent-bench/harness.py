@@ -61,7 +61,12 @@ def _build_prompt(base_prompt: str, iteration: int, prev: Optional[Dict[str, Any
         feedback_parts.append("**Build and run succeeded!** Now optimize for lower latency.\n")
         if prev.get("avg_latency_us"):
             feedback_parts.append(f"Current avg latency: {prev['avg_latency_us']:.1f} µs\n")
-        if prev.get("bottleneck_hints"):
+        if prev.get("scheduling_overhead_diagnostic"):
+            sod = prev["scheduling_overhead_diagnostic"]
+            feedback_parts.append(f"Scheduling overhead: {json.dumps(sod, indent=2)}\n")
+        if prev.get("optimization_suggestions"):
+            feedback_parts.append(f"Optimization suggestions: {json.dumps(prev['optimization_suggestions'], indent=2)}\n")
+        elif prev.get("bottleneck_hints"):
             feedback_parts.append(f"Bottleneck hints: {json.dumps(prev['bottleneck_hints'], indent=2)}\n")
         if prev.get("critical_path"):
             cp = prev["critical_path"]
@@ -80,30 +85,30 @@ def _setup_workspace(cfg: ExperimentConfig, trial_dir: Path) -> Path:
     workspace = trial_dir / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
 
-    if cfg.task == "optimize":
-        # Seed workspace from seeds/ (no optimization hints) when available,
-        # otherwise fall back to references/ for backward compatibility.
-        if cfg.seed_dir:
-            seed = HERE / "seeds" / cfg.seed_dir
-        else:
-            seed = HERE / "references" / cfg.reference_dir
-        if seed.exists():
-            shutil.copytree(seed, workspace, dirs_exist_ok=True)
-
     # For taskflow experiments, symlink the taskflow-lib headers into the workspace
-    # so the Makefile's -Itaskflow-lib resolves correctly from any working directory.
+    # so agents can include them via -Itaskflow-lib without needing external paths.
     if cfg.framework == "taskflow":
         taskflow_lib_src = REPO_ROOT / "taskflow-bench" / "taskflow-lib"
         taskflow_lib_dst = workspace / "taskflow-lib"
         if taskflow_lib_src.exists() and not taskflow_lib_dst.exists():
             taskflow_lib_dst.symlink_to(taskflow_lib_src)
 
-    # Fix any SynStream Cargo.toml copied into the workspace:
-    #   1. Add [workspace] so cargo doesn't try to pull it into the root repo
-    #      workspace (git worktrees share git root with the main repo, so cargo
-    #      traversal reaches /home/.../SynStream/Cargo.toml which rejects it).
-    #   2. Replace relative synstream-types path with absolute path so it
-    #      resolves correctly from any workspace location.
+    # Copy AGENT.md so agents have framework guidance without needing repo access.
+    agent_md_src = REPO_ROOT / "AGENT.md"
+    if agent_md_src.exists():
+        shutil.copy(agent_md_src, workspace / "AGENT.md")
+
+    # Copy verify_wavefront.py so agents can validate correctness without repo access.
+    verifier_src = HERE / "tools" / "verify_wavefront.py"
+    if verifier_src.exists():
+        shutil.copy(verifier_src, workspace / "verify_wavefront.py")
+
+    # Fix any SynStream Cargo.toml written by the agent following AGENT.md template:
+    #   1. Add [workspace] so cargo doesn't traverse to the root repo workspace
+    #      (git worktrees share the git root with the main repo).
+    #   2. Replace relative synstream-types/synstream-macro paths with absolute paths
+    #      so they resolve correctly from any workspace location.
+    # This runs after git init so the initial commit reflects pre-fixed files.
     cargo_toml = workspace / "Cargo.toml"
     if cargo_toml.exists():
         text = cargo_toml.read_text()
@@ -158,6 +163,19 @@ def _get_env_with_exports() -> Dict[str, str]:
     # Strip any stale wrapper/func env vars so the Python API can set them cleanly.
     for var in ("WRAP_PATH", "REG_PATH", "FUNC_PATH"):
         env.pop(var, None)
+
+    # Route claude -p through the LLM gateway to avoid Anthropic submission billing.
+    # Requires AGENT_BENCH_API_KEY to be set. Set AGENT_BENCH_GATEWAY=0 to disable.
+    if os.environ.get("AGENT_BENCH_GATEWAY", "1") != "0":
+        gateway_key = os.environ.get("AGENT_BENCH_API_KEY", "")
+        if gateway_key:
+            env["ANTHROPIC_BASE_URL"]   = "https://llm.kyle.pub/s/zai-coding"
+            env["ANTHROPIC_AUTH_TOKEN"] = gateway_key
+            env.setdefault("ANTHROPIC_DEFAULT_SONNET_MODEL", "glm-5")
+            env.setdefault("ANTHROPIC_DEFAULT_OPUS_MODEL",   "glm-5")
+            env.setdefault("ANTHROPIC_DEFAULT_HAIKU_MODEL",  "glm-4.5-air")
+            env["API_TIMEOUT_MS"] = "3000000"
+
     return env
 
 
@@ -233,6 +251,11 @@ def _run_synstream(workspace: Path, cfg: ExperimentConfig, iter_dir: Path, dylib
     for candidate in [workspace / "report.json", workspace / "results" / "report.json"]:
         if candidate.exists() and not report_path.exists():
             shutil.copy(candidate, report_path)
+
+    # Always mirror the canonical report back into the workspace so the agent
+    # can read it directly on the next iteration (--add-dir workspace).
+    if report_path.exists():
+        shutil.copy(report_path, workspace / "report.json")
 
     return result.returncode, log
 
@@ -514,7 +537,6 @@ def _invoke_claude(
         "--output-format",    "json",
         "--max-budget-usd",   str(cfg.max_budget_usd),
         "--add-dir",          str(workspace),
-        "--add-dir",          str(REPO_ROOT),
     ]
 
     t0 = time.monotonic()

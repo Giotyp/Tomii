@@ -33,10 +33,26 @@ def graph_schema() -> dict:
                             "Number of parallel task instances per stream. "
                             "Controls the granularity of parallelism for this node."
                         ),
+                        "optimization_hint": (
+                            "Large factor (>256) creates many fine-grained tasks and increases "
+                            "scheduling overhead. If report.json shows "
+                            "summary.scheduling_overhead_diagnostic.overhead_pct > 60%, reduce "
+                            "factor via a coarsening parameter (e.g. tile_size in your graph "
+                            "builder, or group_size on this node). "
+                            "Typical sweet spot: factor 8–64 for compute-bound tasks."
+                        ),
+                        "example": 8,
                     },
                     "group_size": {
                         "type": "int",
                         "description": "Group consecutive task instances into batches for scheduling efficiency.",
+                        "optimization_hint": (
+                            "Equivalent to dividing factor by group_size for scheduling purposes — "
+                            "N tasks become N/group_size scheduled units with no graph change. "
+                            "Use when graph topology is fixed but task overhead is too high. "
+                            "Try group_size=8 when factor>64 and overhead_pct is high."
+                        ),
+                        "example": 8,
                     },
                     "priority": {
                         "type": "int",

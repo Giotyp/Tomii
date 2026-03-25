@@ -19,13 +19,11 @@ Implement an N×N anti-diagonal wavefront sweep.
 
 ## Framework
 
-SynStream is a Rust task-graph framework with a Python API. The package is at:
+SynStream is a Rust task-graph framework with a Python API.
+The `synstream` package is installed in the environment — `import synstream as ss`.
 
-```
-<REPO_ROOT>/synstream/
-```
-
-Read `AGENT.md` at `<REPO_ROOT>/AGENT.md` for a quick-reference on the plugin API.
+Read `AGENT.md` in this workspace for a quick-reference on the plugin API,
+Cargo.toml template, and performance optimization guide.
 
 Run these discovery commands to understand the full API before writing code:
 
@@ -46,12 +44,15 @@ No other files are required, but you may create additional source files if neede
 
 ## Output requirements
 
-- Write `report.json` containing at minimum `{"summary": {"avg_latency_us": <float>}}`
+- Write `report.json` by passing `report="report.json"` to `graph.run()`. This produces
+  structured diagnostics (`optimization_suggestions`, `scheduling_overhead_diagnostic`)
+  needed for the optimize phase. The report must contain at minimum
+  `{"summary": {"avg_latency_us": <float>}}`.
 - After running, expose `grid[N-1][N-1]` (the bottom-right corner cell) and call:
   ```
-  python <REPO_ROOT>/agent-bench/tools/verify_wavefront.py --n N --corner VALUE
+  python verify_wavefront.py --n N --corner VALUE
   ```
-  where `VALUE` is your computed `grid[N-1][N-1]`.  Confirm it prints `PASS`.
+  where `VALUE` is your computed `grid[N-1][N-1]`. Confirm it prints `PASS`.
 
 ## Verification
 

@@ -48,8 +48,10 @@ def parse_synstream_report(report_path: Path) -> Dict[str, Any]:
         "min_latency_us":   summary.get("min_latency_us"),
         "total_streams":    summary.get("total_streams"),
         "worker_busy_pct":  summary.get("worker_busy_pct"),
-        "bottleneck_hints": data.get("bottleneck_hints", []),
-        "critical_path":    data.get("critical_path", []),
+        "bottleneck_hints":              data.get("bottleneck_hints", []),
+        "optimization_suggestions":      data.get("optimization_suggestions", []),
+        "scheduling_overhead_diagnostic": summary.get("scheduling_overhead_diagnostic"),
+        "critical_path":                 data.get("critical_path"),
     }
 
 

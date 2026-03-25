@@ -19,16 +19,12 @@ Implement an N×N anti-diagonal wavefront sweep.
 
 ## Framework
 
-Taskflow is a header-only C++17 library. The headers are at:
-
-```
-<REPO_ROOT>/taskflow-bench/taskflow-lib/
-```
+Taskflow is a header-only C++17 library. The headers are in `taskflow-lib/` in this workspace.
 
 Read the headers to learn the API. Compile with:
 
 ```
-g++ -O3 -std=c++17 -I<path-to-taskflow-lib> -lpthread
+g++ -O3 -std=c++17 -Itaskflow-lib -lpthread
 ```
 
 ## What to create
@@ -44,9 +40,9 @@ In `<WORKSPACE>`, create from scratch:
 - Print per-iteration timing to stdout
 - After running, expose `grid[N-1][N-1]` (the bottom-right corner cell) and call:
   ```
-  python <REPO_ROOT>/agent-bench/tools/verify_wavefront.py --n N --corner VALUE
+  python verify_wavefront.py --n N --corner VALUE
   ```
-  where `VALUE` is your computed `grid[N-1][N-1]`.  Confirm it prints `PASS`.
+  where `VALUE` is your computed `grid[N-1][N-1]`. Confirm it prints `PASS`.
 
 ## Verification
 

@@ -220,6 +220,8 @@ def main() -> None:
             "min_latency_us":  native_summary.get("min_latency_us"),
             "total_streams":   iters,
             "worker_busy_pct": native_summary.get("worker_busy_pct"),
+            "total_tasks_per_stream":         native_summary.get("total_tasks_per_stream"),
+            "scheduling_overhead_diagnostic": native_summary.get("scheduling_overhead_diagnostic"),
         },
         "config": {
             "n":         n,
@@ -230,6 +232,7 @@ def main() -> None:
         "critical_path":    native.get("critical_path", []),
         "bottleneck_hints": native.get("bottleneck_hints", []),
         "resource_utilization": native.get("resource_utilization", {}),
+        "optimization_suggestions": native.get("optimization_suggestions", []),
     }
 
     report_path = args.report or (HERE / "report.json")

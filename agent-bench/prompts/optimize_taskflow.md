@@ -17,7 +17,7 @@ Do **not** rebuild or re-run the benchmark yourself — the harness will do that
 
 ## Discovering options
 
-Explore Taskflow headers at `<REPO_ROOT>/taskflow-bench/taskflow-lib/` for available
+Explore Taskflow headers at `taskflow-lib/` in this workspace for available
 partitioner strategies, executor options, and graph construction APIs.
 
 ## Success criteria
