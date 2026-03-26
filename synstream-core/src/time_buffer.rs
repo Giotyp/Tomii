@@ -1355,9 +1355,11 @@ impl TimeBuffer {
         }
 
         // A'. High sequential-node-count, low per-node factor: wrong graph structure.
-        // Fires when overhead is high, the critical path is long (many sequential nodes),
-        // but per-node factor is small — indicating cell-by-cell or row-by-row graphs
-        // rather than the anti-diagonal pattern with large parallel factor per node.
+        // Fires when overhead is high, the critical path is long, per-node factor is small,
+        // AND total_tasks_per_stream is high — indicating a cell-by-cell or row-by-row graph.
+        // total_tasks_per_stream is required (not null) to distinguish genuinely bad graphs
+        // from correct graphs that happen to report low factor because coalesce_barriers is
+        // active (which suppresses per-task timing and artificially lowers reported factor).
         if overhead_pct > 60.0 && max_cp_factor < 16 && total_tasks_per_stream > 200 {
             if let Some(ref cp) = critical_path {
                 if cp.length_nodes > 50 {
@@ -1366,19 +1368,23 @@ impl TimeBuffer {
                         "category": "graph_topology",
                         "description": format!(
                             "Critical path has {} nodes with max per-node factor {} \
-                             ({} total tasks/stream, {:.0}% overhead). The graph is too \
-                             sequential: each node does little parallel work. \
-                             Restructure to the anti-diagonal pattern: one node per \
-                             diagonal with factor = cells_in_diagonal.",
-                            cp.length_nodes, max_cp_factor, total_tasks_per_stream,
-                            overhead_pct
+                             ({:.0}% overhead). The graph is too sequential: the critical \
+                             path is long but each node does little parallel work. \
+                             Restructure so each node covers one parallel work unit \
+                             with a large factor (e.g. one node per diagonal, \
+                             factor = cells_in_diagonal).",
+                            cp.length_nodes, max_cp_factor, overhead_pct
                         ),
-                        "action": "Rewrite run_wavefront.py to loop over anti-diagonals \
-                                   (d in 0..2N-1), create one node per diagonal with \
-                                   factor = min(d+1, N, 2N-1-d), then apply tile_size \
-                                   coarsening as shown in AGENT.md § Graph Coarsening Recipe.",
-                        "knob": "tile_size",
-                        "suggested_value": 64,
+                        "action": "Rewrite your graph builder to create one node per parallel \
+                                   work unit with factor = number_of_parallel_items. \
+                                   For a wavefront sweep: loop over anti-diagonals \
+                                   (d in 0..2N-1), one node per diagonal with \
+                                   factor = min(d+1, N, 2N-1-d), then apply coarsening \
+                                   as shown in AGENT.md § Graph Coarsening Recipe. \
+                                   Do NOT simply change tile_size — the graph loop \
+                                   structure itself needs to change.",
+                        "knob": "graph_structure",
+                        "suggested_value": null,
                         "estimated_speedup": "3–10x",
                         "confidence": "high",
                     }));

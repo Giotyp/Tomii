@@ -95,6 +95,11 @@ summary.total_tasks_per_stream                         # total tasks spawned per
 If `overhead_pct < 20%`, fix the kernel. In between, try scheduling knobs first
 (`coalesce_barriers`, `batching_size`, `inline_continuation`).
 
+> **Warning:** `coalesce_barriers=True` groups tasks into bulk batches and suppresses
+> `total_tasks_per_stream` in subsequent `report.json` (field will be `null`).
+> Apply it only after graph structure is confirmed correct — i.e. `optimization_suggestions`
+> is empty or contains only low-priority entries.
+
 ### Graph Coarsening Recipe
 
 When `overhead_pct` is high, the graph has too many fine-grained tasks. Reduce task count
