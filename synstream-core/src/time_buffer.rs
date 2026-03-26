@@ -1388,10 +1388,10 @@ impl TimeBuffer {
 
         // A''. Mixed overhead zone with over-coarsened graph (small factor, moderate overhead).
         // Fires when: overhead is in the mixed range (20-60%), cp_factor is already very small
-        // (< 8), indicating the graph may be over-coarsened — too few tasks per diagonal to
-        // saturate workers. Recommends reducing tile_size to expose more parallelism.
-        // This prevents agents from increasing tile_size further (wrong direction) when no
-        // other suggestion fires.
+        // (< 8), indicating the graph may be over-coarsened — too few tasks per CP node to
+        // saturate workers. Recommends increasing factor to expose more parallelism.
+        // This prevents agents from coarsening further (wrong direction) when no other
+        // suggestion fires.
         if overhead_pct > 20.0 && overhead_pct < 60.0 && max_cp_factor > 0 && max_cp_factor < 8 {
             if let Some(ref cp) = critical_path {
                 if cp.length_nodes >= 4 {
@@ -1401,17 +1401,19 @@ impl TimeBuffer {
                         "category": "graph_topology",
                         "description": format!(
                             "Overhead is {:.0}% (mixed profile) with only {} tasks per CP node. \
-                             This suggests the graph is over-coarsened: each node processes so much \
-                             data that some CPUs stay idle while others finish. Doubling the factor \
-                             to {} exposes more parallel work per diagonal.",
+                             The graph may be over-coarsened: too few parallel tasks per node to \
+                             keep all workers busy. Increasing factor to ~{} exposes more \
+                             parallel work per node.",
                             overhead_pct, max_cp_factor, suggested_factor
                         ),
                         "action": format!(
-                            "Halve tile_size (or divide the current tile_size by 2) so that each \
-                             diagonal node has factor ~{} instead of {}. Then re-benchmark.",
-                            suggested_factor, max_cp_factor
+                            "Double the factor on critical-path nodes to ~{} (currently {}). \
+                             If your graph builder uses a tile_size or group_size to compute \
+                             factor, halve that parameter. If you set factor directly in \
+                             graph.node(), increase it to ~{}. Then re-benchmark.",
+                            suggested_factor, max_cp_factor, suggested_factor
                         ),
-                        "knob": "tile_size",
+                        "knob": "factor",
                         "suggested_value": suggested_factor,
                         "estimated_speedup": "1.3–2x",
                         "confidence": "medium",
