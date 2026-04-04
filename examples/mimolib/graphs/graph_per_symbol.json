@@ -25,7 +25,7 @@
             "args": [
                 {
                     "type": "String",
-                    "value": "/home/george/Agora/files/config/ci/tddconfig-sim-ul-big.json"
+                    "value": "/home/george/Agora/files/config/ci/tddconfig-sim-ul.json"
                 }
             ]
         },

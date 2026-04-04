@@ -1,5 +1,10 @@
 use crate::functions::*;
 
+/// Zero-compute no-op — isolates pure Vec<CmTypes> dispatch overhead.
+pub fn noop_cm_wrap(_args: Vec<CmTypes>) -> CmTypes {
+    CmTypes::None
+}
+
 pub fn generate_vector_cm_wrap(args: Vec<CmTypes>) -> CmTypes {
     let buf_size = match args[0] {
         CmTypes::Usize(x) => x.clone(),

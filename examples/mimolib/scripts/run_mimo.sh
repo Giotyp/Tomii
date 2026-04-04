@@ -18,27 +18,33 @@ DYN_LIB="$SYNSTREAM_DIR/target/release/libmimolib.so"
 # Json Application graph
 APP_GRAPH=$(readlink -f "$MIMOLIB_DIR/graphs/graph_per_symbol.json")
 
-# Configuration Parameters
+# Configuration Parameters (all tunable knobs are overridable via env vars)
 WORKERS=26
 RUNTIME=5000
-SLOTS=40
+SLOTS=10
 EXP_STREAMS=500
 EXCLUDE_STREAMS=200 # Exclude first N streams from statistics (warm-up)
 RcvThreads=4  # Number of dedicated network receiver threads
 SYSTEM_THREADS=8
 SLOT_PRIORITY="--slot-priority"
-RECORD_STREAM="--record-stream 499"
+RECORD_STREAM=${MIMO_RECORD_STREAM:+"--record-stream ${MIMO_RECORD_STREAM}"}
 INITS="--inits"
 RDTSC="--use-rdtsc"
-BATCHING_SIZE=32
-BATCHING_LIMIT=10
+BATCHING_SIZE=${MIMO_BATCHING_SIZE:-32}
+BATCHING_LIMIT=${MIMO_BATCHING_LIMIT:-10}
+SCHED_FLUSH_THRESHOLD=${MIMO_SCHED_FLUSH_THRESHOLD:-32}
+SPIN_ITERATIONS=${MIMO_SPIN_ITERATIONS:-32}
+SPIN_WAIT_SPIN_ITERS=${MIMO_SPIN_WAIT_SPIN_ITERS:-64}
+SPIN_WAIT_YIELD_ITERS=${MIMO_SPIN_WAIT_YIELD_ITERS:-256}
+SPIN_WAIT_PARK_NS=${MIMO_SPIN_WAIT_PARK_NS:-100}
 OUTPUT="$MIMOLIB_DIR/out.txt"
 TIMING="timing"
 TIMING_FILE="$MIMOLIB_DIR/timing.txt"
 SCHED_FILE="$MIMOLIB_DIR/timing_sched.csv"
-RECORD="--record"
+REPORT_FILE=${MIMO_REPORT_FILE:-"$MIMOLIB_DIR/report.json"}
+RECORD=${MIMO_RECORD:+"--record"}
 DEBUG=""
-CLEANUP=1
+CLEANUP=${MIMO_CLEANUP:-1}
 RUN_BIN=1
 
 
@@ -97,6 +103,12 @@ if [ $RUN_BIN -eq 1 ]; then
         --slots $SLOTS \
         --max-streams $EXP_STREAMS \
         --exclude-streams $EXCLUDE_STREAMS \
+        --report $REPORT_FILE \
+        --sched-flush-threshold $SCHED_FLUSH_THRESHOLD \
+        --spin-iterations $SPIN_ITERATIONS \
+        --spin-wait-spin-iters $SPIN_WAIT_SPIN_ITERS \
+        --spin-wait-yield-iters $SPIN_WAIT_YIELD_ITERS \
+        --spin-wait-park-ns $SPIN_WAIT_PARK_NS \
         $DEBUG $RDTSC \
         $RECORD $RECORD_STREAM \
         $INITS $SLOT_PRIORITY --custom &
@@ -114,18 +126,22 @@ if [ $RUN_BIN -eq 1 ]; then
 fi
 
 
-uv run python $PYTHON_DIR/scheduler_visualize.py $SCHED_FILE \
-    --units ms \
-    -o "$SCRIPTS_DIR/timing.png" \
-    --system-threads $SYSTEM_THREADS \
-    --title "MIMO Benchmark ${TIMING} -- Batch Limit $BATCHING_LIMIT, Batch Size $BATCHING_SIZE" \
-    --tasks '[fft, csi, beam, demul, decode]' \
-    --plot-latency
+if [ "${MIMO_SKIP_VIZ:-0}" = "0" ]; then
+    uv run python $PYTHON_DIR/scheduler_visualize.py $SCHED_FILE \
+        --units ms \
+        -o "$SCRIPTS_DIR/timing.png" \
+        --system-threads $SYSTEM_THREADS \
+        --title "MIMO Benchmark ${TIMING} -- Batch Limit $BATCHING_LIMIT, Batch Size $BATCHING_SIZE" \
+        --tasks '[fft, csi, beam, demul, decode]' \
+        --plot-latency
 
-echo "Generated scheduler visualization"
+    echo "Generated scheduler visualization"
 
-uv run python $PYTHON_DIR/analyze_sched.py $SCHED_FILE \
-    --system-threads $SYSTEM_THREADS \
-    --units ms
+    uv run python $PYTHON_DIR/analyze_sched.py $SCHED_FILE \
+        --system-threads $SYSTEM_THREADS \
+        --units ms
 
-echo "Completed analysis of scheduling data"
+    echo "Completed analysis of scheduling data"
+fi
+
+echo "RUN COMPLETED"
