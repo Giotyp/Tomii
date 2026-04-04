@@ -1294,6 +1294,190 @@ impl TimeBuffer {
             }
         }
 
+        // ── 9b. Agent-native derived metrics ─────────────────────────────────────
+        // Total tasks spawned per stream (sum of all node factors).
+        let total_tasks_per_stream: usize = node_stats_map
+            .values()
+            .map(|s| if num_included > 0 { s.invocations / num_included } else { 0 })
+            .sum();
+
+        // Max factor among critical-path nodes (key input for tile-size suggestion).
+        let max_cp_factor: usize = critical_path_node_set
+            .iter()
+            .filter_map(|name| node_stats_map.get(*name))
+            .map(|s| if num_included > 0 { s.invocations / num_included } else { 0 })
+            .max()
+            .unwrap_or(0);
+
+        // Scheduling overhead: gap between measured latency and critical-path compute.
+        let cp_exec_us = critical_path
+            .as_ref()
+            .map_or(0.0, |cp| (cp.estimated_latency_us * 100.0).round() / 100.0);
+        let overhead_us = (avg_latency_us - critical_path.as_ref().map_or(0.0, |cp| cp.estimated_latency_us)).max(0.0);
+        let overhead_pct = if avg_latency_us > 0.0 { overhead_us / avg_latency_us * 100.0 } else { 0.0 };
+        let sched_interpretation = if critical_path.is_none() {
+            "critical path unavailable — pass graph edges to enable diagnostics".to_string()
+        } else if overhead_pct >= 80.0 {
+            format!(
+                "{:.0}% of latency is scheduling overhead — reducing task count via graph \
+                 coarsening will have high impact; try larger tile_size or group_size in \
+                 your graph builder, or enable coalesce_barriers=True",
+                overhead_pct
+            )
+        } else if overhead_pct >= 50.0 {
+            format!(
+                "{:.0}% of latency is scheduling overhead — consider coalesce_barriers=True, \
+                 batching_size tuning, or inline_continuation=True",
+                overhead_pct
+            )
+        } else if overhead_pct < 20.0 {
+            format!(
+                "{:.0}% of latency is scheduling overhead — compute-bound; focus on \
+                 kernel optimization rather than graph structure",
+                overhead_pct
+            )
+        } else {
+            format!(
+                "{:.0}% of latency is scheduling overhead — mixed profile; try both \
+                 kernel optimization and scheduling knobs",
+                overhead_pct
+            )
+        };
+
+        // ── 9c. Structured optimization suggestions ───────────────────────────────
+        let mut suggestions: Vec<serde_json::Value> = Vec::new();
+
+        // A. Graph topology coarsening (highest impact when overhead-dominated).
+        if overhead_pct > 60.0 && max_cp_factor >= 64 {
+            if let Some(ref cp) = critical_path {
+                let suggested_tile = max_cp_factor / 8;
+                let speedup_lo = (max_cp_factor / 16).max(1);
+                let speedup_hi = max_cp_factor / 8;
+                suggestions.push(json!({
+                    "priority": 1,
+                    "category": "graph_topology",
+                    "description": format!(
+                        "Critical path has {} nodes; highest-factor critical-path node has \
+                         factor {} ({} total tasks/stream). Graph coarsening will cut \
+                         scheduling overhead by ~{}x.",
+                        cp.length_nodes, max_cp_factor, total_tasks_per_stream,
+                        max_cp_factor / 8
+                    ),
+                    "action": format!(
+                        "In your graph builder, reduce the per-node factor from {} to ~{} \
+                         by increasing tile_size from 1 to {}.",
+                        max_cp_factor, max_cp_factor / 8, suggested_tile
+                    ),
+                    "knob": "tile_size",
+                    "suggested_value": suggested_tile,
+                    "estimated_speedup": format!("{}–{}x", speedup_lo, speedup_hi),
+                    "confidence": "high",
+                }));
+            }
+        }
+
+        // A'. High sequential-node-count, low per-node factor: wrong graph structure.
+        // Fires when overhead is high, the critical path is long (many sequential nodes),
+        // but per-node factor is small — indicating cell-by-cell or row-by-row graphs
+        // rather than the anti-diagonal pattern with large parallel factor per node.
+        if overhead_pct > 60.0 && max_cp_factor < 16 && total_tasks_per_stream > 200 {
+            if let Some(ref cp) = critical_path {
+                if cp.length_nodes > 50 {
+                    suggestions.push(json!({
+                        "priority": 1,
+                        "category": "graph_topology",
+                        "description": format!(
+                            "Critical path has {} nodes with max per-node factor {} \
+                             ({} total tasks/stream, {:.0}% overhead). The graph is too \
+                             sequential: each node does little parallel work. \
+                             Restructure to the anti-diagonal pattern: one node per \
+                             diagonal with factor = cells_in_diagonal.",
+                            cp.length_nodes, max_cp_factor, total_tasks_per_stream,
+                            overhead_pct
+                        ),
+                        "action": "Rewrite run_wavefront.py to loop over anti-diagonals \
+                                   (d in 0..2N-1), create one node per diagonal with \
+                                   factor = min(d+1, N, 2N-1-d), then apply tile_size \
+                                   coarsening as shown in AGENT.md § Graph Coarsening Recipe.",
+                        "knob": "tile_size",
+                        "suggested_value": 64,
+                        "estimated_speedup": "3–10x",
+                        "confidence": "high",
+                    }));
+                }
+            }
+        }
+
+        // B. coalesce_barriers for high-factor barrier fan-outs.
+        if overhead_pct > 40.0 && max_cp_factor >= 8 {
+            suggestions.push(json!({
+                "priority": 2,
+                "category": "runtime_flags",
+                "description": format!(
+                    "Barrier fan-out overhead is likely significant with max critical-path \
+                     factor {}. coalesce_barriers groups simultaneous completions into bulk tasks.",
+                    max_cp_factor
+                ),
+                "action": "Set coalesce_barriers=True in graph.run()",
+                "knob": "coalesce_barriers",
+                "suggested_value": true,
+                "estimated_speedup": "1.2–2x",
+                "confidence": "medium",
+            }));
+        }
+
+        // C. batching_size for high task counts.
+        if total_tasks_per_stream > 10_000 && overhead_pct > 40.0 {
+            suggestions.push(json!({
+                "priority": 3,
+                "category": "runtime_flags",
+                "description": format!(
+                    "{} tasks/stream creates high scheduler-submission pressure. \
+                     Larger batching_size amortizes per-batch overhead.",
+                    total_tasks_per_stream
+                ),
+                "action": "Try batching_size=64 (or 16, 256) in graph.run()",
+                "knob": "batching_size",
+                "suggested_value": 64,
+                "estimated_speedup": "1.1–1.5x",
+                "confidence": "medium",
+            }));
+        }
+
+        // D. Worker underutilization after coarsening — only fire when overhead is low
+        //    (overhead not the bottleneck) and there is room to fine-grain tasks.
+        //    Requires max_cp_factor > 8 (not already maximally coarsened) and
+        //    overhead_pct < 60% (compute-bound regime; if overhead is high, suggestion A
+        //    already gives the correct coarsening advice and D would contradict it).
+        if !worker_busy_pct.is_empty() && max_cp_factor > 8 && overhead_pct < 60.0 {
+            let max_util = worker_busy_pct.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            if max_util < 50.0 {
+                if let Some(ref cp) = critical_path {
+                    if cp.length_nodes > 10 {
+                        suggestions.push(json!({
+                            "priority": 4,
+                            "category": "parallelism",
+                            "description": format!(
+                                "Peak worker utilization is only {:.0}% — workers are mostly idle \
+                                 because the critical path serialises execution. SynStream workers \
+                                 are Rayon threads that consume graph tasks; intra-task thread \
+                                 parallelism (e.g. adding Rayon inside a kernel function) is NOT \
+                                 the fix and will not compile due to Send/Sync constraints.",
+                                max_util
+                            ),
+                            "action": "Reduce tile_size to create more parallel tasks per diagonal \
+                                       (e.g. tile_size = max_node_factor / 4). Do NOT add Rayon \
+                                       or threads inside kernel functions.",
+                            "knob": "tile_size",
+                            "suggested_value": (max_cp_factor / 4).max(1),
+                            "estimated_speedup": "1.5–3x",
+                            "confidence": "medium",
+                        }));
+                    }
+                }
+            }
+        }
+
         // ── 10. Build per_node JSON array ─────────────────────────────────────────
         let on_critical: std::collections::HashSet<&str> = critical_path_node_set;
 
@@ -1325,11 +1509,22 @@ impl TimeBuffer {
 
         // ── 11. Assemble final JSON ───────────────────────────────────────────────
         let critical_path_json = match &critical_path {
-            Some(cp) => json!({
-                "length_nodes": cp.length_nodes,
-                "estimated_latency_us": (cp.estimated_latency_us * 100.0).round() / 100.0,
-                "nodes": cp.nodes,
-            }),
+            Some(cp) => {
+                // Truncate node list to a short sample to avoid bloating the report.
+                let nodes_sample: Vec<String> = if cp.nodes.len() > 5 {
+                    let mut s: Vec<String> = cp.nodes[..5].to_vec();
+                    s.push(format!("... ({} more)", cp.nodes.len() - 5));
+                    s
+                } else {
+                    cp.nodes.clone()
+                };
+                json!({
+                    "length_nodes": cp.length_nodes,
+                    "max_node_factor": max_cp_factor,
+                    "estimated_latency_us": (cp.estimated_latency_us * 100.0).round() / 100.0,
+                    "nodes_sample": nodes_sample,
+                })
+            }
             None => json!(null),
         };
 
@@ -1345,6 +1540,13 @@ impl TimeBuffer {
                 "p50_latency_us": (p50_latency_us * 100.0).round() / 100.0,
                 "p99_latency_us": (p99_latency_us * 100.0).round() / 100.0,
                 "throughput_streams_per_sec": (throughput_streams_per_sec * 10.0).round() / 10.0,
+                "total_tasks_per_stream": total_tasks_per_stream,
+                "scheduling_overhead_diagnostic": {
+                    "critical_path_exec_us": cp_exec_us,
+                    "overhead_us": (overhead_us * 100.0).round() / 100.0,
+                    "overhead_pct": (overhead_pct * 10.0).round() / 10.0,
+                    "interpretation": sched_interpretation,
+                },
             },
             "per_node": per_node_entries,
             "critical_path": critical_path_json,
@@ -1352,6 +1554,7 @@ impl TimeBuffer {
                 "worker_busy_pct": worker_busy_pct_rounded,
             },
             "bottleneck_hints": hints,
+            "optimization_suggestions": suggestions,
         });
 
         // ── 12. Write to file ─────────────────────────────────────────────────────
