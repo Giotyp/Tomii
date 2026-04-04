@@ -21,6 +21,7 @@ Typical usage::
 """
 
 from ._graph import Graph
+from ._runner import list_knobs
 from ._loop import Condition, IndexFunc, Loop
 from ._node import NodeDep, NodeOutput
 from ._types import (
@@ -50,6 +51,7 @@ from ._types import (
 __all__ = [
     # Core
     "Graph",
+    "list_knobs",
     # Node dependency helpers
     "NodeOutput",
     "NodeDep",
