@@ -1,0 +1,13 @@
+[workspace]
+
+[package]
+name = "wavefront-ablation"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "wavefront-ablation"
+path = "src/main.rs"
+
+[dependencies]
+crossbeam-channel = "0.5"
