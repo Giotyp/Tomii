@@ -67,6 +67,7 @@ app.build_and_run(wrap_path="wrappers.rs", reg_path="reg.rs",
 | `app.post_node(...)` | Post-computation node (runs after the main graph completes) |
 | `node.out(i)` | Data dependency on instance `i` of a predecessor (`$res`) |
 | `node.wait(i)` | Barrier — wait for instance `i` to complete before proceeding (`$barrier`) |
+| `('dep', node)` | Ordering-only dependency — wait for `node` to complete without consuming its output (`$dep`) |
 | `app.network(**cfg)` | Configure UDP/TCP packet injection for network-driven graphs |
 | `app.to_json()` / `app.save_json(path)` | Export graph to JSON without building |
 
@@ -128,6 +129,7 @@ app.run(
     max_streams=100,
     max_runtime=60,
     timing="timing.csv",
+    report="report.json",
     slot_priority=True,
     exclude_streams=5,
     debug=False,
@@ -141,6 +143,68 @@ See `examples/matrix-compute/run_bench.py` for a complete pipeline (FFT + matrix
 ```bash
 python examples/matrix-compute/run_bench.py --workers 4 --no-clean
 ```
+
+---
+
+## Agent-Native
+
+SynStream exposes structured discovery and diagnostic interfaces designed for LLM agents and automated optimization loops.
+
+### Discovery commands
+
+```bash
+python -m synstream --list-knobs          # human-readable list of all graph.run() options
+python -m synstream --list-knobs-json     # machine-readable JSON with search hints per knob
+python -m synstream --schema              # JSON schema for the full graph construction API
+```
+
+`list_knobs()` and `list_knobs_json()` are also available as Python functions:
+
+```python
+import synstream as ss
+print(ss.list_knobs())
+```
+
+### Structured report
+
+Pass `report="report.json"` to `graph.run()` (or `--report` on the CLI) to emit a JSON performance report after each run:
+
+```python
+app.run(workers=8, slots=1, report="report.json")
+```
+
+Top-level keys:
+
+| Key | Description |
+|-----|-------------|
+| `summary.avg_latency_us` / `p50` / `p99` / `std_dev` | Stream latency statistics |
+| `summary.throughput_streams_per_sec` | End-to-end throughput |
+| `summary.total_tasks_per_stream` | Total scheduled tasks per stream |
+| `summary.scheduling_overhead_diagnostic` | `overhead_pct`, `overhead_us`, `critical_path_exec_us`, `interpretation` |
+| `per_node` | Per-node avg/p99 exec time, invocation count, `on_critical_path` flag |
+| `critical_path` | Estimated serial latency, node count, `max_node_factor` |
+| `resource_utilization.worker_busy_pct` | Per-worker utilization % |
+| `bottleneck_hints` | Free-text hints for the top bottleneck nodes |
+| `optimization_suggestions` | Structured list of prioritized suggestions (see below) |
+
+### Optimization suggestions
+
+`optimization_suggestions` is an array of objects, each with:
+
+```json
+{
+  "priority": 1,
+  "category": "graph_topology",
+  "description": "...",
+  "action": "...",
+  "knob": "tile_size",
+  "suggested_value": 32,
+  "estimated_speedup": "4–8x",
+  "confidence": "high"
+}
+```
+
+Categories: `graph_topology`, `runtime_flags`, `parallelism`. The suggestions fire based on `overhead_pct` thresholds and guide agents toward graph coarsening, `coalesce_barriers`, `batching_size`, or parallelism adjustments.
 
 ---
 
@@ -215,6 +279,7 @@ Options:
 Graphs define `initializations` (pre-computed objects) and `nodes` (tasks). Key argument types:
 - `$ref` — Reference to an initialized object
 - `$res` — Result from a predecessor node (data dependency)
+- `$dep` — Ordering-only dependency (wait for completion, no output consumed)
 - `$barrier` — Wait for all predecessor instances
 - `$network` — Network packet injection marker
 
