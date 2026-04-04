@@ -1069,6 +1069,15 @@ impl TimeBuffer {
         let p50_latency_us = percentile(50.0);
         let p99_latency_us = percentile(99.0);
 
+        let std_dev_latency_us: f64 = if num_included > 1 {
+            let variance = sorted_latencies.iter()
+                .map(|&x| { let d = x - avg_latency_us; d * d })
+                .sum::<f64>() / num_included as f64;
+            variance.sqrt()
+        } else {
+            0.0
+        };
+
         // Throughput: streams per second using total included wall time.
         let total_wall_us: f64 = included_total_times
             .iter()
@@ -1593,6 +1602,7 @@ impl TimeBuffer {
             "summary": {
                 "total_streams": num_included,
                 "avg_latency_us": (avg_latency_us * 100.0).round() / 100.0,
+                "std_dev_latency_us": (std_dev_latency_us * 100.0).round() / 100.0,
                 "p50_latency_us": (p50_latency_us * 100.0).round() / 100.0,
                 "p99_latency_us": (p99_latency_us * 100.0).round() / 100.0,
                 "throughput_streams_per_sec": (throughput_streams_per_sec * 10.0).round() / 10.0,
