@@ -14,7 +14,9 @@ target/*
 *.csv
 *.svg
 shared/**
-paper/**
+mimo-bench/__pycache__/*
+mimo-bench/results/*
+paper/
 cst_macros/**
 synstream/__pycache__/*
 synstream-core/_examples/**
@@ -27,8 +29,10 @@ bilateral-bench/data/*
 bilateral-bench/results/*
 bilateral-bench/synstream/__pycache__/*
 bilateral-bench/taskflow/bilateral_wavefront
+ablation-bench/target/*
+taskflow-bench/taskflow-lib
 timely-bench/target/*
-agent-bench/__pycache__/*
+agent-bench/*
 agent-bench/results*
 jraph-py/**
 rust-translator/**
