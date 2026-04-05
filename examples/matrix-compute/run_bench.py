@@ -162,6 +162,9 @@ def main() -> None:
     out_file.unlink(missing_ok=True)
     timing_file.unlink(missing_ok=True)
 
+    report_file = HERE / "report.txt"
+    report_file.unlink(missing_ok=True)
+
     app = build_graph()
 
     # SCRIPT_DIR is read by get_out_file() to locate the result file
@@ -169,8 +172,7 @@ def main() -> None:
 
     # Step 1: build SynStream + plugin library (mirrors: cargo build + cargo build --manifest-path)
     app.build(
-        wrap_path=str(HERE / "wrappers.rs"),
-        reg_path=str(HERE / "reg.rs"),
+        func_path=str(HERE / "src" / "lib.rs"),
         plugin_manifest=str(HERE / "Cargo.toml"),
         release=True,
         clean=args.clean,
@@ -194,6 +196,7 @@ def main() -> None:
         inits=args.inits,
         slot_priority=args.slot_priority,
         debug=args.debug,
+        report=str(report_file)
     )
 
 
