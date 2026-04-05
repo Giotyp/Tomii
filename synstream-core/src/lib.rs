@@ -21,7 +21,6 @@ pub mod network_funcs;
 pub mod obj_gen;
 pub mod resolution_state;
 pub mod runtime;
-pub mod runtime_funcs;
 pub mod scheduler;
 pub mod time_buffer;
 pub mod utils_rdtsc;

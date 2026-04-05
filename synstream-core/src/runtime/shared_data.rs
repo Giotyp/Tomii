@@ -1,0 +1,153 @@
+use crate::network::{NetworkSocket, PacketMessage};
+use crate::resolution_state::ResolutionState;
+use crate::time_buffer::TimeBufferManager;
+use crate::{buffers::*, graph::*, scheduler::*};
+use flume::{Receiver, Sender};
+use parking_lot::{Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+use synstream_types::*;
+
+/// Type aliases for the crossbeam batch_queue channel used by workers → resolution threads.
+pub type BatchQueueTx = crossbeam_channel::Sender<crate::buffers::NodeInfo>;
+pub type BatchQueueRx = crossbeam_channel::Receiver<crate::buffers::NodeInfo>;
+
+/// Slot state for priority-based processing
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotState {
+    Active,    // Slot is actively processing and sending tasks to scheduler
+    Buffering, // Slot is buffering with tasks
+    Inactive,  // Slot is inactive with no tasks
+}
+
+/// Precomputed node cache and predecessor routing tables.
+pub struct GraphCache {
+    pub node_cache: Vec<super::node_cache::NodeCacheEntry>,
+    pub pred_index_filter: Arc<Vec<Vec<Option<(usize, usize)>>>>,
+    pub pred_group_by: Arc<Vec<Vec<Option<usize>>>>,
+    pub pred_succ_1to1_offset: Arc<Vec<Vec<Option<isize>>>>,
+    pub total_tasks: usize,
+    pub total_cond_tasks: usize,
+}
+
+/// All immutable configuration and tuning knobs.
+pub struct RuntimeConfig {
+    pub slots: usize,
+    pub max_streams: usize,
+    pub max_runtime: Option<u64>,
+    pub system_threads: usize,
+    pub receiver_threads: usize,
+    pub workers: usize,
+    pub core_offset: usize,
+    pub receiver_core_offset: usize,
+    pub slot_priority_enabled: bool,
+    pub coalesce_barriers: bool,
+    pub inline_continuation: bool,
+    pub single_slot_mode: bool,
+    pub record_stream: Option<usize>,
+    pub target_batch_size: usize,
+    pub batch_timeout_us: u64,
+    pub spin_iterations: u32,
+    pub sched_flush_threshold: usize,
+    pub spin_wait_spin_iters: u32,
+    pub spin_wait_yield_iters: u32,
+    pub spin_wait_park_ns: u64,
+    pub recv_pool_size: usize,
+}
+
+/// All per-slot atomics and lock-protected slot state.
+pub struct SlotData {
+    /// Slot generation counters — incremented on slot completion for lazy reinit.
+    pub generation: Arc<Vec<AtomicU64>>,
+    pub pending_tasks: Arc<Vec<AtomicUsize>>,
+    pub pending_cond_tasks: Arc<Vec<AtomicUsize>>,
+    pub processing_count: Arc<Vec<AtomicUsize>>,
+    pub needs_check: Arc<Vec<AtomicBool>>,
+    pub packet_counters: Arc<Vec<AtomicUsize>>,
+    pub packet_complete: Arc<Vec<AtomicBool>>,
+    pub stream_id: Arc<Vec<AtomicUsize>>,
+    pub active_bitmap: Arc<AtomicU64>,
+    /// Condition node spawn tracking per slot.
+    pub cond_instances_to_spawn: Arc<Vec<Vec<AtomicU64>>>,
+    pub states: Arc<RwLock<Vec<SlotState>>>,
+    pub running_streams: Arc<RwLock<Vec<(usize, usize)>>>,
+    /// Per-slot buffering: holds ready nodes with packet data waiting for slot activation.
+    pub buffers: Arc<RwLock<Vec<Vec<(NodeInfo, Option<CmTypes>)>>>>,
+    pub last_assigned: Arc<AtomicUsize>,
+}
+
+/// Network receiver infrastructure.
+pub struct NetworkInfra {
+    pub shutdown_flag: Arc<AtomicBool>,
+    pub receive_finished: Arc<AtomicBool>,
+    /// Flume MPSC channel from network receivers to resolution threads.
+    pub packet_sender: Sender<PacketMessage>,
+    pub packet_receiver: Receiver<PacketMessage>,
+    pub receiver_sockets: Vec<NetworkSocket>,
+    pub packet_drop_counters: Vec<AtomicUsize>,
+    /// Per-socket buffer return channels: resolution thread → receiver thread.
+    pub buffer_return_senders: Vec<Sender<Vec<u8>>>,
+    /// Receiver ends taken exactly once when the corresponding receiver thread is spawned.
+    pub buffer_return_receivers: Vec<Mutex<Option<Receiver<Vec<u8>>>>>,
+    pub streams_receive_counter: Arc<AtomicUsize>,
+    /// Counts frames dropped because no slot was available when they arrived.
+    pub dropped_streams: Arc<AtomicUsize>,
+    /// Per-frame drop bitmap — prevents double-counting of dropped frames.
+    pub frame_dropped: Arc<Vec<AtomicBool>>,
+}
+
+/// Scheduler, batch queue, resolution state, and result storage.
+pub struct ExecCtx {
+    pub scheduler: Arc<SchedulerImpl>,
+    pub batch_queue_tx: BatchQueueTx,
+    pub batch_queue_rx: BatchQueueRx,
+    pub resolution_state: Arc<dyn ResolutionState>,
+    pub node_results: Arc<crate::buffers::LockFreeResultMap>,
+    pub initial_prep_done: Arc<AtomicUsize>,
+}
+
+/// Timing, recording, and stream counters.
+pub struct Telemetry {
+    pub time_buffer: Option<Arc<TimeBufferManager>>,
+    pub async_recorder: Option<Arc<crate::async_recorder::AsyncRecorder>>,
+    pub base_instant: Arc<Instant>,
+    pub job_counter: Arc<AtomicUsize>,
+    pub stream_complete_counter: Arc<AtomicUsize>,
+}
+
+// Shared data across all SynStream threads - immutable or internally synchronized
+pub struct SharedData {
+    /// Immutable graph definition — kept flat for unchanged access pattern.
+    pub graph: Graph,
+    pub graph_cache: GraphCache,
+    pub config: RuntimeConfig,
+    pub slot_data: SlotData,
+    pub net: NetworkInfra,
+    pub exec: ExecCtx,
+    pub telemetry: Telemetry,
+}
+
+/// Returns the appropriate load ordering for slot completion counters.
+///
+/// With `single_slot_mode` (slots == 1) only one stream runs at a time, so AcqRel
+/// pairwise synchronisation is sufficient.  Multi-slot mode requires SeqCst for total
+/// ordering across concurrent slot reinitialisation.
+#[inline(always)]
+pub(super) fn slot_load_ordering(shared: &SharedData) -> Ordering {
+    if shared.config.single_slot_mode {
+        Ordering::Acquire
+    } else {
+        Ordering::SeqCst
+    }
+}
+
+/// Returns the appropriate read-modify-write ordering for slot completion counters.
+#[inline(always)]
+pub(super) fn slot_rmw_ordering(shared: &SharedData) -> Ordering {
+    if shared.config.single_slot_mode {
+        Ordering::AcqRel
+    } else {
+        Ordering::SeqCst
+    }
+}
