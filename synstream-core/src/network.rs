@@ -23,7 +23,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::runtime_funcs::SharedData;
+use crate::runtime::SharedData;
 
 /// Raw packet message forwarded from receiver thread to resolution
 #[derive(Debug, Clone)]
@@ -150,11 +150,11 @@ pub fn single_socket_receiver_loop(
     let read_timeout = Duration::from_micros(1);
 
     // Get socket and channel references
-    let socket = &shared.receiver_sockets[socket_id];
+    let socket = &shared.net.receiver_sockets[socket_id];
     let _ = socket.set_read_timeout(Some(read_timeout));
-    let tx = &shared.packet_sender;
-    let drop_counter = &shared.packet_drop_counters[socket_id];
-    let shutdown = &shared.shutdown_flag;
+    let tx = &shared.net.packet_sender;
+    let drop_counter = &shared.net.packet_drop_counters[socket_id];
+    let shutdown = &shared.net.shutdown_flag;
 
     let network_config_arc = shared
         .graph
@@ -164,7 +164,7 @@ pub fn single_socket_receiver_loop(
 
     // Pre-allocate local buffer pool — no shared mutex on the hot path.
     // Resolution thread returns used buffers via return_rx; fresh allocation is the burst fallback.
-    let mut local_pool: Vec<Vec<u8>> = (0..shared.recv_pool_size)
+    let mut local_pool: Vec<Vec<u8>> = (0..shared.config.recv_pool_size)
         .map(|_| {
             let mut v = Vec::with_capacity(packet_length);
             // SAFETY: recv() overwrites exactly packet_length bytes before any read.
@@ -265,13 +265,13 @@ pub fn multi_socket_receiver_loop(
         .expect("Network config must be present for receiver threads");
     let packet_length = network_config_arc.packet_length;
 
-    let shutdown = &shared.shutdown_flag;
+    let shutdown = &shared.net.shutdown_flag;
     let read_timeout = Duration::from_micros(1);
 
     // Set read timeout ONCE per socket during init — setsockopt on every
     // poll iteration was a syscall (~100-500 ns) burned per socket per loop.
     for socket_id in socket_range.clone() {
-        let socket = &shared.receiver_sockets[socket_id];
+        let socket = &shared.net.receiver_sockets[socket_id];
         let _ = socket.set_read_timeout(Some(read_timeout));
     }
 
@@ -281,7 +281,7 @@ pub fn multi_socket_receiver_loop(
     let range_len = socket_range.end - socket_range.start;
     let mut local_pools: Vec<Vec<Vec<u8>>> = (0..range_len)
         .map(|_| {
-            (0..shared.recv_pool_size)
+            (0..shared.config.recv_pool_size)
                 .map(|_| {
                     let mut v = Vec::with_capacity(packet_length);
                     // SAFETY: recv() overwrites exactly packet_length bytes before any read.
@@ -297,7 +297,7 @@ pub fn multi_socket_receiver_loop(
         thread_id, socket_range, core_id
     );
 
-    let tx = &shared.packet_sender;
+    let tx = &shared.net.packet_sender;
 
     let mut first_packet_received: bool = false;
     let mut first_packet_timestamp: Instant = Instant::now();
@@ -318,8 +318,8 @@ pub fn multi_socket_receiver_loop(
         // Round-robin poll all assigned sockets
         for socket_id in socket_range.clone() {
             let local_idx = socket_id - range_start;
-            let socket = &shared.receiver_sockets[socket_id];
-            let drop_counter = &shared.packet_drop_counters[socket_id];
+            let socket = &shared.net.receiver_sockets[socket_id];
+            let drop_counter = &shared.net.packet_drop_counters[socket_id];
 
             // Drain any buffers returned by the resolution thread into this socket's local pool.
             while let Ok(buf) = return_rxs[local_idx].try_recv() {
