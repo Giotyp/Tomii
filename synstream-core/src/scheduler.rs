@@ -837,19 +837,37 @@ impl WorkerAffinityConfig {
     }
 }
 
-pub fn create_scheduler(
-    scheduler_type: SchedulerType,
-    core_offset: usize,
-    num_workers: usize,
-    record: bool,
-    external_recorder: Option<Arc<AsyncRecorder>>,
-    base_instant: Instant,
-    system_threads: usize,
-    receiver_threads: usize,
-    target_batch_size: usize,
-    batch_timeout_us: u64,
-    worker_affinity: Option<WorkerAffinityConfig>,
-) -> SchedulerImpl {
+/// Configuration for creating a scheduler instance.
+///
+/// Used by [`create_scheduler`] to avoid a 11-parameter function signature.
+pub struct SchedulerConfig {
+    pub scheduler_type: SchedulerType,
+    pub core_offset: usize,
+    pub num_workers: usize,
+    pub record: bool,
+    pub external_recorder: Option<Arc<AsyncRecorder>>,
+    pub base_instant: Instant,
+    pub system_threads: usize,
+    pub receiver_threads: usize,
+    pub target_batch_size: usize,
+    pub batch_timeout_us: u64,
+    pub worker_affinity: Option<WorkerAffinityConfig>,
+}
+
+pub fn create_scheduler(cfg: SchedulerConfig) -> SchedulerImpl {
+    let SchedulerConfig {
+        scheduler_type,
+        core_offset,
+        num_workers,
+        record,
+        external_recorder,
+        base_instant,
+        system_threads,
+        receiver_threads,
+        target_batch_size,
+        batch_timeout_us,
+        worker_affinity,
+    } = cfg;
     match scheduler_type {
         SchedulerType::Fifo => SchedulerImpl::Fifo(FifoScheduler::new(
             core_offset,

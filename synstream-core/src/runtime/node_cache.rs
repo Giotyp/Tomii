@@ -96,14 +96,8 @@ pub(super) fn node_cache_entry(
     initial_nodes: &Vec<crate::IdType>,
     condition_nodes: &std::collections::HashSet<crate::IdType>,
 ) -> NodeCacheEntry {
-    print_debug(|| {
-        format!(
-            "Creating node cache entry for node {} name {}",
-            node.id, node.name
-        )
-    });
+    print_debug(|| format!("Creating node cache entry for node {} name {}", node.id, node.name));
 
-    // For network node, create empty cache entry
     if node.name == "$network" {
         return NodeCacheEntry {
             factor: node.factor,
@@ -119,167 +113,17 @@ pub(super) fn node_cache_entry(
             priority: crate::custom_scheduler::Priority::Normal,
             affinity_group: 0,
             worker_resolvable: false,
-            needs_result_store: false, // Computed later in SynRt::new
+            needs_result_store: false,
         };
     }
 
-    let mut rt_idxs_indexes = Vec::new();
-    let mut buffer_ref_indexes = Vec::new();
-    let mut buffer_values = Vec::new();
-    let mut rt_workers_indexes = Vec::new();
-    let mut real_res_indexes = Vec::new();
-    let mut res_indexes = Vec::new();
-    let mut args = vec![CmTypes::None; node.args.len()];
+    let (arg_cache, pred_hash) = build_arg_cache(&node.args, init_objects, true);
+    let pred_vec = build_pred_vec(pred_hash);
 
-    let mut idx_count = 0;
-    let mut pred_hash: std::collections::HashMap<IdType, Vec<usize>> =
-        std::collections::HashMap::new();
-
-    for (idx, arg) in node.args.iter().enumerate() {
-        if arg.is_condition() {
-            continue;
-        }
-        match &arg.type_ {
-            CmTypes::Ref(obj_id) => {
-                if *obj_id == 0 {
-                    // Reserved for $index
-                    rt_idxs_indexes.push(idx_count);
-                } else if *obj_id == 1 {
-                    // Reserved for $workers
-                    rt_workers_indexes.push(idx_count);
-                } else {
-                    // For init_object values
-                    let obj_vec = &init_objects[*obj_id];
-                    if obj_vec.len() > 1 {
-                        // If the object is a buffer, we need node_index
-                        buffer_ref_indexes.push(idx_count);
-                        buffer_values.push(obj_vec.clone());
-                    } else {
-                        // If the object is a variable, get the first element
-                        args[idx_count] = obj_vec[0].clone()
-                    }
-                }
-            }
-            CmTypes::Res(_) | CmTypes::Dep(_) => {
-                res_indexes.push(idx_count);
-                real_res_indexes.push(idx);
-                let pred = arg
-                    .predecessor
-                    .as_ref()
-                    .expect("Result argument missing predecessor");
-                let pred_id = pred.id;
-                let pred_idx_count = pred.indexes.len();
-
-                if !pred_hash.contains_key(&pred_id) {
-                    pred_hash.insert(pred_id, vec![pred_idx_count]);
-                } else {
-                    pred_hash.get_mut(&pred_id).unwrap().push(pred_idx_count);
-                }
-            }
-            CmTypes::Barrier(_) => { //ignore
-            }
-            _ => {
-                args[idx_count] = arg.type_.clone();
-            }
-        }
-        idx_count += 1;
-    }
-
-    let arg_cache = ArgCacheEntry {
-        args,
-        buffer_ref_indexes,
-        buffer_values,
-        rt_idxs_indexes,
-        rt_workers_indexes,
-        res_indexes,
-        real_res_indexes,
-    };
-
-    let max_pred_id = pred_hash.keys().max().cloned().unwrap_or(0);
-    let mut pred_vec = Vec::new();
-    for pred_id in 0..max_pred_id + 1 {
-        if let Some(pred_ids_count) = pred_hash.get(&pred_id) {
-            // count unique elements in pred_ids_count
-            let unique_counts: std::collections::HashSet<usize> =
-                pred_ids_count.iter().cloned().collect();
-            let count = unique_counts.iter().max().unwrap();
-            pred_vec.push(*count);
-        } else {
-            pred_vec.push(0);
-        }
-    }
-
-    // Pre-compute condition index for O(1) lookup
     let cond_index = if condition_nodes.contains(&node.id) {
-        condition_nodes
-            .iter()
-            .position(|&x| x == node.id)
-            .unwrap_or(0)
+        condition_nodes.iter().position(|&x| x == node.id).unwrap_or(0)
     } else {
         0
-    };
-
-    // Parse node-level condition if present
-    let node_condition = if let Some(cond) = &node.condition {
-        // Build arg cache for condition args
-        let mut cond_rt_idxs_indexes = Vec::new();
-        let mut cond_buffer_ref_indexes = Vec::new();
-        let mut cond_buffer_values = Vec::new();
-        let mut cond_rt_workers_indexes = Vec::new();
-        let mut cond_real_res_indexes = Vec::new();
-        let mut cond_res_indexes = Vec::new();
-        let mut cond_args_vec = vec![CmTypes::None; cond.args.len()];
-
-        let mut cond_idx_count = 0;
-        for (idx, arg) in cond.args.iter().enumerate() {
-            match &arg.type_ {
-                CmTypes::Ref(obj_id) => {
-                    if *obj_id == 0 {
-                        cond_rt_idxs_indexes.push(cond_idx_count);
-                    } else if *obj_id == 1 {
-                        cond_rt_workers_indexes.push(cond_idx_count);
-                    } else {
-                        let obj_vec = &init_objects[*obj_id];
-                        if obj_vec.len() > 1 {
-                            cond_buffer_ref_indexes.push(cond_idx_count);
-                            cond_buffer_values.push(obj_vec.clone());
-                        } else {
-                            cond_args_vec[cond_idx_count] = obj_vec[0].clone();
-                        }
-                    }
-                }
-                CmTypes::Res(_) | CmTypes::Dep(_) => {
-                    cond_res_indexes.push(cond_idx_count);
-                    cond_real_res_indexes.push(idx);
-                }
-                CmTypes::Barrier(_) => {
-                    // Ignore barriers in condition args
-                }
-                _ => {
-                    cond_args_vec[cond_idx_count] = arg.type_.clone();
-                }
-            }
-            cond_idx_count += 1;
-        }
-
-        let cond_arg_cache = ArgCacheEntry {
-            args: cond_args_vec,
-            buffer_ref_indexes: cond_buffer_ref_indexes,
-            buffer_values: cond_buffer_values,
-            rt_idxs_indexes: cond_rt_idxs_indexes,
-            rt_workers_indexes: cond_rt_workers_indexes,
-            res_indexes: cond_res_indexes,
-            real_res_indexes: cond_real_res_indexes,
-        };
-
-        Some(NodeConditionCache {
-            operation: cond.operation.clone(),
-            eval_value: cond.eval_value.clone(),
-            func_ptr: cond.func_ptr,
-            arg_cache: cond_arg_cache,
-        })
-    } else {
-        None
     };
 
     NodeCacheEntry {
@@ -291,12 +135,105 @@ pub(super) fn node_cache_entry(
         is_initial: initial_nodes.contains(&node.id),
         is_condition: condition_nodes.contains(&node.id),
         cond_index,
-        successor_count: 0, // Will be filled by caller with successor list length
-        node_condition,
-        // Defaults; overwritten in SynRt::new after scheduler is available
+        successor_count: 0,
+        node_condition: build_condition_cache(node, init_objects),
         priority: crate::custom_scheduler::Priority::Normal,
         affinity_group: 0,
-        worker_resolvable: false, // Computed in SynRt::new after successors are known
-        needs_result_store: false, // Computed in SynRt::new after successors are known
+        worker_resolvable: false,
+        needs_result_store: false,
     }
+}
+
+/// Build an [`ArgCacheEntry`] from a list of node arguments.
+///
+/// When `skip_conditions` is true, args where `is_condition() == true` are skipped
+/// (used for main node args, which interleave condition and non-condition entries).
+/// Also returns the predecessor hash needed to build `pred_vec` (callers that don't
+/// need it, e.g. condition arg caches, can simply discard it).
+fn build_arg_cache(
+    args: &[Arg],
+    init_objects: &[Vec<CmTypes>],
+    skip_conditions: bool,
+) -> (ArgCacheEntry, std::collections::HashMap<IdType, Vec<usize>>) {
+    let mut rt_idxs_indexes = Vec::new();
+    let mut buffer_ref_indexes = Vec::new();
+    let mut buffer_values = Vec::new();
+    let mut rt_workers_indexes = Vec::new();
+    let mut real_res_indexes = Vec::new();
+    let mut res_indexes = Vec::new();
+    let mut args_out = vec![CmTypes::None; args.len()];
+    let mut pred_hash: std::collections::HashMap<IdType, Vec<usize>> =
+        std::collections::HashMap::new();
+    let mut idx_count = 0;
+
+    for (idx, arg) in args.iter().enumerate() {
+        if skip_conditions && arg.is_condition() {
+            continue;
+        }
+        match &arg.type_ {
+            CmTypes::Ref(obj_id) => {
+                if *obj_id == 0 {
+                    rt_idxs_indexes.push(idx_count);
+                } else if *obj_id == 1 {
+                    rt_workers_indexes.push(idx_count);
+                } else {
+                    let obj_vec = &init_objects[*obj_id];
+                    if obj_vec.len() > 1 {
+                        buffer_ref_indexes.push(idx_count);
+                        buffer_values.push(obj_vec.clone());
+                    } else {
+                        args_out[idx_count] = obj_vec[0].clone();
+                    }
+                }
+            }
+            CmTypes::Res(_) | CmTypes::Dep(_) => {
+                res_indexes.push(idx_count);
+                real_res_indexes.push(idx);
+                if let Some(pred) = arg.predecessor.as_ref() {
+                    pred_hash.entry(pred.id).or_default().push(pred.indexes.len());
+                }
+            }
+            CmTypes::Barrier(_) => {}
+            _ => {
+                args_out[idx_count] = arg.type_.clone();
+            }
+        }
+        idx_count += 1;
+    }
+
+    (
+        ArgCacheEntry {
+            args: args_out,
+            buffer_ref_indexes,
+            buffer_values,
+            rt_idxs_indexes,
+            rt_workers_indexes,
+            res_indexes,
+            real_res_indexes,
+        },
+        pred_hash,
+    )
+}
+
+/// Convert the predecessor hash into a dense `pred_vec` indexed by predecessor node ID.
+fn build_pred_vec(pred_hash: std::collections::HashMap<IdType, Vec<usize>>) -> Vec<usize> {
+    let max_pred_id = pred_hash.keys().max().cloned().unwrap_or(0);
+    let mut pred_vec = vec![0usize; max_pred_id as usize + 1];
+    for (pred_id, counts) in &pred_hash {
+        let unique: std::collections::HashSet<usize> = counts.iter().cloned().collect();
+        pred_vec[*pred_id as usize] = *unique.iter().max().unwrap();
+    }
+    pred_vec
+}
+
+/// Build the optional [`NodeConditionCache`] for a node that carries a condition expression.
+fn build_condition_cache(node: &Node, init_objects: &[Vec<CmTypes>]) -> Option<NodeConditionCache> {
+    let cond = node.condition.as_ref()?;
+    let (arg_cache, _) = build_arg_cache(&cond.args, init_objects, false);
+    Some(NodeConditionCache {
+        operation: cond.operation.clone(),
+        eval_value: cond.eval_value.clone(),
+        func_ptr: cond.func_ptr,
+        arg_cache,
+    })
 }
