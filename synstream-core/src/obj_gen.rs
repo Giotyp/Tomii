@@ -8,7 +8,7 @@ use synstream_types::*;
 pub fn init_objects(
     initializations_json: &Vec<InitJson>,
     workers: usize,
-) -> Result<(Vec<Vec<CmTypes>>, RapidHashMap<String, usize>), serde_json::Error> {
+) -> Result<(Vec<Vec<CmTypes>>, RapidHashMap<String, usize>), crate::SynError> {
     // Create a new RapidHashMap to store the initialized objects
     let mut init_objects: Vec<Vec<CmTypes>> = Vec::new();
     let mut obj_id_map: RapidHashMap<String, usize> = RapidHashMap::new();
@@ -40,11 +40,10 @@ pub fn init_objects(
             let value_cmt = match value_cmt_res {
                 Ok(cmt) => cmt,
                 Err(e) => {
-                    eprintln!(
-                        "Error parsing type '{}' with value '{}': {}",
+                    return Err(format!(
+                        "No init function for type '{}' with value '{}': {}. Create an init function to handle this type.",
                         type_str, value_str, e
-                    );
-                    panic!("Create an init function to handle this type.");
+                    ).into());
                 }
             };
 
@@ -59,7 +58,10 @@ pub fn init_objects(
         } else {
             // function call needed
             let func_name = init.function.as_ref().unwrap();
-            let func_ptr = get_func(func_name).unwrap();
+            let func_ptr = get_func(func_name)
+                .ok_or_else(|| -> crate::SynError {
+                    format!("Function '{}' not found in registry", func_name).into()
+                })?;
 
             let mut value_vec: Vec<CmTypes> = Vec::new();
             for i in 0..factor {
@@ -91,11 +93,10 @@ pub fn init_objects(
                     let arg_cmt = match arg_cmt_res {
                         Ok(cmt) => cmt,
                         Err(e) => {
-                            eprintln!(
-                                "Error parsing type '{}' with value '{}': {}",
+                            return Err(format!(
+                                "No init function for type '{}' with value '{}': {}. Create an init function to handle this type.",
                                 type_str, value_str, e
-                            );
-                            panic!("Create an init function to handle this type.");
+                            ).into());
                         }
                     };
                     args.push(arg_cmt);

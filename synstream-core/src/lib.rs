@@ -27,6 +27,9 @@ pub mod utils_rdtsc;
 
 pub type IdType = u16;
 
+/// Boxed error type for public API boundaries.
+pub type SynError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
 /// Task metadata passed from the scheduler to the recording layer.
 #[derive(Debug, Clone, Copy)]
 pub struct TaskMeta {
