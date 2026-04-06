@@ -149,17 +149,17 @@ fn parse_condition(condition_json: &ConditionJson) -> InitCondition {
     }
 }
 
-pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::Error> {
-    let mut file = File::open(graph_json).unwrap();
+pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, crate::SynError> {
+    let mut file = File::open(graph_json)
+        .map_err(|e| -> crate::SynError {
+            format!("Cannot open graph file '{}': {}", graph_json, e).into()
+        })?;
     let mut contents = String::new();
-    file.read_to_string(&mut contents).unwrap();
+    file.read_to_string(&mut contents)?;
 
     let graph_parsed: GraphFile = serde_json::from_str(&contents)?;
 
-    let (init_vec, obj_id_map) = match init_objects(&graph_parsed.initializations, workers) {
-        Ok(v) => v,
-        Err(e) => panic!("Error parsing initial objects: {}", e),
-    };
+    let (init_vec, obj_id_map) = init_objects(&graph_parsed.initializations, workers)?;
 
     let mut graph = Graph::new();
     let mut name_to_id: RapidHashMap<String, IdType> = RapidHashMap::new();
@@ -168,7 +168,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
     graph.obj_id_map = obj_id_map.clone();
 
     if let Some(nc_json) = &graph_parsed.network_config {
-        let nc = parse_network_config(nc_json, &init_vec, &obj_id_map, &name_to_id, workers);
+        let nc = parse_network_config(nc_json, &init_vec, &obj_id_map, &name_to_id, workers)?;
         graph.set_network_config(&nc);
     } else {
         println!("No network_config found - skipping network receiver setup");
@@ -197,7 +197,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
     }
 
     for node_json in graph_parsed.nodes.iter() {
-        let node = parse_single_node(node_json, &init_vec, &obj_id_map, &name_to_id, workers);
+        let node = parse_single_node(node_json, &init_vec, &obj_id_map, &name_to_id, workers)?;
         let node_id = node_counter;
         node_counter += 1;
         name_to_id.insert(node_json.name.clone(), node_id);
@@ -210,7 +210,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
         &obj_id_map,
         &name_to_id,
         workers,
-    ) {
+    )? {
         graph.add_post_node(node);
     }
 
@@ -224,10 +224,12 @@ fn parse_network_config(
     obj_id_map: &RapidHashMap<String, usize>,
     name_to_id: &RapidHashMap<String, IdType>,
     workers: usize,
-) -> GraphNetworkConfig {
+) -> Result<GraphNetworkConfig, crate::SynError> {
     let socket_type = match nc_json.socket_type.to_lowercase().as_str() {
         "udp" => SocketType::Udp,
-        other => panic!("Unsupported socket type '{}'. Only 'udp' is currently supported.", other),
+        other => return Err(format!(
+            "Unsupported socket type '{}'. Only 'udp' is currently supported.", other
+        ).into()),
     };
 
     let num_sockets = nc_json.num_sockets.resolve(init_vec, obj_id_map, workers);
@@ -238,7 +240,9 @@ fn parse_network_config(
         if let Some(&obj_id) = obj_id_map.get(given) {
             init_vec[obj_id][0]
                 .as_string()
-                .expect("Network address must be a String type in init_objects")
+                .ok_or_else(|| -> crate::SynError {
+                    "Network address must be a String type in init_objects".into()
+                })?
         } else {
             given.clone()
         }
@@ -276,7 +280,7 @@ fn parse_network_config(
     println!("  Start port: {}", nc.start_port);
     println!("  Extract packet function: {}", nc_json.extract_packet_func);
 
-    nc
+    Ok(nc)
 }
 
 /// Parse a single node JSON entry into a [`Node`] with `id` set to 0.
@@ -287,7 +291,7 @@ fn parse_single_node(
     obj_id_map: &RapidHashMap<String, usize>,
     name_to_id: &RapidHashMap<String, IdType>,
     workers: usize,
-) -> Node {
+) -> Result<Node, crate::SynError> {
     let args: Vec<Arg> = node_json.args.iter()
         .map(|a| parse_arg(a, init_vec, obj_id_map, name_to_id, workers))
         .collect();
@@ -331,7 +335,7 @@ fn parse_single_node(
             .unwrap_or_else(|e| panic!("Invalid use_workers spec '{}': {}", spec_str, e))
     });
 
-    Node {
+    Ok(Node {
         name: node_json.name.clone(),
         args,
         id: 0, // caller assigns real ID
@@ -343,7 +347,7 @@ fn parse_single_node(
         condition,
         priority,
         use_workers,
-    }
+    })
 }
 
 /// Parse all post-node JSON entries into [`Node`] values with assigned IDs.
@@ -353,9 +357,10 @@ fn parse_post_nodes(
     obj_id_map: &RapidHashMap<String, usize>,
     name_to_id: &RapidHashMap<String, IdType>,
     workers: usize,
-) -> Vec<Node> {
+) -> Result<Vec<Node>, crate::SynError> {
     let mut post_counter: IdType = 0;
-    post_nodes_json.iter().map(|pn_json| {
+    let mut nodes = Vec::with_capacity(post_nodes_json.len());
+    for pn_json in post_nodes_json {
         let args: Vec<Arg> = pn_json.args.iter()
             .map(|a| parse_arg(a, init_vec, obj_id_map, name_to_id, workers))
             .collect();
@@ -364,7 +369,7 @@ fn parse_post_nodes(
         println!("Adding post-node: {}", pn_json.name);
         let post_id = post_counter;
         post_counter += 1;
-        Node {
+        nodes.push(Node {
             name: pn_json.name.clone(),
             args,
             id: post_id,
@@ -376,6 +381,7 @@ fn parse_post_nodes(
             condition: None,
             priority: NodePriority::default(),
             use_workers: None,
-        }
-    }).collect()
+        });
+    }
+    Ok(nodes)
 }
