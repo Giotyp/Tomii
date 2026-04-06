@@ -56,23 +56,24 @@ pub fn set_current_worker_index(index: usize) {
     WORKER_INDEX.with(|c| c.set(index));
 }
 
-/// Create Threadpool with Rayon
-/// Returns: (ThreadPool, system_core_offset, worker_core_offset)
+pub struct ThreadPoolResult {
+    pub threadpool: ThreadPool,
+    pub system_core_offset: usize,
+    pub system_threads: usize,
+    pub receiver_core_offset: usize,
+    pub receiver_threads: usize,
+    pub worker_core_offset: usize,
+    pub main_core: Option<core_affinity::CoreId>,
+}
+
+/// Create Threadpool with Rayon, pinning workers to allocated cores.
 pub fn create_threadpool(
     core_offset: usize,
     workers: usize,
     receiver_threads: usize,
     system_threads: usize,
     async_recorder: Option<Arc<AsyncRecorder>>,
-) -> (
-    ThreadPool,
-    usize,
-    usize,
-    usize,
-    usize,
-    usize,
-    Option<core_affinity::CoreId>,
-) {
+) -> ThreadPoolResult {
     // Use core allocation algorithm
     let alloc =
         crate::core_alloc::allocate_cores(core_offset, system_threads, receiver_threads, workers);
@@ -142,15 +143,15 @@ pub fn create_threadpool(
         .build()
         .unwrap();
 
-    (
-        worker_threadpool,
+    ThreadPoolResult {
+        threadpool: worker_threadpool,
         system_core_offset,
-        actual_system_threads,
-        receiver_offset,
-        actual_receivers,
-        worker_offset,
-        main_core_opt,
-    )
+        system_threads: actual_system_threads,
+        receiver_core_offset: receiver_offset,
+        receiver_threads: actual_receivers,
+        worker_core_offset: worker_offset,
+        main_core: main_core_opt,
+    }
 }
 
 /// Per-worker utilization tracking (optional, only when recording enabled)
@@ -266,15 +267,7 @@ impl SchedulerBase {
             None
         };
 
-        let (
-            worker_threadpool,
-            system_core_offset,
-            system_threads,
-            receiver_core_offset,
-            receiver_threads,
-            worker_core_offset,
-            main_core,
-        ) = create_threadpool(
+        let tp = create_threadpool(
             core_offset,
             workers,
             receiver_threads,
@@ -290,13 +283,13 @@ impl SchedulerBase {
         };
 
         Self {
-            threadpool: worker_threadpool,
-            system_core_offset,
-            system_threads,
-            receiver_core_offset,
-            receiver_threads,
-            worker_core_offset,
-            main_core,
+            threadpool: tp.threadpool,
+            system_core_offset: tp.system_core_offset,
+            system_threads: tp.system_threads,
+            receiver_core_offset: tp.receiver_core_offset,
+            receiver_threads: tp.receiver_threads,
+            worker_core_offset: tp.worker_core_offset,
+            main_core: tp.main_core,
             pending_jobs: Arc::new(AtomicUsize::new(0)),
             total_spawned: Arc::new(AtomicUsize::new(0)),
             total_completed: Arc::new(AtomicUsize::new(0)),
@@ -374,8 +367,8 @@ impl SchedulerBase {
         let recorder_enabled = self.async_recorder.is_some();
         let metrics = self.worker_metrics.clone(); // Phase 4
 
-        let (task_id, slot, index, should_record) =
-            meta.unwrap_or((IdType::MIN, usize::MIN, usize::MIN, false));
+        let crate::TaskMeta { task_id, slot, index, should_record } =
+            meta.unwrap_or(crate::TaskMeta { task_id: IdType::MIN, slot: usize::MIN, index: usize::MIN, should_record: false });
 
         let wrapped_task = move || {
             let worker = get_current_worker_id().unwrap_or(usize::MAX);

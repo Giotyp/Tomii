@@ -25,22 +25,15 @@ pub mod scheduler;
 pub mod time_buffer;
 pub mod utils_rdtsc;
 
-use lazy_static::lazy_static;
-use std::sync::atomic::AtomicU16;
-
 pub type IdType = u16;
 
-/// Task metadata tuple: (task_id, slot, index, should_record)
-/// - task_id: Unique identifier for the computational node
-/// - slot: Execution slot for stream isolation
-/// - index: Instance index for multi-factor nodes
-/// - should_record: Whether to record timing data for this task
-pub type TaskMeta = (IdType, usize, usize, bool);
-
-lazy_static! {
-    pub static ref ObjectCount: AtomicU16 = AtomicU16::new(0);
-    pub static ref NodeCount: AtomicU16 = AtomicU16::new(0);
-    pub static ref PostNodeCount: AtomicU16 = AtomicU16::new(0);
+/// Task metadata passed from the scheduler to the recording layer.
+#[derive(Debug, Clone, Copy)]
+pub struct TaskMeta {
+    pub task_id: IdType,
+    pub slot: usize,
+    pub index: usize,
+    pub should_record: bool,
 }
 
 // Record for thread executions
@@ -56,7 +49,7 @@ pub struct Record {
 }
 
 pub mod prelude {
-    pub use crate::{IdType, NodeCount, ObjectCount, PostNodeCount};
+    pub use crate::IdType;
 }
 
 pub mod wrappers {

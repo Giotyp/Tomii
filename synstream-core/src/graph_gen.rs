@@ -1,3 +1,4 @@
+use crate::IdType;
 use core::panic;
 use std::fs::File;
 use std::io::Read;
@@ -8,10 +9,8 @@ use crate::graph_struct::*;
 use crate::json_structs::*;
 use crate::network::SocketType;
 use crate::obj_gen::init_objects;
-use crate::prelude::*;
 use rapidhash::{HashMapExt, RapidHashMap};
 use serde_json;
-use std::sync::atomic::Ordering::SeqCst;
 use synstream_types::*;
 
 fn parse_arg(
@@ -175,14 +174,17 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
         println!("No network_config found - skipping network receiver setup");
     }
 
+    let mut node_counter: IdType = 0;
+
     // Reserve id:0 for the virtual $network node when a network config is present.
     if let Some(network_config) = graph.network_config().as_ref() {
-        let node_count = NodeCount.fetch_add(1, SeqCst);
-        name_to_id.insert("$network".to_string(), node_count);
+        let node_id = node_counter;
+        node_counter += 1;
+        name_to_id.insert("$network".to_string(), node_id);
         graph.add_node(Node {
             name: "$network".to_string(),
             args: Vec::new(),
-            id: node_count as IdType,
+            id: node_id,
             loop_args: None,
             factor: network_config.stream_packets,
             group_size: None,
@@ -196,9 +198,10 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
 
     for node_json in graph_parsed.nodes.iter() {
         let node = parse_single_node(node_json, &init_vec, &obj_id_map, &name_to_id, workers);
-        let node_count = NodeCount.fetch_add(1, SeqCst);
-        name_to_id.insert(node_json.name.clone(), node_count);
-        graph.add_node(Node { id: node_count as IdType, ..node });
+        let node_id = node_counter;
+        node_counter += 1;
+        name_to_id.insert(node_json.name.clone(), node_id);
+        graph.add_node(Node { id: node_id, ..node });
     }
 
     for node in parse_post_nodes(
@@ -351,6 +354,7 @@ fn parse_post_nodes(
     name_to_id: &RapidHashMap<String, IdType>,
     workers: usize,
 ) -> Vec<Node> {
+    let mut post_counter: IdType = 0;
     post_nodes_json.iter().map(|pn_json| {
         let args: Vec<Arg> = pn_json.args.iter()
             .map(|a| parse_arg(a, init_vec, obj_id_map, name_to_id, workers))
@@ -358,11 +362,12 @@ fn parse_post_nodes(
         let func_ptr = get_func(&pn_json.function);
         let factor = pn_json.factor.as_ref().map_or(1, |f| f.resolve(init_vec, obj_id_map, workers));
         println!("Adding post-node: {}", pn_json.name);
-        let post_node_count = PostNodeCount.fetch_add(1, SeqCst);
+        let post_id = post_counter;
+        post_counter += 1;
         Node {
             name: pn_json.name.clone(),
             args,
-            id: post_node_count,
+            id: post_id,
             loop_args: None,
             factor,
             group_size: None,
