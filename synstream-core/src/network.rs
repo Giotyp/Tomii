@@ -75,6 +75,8 @@ impl NetworkSocket {
 fn set_socket_recv_buffer(socket: &UdpSocket, size: usize) {
     let fd = socket.as_raw_fd();
     let buf_size = size as libc::c_int;
+    // SAFETY: `fd` is a valid socket descriptor for the lifetime of `socket`; `buf_size` is a
+    // stack-allocated `c_int` whose address and size are correctly passed to `setsockopt`.
     let ret = unsafe {
         libc::setsockopt(
             fd,

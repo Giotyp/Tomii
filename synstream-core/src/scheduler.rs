@@ -56,13 +56,24 @@ pub fn set_current_worker_index(index: usize) {
     WORKER_INDEX.with(|c| c.set(index));
 }
 
+/// Resources returned by [`create_threadpool`].
+///
+/// Bundles the Rayon pool with the core-allocation metadata so callers can
+/// pin system and receiver threads without re-running the allocation logic.
 pub struct ThreadPoolResult {
+    /// The constructed Rayon thread pool.
     pub threadpool: ThreadPool,
+    /// Core index where system (resolution) threads start.
     pub system_core_offset: usize,
+    /// Number of system threads allocated.
     pub system_threads: usize,
+    /// Core index where network receiver threads start.
     pub receiver_core_offset: usize,
+    /// Number of receiver threads allocated.
     pub receiver_threads: usize,
+    /// Core index where Rayon worker threads start.
     pub worker_core_offset: usize,
+    /// Core to pin the main thread to, if available.
     pub main_core: Option<core_affinity::CoreId>,
 }
 
@@ -428,6 +439,10 @@ enum SpawnMode {
     WorkStealing,
 }
 
+/// Rayon-backed scheduler supporting both FIFO and work-stealing spawn modes.
+///
+/// Created via [`create_scheduler`] — use [`SchedulerType::Fifo`] for
+/// deterministic ordering or [`SchedulerType::WorkStealing`] for throughput.
 #[derive(Debug)]
 pub struct RayonScheduler {
     base: SchedulerBase,
@@ -485,6 +500,11 @@ impl RayonScheduler {
     }
 }
 
+/// The active scheduler instance.
+///
+/// `Rayon` covers both FIFO and work-stealing modes on a shared thread pool.
+/// `Custom` is a hand-wired scheduler with per-group worker queues and
+/// explicit CPU affinity, suitable for latency-sensitive MIMO pipelines.
 pub enum SchedulerImpl {
     Rayon(RayonScheduler),
     Custom(crate::custom_scheduler::CustomScheduler),
@@ -642,10 +662,16 @@ impl SchedulerImpl {
     }
 }
 
+/// Which scheduler implementation to create.
+///
+/// Pass to [`SchedulerConfig`] when calling [`create_scheduler`].
 #[derive(Debug, Clone, Copy)]
 pub enum SchedulerType {
+    /// Rayon pool with FIFO spawn order (lower variance, higher latency).
     Fifo,
+    /// Rayon pool with work-stealing (better throughput for uneven tasks).
     WorkStealing,
+    /// Hand-wired per-group queues with CPU pinning (lowest latency).
     Custom,
 }
 

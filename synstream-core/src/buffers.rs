@@ -1316,6 +1316,8 @@ impl LockFreeResultMap {
 
         // Free old value if it existed
         if !old_ptr.is_null() {
+            // SAFETY: `old_ptr` was produced by `Box::into_raw` in a prior call to `set()`;
+            // the atomic swap gives us exclusive ownership, so reconstructing the Box is valid.
             unsafe {
                 drop(Box::from_raw(old_ptr));
             }
@@ -1342,7 +1344,9 @@ impl LockFreeResultMap {
         if ptr.is_null() {
             None
         } else {
-            // Safe: pointer is valid and we're only cloning (not mutating)
+            // SAFETY: `ptr` is non-null and was stored by `set()` via `Box::into_raw`; the
+            // Acquire load synchronizes with the Release store, so the pointee is fully initialized.
+            // We only clone (no mutation), so no aliasing rules are violated.
             Some(unsafe { (*ptr).clone() })
         }
     }
@@ -1381,6 +1385,8 @@ impl LockFreeResultMap {
         for idx in start..end {
             let old_ptr = self.buffer[idx].swap(std::ptr::null_mut(), Ordering::SeqCst);
             if !old_ptr.is_null() {
+                // SAFETY: `old_ptr` was produced by `Box::into_raw` in `set()`; the SeqCst swap
+                // gives us exclusive ownership of this pointer before we drop it.
                 unsafe {
                     drop(Box::from_raw(old_ptr));
                 }
@@ -1403,6 +1409,8 @@ impl Drop for LockFreeResultMap {
         for atomic_ptr in &self.buffer {
             let ptr = atomic_ptr.load(Ordering::Acquire);
             if !ptr.is_null() {
+                // SAFETY: `ptr` was produced by `Box::into_raw` in `set()`; `drop` has `&mut self`
+                // so no other thread can access the map, giving us exclusive ownership.
                 unsafe {
                     drop(Box::from_raw(ptr));
                 }

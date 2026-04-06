@@ -13,6 +13,8 @@ static RDTSC_FREQ_GHZ: OnceLock<f64> = OnceLock::new();
 pub fn rdtsc() -> u64 {
     let rax: u32;
     let rdx: u32;
+    // SAFETY: `rdtscp` is a valid x86_64 read-only instruction; all output registers are
+    // explicitly declared, so no undefined register state is introduced.
     unsafe {
         asm!(
             "rdtscp",
@@ -38,6 +40,9 @@ fn get_rdtsc_freq() -> f64 {
 /// CLOCK_REALTIME. This is a pretty function that should be called only
 /// during initialization.
 fn measure_rdtsc_freq() -> f64 {
+    // SAFETY: `zeroed()` is valid for `timespec` (all-zeros is a defined bit pattern);
+    // `clock_gettime` is a POSIX syscall that writes into the provided `timespec` pointers,
+    // which are valid stack allocations for the duration of the call.
     unsafe {
         let mut start: timespec = zeroed();
         let mut end: timespec = zeroed();
