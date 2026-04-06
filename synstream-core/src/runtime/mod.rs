@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use crate::async_recorder::{set_worker_recorder, AsyncRecorder};
 use crate::debug::print_debug;
 use crate::graph::*;
-use crate::network::{multi_socket_receiver_loop, single_socket_receiver_loop};
+use crate::network::multi_socket_receiver_loop;
 use crate::resolution_state::{MultiThreadedState, ResolutionState};
 use crate::scheduler::SchedulerImpl;
 use crate::time_buffer::TimeBufferManager;
@@ -447,7 +447,13 @@ impl SynRt {
                 let handle = thread::Builder::new()
                     .name(format!("rx-{}", socket_id))
                     .spawn(move || {
-                        single_socket_receiver_loop(shared_clone, socket_id, core_id, return_rx);
+                        multi_socket_receiver_loop(
+                            shared_clone,
+                            socket_id,
+                            socket_id..socket_id + 1,
+                            core_id,
+                            vec![return_rx],
+                        );
                     })
                     .expect("Failed to spawn receiver thread");
                 handles.push(handle);
