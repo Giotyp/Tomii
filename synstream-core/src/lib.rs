@@ -25,29 +25,47 @@ pub mod scheduler;
 pub mod time_buffer;
 pub mod utils_rdtsc;
 
+/// Node and object identifier type. `u16` supports up to 65 535 graph nodes.
 pub type IdType = u16;
 
-/// Boxed error type for public API boundaries.
+/// Boxed error type returned by public API boundaries (`from_json`, `init_objects`, etc.).
 pub type SynError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// Task metadata passed from the scheduler to the recording layer.
+/// Metadata attached to a spawned task for timing and recording.
+///
+/// Passed from the resolution loop to the scheduler so the recording layer can
+/// correlate execution events back to the originating graph node.
 #[derive(Debug, Clone, Copy)]
 pub struct TaskMeta {
+    /// Graph node identifier.
     pub task_id: IdType,
+    /// Execution slot (stream index mod `slots`).
     pub slot: usize,
+    /// Instance index within a multi-factor node.
     pub index: usize,
+    /// Whether this task should be timed and recorded.
     pub should_record: bool,
 }
 
-// Record for thread executions
+/// A single timing record emitted by a worker thread.
+///
+/// Written to CSV when `--timing` is enabled. Each record captures the wall-clock
+/// interval during which a task ran on a specific worker.
 #[derive(Debug, Clone)]
 pub struct Record {
+    /// Execution slot (stream index mod `slots`).
     pub slot: usize,
+    /// Monotonically increasing spawn counter used as a unique job ID.
     pub job_id: usize,
+    /// Task start time in nanoseconds relative to the base instant.
     pub start_ns: u128,
+    /// Task end time in nanoseconds relative to the base instant.
     pub end_ns: u128,
+    /// Physical core ID of the worker that ran this task.
     pub worker: usize,
+    /// Graph node identifier.
     pub task_id: IdType,
+    /// Instance index within a multi-factor node.
     pub index: usize,
 }
 

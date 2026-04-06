@@ -385,3 +385,29 @@ fn parse_post_nodes(
     }
     Ok(nodes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_json_missing_file_returns_err() {
+        let result = from_json("/nonexistent/path/graph.json", 1);
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("Cannot open graph file"),
+                "unexpected error: {e}"
+            ),
+            Ok(_) => panic!("expected Err, got Ok"),
+        }
+    }
+
+    #[test]
+    fn from_json_invalid_json_returns_err() {
+        let path = "/tmp/synstream_test_invalid.json";
+        std::fs::write(path, "not valid json {{").unwrap();
+        let result = from_json(path, 1);
+        std::fs::remove_file(path).ok();
+        assert!(result.is_err(), "expected Err for invalid JSON");
+    }
+}
