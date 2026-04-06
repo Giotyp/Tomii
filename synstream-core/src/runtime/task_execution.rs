@@ -1,6 +1,4 @@
-use super::arg_resolution::{
-    populate_cached_args_into, ARG_BUF, EXECUTING_GEN, EXECUTING_SLOT, STALE_TASK_DETECTED,
-};
+use super::arg_resolution::{populate_cached_args_into, ARG_BUF, WORKER_STATE};
 use super::scheduling::send_to_scheduler;
 use super::shared_data::{SharedData, slot_load_ordering, slot_rmw_ordering};
 use super::successor::{collect_successors_for_node_into, push_ready_chunked};
@@ -20,10 +18,6 @@ thread_local! {
     static WORKER_READY_BUF: RefCell<Vec<usize>> = RefCell::new(Vec::with_capacity(32));
     static WORKER_SCHED_BUF: RefCell<Vec<NodeInfo>> = RefCell::new(Vec::with_capacity(32));
     static WORKER_ARGS_BUF: RefCell<Vec<Option<Vec<CmTypes>>>> = RefCell::new(Vec::with_capacity(32));
-
-    /// Set by worker_resolve_successors when inline_continuation is enabled.
-    /// Consumed by the send_to_scheduler trampoline after execute_task returns.
-    pub(super) static INLINE_CONTINUATION: RefCell<Option<NodeInfo>> = RefCell::new(None);
 }
 
 /// Worker-side dependency resolution: resolves successors directly on the worker
@@ -125,7 +119,7 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
                     }
 
                     if let Some(ni) = inline {
-                        INLINE_CONTINUATION.with(|c| *c.borrow_mut() = Some(ni));
+                        WORKER_STATE.with(|ws| ws.borrow_mut().inline_continuation = Some(ni));
                     }
                 });
             });
@@ -173,9 +167,12 @@ pub(super) fn execute_task(
         // Set stale-detection TLS context — required by populate_cached_args_into.
         // In single_slot_mode mid-execution slot recycling is impossible; skip TLS writes.
         if !shared.config.single_slot_mode {
-            STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = false);
-            EXECUTING_SLOT.with(|s| *s.borrow_mut() = node_info.slot);
-            EXECUTING_GEN.with(|g| *g.borrow_mut() = node_info.gen);
+            WORKER_STATE.with(|ws| {
+                let mut ws = ws.borrow_mut();
+                ws.stale_task_detected = false;
+                ws.executing_slot = node_info.slot;
+                ws.executing_gen = node_info.gen;
+            });
         }
 
         let node_cache = &shared.graph_cache.node_cache[node_info.id as usize];
@@ -192,7 +189,7 @@ pub(super) fn execute_task(
                     node_info.slot,
                     node_info.pred_index,
                 );
-                if !shared.config.single_slot_mode && STALE_TASK_DETECTED.with(|f| *f.borrow()) {
+                if !shared.config.single_slot_mode && WORKER_STATE.with(|ws| ws.borrow().stale_task_detected) {
                     buf.clear();
                     return; // Slot recycled mid-bulk — drop remaining instances
                 }
@@ -209,7 +206,7 @@ pub(super) fn execute_task(
         });
 
         // Stale check: if slot was recycled during bulk execution, skip completion accounting
-        if !shared.config.single_slot_mode && STALE_TASK_DETECTED.with(|f| *f.borrow()) {
+        if !shared.config.single_slot_mode && WORKER_STATE.with(|ws| ws.borrow().stale_task_detected) {
             return;
         }
 
@@ -222,9 +219,12 @@ pub(super) fn execute_task(
     // Initialize stale-detection context for collect_arg_result.
     // In single_slot_mode, mid-execution slot recycling is impossible; skip TLS writes.
     if !shared.config.single_slot_mode {
-        STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = false);
-        EXECUTING_SLOT.with(|s| *s.borrow_mut() = node_info.slot);
-        EXECUTING_GEN.with(|g| *g.borrow_mut() = node_info.gen);
+        WORKER_STATE.with(|ws| {
+            let mut ws = ws.borrow_mut();
+            ws.stale_task_detected = false;
+            ws.executing_slot = node_info.slot;
+            ws.executing_gen = node_info.gen;
+        });
     }
 
     // Capture execution start timestamp immediately
@@ -281,7 +281,7 @@ pub(super) fn execute_task(
                 node_info.pred_index,
             );
             // Check stale BEFORE calling func (result missing due to reinit_slot race)
-            if !shared.config.single_slot_mode && STALE_TASK_DETECTED.with(|f| *f.borrow()) {
+            if !shared.config.single_slot_mode && WORKER_STATE.with(|ws| ws.borrow().stale_task_detected) {
                 buf.clear();
                 return None::<CmTypes>;
             }

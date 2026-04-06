@@ -6,14 +6,37 @@ use synstream_types::*;
 
 use super::node_cache::ArgCacheEntry;
 
+/// Per-worker execution state shared between arg resolution and task execution.
+/// Consolidated into one struct to make cross-file coupling explicit and grep-able.
+pub(super) struct WorkerThreadState {
+    /// Set by `collect_arg_result` when a gen mismatch is detected mid-arg-collection.
+    /// Checked by `execute_task` to drop stale tasks without corrupting new-stream counters.
+    pub stale_task_detected: bool,
+    /// Slot being executed on this worker (`usize::MAX` when idle).
+    pub executing_slot: usize,
+    /// Generation stamp of the executing slot at task dispatch time.
+    pub executing_gen: u32,
+    /// Populated by `worker_resolve_successors` when `inline_continuation` is enabled.
+    /// Consumed by the `send_to_scheduler` trampoline loop after `execute_task` returns.
+    pub inline_continuation: Option<NodeInfo>,
+}
+
+impl WorkerThreadState {
+    const fn new() -> Self {
+        Self {
+            stale_task_detected: false,
+            executing_slot: usize::MAX,
+            executing_gen: 0,
+            inline_continuation: None,
+        }
+    }
+}
+
 thread_local! {
     pub(super) static ARG_BUF: RefCell<Vec<CmTypes>> = RefCell::new(Vec::with_capacity(16));
-    // Stale-task signaling for collect_arg_result → execute_task.
-    // Set by collect_arg_result when a gen mismatch is detected during arg collection.
-    // Checked by execute_task after populate_cached_args_into returns.
-    pub(super) static STALE_TASK_DETECTED: RefCell<bool> = RefCell::new(false);
-    pub(super) static EXECUTING_SLOT: RefCell<usize> = RefCell::new(usize::MAX);
-    pub(super) static EXECUTING_GEN: RefCell<u32> = RefCell::new(0);
+    /// Combined worker execution state — replaces the former per-field thread_locals
+    /// (STALE_TASK_DETECTED, EXECUTING_SLOT, EXECUTING_GEN, INLINE_CONTINUATION).
+    pub(super) static WORKER_STATE: RefCell<WorkerThreadState> = RefCell::new(WorkerThreadState::new());
 }
 
 #[allow(dead_code)]
@@ -261,14 +284,16 @@ fn spin_wait_for_result(
         if let Some(result) = shared.exec.node_results.get(node_info) {
             return Some(result);
         }
-        let exec_slot = EXECUTING_SLOT.with(|s| *s.borrow());
-        let exec_gen = EXECUTING_GEN.with(|g| *g.borrow());
+        let (exec_slot, exec_gen) = WORKER_STATE.with(|ws| {
+            let ws = ws.borrow();
+            (ws.executing_slot, ws.executing_gen)
+        });
         if exec_slot != usize::MAX {
             let current_gen =
                 shared.slot_data.generation[exec_slot].load(Ordering::Acquire) as u32;
             if exec_gen != current_gen {
                 if !shared.config.single_slot_mode {
-                    STALE_TASK_DETECTED.with(|f| *f.borrow_mut() = true);
+                    WORKER_STATE.with(|ws| ws.borrow_mut().stale_task_detected = true);
                 }
                 return None;
             }
@@ -313,7 +338,7 @@ pub(super) fn collect_arg_result(
         }
         CmTypes::Res(res_node_id) => {
             // Short-circuit: if a previous arg already detected stale, skip remaining
-            if !shared.config.single_slot_mode && STALE_TASK_DETECTED.with(|f| *f.borrow()) {
+            if !shared.config.single_slot_mode && WORKER_STATE.with(|ws| ws.borrow().stale_task_detected) {
                 return None;
             }
 

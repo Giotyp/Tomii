@@ -9,7 +9,7 @@
 
 pub mod async_recorder;
 pub mod buffers;
-pub mod core_alloc;
+pub(crate) mod core_alloc;
 pub mod custom_scheduler;
 pub mod debug;
 pub mod graph;
@@ -17,9 +17,9 @@ pub mod graph_gen;
 pub mod graph_struct;
 pub mod json_structs;
 pub mod network;
-pub mod network_funcs;
-pub mod obj_gen;
-pub mod resolution_state;
+pub(crate) mod network_funcs;
+pub(crate) mod obj_gen;
+pub(crate) mod resolution_state;
 pub mod runtime;
 pub mod scheduler;
 pub mod time_buffer;
