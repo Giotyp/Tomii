@@ -155,128 +155,31 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
     let mut contents = String::new();
     file.read_to_string(&mut contents).unwrap();
 
-    // Parse JSON file with defined structure
     let graph_parsed: GraphFile = serde_json::from_str(&contents)?;
 
-    // Check for initializations in the graph
     let (init_vec, obj_id_map) = match init_objects(&graph_parsed.initializations, workers) {
-        Ok((init_vec, obj_id_map)) => (init_vec, obj_id_map),
-        Err(e) => {
-            panic!("Error parsing initial objects: {}", e);
-        }
+        Ok(v) => v,
+        Err(e) => panic!("Error parsing initial objects: {}", e),
     };
 
-    // Create a new Graph
     let mut graph = Graph::new();
     let mut name_to_id: RapidHashMap<String, IdType> = RapidHashMap::new();
 
-    // Set the initialized objects in the graph
     graph.set_init_objects(&init_vec);
     graph.obj_id_map = obj_id_map.clone();
 
-    // Parse network configuration if present
-    if let Some(network_config_json) = &graph_parsed.network_config {
-        // Parse socket type
-        let socket_type = match network_config_json.socket_type.to_lowercase().as_str() {
-            "udp" => SocketType::Udp,
-            other => panic!(
-                "Unsupported socket type '{}'. Only 'udp' is currently supported.",
-                other
-            ),
-        };
-
-        // Resolve SimpleArgJson fields to concrete types
-        let num_sockets = network_config_json
-            .num_sockets
-            .resolve(&init_vec, &obj_id_map, workers);
-        let packet_length =
-            network_config_json
-                .packet_length
-                .resolve(&init_vec, &obj_id_map, workers);
-        let stream_packets =
-            network_config_json
-                .stream_packets
-                .resolve(&init_vec, &obj_id_map, workers);
-        let address: String = {
-            let given_address = &network_config_json.address;
-            if obj_id_map.contains_key(given_address) {
-                let obj_id = obj_id_map.get(given_address).unwrap();
-                init_vec[*obj_id][0]
-                    .as_string()
-                    .expect("Network address must be a String type in init_objects")
-            } else {
-                given_address.clone()
-            }
-        };
-        let start_port = network_config_json
-            .start_port
-            .resolve(&init_vec, &obj_id_map, workers);
-
-        // Resolve extract_packet_func to function pointer
-        let extract_packet_func = get_func(&network_config_json.extract_packet_func);
-        // Resolve id_function to function pointer
-        let id_function = get_func(&network_config_json.id_function);
-        // Resolve index_function (function + args)
-        let index_function = {
-            let idx_func_json = &network_config_json.index_function;
-            let func_ptr = get_func(&idx_func_json.function);
-
-            // Parse arguments for index_function
-            let mut parsed_args = Vec::new();
-            for arg_json in &idx_func_json.args {
-                parsed_args.push(parse_arg(
-                    arg_json,
-                    &init_vec,
-                    &obj_id_map,
-                    &name_to_id,
-                    workers,
-                ));
-            }
-
-            Some(IndexFunction {
-                func_ptr,
-                args: parsed_args,
-            })
-        };
-
-        let graph_network_config = GraphNetworkConfig {
-            socket_type,
-            num_sockets,
-            packet_length,
-            stream_packets,
-            buffer_depth: network_config_json.buffer_depth,
-            address,
-            start_port,
-            extract_packet_func,
-            id_function,
-            index_function,
-        };
-
-        println!("Network configuration parsed:");
-        println!("  Socket type: {:?}", graph_network_config.socket_type);
-        println!("  Number of sockets: {}", graph_network_config.num_sockets);
-        println!("  Packet length: {}", graph_network_config.packet_length);
-        println!(
-            "  Buffer depth: {} packets",
-            graph_network_config.buffer_depth
-        );
-        println!("  Address: {}", graph_network_config.address);
-        println!("  Start port: {}", graph_network_config.start_port);
-        println!(
-            "  Extract packet function: {}",
-            network_config_json.extract_packet_func
-        );
-
-        graph.set_network_config(&graph_network_config);
+    if let Some(nc_json) = &graph_parsed.network_config {
+        let nc = parse_network_config(nc_json, &init_vec, &obj_id_map, &name_to_id, workers);
+        graph.set_network_config(&nc);
     } else {
         println!("No network_config found - skipping network receiver setup");
     }
 
-    // If network_config is present in graph, we reserve id:0 for network
+    // Reserve id:0 for the virtual $network node when a network config is present.
     if let Some(network_config) = graph.network_config().as_ref() {
         let node_count = NodeCount.fetch_add(1, SeqCst);
         name_to_id.insert("$network".to_string(), node_count);
-        let net_node = Node {
+        graph.add_node(Node {
             name: "$network".to_string(),
             args: Vec::new(),
             id: node_count as IdType,
@@ -288,160 +191,176 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             condition: None,
             priority: NodePriority::default(),
             use_workers: None,
-        };
-        graph.add_node(net_node);
+        });
     }
 
     for node_json in graph_parsed.nodes.iter() {
-        let mut args = Vec::new();
-        let mut loop_args_vec = Vec::new();
-
-        for arg_json in &node_json.args {
-            args.push(parse_arg(
-                arg_json,
-                &init_vec,
-                &obj_id_map,
-                &name_to_id,
-                workers,
-            ));
-        }
-
-        if let Some(loop_args_json) = &node_json.loop_args {
-            for arg_json in loop_args_json {
-                loop_args_vec.push(parse_arg(
-                    arg_json,
-                    &init_vec,
-                    &obj_id_map,
-                    &name_to_id,
-                    workers,
-                ));
-            }
-        }
-
-        let loop_args = {
-            if loop_args_vec.is_empty() {
-                None
-            } else {
-                Some(loop_args_vec)
-            }
-        };
-
-        let func_ptr = get_func(&node_json.function);
-
-        let factor = match &node_json.factor {
-            Some(factor) => factor.resolve(&init_vec, &obj_id_map, workers),
-            None => 1,
-        };
-
-        let group_size = node_json
-            .group_size
-            .as_ref()
-            .map(|gs| gs.resolve(&init_vec, &obj_id_map, workers));
-
-        let loop_ = node_json.loop_.as_ref().map(|loop_json| Loop {
-            name: loop_json.name.clone(),
-            factor: loop_json
-                .factor
-                .as_ref()
-                .map_or(1, |f| f.resolve(&init_vec, &obj_id_map, workers)),
-        });
-
-        // Parse node-level condition if present
-        let condition = if let Some(cond_json) = &node_json.condition {
-            let func_name = &cond_json.function;
-            let cond_func_ptr = get_func(func_name)
-                .unwrap_or_else(|| panic!("Condition function '{}' not found", func_name));
-            let op_str = &cond_json.operation;
-            let cond_operation = CondOp::from_str(op_str)
-                .unwrap_or_else(|| panic!("Invalid condition operation: {}", op_str));
-
-            // Parse condition value
-            let cond_value =
-                string_to_cmtype(cond_json.value_type.clone(), cond_json.value.clone())
-                    .unwrap_or_else(|_| {
-                        panic!("Failed to parse condition value: {}", cond_json.value)
-                    });
-
-            // Parse condition args
-            let mut cond_args = Vec::new();
-            for arg_json in &cond_json.args {
-                cond_args.push(parse_arg(
-                    arg_json,
-                    &init_vec,
-                    &obj_id_map,
-                    &name_to_id,
-                    workers,
-                ));
-            }
-
-            Some(NodeCondition {
-                operation: cond_operation,
-                eval_value: cond_value,
-                func_ptr: cond_func_ptr,
-                args: cond_args,
-            })
-        } else {
-            None
-        };
-
-        // Parse priority (default to Normal if not specified)
-        let priority = node_json
-            .priority
-            .as_deref()
-            .map(NodePriority::from_str)
-            .unwrap_or_default();
-
-        // Parse use_workers from JSON string (e.g., "0-7" or "4") to WorkerRangeSpec
-        let use_workers = node_json.use_workers.as_ref().map(|spec_str| {
-            crate::WorkerRangeSpec::parse(spec_str)
-                .unwrap_or_else(|e| panic!("Invalid use_workers spec '{}': {}", spec_str, e))
-        });
-
+        let node = parse_single_node(node_json, &init_vec, &obj_id_map, &name_to_id, workers);
         let node_count = NodeCount.fetch_add(1, SeqCst);
         name_to_id.insert(node_json.name.clone(), node_count);
-
-        let node = Node {
-            name: node_json.name.clone(),
-            args,
-            id: node_count as IdType,
-            loop_args,
-            factor,
-            group_size,
-            func_ptr,
-            loop_,
-            condition,
-            priority,
-            use_workers,
-        };
-
-        graph.add_node(node);
+        graph.add_node(Node { id: node_count as IdType, ..node });
     }
 
-    for post_node_json in graph_parsed.post_nodes.unwrap_or_default().iter() {
-        let mut args = Vec::new();
-        for arg_json in &post_node_json.args {
-            args.push(parse_arg(
-                arg_json,
-                &init_vec,
-                &obj_id_map,
-                &name_to_id,
-                workers,
-            ));
+    for node in parse_post_nodes(
+        &graph_parsed.post_nodes.unwrap_or_default(),
+        &init_vec,
+        &obj_id_map,
+        &name_to_id,
+        workers,
+    ) {
+        graph.add_post_node(node);
+    }
+
+    Ok(graph)
+}
+
+/// Parse the `network_config` JSON block into a [`GraphNetworkConfig`].
+fn parse_network_config(
+    nc_json: &NetworkConfigJson,
+    init_vec: &[Vec<synstream_types::CmTypes>],
+    obj_id_map: &RapidHashMap<String, usize>,
+    name_to_id: &RapidHashMap<String, IdType>,
+    workers: usize,
+) -> GraphNetworkConfig {
+    let socket_type = match nc_json.socket_type.to_lowercase().as_str() {
+        "udp" => SocketType::Udp,
+        other => panic!("Unsupported socket type '{}'. Only 'udp' is currently supported.", other),
+    };
+
+    let num_sockets = nc_json.num_sockets.resolve(init_vec, obj_id_map, workers);
+    let packet_length = nc_json.packet_length.resolve(init_vec, obj_id_map, workers);
+    let stream_packets = nc_json.stream_packets.resolve(init_vec, obj_id_map, workers);
+    let address: String = {
+        let given = &nc_json.address;
+        if let Some(&obj_id) = obj_id_map.get(given) {
+            init_vec[obj_id][0]
+                .as_string()
+                .expect("Network address must be a String type in init_objects")
+        } else {
+            given.clone()
         }
+    };
+    let start_port = nc_json.start_port.resolve(init_vec, obj_id_map, workers);
+    let extract_packet_func = get_func(&nc_json.extract_packet_func);
+    let id_function = get_func(&nc_json.id_function);
+    let index_function = {
+        let func_ptr = get_func(&nc_json.index_function.function);
+        let args = nc_json.index_function.args.iter()
+            .map(|a| parse_arg(a, init_vec, obj_id_map, name_to_id, workers))
+            .collect();
+        Some(IndexFunction { func_ptr, args })
+    };
 
-        let func_ptr = get_func(&post_node_json.function);
+    let nc = GraphNetworkConfig {
+        socket_type,
+        num_sockets,
+        packet_length,
+        stream_packets,
+        buffer_depth: nc_json.buffer_depth,
+        address,
+        start_port,
+        extract_packet_func,
+        id_function,
+        index_function,
+    };
 
-        let factor = match &post_node_json.factor {
-            Some(factor) => factor.resolve(&init_vec, &obj_id_map, workers),
-            None => 1,
-        };
+    println!("Network configuration parsed:");
+    println!("  Socket type: {:?}", nc.socket_type);
+    println!("  Number of sockets: {}", nc.num_sockets);
+    println!("  Packet length: {}", nc.packet_length);
+    println!("  Buffer depth: {} packets", nc.buffer_depth);
+    println!("  Address: {}", nc.address);
+    println!("  Start port: {}", nc.start_port);
+    println!("  Extract packet function: {}", nc_json.extract_packet_func);
 
-        println!("Adding post-node: {}", post_node_json.name);
+    nc
+}
 
+/// Parse a single node JSON entry into a [`Node`] with `id` set to 0.
+/// The caller is responsible for assigning the real ID and registering the name.
+fn parse_single_node(
+    node_json: &NodeJson,
+    init_vec: &[Vec<synstream_types::CmTypes>],
+    obj_id_map: &RapidHashMap<String, usize>,
+    name_to_id: &RapidHashMap<String, IdType>,
+    workers: usize,
+) -> Node {
+    let args: Vec<Arg> = node_json.args.iter()
+        .map(|a| parse_arg(a, init_vec, obj_id_map, name_to_id, workers))
+        .collect();
+
+    let loop_args: Option<Vec<Arg>> = node_json.loop_args.as_ref().map(|la| {
+        la.iter().map(|a| parse_arg(a, init_vec, obj_id_map, name_to_id, workers)).collect()
+    });
+
+    let func_ptr = get_func(&node_json.function);
+    let factor = node_json.factor.as_ref()
+        .map_or(1, |f| f.resolve(init_vec, obj_id_map, workers));
+    let group_size = node_json.group_size.as_ref()
+        .map(|gs| gs.resolve(init_vec, obj_id_map, workers));
+    let loop_ = node_json.loop_.as_ref().map(|lj| Loop {
+        name: lj.name.clone(),
+        factor: lj.factor.as_ref().map_or(1, |f| f.resolve(init_vec, obj_id_map, workers)),
+    });
+
+    let condition = node_json.condition.as_ref().map(|cond_json| {
+        let func_name = &cond_json.function;
+        let cond_func_ptr = get_func(func_name)
+            .unwrap_or_else(|| panic!("Condition function '{}' not found", func_name));
+        let cond_operation = CondOp::from_str(&cond_json.operation)
+            .unwrap_or_else(|| panic!("Invalid condition operation: {}", cond_json.operation));
+        let cond_value = string_to_cmtype(cond_json.value_type.clone(), cond_json.value.clone())
+            .unwrap_or_else(|_| panic!("Failed to parse condition value: {}", cond_json.value));
+        let cond_args: Vec<Arg> = cond_json.args.iter()
+            .map(|a| parse_arg(a, init_vec, obj_id_map, name_to_id, workers))
+            .collect();
+        NodeCondition {
+            operation: cond_operation,
+            eval_value: cond_value,
+            func_ptr: cond_func_ptr,
+            args: cond_args,
+        }
+    });
+
+    let priority = node_json.priority.as_deref().map(NodePriority::from_str).unwrap_or_default();
+    let use_workers = node_json.use_workers.as_ref().map(|spec_str| {
+        crate::WorkerRangeSpec::parse(spec_str)
+            .unwrap_or_else(|e| panic!("Invalid use_workers spec '{}': {}", spec_str, e))
+    });
+
+    Node {
+        name: node_json.name.clone(),
+        args,
+        id: 0, // caller assigns real ID
+        loop_args,
+        factor,
+        group_size,
+        func_ptr,
+        loop_,
+        condition,
+        priority,
+        use_workers,
+    }
+}
+
+/// Parse all post-node JSON entries into [`Node`] values with assigned IDs.
+fn parse_post_nodes(
+    post_nodes_json: &[NodeJson],
+    init_vec: &[Vec<synstream_types::CmTypes>],
+    obj_id_map: &RapidHashMap<String, usize>,
+    name_to_id: &RapidHashMap<String, IdType>,
+    workers: usize,
+) -> Vec<Node> {
+    post_nodes_json.iter().map(|pn_json| {
+        let args: Vec<Arg> = pn_json.args.iter()
+            .map(|a| parse_arg(a, init_vec, obj_id_map, name_to_id, workers))
+            .collect();
+        let func_ptr = get_func(&pn_json.function);
+        let factor = pn_json.factor.as_ref().map_or(1, |f| f.resolve(init_vec, obj_id_map, workers));
+        println!("Adding post-node: {}", pn_json.name);
         let post_node_count = PostNodeCount.fetch_add(1, SeqCst);
-
-        let node = Node {
-            name: post_node_json.name.clone(),
+        Node {
+            name: pn_json.name.clone(),
             args,
             id: post_node_count,
             loop_args: None,
@@ -452,10 +371,6 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, serde_json::
             condition: None,
             priority: NodePriority::default(),
             use_workers: None,
-        };
-
-        graph.add_post_node(node);
-    }
-
-    Ok(graph)
+        }
+    }).collect()
 }
