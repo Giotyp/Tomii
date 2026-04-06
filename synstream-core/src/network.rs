@@ -19,11 +19,9 @@
 
 use std::net::UdpSocket;
 use std::os::unix::io::AsRawFd;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-use crate::runtime::SharedData;
 
 /// Raw packet message forwarded from receiver thread to resolution
 #[derive(Debug, Clone)]
@@ -135,7 +133,12 @@ pub fn bind_udp_socket_range(
 ///
 /// Thread naming is handled by the caller via `thread::Builder::name()`.
 pub fn multi_socket_receiver_loop(
-    shared: Arc<SharedData>,
+    packet_length: usize,
+    recv_pool_size: usize,
+    shutdown: Arc<AtomicBool>,
+    tx: flume::Sender<PacketMessage>,
+    sockets: Arc<Vec<NetworkSocket>>,
+    drop_counters: Arc<Vec<AtomicUsize>>,
     thread_id: usize,
     socket_range: std::ops::Range<usize>,
     core_id: usize,
@@ -148,19 +151,12 @@ pub fn multi_socket_receiver_loop(
         }
     }
 
-    let network_config_arc = shared
-        .graph
-        .network_config()
-        .expect("Network config must be present for receiver threads");
-    let packet_length = network_config_arc.packet_length;
-
-    let shutdown = &shared.net.shutdown_flag;
     let read_timeout = Duration::from_micros(1);
 
     // Set read timeout ONCE per socket during init — setsockopt on every
     // poll iteration was a syscall (~100-500 ns) burned per socket per loop.
     for socket_id in socket_range.clone() {
-        let socket = &shared.net.receiver_sockets[socket_id];
+        let socket = &sockets[socket_id];
         let _ = socket.set_read_timeout(Some(read_timeout));
     }
 
@@ -170,7 +166,7 @@ pub fn multi_socket_receiver_loop(
     let range_len = socket_range.end - socket_range.start;
     let mut local_pools: Vec<Vec<Vec<u8>>> = (0..range_len)
         .map(|_| {
-            (0..shared.config.recv_pool_size)
+            (0..recv_pool_size)
                 .map(|_| {
                     let mut v = Vec::with_capacity(packet_length);
                     // SAFETY: recv() overwrites exactly packet_length bytes before any read.
@@ -186,7 +182,7 @@ pub fn multi_socket_receiver_loop(
         thread_id, socket_range, core_id
     );
 
-    let tx = &shared.net.packet_sender;
+    let tx = &tx;
 
     let mut first_packet_received: bool = false;
     let mut first_packet_timestamp: Instant = Instant::now();
@@ -207,8 +203,8 @@ pub fn multi_socket_receiver_loop(
         // Round-robin poll all assigned sockets
         for socket_id in socket_range.clone() {
             let local_idx = socket_id - range_start;
-            let socket = &shared.net.receiver_sockets[socket_id];
-            let drop_counter = &shared.net.packet_drop_counters[socket_id];
+            let socket = &sockets[socket_id];
+            let drop_counter = &drop_counters[socket_id];
 
             // Drain any buffers returned by the resolution thread into this socket's local pool.
             while let Ok(buf) = return_rxs[local_idx].try_recv() {

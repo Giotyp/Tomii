@@ -43,10 +43,10 @@ pub(super) fn prepare_network_infrastructure(
     socket_recv_buf_bytes: usize,
     recv_pool_size: usize,
 ) -> (
-    Vec<NetworkSocket>,
+    Arc<Vec<NetworkSocket>>,
     flume::Sender<crate::network::PacketMessage>,
     flume::Receiver<crate::network::PacketMessage>,
-    Vec<AtomicUsize>,
+    Arc<Vec<AtomicUsize>>,
     Vec<flume::Sender<Vec<u8>>>,
     Vec<parking_lot::Mutex<Option<flume::Receiver<Vec<u8>>>>>,
 ) {
@@ -82,20 +82,20 @@ pub(super) fn prepare_network_infrastructure(
         }
 
         (
-            receiver_sockets,
+            Arc::new(receiver_sockets),
             packet_sender,
             packet_receiver,
-            packet_drop_counters,
+            Arc::new(packet_drop_counters),
             buffer_return_senders,
             buffer_return_receivers,
         )
     } else {
         let (packet_sender, packet_receiver) = flume::bounded(1);
         (
-            Vec::new(),
+            Arc::new(Vec::new()),
             packet_sender,
             packet_receiver,
-            Vec::new(),
+            Arc::new(Vec::new()),
             Vec::new(),
             Vec::new(),
         )

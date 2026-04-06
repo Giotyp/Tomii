@@ -84,8 +84,8 @@ pub struct NetworkInfra {
     /// Flume MPSC channel from network receivers to resolution threads.
     pub packet_sender: Sender<PacketMessage>,
     pub packet_receiver: Receiver<PacketMessage>,
-    pub receiver_sockets: Vec<NetworkSocket>,
-    pub packet_drop_counters: Vec<AtomicUsize>,
+    pub receiver_sockets: Arc<Vec<NetworkSocket>>,
+    pub packet_drop_counters: Arc<Vec<AtomicUsize>>,
     /// Per-socket buffer return channels: resolution thread → receiver thread.
     pub buffer_return_senders: Vec<Sender<Vec<u8>>>,
     /// Receiver ends taken exactly once when the corresponding receiver thread is spawned.
