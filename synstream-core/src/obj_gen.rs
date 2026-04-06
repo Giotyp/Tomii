@@ -1,10 +1,8 @@
 use crate::debug::print_debug;
 use crate::func_reg::get_func;
 use crate::json_structs::*;
-use crate::prelude::*;
 use rapidhash::{HashMapExt, RapidHashMap};
 use serde_json;
-use std::sync::atomic::Ordering::SeqCst;
 use synstream_types::*;
 
 pub fn init_objects(
@@ -16,7 +14,7 @@ pub fn init_objects(
     let mut obj_id_map: RapidHashMap<String, usize> = RapidHashMap::new();
 
     // Keep index 0 for $index, 1 for $workers -- resolved at runtime
-    let _ = ObjectCount.fetch_add(2, SeqCst);
+    let mut obj_counter: u16 = 2;
     obj_id_map.insert("$index".to_string(), 0);
     obj_id_map.insert("$workers".to_string(), 1);
     // Initialize $index and $workers
@@ -54,8 +52,8 @@ pub fn init_objects(
             for _ in 0..factor {
                 value_vec.push(value_cmt.clone());
             }
-            // fetch-add ObjectCount
-            let obj_id = ObjectCount.fetch_add(1, SeqCst);
+            let obj_id = obj_counter;
+            obj_counter += 1;
             obj_id_map.insert(name.clone(), obj_id as usize);
             init_objects.push(value_vec);
         } else {
@@ -106,8 +104,8 @@ pub fn init_objects(
                 let value_cmt = func_ptr(&args);
                 value_vec.push(value_cmt.clone());
             }
-            // fetch-add ObjectCount
-            let obj_id = ObjectCount.fetch_add(1, SeqCst);
+            let obj_id = obj_counter;
+            obj_counter += 1;
             obj_id_map.insert(name.clone(), obj_id as usize);
             init_objects.push(value_vec);
         }

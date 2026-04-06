@@ -883,7 +883,7 @@ impl CustomScheduler {
         let job_id = self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
         self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
 
-        let record_meta = meta.and_then(|(task_id, slot, index, should_record)| {
+        let record_meta = meta.and_then(|crate::TaskMeta { task_id, slot, index, should_record }| {
             if should_record {
                 Some(RecordMeta {
                     job_id,
@@ -917,7 +917,7 @@ impl CustomScheduler {
         let job_id = self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
         self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
 
-        let record_meta = meta.and_then(|(task_id, slot, index, should_record)| {
+        let record_meta = meta.and_then(|crate::TaskMeta { task_id, slot, index, should_record }| {
             if should_record {
                 Some(RecordMeta {
                     job_id,
@@ -953,7 +953,7 @@ impl CustomScheduler {
             let job_id = self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
             self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
 
-            let record_meta = meta.and_then(|(task_id, slot, index, should_record)| {
+            let record_meta = meta.and_then(|crate::TaskMeta { task_id, slot, index, should_record }| {
                 if should_record {
                     Some(RecordMeta {
                         job_id,

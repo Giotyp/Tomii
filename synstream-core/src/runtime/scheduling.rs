@@ -61,7 +61,7 @@ pub(super) fn send_to_scheduler(
 
         let shared_clone = Arc::clone(shared);
         let should_record = should_record_slot(shared, node_info.slot);
-        let meta_data = (node_info.id, node_info.slot, node_info.index, should_record);
+        let meta_data = crate::TaskMeta { task_id: node_info.id, slot: node_info.slot, index: node_info.index, should_record };
         let mut node_info = node_info.clone();
         // Stamp the current slot generation so execute_task can detect stale tasks.
         // Post-nodes are exempt: they run after all streams complete and have no generation risk.
