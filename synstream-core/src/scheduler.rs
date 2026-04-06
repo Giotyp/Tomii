@@ -422,13 +422,21 @@ impl SchedulerBase {
     }
 }
 
-#[derive(Debug)]
-pub struct FifoScheduler {
-    base: SchedulerBase,
+#[derive(Debug, Clone, Copy)]
+enum SpawnMode {
+    Fifo,
+    WorkStealing,
 }
 
-impl FifoScheduler {
+#[derive(Debug)]
+pub struct RayonScheduler {
+    base: SchedulerBase,
+    mode: SpawnMode,
+}
+
+impl RayonScheduler {
     fn new(
+        mode: SpawnMode,
         core_offset: usize,
         workers: usize,
         record: bool,
@@ -451,6 +459,7 @@ impl FifoScheduler {
                 target_batch_size,
                 batch_timeout_us,
             ),
+            mode,
         }
     }
 
@@ -458,69 +467,26 @@ impl FifoScheduler {
     where
         F: FnOnce() + Send + 'static,
     {
-        self.spawn_task_with_meta(None, task)
+        self.spawn_task_with_meta(None, task);
     }
 
     fn spawn_task_with_meta<F>(&self, meta: Option<crate::TaskMeta>, task: F)
     where
         F: FnOnce() + Send + 'static,
     {
-        self.base
-            .spawn_task_common(meta, task, |t| self.base.threadpool.spawn_fifo(t));
-    }
-}
-
-#[derive(Debug)]
-pub struct WorkStealScheduler {
-    base: SchedulerBase,
-}
-
-impl WorkStealScheduler {
-    fn new(
-        core_offset: usize,
-        workers: usize,
-        record: bool,
-        external_recorder: Option<Arc<AsyncRecorder>>,
-        base_instant: Instant,
-        system_threads: usize,
-        receiver_threads: usize,
-        target_batch_size: usize,
-        batch_timeout_us: u64,
-    ) -> Self {
-        Self {
-            base: SchedulerBase::new(
-                core_offset,
-                workers,
-                record,
-                external_recorder,
-                base_instant,
-                system_threads,
-                receiver_threads,
-                target_batch_size,
-                batch_timeout_us,
-            ),
+        match self.mode {
+            SpawnMode::Fifo => self
+                .base
+                .spawn_task_common(meta, task, |t| self.base.threadpool.spawn_fifo(t)),
+            SpawnMode::WorkStealing => self
+                .base
+                .spawn_task_common(meta, task, |t| self.base.threadpool.spawn(t)),
         }
-    }
-
-    fn spawn_task<F>(&self, task: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        self.spawn_task_with_meta(None, task)
-    }
-
-    fn spawn_task_with_meta<F>(&self, meta: Option<crate::TaskMeta>, task: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        self.base
-            .spawn_task_common(meta, task, |t| self.base.threadpool.spawn(t));
     }
 }
 
 pub enum SchedulerImpl {
-    Fifo(FifoScheduler),
-    WorkStealing(WorkStealScheduler),
+    Rayon(RayonScheduler),
     Custom(crate::custom_scheduler::CustomScheduler),
 }
 
@@ -530,8 +496,7 @@ impl SchedulerImpl {
         F: FnOnce() + Send + 'static,
     {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.spawn_task(task),
-            SchedulerImpl::WorkStealing(scheduler) => scheduler.spawn_task(task),
+            SchedulerImpl::Rayon(scheduler) => scheduler.spawn_task(task),
             SchedulerImpl::Custom(scheduler) => scheduler.spawn(task),
         }
     }
@@ -541,8 +506,7 @@ impl SchedulerImpl {
         F: FnOnce() + Send + 'static,
     {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.spawn_task_with_meta(meta, task),
-            SchedulerImpl::WorkStealing(scheduler) => scheduler.spawn_task_with_meta(meta, task),
+            SchedulerImpl::Rayon(scheduler) => scheduler.spawn_task_with_meta(meta, task),
             SchedulerImpl::Custom(scheduler) => scheduler.spawn_with_meta(meta, task),
         }
     }
@@ -557,8 +521,7 @@ impl SchedulerImpl {
         F: FnOnce() + Send + 'static,
     {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.spawn_task_with_meta(meta, task),
-            SchedulerImpl::WorkStealing(scheduler) => scheduler.spawn_task_with_meta(meta, task),
+            SchedulerImpl::Rayon(scheduler) => scheduler.spawn_task_with_meta(meta, task),
             SchedulerImpl::Custom(scheduler) => {
                 scheduler.spawn_with_meta_priority(priority, meta, task)
             }
@@ -576,8 +539,7 @@ impl SchedulerImpl {
         F: FnOnce() + Send + 'static,
     {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.spawn_task_with_meta(meta, task),
-            SchedulerImpl::WorkStealing(scheduler) => scheduler.spawn_task_with_meta(meta, task),
+            SchedulerImpl::Rayon(scheduler) => scheduler.spawn_task_with_meta(meta, task),
             SchedulerImpl::Custom(scheduler) => {
                 scheduler.spawn_to_group_with_meta(group_id, priority, meta, task)
             }
@@ -590,7 +552,7 @@ impl SchedulerImpl {
     /// - group_id for Range specs in Custom scheduler
     pub fn get_affinity_group(&self, use_workers: Option<&crate::WorkerRangeSpec>) -> usize {
         match self {
-            SchedulerImpl::Fifo(_) | SchedulerImpl::WorkStealing(_) => {
+            SchedulerImpl::Rayon(_) => {
                 // Non-custom schedulers don't support affinity groups
                 0
             }
@@ -603,64 +565,56 @@ impl SchedulerImpl {
 
     pub fn workers(&self) -> usize {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.base.workers(),
-            SchedulerImpl::WorkStealing(scheduler) => scheduler.base.workers(),
+            SchedulerImpl::Rayon(scheduler) => scheduler.base.workers(),
             SchedulerImpl::Custom(scheduler) => scheduler.workers(),
         }
     }
 
     pub fn pending_jobs(&self) -> usize {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.base.pending_jobs(),
-            SchedulerImpl::WorkStealing(scheduler) => scheduler.base.pending_jobs(),
+            SchedulerImpl::Rayon(scheduler) => scheduler.base.pending_jobs(),
             SchedulerImpl::Custom(scheduler) => scheduler.pending_tasks(),
         }
     }
 
     pub fn total_jobs_spawned(&self) -> usize {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.base.total_jobs_spawned(),
-            SchedulerImpl::WorkStealing(scheduler) => scheduler.base.total_jobs_spawned(),
+            SchedulerImpl::Rayon(scheduler) => scheduler.base.total_jobs_spawned(),
             SchedulerImpl::Custom(scheduler) => scheduler.total_spawned(),
         }
     }
 
     pub fn total_jobs_completed(&self) -> usize {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.base.total_jobs_completed(),
-            SchedulerImpl::WorkStealing(scheduler) => scheduler.base.total_jobs_completed(),
+            SchedulerImpl::Rayon(scheduler) => scheduler.base.total_jobs_completed(),
             SchedulerImpl::Custom(scheduler) => scheduler.total_completed(),
         }
     }
 
     pub fn core_offset(&self) -> usize {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.base.core_offset(),
-            SchedulerImpl::WorkStealing(scheduler) => scheduler.base.core_offset(),
+            SchedulerImpl::Rayon(scheduler) => scheduler.base.core_offset(),
             SchedulerImpl::Custom(scheduler) => scheduler.core_offset(),
         }
     }
 
     pub fn system_threads(&self) -> usize {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.base.system_threads(),
-            SchedulerImpl::WorkStealing(scheduler) => scheduler.base.system_threads(),
+            SchedulerImpl::Rayon(scheduler) => scheduler.base.system_threads(),
             SchedulerImpl::Custom(scheduler) => scheduler.system_threads(),
         }
     }
 
     pub fn receiver_core_offset(&self) -> usize {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.base.receiver_core_offset(),
-            SchedulerImpl::WorkStealing(scheduler) => scheduler.base.receiver_core_offset(),
+            SchedulerImpl::Rayon(scheduler) => scheduler.base.receiver_core_offset(),
             SchedulerImpl::Custom(scheduler) => scheduler.receiver_core_offset(),
         }
     }
 
     pub fn receiver_threads(&self) -> usize {
         match self {
-            SchedulerImpl::Fifo(scheduler) => scheduler.base.receiver_threads(),
-            SchedulerImpl::WorkStealing(scheduler) => scheduler.base.receiver_threads(),
+            SchedulerImpl::Rayon(scheduler) => scheduler.base.receiver_threads(),
             SchedulerImpl::Custom(scheduler) => scheduler.receiver_threads(),
         }
     }
@@ -668,24 +622,21 @@ impl SchedulerImpl {
     /// Dump recorded schedule to CSV at `path` (slot,job_id,start_ns,end_ns,worker,task_name)
     pub fn write_record(&self, path: &str) {
         match self {
-            SchedulerImpl::Fifo(s) => s.base.write_records_to_csv(path),
-            SchedulerImpl::WorkStealing(s) => s.base.write_records_to_csv(path),
+            SchedulerImpl::Rayon(s) => s.base.write_records_to_csv(path),
             SchedulerImpl::Custom(s) => s.write_record(path),
         }
     }
 
     pub fn get_async_recorder(&self) -> Option<Arc<AsyncRecorder>> {
         match self {
-            SchedulerImpl::Fifo(s) => s.base.get_async_recorder(),
-            SchedulerImpl::WorkStealing(s) => s.base.get_async_recorder(),
+            SchedulerImpl::Rayon(s) => s.base.get_async_recorder(),
             SchedulerImpl::Custom(s) => s.get_async_recorder(),
         }
     }
 
     pub fn main_core(&self) -> Option<core_affinity::CoreId> {
         match self {
-            SchedulerImpl::Fifo(s) => s.base.get_main_core(),
-            SchedulerImpl::WorkStealing(s) => s.base.get_main_core(),
+            SchedulerImpl::Rayon(s) => s.base.get_main_core(),
             SchedulerImpl::Custom(s) => s.main_core(),
         }
     }
@@ -862,7 +813,8 @@ pub fn create_scheduler(cfg: SchedulerConfig) -> SchedulerImpl {
         worker_affinity,
     } = cfg;
     match scheduler_type {
-        SchedulerType::Fifo => SchedulerImpl::Fifo(FifoScheduler::new(
+        SchedulerType::Fifo => SchedulerImpl::Rayon(RayonScheduler::new(
+            SpawnMode::Fifo,
             core_offset,
             num_workers,
             record,
@@ -873,7 +825,8 @@ pub fn create_scheduler(cfg: SchedulerConfig) -> SchedulerImpl {
             target_batch_size,
             batch_timeout_us,
         )),
-        SchedulerType::WorkStealing => SchedulerImpl::WorkStealing(WorkStealScheduler::new(
+        SchedulerType::WorkStealing => SchedulerImpl::Rayon(RayonScheduler::new(
+            SpawnMode::WorkStealing,
             core_offset,
             num_workers,
             record,
