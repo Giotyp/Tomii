@@ -6,7 +6,7 @@ use std::time::Instant;
 use synstream_core::debug::*;
 use synstream_core::graph::Graph;
 use synstream_core::graph_gen::from_json;
-use synstream_core::runtime::SynRt;
+use synstream_core::runtime::{SynRt, SynRtBuilder};
 use synstream_core::scheduler::{create_scheduler, SchedulerType};
 use synstream_core::utils_rdtsc;
 
@@ -208,7 +208,7 @@ fn main() {
     let timing_enabled = args.timing.is_some();
 
     let synrt = run_graph(
-        &graph,
+        graph,
         scheduler_type,
         args.workers,
         args.core_offset,
@@ -261,7 +261,7 @@ fn main() {
 }
 
 pub fn run_graph(
-    graph: &Graph,
+    graph: Graph,
     scheduler_type: SchedulerType,
     workers: usize,
     core_offset: usize,
@@ -313,15 +313,11 @@ pub fn run_graph(
         use synstream_core::WorkerRangeSpec;
 
         let mut unique_worker_specs: HashSet<WorkerRangeSpec> = HashSet::new();
-
-        // Scan regular nodes
         for node in &graph.nodes {
             if let Some(ref spec) = node.use_workers {
                 unique_worker_specs.insert(spec.clone());
             }
         }
-
-        // Scan post nodes if present
         if let Some(ref post_nodes) = graph.post_nodes {
             for node in post_nodes {
                 if let Some(ref spec) = node.use_workers {
@@ -331,17 +327,11 @@ pub fn run_graph(
         }
 
         if !unique_worker_specs.is_empty() {
-            println!(
-                "Detected {} unique worker specs:",
-                unique_worker_specs.len()
-            );
+            println!("Detected {} unique worker specs:", unique_worker_specs.len());
             for spec in &unique_worker_specs {
                 println!("  {}", spec);
             }
-            Some(WorkerAffinityConfig::from_worker_specs(
-                &unique_worker_specs,
-                workers,
-            ))
+            Some(WorkerAffinityConfig::from_worker_specs(&unique_worker_specs, workers))
         } else {
             None
         }
@@ -361,39 +351,35 @@ pub fn run_graph(
         worker_affinity,
     );
 
-    // Pin main thread to reserved core if scheduler reserved one
     if let Some(core_id) = scheduler.main_core() {
-        // Attempt to pin the current (main) thread to the reserved core
         core_affinity::set_for_current(core_id);
         println!("Pinned main thread to core {:?}", core_id);
     }
 
-    let mut synrt = SynRt::new(
-        graph,
-        slots,
-        max_streams,
-        max_runtime,
-        use_rdtsc,
-        record,
-        record_stream,
-        timing_enabled,
-        scheduler,
-        base_instant,
-        slot_priority_enabled,
-        shared_recorder,
-        batching_size,
-        batching_limit,
-        coalesce_barriers,
-        inline_continuation,
-        batch_queue_capacity,
-        spin_iterations,
-        sched_flush_threshold,
-        socket_recv_buf_bytes,
-        recv_pool_size,
-        spin_wait_spin_iters,
-        spin_wait_yield_iters,
-        spin_wait_park_ns,
-    );
+    let mut synrt = SynRtBuilder::new(graph, scheduler)
+        .base_instant(base_instant)
+        .slots(slots)
+        .max_streams(max_streams)
+        .max_runtime(max_runtime)
+        .use_rdtsc(use_rdtsc)
+        .record(record)
+        .record_stream(record_stream)
+        .timing_enabled(timing_enabled)
+        .slot_priority_enabled(slot_priority_enabled)
+        .async_recorder(shared_recorder)
+        .target_batch_size(batching_size)
+        .batch_timeout_us(batching_limit)
+        .coalesce_barriers(coalesce_barriers)
+        .inline_continuation(inline_continuation)
+        .batch_queue_capacity(batch_queue_capacity)
+        .spin_iterations(spin_iterations)
+        .sched_flush_threshold(sched_flush_threshold)
+        .socket_recv_buf_bytes(socket_recv_buf_bytes)
+        .recv_pool_size(recv_pool_size)
+        .spin_wait_spin_iters(spin_wait_spin_iters)
+        .spin_wait_yield_iters(spin_wait_yield_iters)
+        .spin_wait_park_ns(spin_wait_park_ns)
+        .build();
 
     synrt.run();
     synrt

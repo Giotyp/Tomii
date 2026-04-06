@@ -1,6 +1,7 @@
 use super::reporting::should_record_slot;
 use super::shared_data::SharedData;
-use super::task_execution::{execute_task, INLINE_CONTINUATION};
+use super::arg_resolution::WORKER_STATE;
+use super::task_execution::execute_task;
 use crate::async_recorder::submit_record;
 use crate::buffers::*;
 use crate::time_buffer::TimingMethod;
@@ -80,7 +81,7 @@ pub(super) fn send_to_scheduler(
                 let args = if first { pre_built_args.clone() } else { None };
                 first = false;
                 execute_task(&shared_clone, current_func, &current, args, spawn_ns);
-                match INLINE_CONTINUATION.with(|c| c.borrow_mut().take()) {
+                match WORKER_STATE.with(|ws| ws.borrow_mut().inline_continuation.take()) {
                     Some(next) => {
                         current_func = shared_clone.graph_cache.node_cache[next.id as usize].func_ptr;
                         current = next;
