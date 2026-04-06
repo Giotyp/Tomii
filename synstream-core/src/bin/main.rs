@@ -7,7 +7,7 @@ use synstream_core::debug::*;
 use synstream_core::graph::Graph;
 use synstream_core::graph_gen::from_json;
 use synstream_core::runtime::{SynRt, SynRtBuilder};
-use synstream_core::scheduler::{create_scheduler, SchedulerType};
+use synstream_core::scheduler::{create_scheduler, SchedulerConfig, SchedulerType};
 use synstream_core::utils_rdtsc;
 
 #[derive(Parser)]
@@ -337,19 +337,19 @@ pub fn run_graph(
         }
     };
 
-    let scheduler = create_scheduler(
+    let scheduler = create_scheduler(SchedulerConfig {
         scheduler_type,
         core_offset,
-        workers,
+        num_workers: workers,
         record,
-        shared_recorder.clone(),
+        external_recorder: shared_recorder.clone(),
         base_instant,
         system_threads,
         receiver_threads,
-        batching_size,
-        batching_limit,
+        target_batch_size: batching_size,
+        batch_timeout_us: batching_limit,
         worker_affinity,
-    );
+    });
 
     if let Some(core_id) = scheduler.main_core() {
         core_affinity::set_for_current(core_id);

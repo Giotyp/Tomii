@@ -159,65 +159,19 @@ pub(super) fn execute_task(
         }
     }
 
-    // Bulk execute path: run multiple consecutive instances in a tight loop on this worker.
-    // Spawned by push_ready_chunked when a barrier fan-out produces N > num_workers ready
-    // instances simultaneously (e.g. wavefront diagonal completion).  Each bulk task covers
-    // a contiguous range `index..index+bulk_count`, eliminating O(N) individual Rayon spawns.
     if node_info.bulk_count > 1 {
-        // Set stale-detection TLS context — required by populate_cached_args_into.
-        // In single_slot_mode mid-execution slot recycling is impossible; skip TLS writes.
-        if !shared.config.single_slot_mode {
-            WORKER_STATE.with(|ws| {
-                let mut ws = ws.borrow_mut();
-                ws.stale_task_detected = false;
-                ws.executing_slot = node_info.slot;
-                ws.executing_gen = node_info.gen;
-            });
-        }
-
-        let node_cache = &shared.graph_cache.node_cache[node_info.id as usize];
-        ARG_BUF.with(|buf_cell| {
-            let mut buf = buf_cell.borrow_mut();
-            for inst_idx in node_info.index..node_info.index + node_info.bulk_count {
-                buf.clear();
-                populate_cached_args_into(
-                    &mut buf,
-                    shared,
-                    &node_cache.arg_cache,
-                    node_info.id,
-                    inst_idx,
-                    node_info.slot,
-                    node_info.pred_index,
-                );
-                if !shared.config.single_slot_mode && WORKER_STATE.with(|ws| ws.borrow().stale_task_detected) {
-                    buf.clear();
-                    return; // Slot recycled mid-bulk — drop remaining instances
-                }
-                let result = func(&buf);
-                buf.clear(); // release Arc refs promptly
-                // Store result for this specific instance using a per-instance NodeInfo
-                if node_cache.needs_result_store {
-                    let mut inst_info = node_info.clone();
-                    inst_info.index = inst_idx;
-                    inst_info.bulk_count = 1;
-                    shared.exec.node_results.set(&inst_info, result);
-                }
-            }
-        });
-
-        // Stale check: if slot was recycled during bulk execution, skip completion accounting
-        if !shared.config.single_slot_mode && WORKER_STATE.with(|ws| ws.borrow().stale_task_detected) {
-            return;
-        }
-
-        // Single call to worker_resolve_successors accounts for all bulk_count instances
-        // via the bulk_count-aware counter decrements and decrease_and_get_ready_into call.
-        worker_resolve_successors(shared, node_info);
+        execute_bulk_task(shared, func, node_info);
         return;
     }
+    execute_single_task(shared, func, node_info, pre_built_args, spawn_ns);
+}
 
-    // Initialize stale-detection context for collect_arg_result.
-    // In single_slot_mode, mid-execution slot recycling is impossible; skip TLS writes.
+/// Bulk execution path: run `bulk_count` consecutive instances in a tight loop.
+///
+/// Spawned by `push_ready_chunked` when a barrier fan-out produces N > num_workers
+/// ready instances simultaneously (e.g. wavefront diagonal). Eliminates O(N) individual
+/// Rayon spawns by covering a contiguous range `index..index+bulk_count` in one task.
+fn execute_bulk_task(shared: &Arc<SharedData>, func: CmPtr, node_info: &NodeInfo) {
     if !shared.config.single_slot_mode {
         WORKER_STATE.with(|ws| {
             let mut ws = ws.borrow_mut();
@@ -227,78 +181,112 @@ pub(super) fn execute_task(
         });
     }
 
-    // Capture execution start timestamp immediately
-    let exec_start_ns = shared.telemetry.base_instant.elapsed().as_nanos();
-
-    let worker_id = crate::scheduler::get_current_worker_id().unwrap_or(usize::MAX);
-
-    // Record scheduling latency if async recorder enabled and slot should be recorded
-    if shared.telemetry.async_recorder.is_some() {
-        if super::reporting::should_record_slot(shared, node_info.slot) {
-            let job_id = shared.telemetry.job_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            crate::async_recorder::submit_record(crate::Record {
-                slot: node_info.slot,
-                job_id,
-                start_ns: spawn_ns,
-                end_ns: exec_start_ns,
-                worker: worker_id,
-                task_id: crate::IdType::MAX - 3 * (node_info.id as crate::IdType),
-                index: node_info.index,
-            });
-        }
-    }
-
-    // Look up time_buf from shared (avoids Option<Arc> clone per task in closure capture)
-    let time_buf = &shared.telemetry.time_buffer;
-
-    // Start timing for actual function execution
-    let start_time = if !node_info.post_node {
-        Some(if let Some(tb) = time_buf {
-            tb.measure_time()
-        } else {
-            TimingMethod::Instant(Instant::now())
-        })
-    } else {
-        None
-    };
-
-    let result = if let Some(ref args) = pre_built_args {
-        // For post-nodes or special cases with pre-built args
-        func(args)
-    } else {
-        // For regular nodes, build args from cache using thread-local buffer
-        let node_cache = &shared.graph_cache.node_cache[node_info.id as usize];
-        let result_opt = ARG_BUF.with(|buf_cell| {
-            let mut buf = buf_cell.borrow_mut();
+    let node_cache = &shared.graph_cache.node_cache[node_info.id as usize];
+    ARG_BUF.with(|buf_cell| {
+        let mut buf = buf_cell.borrow_mut();
+        for inst_idx in node_info.index..node_info.index + node_info.bulk_count {
             buf.clear();
             populate_cached_args_into(
                 &mut buf,
                 shared,
                 &node_cache.arg_cache,
                 node_info.id,
-                node_info.index,
+                inst_idx,
                 node_info.slot,
                 node_info.pred_index,
             );
-            // Check stale BEFORE calling func (result missing due to reinit_slot race)
+            if !shared.config.single_slot_mode && WORKER_STATE.with(|ws| ws.borrow().stale_task_detected) {
+                buf.clear();
+                return; // Slot recycled mid-bulk — drop remaining instances
+            }
+            let result = func(&buf);
+            buf.clear(); // release Arc refs promptly
+            if node_cache.needs_result_store {
+                let mut inst_info = node_info.clone();
+                inst_info.index = inst_idx;
+                inst_info.bulk_count = 1;
+                shared.exec.node_results.set(&inst_info, result);
+            }
+        }
+    });
+
+    if !shared.config.single_slot_mode && WORKER_STATE.with(|ws| ws.borrow().stale_task_detected) {
+        return;
+    }
+    worker_resolve_successors(shared, node_info);
+}
+
+/// Single-instance execution path for regular and post-nodes.
+///
+/// Builds args from the cache (or uses pre-built args for post-nodes), runs the
+/// plugin function, stores the result, and either resolves successors worker-side
+/// (if `worker_resolvable`) or sends a completion token to the batch queue.
+fn execute_single_task(
+    shared: &Arc<SharedData>,
+    func: CmPtr,
+    node_info: &NodeInfo,
+    pre_built_args: Option<Vec<CmTypes>>,
+    spawn_ns: u128,
+) {
+    if !shared.config.single_slot_mode {
+        WORKER_STATE.with(|ws| {
+            let mut ws = ws.borrow_mut();
+            ws.stale_task_detected = false;
+            ws.executing_slot = node_info.slot;
+            ws.executing_gen = node_info.gen;
+        });
+    }
+
+    let exec_start_ns = shared.telemetry.base_instant.elapsed().as_nanos();
+    let worker_id = crate::scheduler::get_current_worker_id().unwrap_or(usize::MAX);
+
+    if shared.telemetry.async_recorder.is_some() && super::reporting::should_record_slot(shared, node_info.slot) {
+        let job_id = shared.telemetry.job_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        crate::async_recorder::submit_record(crate::Record {
+            slot: node_info.slot,
+            job_id,
+            start_ns: spawn_ns,
+            end_ns: exec_start_ns,
+            worker: worker_id,
+            task_id: crate::IdType::MAX - 3 * (node_info.id as crate::IdType),
+            index: node_info.index,
+        });
+    }
+
+    let time_buf = &shared.telemetry.time_buffer;
+    let start_time = if !node_info.post_node {
+        Some(if let Some(tb) = time_buf { tb.measure_time() } else { TimingMethod::Instant(Instant::now()) })
+    } else {
+        None
+    };
+
+    let result = if let Some(ref args) = pre_built_args {
+        func(args)
+    } else {
+        let node_cache = &shared.graph_cache.node_cache[node_info.id as usize];
+        let result_opt = ARG_BUF.with(|buf_cell| {
+            let mut buf = buf_cell.borrow_mut();
+            buf.clear();
+            populate_cached_args_into(
+                &mut buf, shared, &node_cache.arg_cache,
+                node_info.id, node_info.index, node_info.slot, node_info.pred_index,
+            );
             if !shared.config.single_slot_mode && WORKER_STATE.with(|ws| ws.borrow().stale_task_detected) {
                 buf.clear();
                 return None::<CmTypes>;
             }
             let r = func(&buf);
-            buf.clear(); // release Arc refs promptly
+            buf.clear();
             Some(r)
         });
         match result_opt {
             Some(r) => r,
             None => {
-                print_debug(|| {
-                    format!(
-                        "Stale task dropped during arg collection: node {} slot {} index {} gen {}",
-                        node_info.id, node_info.slot, node_info.index, node_info.gen
-                    )
-                });
-                return; // Silently drop — slot was recycled during arg collection
+                print_debug(|| format!(
+                    "Stale task dropped during arg collection: node {} slot {} index {} gen {}",
+                    node_info.id, node_info.slot, node_info.index, node_info.gen
+                ));
+                return;
             }
         }
     };
@@ -307,27 +295,18 @@ pub(super) fn execute_task(
         if let Some(tb) = time_buf {
             let end_time = tb.measure_time();
             let duration = tb.measure_duration(start, end_time);
-            // Look up node_name from cache (avoids String clone per task in closure capture)
             let node_name = &shared.graph_cache.node_cache[node_info.id as usize].name;
             tb.add_task_time(node_info.slot, node_name, worker_id, duration);
         }
     }
 
-    // Pre-store result in node_results before resolving or sending completion token.
-    // Skip the store when no successor reads this result via $res (barrier-only successors).
     if shared.graph_cache.node_cache[node_info.id as usize].needs_result_store {
         shared.exec.node_results.set(node_info, result);
     }
 
-    // Worker-side dependency resolution: if all successors are non-condition,
-    // resolve dependencies and schedule successors directly on this worker thread,
-    // bypassing the batch_queue → resolution thread round-trip (~5-15μs → ~100-500ns).
     if !node_info.post_node && shared.graph_cache.node_cache[node_info.id as usize].worker_resolvable {
         worker_resolve_successors(shared, node_info);
     } else {
-        // Send the lightweight NodeInfo token. Use blocking send (not try_send) so that
-        // a full queue causes the worker to wait rather than silently dropping the token.
-        // Dropping a token would leave slot_pending_tasks > 0 forever → hang.
         let _ = shared.exec.batch_queue_tx.send(node_info.clone());
     }
 }
