@@ -261,9 +261,7 @@ fn restart_slot_nonnetwork(
     }
     // slots_dirty was already set by the caller after process_slot_completion.
 
-    if let Some(tb) = &shared.telemetry.time_buffer {
-        tb.start_slot_processing(slot);
-    }
+    shared.telemetry.with_timing(|tb| tb.start_slot_processing(slot));
 
     let compute_nodes = initial_nodes(shared, vec![slot]);
     print_debug(|| {

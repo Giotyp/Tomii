@@ -116,6 +116,39 @@ pub struct Telemetry {
     pub stream_complete_counter: Arc<AtomicUsize>,
 }
 
+impl Telemetry {
+    /// Capture a start timestamp for a timed section.
+    /// Returns `None` when timing is not enabled.
+    #[inline]
+    pub fn measure_start(&self) -> Option<crate::time_buffer::TimingMethod> {
+        self.time_buffer.as_ref().map(|tb| tb.measure_time())
+    }
+
+    /// Record a named timing section. No-op when timing is disabled or `start` is `None`.
+    #[inline]
+    pub fn record_timing(
+        &self,
+        start: Option<crate::time_buffer::TimingMethod>,
+        slot: usize,
+        label: &str,
+        worker: usize,
+    ) {
+        if let (Some(tb), Some(start)) = (&self.time_buffer, start) {
+            let end = tb.measure_time();
+            let dur = tb.measure_duration(start, end);
+            tb.add_task_time(slot, label, worker, dur);
+        }
+    }
+
+    /// Call `f` with the `TimeBufferManager` if timing is enabled; no-op otherwise.
+    #[inline]
+    pub fn with_timing<F: FnOnce(&TimeBufferManager)>(&self, f: F) {
+        if let Some(tb) = &self.time_buffer {
+            f(tb);
+        }
+    }
+}
+
 // Shared data across all SynStream threads - immutable or internally synchronized
 pub struct SharedData {
     /// Immutable graph definition — kept flat for unchanged access pattern.

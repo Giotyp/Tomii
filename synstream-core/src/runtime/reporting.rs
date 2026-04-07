@@ -22,9 +22,7 @@ impl super::SynRt {
         out_file: Option<&str>,
         exclude_streams: usize,
     ) {
-        if let Some(tb) = &self.shared.telemetry.time_buffer {
-            tb.print_stats(bench_name, out_file, exclude_streams);
-        }
+        self.shared.telemetry.with_timing(|tb| tb.print_stats(bench_name, out_file, exclude_streams));
     }
 
     pub fn write_json_report(&self, path: &str, exclude_streams: usize) {

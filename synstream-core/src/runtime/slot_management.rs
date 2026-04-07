@@ -8,11 +8,11 @@ use synstream_types::*;
 #[inline]
 pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
     // Complete timing - use unwrap_or to handle errors gracefully
-    if let Some(tb) = &shared.telemetry.time_buffer {
+    shared.telemetry.with_timing(|tb| {
         if let Err(e) = tb.finish_slot_processing(slot) {
             eprintln!("Warning: Failed to finish slot {} timing: {}", slot, e);
         }
-    }
+    });
 
     // Count currently active/processing streams (excluding this completing slot)
     let currently_active_streams = {
@@ -117,9 +117,7 @@ pub(super) fn assign_stream_to_available_slot(
         shared.slot_data.generation[last_slot_assigned].fetch_add(1, Ordering::SeqCst);
 
         // Start timing for the slot immediately upon assignment
-        if let Some(tb) = &shared.telemetry.time_buffer {
-            tb.start_slot_processing(last_slot_assigned);
-        }
+        shared.telemetry.with_timing(|tb| tb.start_slot_processing(last_slot_assigned));
 
         return Some((last_slot_assigned, true)); // Newly activated from Inactive → Active
     }
@@ -147,9 +145,7 @@ pub(super) fn assign_stream_to_available_slot(
             // In network mode, activate_next_slot will call start_slot_processing
             // again (overwriting the start time) when the slot transitions to
             // Active — that is fine; the later timestamp is more accurate there.
-            if let Some(tb) = &shared.telemetry.time_buffer {
-                tb.start_slot_processing(slot_id);
-            }
+            shared.telemetry.with_timing(|tb| tb.start_slot_processing(slot_id));
             return Some((slot_id, false)); // Assigned but Buffering, not Active
         }
     }
@@ -248,9 +244,7 @@ pub(super) fn activate_next_slot(
         // new stream's dependency counters or cause spurious task spawning.
         shared.slot_data.generation[slot_id].fetch_add(1, Ordering::SeqCst);
 
-        if let Some(tb) = &shared.telemetry.time_buffer {
-            tb.start_slot_processing(slot_id);
-        }
+        shared.telemetry.with_timing(|tb| tb.start_slot_processing(slot_id));
 
         Some((slot_id, buffered))
     } else {

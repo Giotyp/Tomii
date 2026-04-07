@@ -4,10 +4,8 @@ use super::shared_data::{SharedData, slot_load_ordering, slot_rmw_ordering};
 use super::successor::{collect_successors_for_node_into, push_ready_chunked};
 use crate::buffers::*;
 use crate::debug::print_debug;
-use crate::time_buffer::TimingMethod;
 use std::cell::RefCell;
 use std::sync::Arc;
-use std::time::Instant;
 use synstream_types::*;
 
 thread_local! {
@@ -253,9 +251,8 @@ fn execute_single_task(
         });
     }
 
-    let time_buf = &shared.telemetry.time_buffer;
     let start_time = if !node_info.post_node {
-        Some(if let Some(tb) = time_buf { tb.measure_time() } else { TimingMethod::Instant(Instant::now()) })
+        shared.telemetry.measure_start()
     } else {
         None
     };
@@ -291,14 +288,8 @@ fn execute_single_task(
         }
     };
 
-    if let Some(start) = start_time {
-        if let Some(tb) = time_buf {
-            let end_time = tb.measure_time();
-            let duration = tb.measure_duration(start, end_time);
-            let node_name = &shared.graph_cache.node_cache[node_info.id as usize].name;
-            tb.add_task_time(node_info.slot, node_name, worker_id, duration);
-        }
-    }
+    let node_name = &shared.graph_cache.node_cache[node_info.id as usize].name;
+    shared.telemetry.record_timing(start_time, node_info.slot, node_name, worker_id);
 
     if shared.graph_cache.node_cache[node_info.id as usize].needs_result_store {
         shared.exec.node_results.set(node_info, result);
