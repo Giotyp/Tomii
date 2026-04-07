@@ -16,22 +16,29 @@ use std::sync::Arc;
 use std::time::Duration;
 use synstream_types::*;
 
+/// Reusable scratch buffers for `process_batch_resolution` → `process_batch_inner`.
+/// Bundled into one struct so a single `thread_local!` entry replaces four,
+/// collapsing the former 4-deep `.with()` nesting to one level.
+struct BatchInnerBuffers {
+    succ_updates: Vec<(NodeInfo, bool, IdType, Option<usize>)>,
+    schedule:     Vec<NodeInfo>,
+    ready:        Vec<usize>,
+    batch_sched:  Vec<NodeInfo>,
+}
+
 thread_local! {
-    // Successor descriptors collected for a single node being processed.
-    static SUCC_UPDATES_BUF: RefCell<Vec<(NodeInfo, bool, IdType, Option<usize>)>> =
-        RefCell::new(Vec::with_capacity(32));
-    // Nodes queued for scheduling from a single predecessor's successor set.
-    static SCHEDULE_BUF: RefCell<Vec<NodeInfo>> = RefCell::new(Vec::with_capacity(32));
-    // Ready instance indices returned by decrease_and_get_ready_into.
-    static READY_BUF: RefCell<Vec<usize>> = RefCell::new(Vec::with_capacity(16));
-    // Accumulates scheduled successor nodes during batch processing.
-    // Flushed incrementally via preparation() every sched_flush_threshold items
-    // so workers receive tasks while the system thread is still processing the batch.
-    static BATCH_SCHED_BUF: RefCell<Vec<NodeInfo>> = RefCell::new(Vec::with_capacity(256));
-    // Reusable staging buffer for task completion batches: converts Vec<NodeInfo> (from the
-    // batch_queue) into Vec<(NodeInfo, Option<CmTypes>)> without per-batch heap allocation.
-    // The Vec is drained (not consumed) by process_batch_resolution, so capacity is retained.
-    static TASK_COMP_BUF: RefCell<Vec<(NodeInfo, Option<synstream_types::CmTypes>)>> =
+    // Batch resolution inner buffers — all four in one allocation.
+    static BATCH_INNER_BUFS: RefCell<BatchInnerBuffers> = RefCell::new(BatchInnerBuffers {
+        succ_updates: Vec::with_capacity(32),
+        schedule:     Vec::with_capacity(32),
+        ready:        Vec::with_capacity(16),
+        batch_sched:  Vec::with_capacity(256),
+    });
+    // Staging buffer for task completions drained from batch_queue.
+    // Kept separate from BATCH_INNER_BUFS because drain_and_process_batch_queue holds
+    // this borrow while calling process_batch_resolution (which borrows BATCH_INNER_BUFS),
+    // so merging them would cause a re-entrant borrow panic.
+    static TASK_COMP_BUF: RefCell<Vec<(NodeInfo, Option<CmTypes>)>> =
         RefCell::new(Vec::with_capacity(256));
 }
 
@@ -213,26 +220,22 @@ impl super::SynRt {
         // Opt: Successor nodes are accumulated into BATCH_SCHED_BUF across all nodes in the
         // batch; a single preparation() call is made after the loop instead of one per node.
         // This reduces scheduler submissions from O(batch_size) to O(1) per batch.
-        SUCC_UPDATES_BUF.with(|sbuf| {
-            SCHEDULE_BUF.with(|tbuf| {
-                READY_BUF.with(|rbuf| {
-                    BATCH_SCHED_BUF.with(|bbuf| {
-                        process_batch_inner(
-                            shared,
-                            batch,
-                            thread_core,
-                            thread_id,
-                            thread_slot,
-                            cond_indexes,
-                            stream_slot_activity,
-                            &mut *sbuf.borrow_mut(),
-                            &mut *tbuf.borrow_mut(),
-                            &mut *rbuf.borrow_mut(),
-                            &mut *bbuf.borrow_mut(),
-                        );
-                    })
-                })
-            })
+        BATCH_INNER_BUFS.with(|bufs| {
+            let mut bufs = bufs.borrow_mut();
+            let BatchInnerBuffers { succ_updates, schedule, ready, batch_sched } = &mut *bufs;
+            process_batch_inner(
+                shared,
+                batch,
+                thread_core,
+                thread_id,
+                thread_slot,
+                cond_indexes,
+                stream_slot_activity,
+                succ_updates,
+                schedule,
+                ready,
+                batch_sched,
+            );
         });
 
         // Lock-free recording via per-worker channel
