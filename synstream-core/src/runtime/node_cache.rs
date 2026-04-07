@@ -1,4 +1,5 @@
 use crate::debug::print_debug;
+use crate::func_reg::get_func;
 use crate::{graph_struct::*, IdType};
 use synstream_types::*;
 
@@ -43,6 +44,30 @@ pub struct NodeConditionCache {
     pub arg_cache: ArgCacheEntry,
 }
 
+/// Pre-resolved predecessor metadata for a `$res` or `$dep` argument.
+///
+/// Cached at build time to eliminate per-task `shared.graph.nodes[...]` lookups
+/// in the `populate_cached_args_into` hot path.
+#[derive(Clone)]
+pub struct ResPredCache {
+    /// ID of the current (successor) node — needed for `pred_group_by` table lookups.
+    pub node_id: crate::IdType,
+    /// ID of the predecessor (result) node.
+    pub res_node_id: crate::IdType,
+    /// Relative instance offsets declared in the argument (`predecessor.indexes`).
+    pub indexes: Vec<isize>,
+    /// Predecessor node's parallel factor.
+    pub pred_factor: usize,
+    /// Predecessor node's `group_size` (for grouped-symbol index calculation).
+    pub pred_group_size: Option<usize>,
+    /// Current node's `group_size` (for grouped-symbol index calculation).
+    pub node_group_size: Option<usize>,
+    /// Current node's parallel factor (used for the 1:1-mapping check).
+    pub node_factor: usize,
+    /// True when this is a `$dep` (ordering-only) argument; result is always `CmTypes::None`.
+    pub is_dep: bool,
+}
+
 #[derive(Clone)]
 pub struct ArgCacheEntry {
     // initially store ref indexes for node id
@@ -59,6 +84,10 @@ pub struct ArgCacheEntry {
     pub res_indexes: Vec<usize>,
     // real indexes of $res
     pub real_res_indexes: Vec<usize>,
+    // Pre-resolved predecessor/node metadata for each $res/$dep arg.
+    // Aligned with res_indexes: res_predecessors[i] corresponds to res_indexes[i].
+    // Populated by build_node_cache after all NodeCacheEntry values are constructed.
+    pub res_predecessors: Vec<ResPredCache>,
 }
 
 impl Default for ArgCacheEntry {
@@ -71,6 +100,7 @@ impl Default for ArgCacheEntry {
             rt_workers_indexes: Vec::new(),
             res_indexes: Vec::new(),
             real_res_indexes: Vec::new(),
+            res_predecessors: Vec::new(),
         }
     }
 }
@@ -85,6 +115,7 @@ impl std::fmt::Debug for ArgCacheEntry {
             .field("rt_workers_indexes", &self.rt_workers_indexes)
             .field("res_indexes", &self.res_indexes)
             .field("real_res_indexes", &self.real_res_indexes)
+            .field("res_predecessors.len", &self.res_predecessors.len())
             .finish()
     }
 }
@@ -92,8 +123,8 @@ impl std::fmt::Debug for ArgCacheEntry {
 #[inline]
 pub(super) fn node_cache_entry(
     node: &Node,
-    init_objects: &Vec<Vec<CmTypes>>,
-    initial_nodes: &Vec<crate::IdType>,
+    init_objects: &[Vec<CmTypes>],
+    initial_nodes: &[crate::IdType],
     condition_nodes: &std::collections::HashSet<crate::IdType>,
 ) -> NodeCacheEntry {
     print_debug(|| format!("Creating node cache entry for node {} name {}", node.id, node.name));
@@ -130,7 +161,8 @@ pub(super) fn node_cache_entry(
         factor: node.factor,
         pred_vec,
         name: node.name.clone(),
-        func_ptr: node.func_ptr.expect("Node function pointer is None"),
+        func_ptr: get_func(&node.func_name)
+            .unwrap_or_else(|| panic!("Function '{}' not found in registry", node.func_name)),
         arg_cache,
         is_initial: initial_nodes.contains(&node.id),
         is_condition: condition_nodes.contains(&node.id),
@@ -155,6 +187,7 @@ fn build_arg_cache(
     init_objects: &[Vec<CmTypes>],
     skip_conditions: bool,
 ) -> (ArgCacheEntry, std::collections::HashMap<IdType, Vec<usize>>) {
+
     let mut rt_idxs_indexes = Vec::new();
     let mut buffer_ref_indexes = Vec::new();
     let mut buffer_values = Vec::new();
@@ -210,6 +243,7 @@ fn build_arg_cache(
             rt_workers_indexes,
             res_indexes,
             real_res_indexes,
+            res_predecessors: Vec::new(), // populated later by build_node_cache second pass
         },
         pred_hash,
     )
@@ -233,7 +267,8 @@ fn build_condition_cache(node: &Node, init_objects: &[Vec<CmTypes>]) -> Option<N
     Some(NodeConditionCache {
         operation: cond.operation.clone(),
         eval_value: cond.eval_value.clone(),
-        func_ptr: cond.func_ptr,
+        func_ptr: get_func(&cond.func_name)
+            .unwrap_or_else(|| panic!("Condition function '{}' not found in registry", cond.func_name)),
         arg_cache,
     })
 }

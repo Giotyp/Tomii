@@ -1,16 +1,16 @@
 /// Private helpers for `SynRtBuilder::build()` — pure computation, no threading.
-use super::node_cache::{node_cache_entry, NodeCacheEntry};
+use super::node_cache::{node_cache_entry, NodeCacheEntry, ResPredCache};
 use crate::graph::*;
 use crate::scheduler::SchedulerImpl;
 use crate::IdType;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
+use synstream_types::CmTypes;
 
 /// Build the node cache from graph nodes, computing all pre-derived flags.
 ///
 /// Sets: `successor_count`, `worker_resolvable`, `needs_result_store`,
 /// `priority`, and `affinity_group` in addition to the base cache entry.
-pub(super) fn build_node_cache(app_graph: &Graph, scheduler: &SchedulerImpl) -> Vec<NodeCacheEntry> {
-    let init_objects = app_graph.init_objects.as_ref().unwrap();
+pub(super) fn build_node_cache(app_graph: &Graph, init_objects: &[Vec<synstream_types::CmTypes>], scheduler: &SchedulerImpl) -> Vec<NodeCacheEntry> {
     let mut cache: Vec<NodeCacheEntry> = app_graph
         .nodes
         .iter()
@@ -75,6 +75,60 @@ pub(super) fn build_node_cache(app_graph: &Graph, scheduler: &SchedulerImpl) -> 
         }
     }
 
+    // res_predecessors — pre-resolve predecessor/node metadata for the populate_cached_args_into
+    // hot path.  Eliminates `shared.graph.nodes[pred_id]` lookups during task execution.
+    // Both main arg_cache and condition arg_cache are populated here so the fast path is
+    // always available regardless of which cache path is taken.
+    for node_id in 0..app_graph.nodes.len() {
+        let node = &app_graph.nodes[node_id];
+
+        // Helper closure: build ResPredCache entries from an arg slice.
+        // `skip_cond` mirrors the `skip_conditions` flag used in build_arg_cache.
+        let build_res_preds = |args: &[crate::graph_struct::Arg], skip_cond: bool| -> Vec<ResPredCache> {
+            let mut v = Vec::new();
+            for arg in args {
+                if skip_cond && arg.is_condition() { continue; }
+                match &arg.type_ {
+                    CmTypes::Res(res_nid) => {
+                        let pred_node = &app_graph.nodes[*res_nid as usize];
+                        v.push(ResPredCache {
+                            node_id: node_id as IdType,
+                            res_node_id: *res_nid as IdType,
+                            indexes: arg.predecessor.as_ref().map_or_else(Vec::new, |p| p.indexes.clone()),
+                            pred_factor: pred_node.factor,
+                            pred_group_size: pred_node.group_size,
+                            node_group_size: node.group_size,
+                            node_factor: node.factor,
+                            is_dep: false,
+                        });
+                    }
+                    CmTypes::Dep(res_nid) => {
+                        v.push(ResPredCache {
+                            node_id: node_id as IdType,
+                            res_node_id: *res_nid as IdType,
+                            indexes: Vec::new(),
+                            pred_factor: 0,
+                            pred_group_size: None,
+                            node_group_size: None,
+                            node_factor: node.factor,
+                            is_dep: true,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            v
+        };
+
+        let main_res_preds = build_res_preds(&node.args, true);
+        let cond_res_preds = node.condition.as_ref().map(|cond| build_res_preds(&cond.args, false));
+
+        cache[node_id].arg_cache.res_predecessors = main_res_preds;
+        if let (Some(nc), Some(cp)) = (cache[node_id].node_condition.as_mut(), cond_res_preds) {
+            nc.arg_cache.res_predecessors = cp;
+        }
+    }
+
     cache
 }
 
@@ -107,22 +161,8 @@ pub(super) fn build_predecessor_tables(
             let pred_id = pred.id as usize;
             let pred_factor = app_graph.nodes[pred_id].factor;
 
-            if !pred.indexes.is_empty() {
-                let min_idx = *pred.indexes.iter().min().unwrap() as usize;
-                let max_idx = *pred.indexes.iter().max().unwrap() as usize;
-                let range_len = max_idx - min_idx + 1;
-
-                let should_filter = if pred.group_by.is_some() {
-                    true // always filter when group_by present (needed for offset calculation)
-                } else if range_len < pred_factor && range_len == pred.indexes.len() {
-                    range_len == succ_factor
-                } else {
-                    false
-                };
-
-                if should_filter {
-                    filter[succ_id][pred_id] = Some((min_idx, max_idx + 1));
-                }
+            if let Some(range) = pred.index_filter(pred_factor, succ_factor) {
+                filter[succ_id][pred_id] = Some(range);
             }
 
             if let Some(gb) = pred.group_by {

@@ -1,13 +1,15 @@
 use core::panic;
-use rapidhash::RapidHashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::graph_struct::*;
 use crate::{debug::print_debug, IdType};
-use synstream_types::*;
 
-/// Graph structure
+/// Pure topological description of a task graph.
+///
+/// Contains nodes, edges, and metadata derived purely from the graph structure.
+/// Materialized initialization objects live in [`crate::graph_gen::GraphSpec`] and
+/// are stored in `GraphCache` at runtime — not here.
 #[derive(Clone)]
 pub struct Graph {
     pub nodes: Vec<Node>,
@@ -15,43 +17,9 @@ pub struct Graph {
     pub successors: Vec<Vec<IdType>>,
     pub condition_nodes: HashSet<IdType>,
     pub post_nodes: Option<Vec<Node>>,
-    pub init_objects: Option<Vec<Vec<CmTypes>>>,
-    pub obj_id_map: RapidHashMap<String, usize>,
     pub network_config: Option<Arc<GraphNetworkConfig>>,
 }
 
-/// Compute how many predecessor instances will actually send decrements
-/// to this successor.  When a pred_index_filter would narrow down which
-/// instances send decrements, the count equals the filtered range.
-/// Otherwise ALL predecessor instances contribute (pred_factor).
-fn contributing_instances(
-    pred: &crate::graph_struct::Predecessor,
-    nodes: &[Node],
-    succ_factor: usize,
-) -> usize {
-    let pred_factor = nodes[pred.id as usize].factor;
-    if pred.indexes.is_empty() {
-        return pred_factor;
-    }
-    // Replicate the pred_index_filter logic from runtime.rs
-    let min_idx = *pred.indexes.iter().min().unwrap() as usize;
-    let max_idx = *pred.indexes.iter().max().unwrap() as usize;
-    let range_len = max_idx - min_idx + 1;
-
-    let should_filter = if pred.group_by.is_some() {
-        true
-    } else if range_len < pred_factor && range_len == pred.indexes.len() {
-        range_len == succ_factor
-    } else {
-        false
-    };
-
-    if should_filter {
-        pred.indexes.len()
-    } else {
-        pred_factor
-    }
-}
 
 impl Graph {
     pub fn add_node(&mut self, node: Node) {
@@ -171,8 +139,9 @@ impl Graph {
                                 });
                                 dep_count += barrier_deps;
                             } else {
+                                let pred_factor = self.nodes[pred.id as usize].factor;
                                 let contributing =
-                                    contributing_instances(pred, &self.nodes, node.factor);
+                                    pred.contributing_instances(pred_factor, node.factor);
                                 if num_groups > 1 {
                                     // Global barrier: each instance group needs all deps
                                     print_debug(|| {
@@ -198,8 +167,9 @@ impl Graph {
                 if !arg.type_.is_barrier() {
                     if let Some(pred) = &arg.predecessor {
                         if preds_seen.insert(pred.id) {
+                            let pred_factor = self.nodes[pred.id as usize].factor;
                             let contributing =
-                                contributing_instances(pred, &self.nodes, node.factor);
+                                pred.contributing_instances(pred_factor, node.factor);
                             dep_count += contributing;
                         }
                     }
@@ -231,18 +201,12 @@ impl Graph {
             successors: Vec::new(),
             condition_nodes: HashSet::new(),
             post_nodes: None,
-            init_objects: None,
-            obj_id_map: RapidHashMap::default(),
             network_config: None,
         }
     }
 
     pub fn set_nodes(&mut self, nodes: Vec<Node>) {
         self.nodes = nodes;
-    }
-
-    pub fn set_init_objects(&mut self, init_objects: &Vec<Vec<CmTypes>>) {
-        self.init_objects = Some(init_objects.clone());
     }
 
     pub fn set_post_nodes(&mut self, post_nodes: Option<Vec<Node>>) {
@@ -314,17 +278,6 @@ impl Graph {
 
     pub fn network_config(&self) -> Option<Arc<GraphNetworkConfig>> {
         self.network_config.clone()
-    }
-
-    pub fn print_init_objects(&self) {
-        if let Some(init_objects) = &self.init_objects {
-            println!("Initialized Objects:");
-            for (id, obj) in init_objects.iter().enumerate() {
-                println!("  {}: {:?}", id, obj);
-            }
-        } else {
-            println!("No initialized objects.");
-        }
     }
 
     pub fn print_graph(&self) {
