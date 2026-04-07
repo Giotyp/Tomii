@@ -8,14 +8,24 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use synstream_types::*;
 
+/// Reusable scratch buffers for worker-side successor resolution.
+/// Bundled into one struct so a single `thread_local!` entry replaces four,
+/// eliminating the 4-deep `.with()` nesting in `worker_resolve_successors`.
+struct WorkerResolutionBuffers {
+    succ: Vec<(NodeInfo, bool, crate::IdType, Option<usize>)>,
+    ready: Vec<usize>,
+    sched: Vec<NodeInfo>,
+    args: Vec<Option<Vec<CmTypes>>>,
+}
+
 thread_local! {
-    // Worker-side dependency resolution buffers.
-    // Used by worker_resolve_successors to avoid heap allocation on the hot path.
-    static WORKER_SUCC_BUF: RefCell<Vec<(NodeInfo, bool, crate::IdType, Option<usize>)>> =
-        RefCell::new(Vec::with_capacity(32));
-    static WORKER_READY_BUF: RefCell<Vec<usize>> = RefCell::new(Vec::with_capacity(32));
-    static WORKER_SCHED_BUF: RefCell<Vec<NodeInfo>> = RefCell::new(Vec::with_capacity(32));
-    static WORKER_ARGS_BUF: RefCell<Vec<Option<Vec<CmTypes>>>> = RefCell::new(Vec::with_capacity(32));
+    // Worker-side dependency resolution buffers — all four in one allocation.
+    static WORKER_BUFS: RefCell<WorkerResolutionBuffers> = RefCell::new(WorkerResolutionBuffers {
+        succ:  Vec::with_capacity(32),
+        ready: Vec::with_capacity(32),
+        sched: Vec::with_capacity(32),
+        args:  Vec::with_capacity(32),
+    });
 }
 
 /// Worker-side dependency resolution: resolves successors directly on the worker
@@ -47,81 +57,76 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
     }
 
     // Steps 4-6: Collect successors, resolve dependencies, schedule ready nodes.
-    WORKER_SUCC_BUF.with(|sbuf| {
-        WORKER_READY_BUF.with(|rbuf| {
-            WORKER_SCHED_BUF.with(|tbuf| {
-                WORKER_ARGS_BUF.with(|abuf| {
-                    let mut succ_buf = sbuf.borrow_mut();
-                    let mut ready = rbuf.borrow_mut();
-                    let mut sched = tbuf.borrow_mut();
-                    let mut args_buf = abuf.borrow_mut();
-                    sched.clear();
+    WORKER_BUFS.with(|bufs| {
+        let mut bufs = bufs.borrow_mut();
+        bufs.sched.clear();
 
-                    // Step 4: Collect successors.
-                    collect_successors_for_node_into(shared, node_info, &mut succ_buf);
+        // Step 4: Collect successors.
+        collect_successors_for_node_into(shared, node_info, &mut bufs.succ);
 
-                    // Load slot generation once for all successors.
-                    let slot_gen = shared.slot_data.generation[slot].load(slot_load_ordering(shared)) as u32;
+        // Load slot generation once for all successors.
+        let slot_gen = shared.slot_data.generation[slot].load(slot_load_ordering(shared)) as u32;
 
-                    // Step 5: Resolve dependencies for each successor (all non-condition).
-                    for (_succ_info, _has_cond, succ_id, pred_group) in succ_buf.iter() {
-                        let succ_node_id = *succ_id as usize;
+        // Step 5: Resolve dependencies for each successor (all non-condition).
+        // Destructure into separate field borrows so the borrow checker allows
+        // iterating `succ` while mutating `ready` and `sched` simultaneously.
+        let WorkerResolutionBuffers { succ, ready, sched, .. } = &mut *bufs;
+        for (_succ_info, _has_cond, succ_id, pred_group) in succ.iter() {
+            let succ_node_id = *succ_id as usize;
 
-                        // For 1:1 non-barrier deps, fire the specific successor instance
-                        // that reads this predecessor (result guaranteed available).
-                        let specific_succ_idx = shared
-                            .graph_cache.pred_succ_1to1_offset
-                            .get(succ_node_id)
-                            .and_then(|v| v.get(node_info.id as usize))
-                            .and_then(|o| *o)
-                            .map(|k| {
-                                let f = shared.graph_cache.node_cache[succ_node_id].factor;
-                                ((node_info.index as isize - k).rem_euclid(f as isize)) as usize
-                            });
-
-                        shared.exec.resolution_state.decrease_and_get_ready_into(
-                            slot,
-                            succ_node_id,
-                            slot_gen,
-                            *pred_group,
-                            node_info.bulk_count,
-                            specific_succ_idx,
-                            &mut ready,
-                        );
-
-                        push_ready_chunked(
-                            &ready,
-                            succ_node_id as crate::IdType,
-                            slot,
-                            node_info.index,
-                            shared.config.workers,
-                            shared.config.coalesce_barriers,
-                            &mut sched,
-                        );
-                    }
-
-                    // Inline continuation: reserve one ready successor for this worker
-                    // thread instead of spawning it through the scheduler.
-                    // Stamp slot_gen so the trampoline's stale check passes on streams > 0.
-                    let inline = if shared.config.inline_continuation && !sched.is_empty() {
-                        sched.pop().map(|mut ni| { ni.gen = slot_gen; ni })
-                    } else {
-                        None
-                    };
-
-                    // Step 6: Schedule remaining ready successors.
-                    if !sched.is_empty() {
-                        args_buf.clear();
-                        args_buf.resize(sched.len(), None);
-                        send_to_scheduler(shared, &sched, &args_buf, None);
-                    }
-
-                    if let Some(ni) = inline {
-                        WORKER_STATE.with(|ws| ws.borrow_mut().inline_continuation = Some(ni));
-                    }
+            // For 1:1 non-barrier deps, fire the specific successor instance
+            // that reads this predecessor (result guaranteed available).
+            let specific_succ_idx = shared
+                .graph_cache.pred_succ_1to1_offset
+                .get(succ_node_id)
+                .and_then(|v| v.get(node_info.id as usize))
+                .and_then(|o| *o)
+                .map(|k| {
+                    let f = shared.graph_cache.node_cache[succ_node_id].factor;
+                    ((node_info.index as isize - k).rem_euclid(f as isize)) as usize
                 });
-            });
-        });
+
+            shared.exec.resolution_state.decrease_and_get_ready_into(
+                slot,
+                succ_node_id,
+                slot_gen,
+                *pred_group,
+                node_info.bulk_count,
+                specific_succ_idx,
+                ready,
+            );
+
+            push_ready_chunked(
+                ready,
+                succ_node_id as crate::IdType,
+                slot,
+                node_info.index,
+                shared.config.workers,
+                shared.config.coalesce_barriers,
+                sched,
+            );
+        }
+
+        // Inline continuation: reserve one ready successor for this worker
+        // thread instead of spawning it through the scheduler.
+        // Stamp slot_gen so the trampoline's stale check passes on streams > 0.
+        let inline = if shared.config.inline_continuation && !bufs.sched.is_empty() {
+            bufs.sched.pop().map(|mut ni| { ni.gen = slot_gen; ni })
+        } else {
+            None
+        };
+
+        // Step 6: Schedule remaining ready successors.
+        if !bufs.sched.is_empty() {
+            let n = bufs.sched.len();
+            bufs.args.clear();
+            bufs.args.resize(n, None);
+            send_to_scheduler(shared, &bufs.sched, &bufs.args, None);
+        }
+
+        if let Some(ni) = inline {
+            WORKER_STATE.with(|ws| ws.borrow_mut().inline_continuation = Some(ni));
+        }
     });
 
     // Step 7: Decrement processing_count AFTER all successor processing.
