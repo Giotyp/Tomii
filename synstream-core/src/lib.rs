@@ -73,18 +73,27 @@ pub mod prelude {
     pub use crate::IdType;
 }
 
+#[cfg(build_rs_ran)]
 pub mod wrappers {
     include!(concat!(env!("OUT_DIR"), "/wrappers.rs"));
 }
+#[cfg(not(build_rs_ran))]
+pub mod wrappers {}
 
 // Re-exports
 pub use crate::async_recorder::AsyncRecorder;
+#[cfg(build_rs_ran)]
 pub mod func_reg {
     include!(concat!(env!("OUT_DIR"), "/func_reg.rs"));
 }
+#[cfg(not(build_rs_ran))]
+pub mod func_reg {}
+#[cfg(build_rs_ran)]
 pub mod funcs {
     include!(concat!(env!("OUT_DIR"), "/funcs.rs"));
 }
+#[cfg(not(build_rs_ran))]
+pub mod funcs {}
 
 pub mod worker_range;
 pub use worker_range::{WorkerRange, WorkerRangeSpec};
