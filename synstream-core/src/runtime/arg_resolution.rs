@@ -39,23 +39,6 @@ thread_local! {
     pub(super) static WORKER_STATE: RefCell<WorkerThreadState> = RefCell::new(WorkerThreadState::new());
 }
 
-#[allow(dead_code)]
-#[inline]
-pub(super) fn create_node_args(
-    shared: &Arc<SharedData>,
-    node: &super::node_cache::NodeCacheEntry,
-    node_id: IdType,
-    node_index: usize,
-    slot: usize,
-    pred_index: usize,
-) -> Vec<CmTypes> {
-    let args_cache = &node.arg_cache;
-
-    // All argument resolution is handled uniformly in parse_cached_args
-    parse_cached_args(
-        shared, args_cache, node_id, node_index, slot, pred_index, None,
-    )
-}
 
 #[inline(always)]
 fn process_buffer_refs(arg_vec: &mut Vec<CmTypes>, cache: &ArgCacheEntry, node_index: usize) {

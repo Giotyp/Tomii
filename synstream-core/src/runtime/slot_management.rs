@@ -188,13 +188,6 @@ pub(super) fn release_slot(shared: &Arc<SharedData>, slot: usize) {
     drop(running_streams);
 }
 
-/// Check if a slot is active (ready to send tasks to scheduler)
-#[allow(dead_code)]
-#[inline]
-pub(super) fn is_slot_active(shared: &Arc<SharedData>, slot: usize) -> bool {
-    let states = shared.slot_data.states.read();
-    states[slot] == SlotState::Active
-}
 
 /// Activate the next buffering slot in round-robin order
 /// Returns (activated_slot_id, buffered_nodes) for processing

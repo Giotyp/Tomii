@@ -1,3 +1,9 @@
+// Several TimingRequest variants and TimeBuffer/AsyncTimeBuffer methods are
+// planned for future use (RDTSC-based timing, slot statistics, async paths)
+// but not yet wired into the runtime. Suppress dead-code warnings for this
+// internal (pub(crate)) module.
+#![allow(dead_code)]
+
 use crate::utils_rdtsc::{cycles_to_ns, rdtsc};
 use rapidhash::{HashMapExt, RapidHashMap};
 use std::sync::mpsc::{self, Sender};

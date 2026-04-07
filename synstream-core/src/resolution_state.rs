@@ -24,15 +24,9 @@ pub trait ResolutionState: Send + Sync {
     // This eliminates the TOCTOU window between is_slot_completed() and mark_slot_completed().
     fn try_complete_slot(&self, slot: usize) -> bool;
 
-    // Clear all sent flags for a slot
-    fn clear_slot_sent_flags(&self, slot: usize);
-
     // Increase dependency count and return new count
     // slot_gen: current slot generation for lazy generational reinit
     fn increment_dependency(&self, node_info: &NodeInfo, slot_gen: u32) -> Option<usize>;
-
-    // Reinitialize dependency map for a slot
-    fn reinit_dependencies(&self, nodes: &Vec<crate::graph_struct::Node>, slot: usize);
 
     // NEW: Optimized per-node decrements returning batch of ready instances
     // Decrements the dependency counter for a node in a slot by `count` and returns
@@ -66,7 +60,6 @@ pub struct MultiThreadedState {
     node_dep_map: Arc<crate::buffers::NodeDepMap>,
 
     completed_slots: Arc<Mutex<HashSet<usize>>>,
-    dependency_count_vec: Arc<Vec<usize>>,
 }
 
 impl MultiThreadedState {
@@ -83,7 +76,6 @@ impl MultiThreadedState {
         Self {
             node_dep_map: Arc::new(node_dep_map),
             completed_slots: Arc::new(Mutex::new(HashSet::new())),
-            dependency_count_vec: Arc::new(dependency_count_vec),
         }
     }
 }
@@ -122,23 +114,10 @@ impl ResolutionState for MultiThreadedState {
     }
 
     #[inline]
-    fn clear_slot_sent_flags(&self, slot: usize) {
-        // Delegate to NodeDepMap
-        self.node_dep_map.clear_slot_sent_flags(slot);
-    }
-
-    #[inline]
     fn increment_dependency(&self, node_info: &NodeInfo, slot_gen: u32) -> Option<usize> {
         // Delegate to NodeDepMap
         self.node_dep_map
             .increment_dependency(node_info.slot, node_info.id as usize, slot_gen, Some(node_info.index))
-    }
-
-    #[inline]
-    fn reinit_dependencies(&self, nodes: &Vec<crate::graph_struct::Node>, slot: usize) {
-        // Delegate to NodeDepMap
-        self.node_dep_map
-            .reinit_slot(nodes, slot, &self.dependency_count_vec);
     }
 
     #[inline]
@@ -166,7 +145,6 @@ impl fmt::Debug for MultiThreadedState {
         f.debug_struct("MultiThreadedState")
             .field("\nnode_dep_map", &self.node_dep_map)
             .field("\ncompleted_slots", &completed_slots)
-            .field("\ndependency_count_vec", &self.dependency_count_vec)
             .finish()
     }
 }

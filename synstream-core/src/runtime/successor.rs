@@ -190,12 +190,3 @@ pub(super) fn collect_successors_for_node_into(
     }
 }
 
-#[allow(dead_code)]
-pub(super) fn collect_successors_for_node(
-    shared: &Arc<SharedData>,
-    node_info: &NodeInfo,
-) -> Vec<(NodeInfo, bool, IdType, Option<usize>)> {
-    let mut out = Vec::new();
-    collect_successors_for_node_into(shared, node_info, &mut out);
-    out
-}
