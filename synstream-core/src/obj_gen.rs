@@ -24,7 +24,7 @@ pub fn init_objects(
         let name = &init.name;
         print_debug(|| format!("Initializing object: {}", name));
         let factor = match &init.factor {
-            Some(factor) => factor.search(&init_objects, &obj_id_map, workers),
+            Some(factor) => factor.resolve(&init_objects, &obj_id_map, workers),
             None => 1,
         };
         let args_json: &Vec<ArgInit> = &init.args;

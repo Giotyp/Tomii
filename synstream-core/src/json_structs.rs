@@ -154,39 +154,4 @@ impl Factor {
         }
     }
 
-    pub fn search(
-        &self,
-        init_objects: &[Vec<CmTypes>],
-        obj_id_map: &RapidHashMap<String, usize>,
-        workers: usize,
-    ) -> usize {
-        match self {
-            Factor::Number(num) => *num,
-            Factor::Ref(ref_name) => {
-                // Check if ref_name is $workers
-                if ref_name == "$workers" {
-                    return workers;
-                }
-
-                let obj_id = obj_id_map.get(ref_name).unwrap();
-
-                if obj_id > &init_objects.len() {
-                    panic!(
-                        "Variable '{}' not found or does not contain a number",
-                        ref_name
-                    );
-                }
-
-                let usize_res = &init_objects[*obj_id][0].valid_number_to_usize();
-                if let Some(usize_val) = usize_res {
-                    *usize_val
-                } else {
-                    panic!(
-                        "Variable '{}' found but does not contain a valid number",
-                        ref_name
-                    );
-                }
-            }
-        }
-    }
 }
