@@ -4,6 +4,7 @@ use super::arg_resolution::WORKER_STATE;
 use super::task_execution::execute_task;
 use crate::async_recorder::submit_record;
 use crate::buffers::*;
+use crate::func_reg::get_func;
 use crate::Record;
 use crate::IdType;
 use std::cell::RefCell;
@@ -38,7 +39,8 @@ pub(super) fn send_to_scheduler(
             let node = &nodes[node_info.id as usize];
 
             let func = custom_func
-                .unwrap_or_else(|| node.func_ptr.expect("Post node function pointer is None"));
+                .unwrap_or_else(|| get_func(&node.func_name)
+                    .unwrap_or_else(|| panic!("Post-node function '{}' not found in registry", node.func_name)));
 
             use crate::custom_scheduler::Priority;
             use crate::graph_struct::NodePriority;
@@ -163,7 +165,7 @@ impl super::SynRt {
                     let arg_vec =
                         super::arg_resolution::parse_args(&self.shared, &post_node.args, index, stream_use, 0, None);
 
-                    let func: Option<CmPtr> = post_node.func_ptr;
+                    let func: Option<CmPtr> = get_func(&post_node.func_name);
                     pre_build_args.push(Some(arg_vec));
                     functions.push(func);
                     post_schedule.push(node_info);

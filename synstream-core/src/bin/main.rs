@@ -4,8 +4,7 @@ use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::time::Instant;
 use synstream_core::debug::*;
-use synstream_core::graph::Graph;
-use synstream_core::graph_gen::from_json;
+use synstream_core::graph_gen::{from_json, GraphSpec};
 use synstream_core::runtime::{BatchConfig, SpinWaitConfig, SynRt, SynRtBuilder};
 use synstream_core::scheduler::{create_scheduler, SchedulerConfig, SchedulerType};
 use synstream_core::utils_rdtsc;
@@ -188,14 +187,17 @@ fn main() {
     };
 
     print_debug(|| "Starting Graph Initialization".to_string());
-    let graph = from_json(&args.json, args.workers).expect("Failed to parse graph from JSON file");
+    let spec = from_json(&args.json, args.workers).expect("Failed to parse graph from JSON file");
     print_debug(|| "Graph Initialized".to_string());
     // check if inits flag is set
     if args.inits {
         println!();
-        graph.print_graph();
+        spec.graph.print_graph();
         println!();
-        graph.print_init_objects();
+        println!("Initialized Objects:");
+        for (id, obj) in spec.init_objects.iter().enumerate() {
+            println!("  {}: {:?}", id, obj);
+        }
         println!();
     }
     print_debug(|| "Objects Initialized".to_string());
@@ -208,7 +210,7 @@ fn main() {
     let timing_enabled = args.timing.is_some();
 
     let synrt = run_graph(
-        graph,
+        spec,
         scheduler_type,
         args.workers,
         args.core_offset,
@@ -265,7 +267,7 @@ fn main() {
 }
 
 pub fn run_graph(
-    graph: Graph,
+    spec: GraphSpec,
     scheduler_type: SchedulerType,
     workers: usize,
     core_offset: usize,
@@ -287,7 +289,7 @@ pub fn run_graph(
     spin_wait: SpinWaitConfig,
     batch: BatchConfig,
 ) -> SynRt {
-    let receiver_threads = if graph.network_config().is_some() {
+    let receiver_threads = if spec.graph.network_config().is_some() {
         receiver_threads
     } else {
         0
@@ -312,23 +314,23 @@ pub fn run_graph(
         use synstream_core::WorkerRangeSpec;
 
         let mut unique_worker_specs: HashSet<WorkerRangeSpec> = HashSet::new();
-        for node in &graph.nodes {
-            if let Some(ref spec) = node.use_workers {
-                unique_worker_specs.insert(spec.clone());
+        for node in &spec.graph.nodes {
+            if let Some(ref ws) = node.use_workers {
+                unique_worker_specs.insert(ws.clone());
             }
         }
-        if let Some(ref post_nodes) = graph.post_nodes {
+        if let Some(ref post_nodes) = spec.graph.post_nodes {
             for node in post_nodes {
-                if let Some(ref spec) = node.use_workers {
-                    unique_worker_specs.insert(spec.clone());
+                if let Some(ref ws) = node.use_workers {
+                    unique_worker_specs.insert(ws.clone());
                 }
             }
         }
 
         if !unique_worker_specs.is_empty() {
             println!("Detected {} unique worker specs:", unique_worker_specs.len());
-            for spec in &unique_worker_specs {
-                println!("  {}", spec);
+            for ws in &unique_worker_specs {
+                println!("  {}", ws);
             }
             Some(WorkerAffinityConfig::from_worker_specs(&unique_worker_specs, workers))
         } else {
@@ -355,7 +357,7 @@ pub fn run_graph(
         println!("Pinned main thread to core {:?}", core_id);
     }
 
-    let mut synrt = SynRtBuilder::new(graph, scheduler)
+    let mut synrt = SynRtBuilder::new(spec, scheduler)
         .base_instant(base_instant)
         .slots(slots)
         .max_streams(max_streams)

@@ -150,7 +150,18 @@ fn parse_condition(condition_json: &ConditionJson) -> InitCondition {
     }
 }
 
-pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, crate::SynError> {
+/// The result of parsing a graph JSON file.
+///
+/// `init_objects` is separated from `Graph` because it contains live Rust values
+/// (`CmTypes::Any` wrapping heap-allocated objects) that should not be part of the
+/// pure-description `Graph` type.  Callers pass this to `SynRtBuilder::new`.
+pub struct GraphSpec {
+    pub graph: Graph,
+    /// Materialized initialization objects, indexed by `$ref` IDs embedded in `Arg` values.
+    pub init_objects: Vec<Vec<CmTypes>>,
+}
+
+pub fn from_json(graph_json: &str, workers: usize) -> Result<GraphSpec, crate::SynError> {
     let mut file = File::open(graph_json)
         .map_err(|e| -> crate::SynError {
             format!("Cannot open graph file '{}': {}", graph_json, e).into()
@@ -164,9 +175,6 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, crate::SynEr
 
     let mut graph = Graph::new();
     let mut name_to_id: RapidHashMap<String, IdType> = RapidHashMap::new();
-
-    graph.set_init_objects(&init_vec);
-    graph.obj_id_map = obj_id_map.clone();
 
     if let Some(nc_json) = &graph_parsed.network_config {
         let nc = parse_network_config(nc_json, &init_vec, &obj_id_map, &name_to_id, workers)?;
@@ -189,7 +197,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, crate::SynEr
             loop_args: None,
             factor: network_config.stream_packets,
             group_size: None,
-            func_ptr: None,
+            func_name: String::new(), // virtual node — no function
             loop_: None,
             condition: None,
             priority: NodePriority::default(),
@@ -215,7 +223,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<Graph, crate::SynEr
         graph.add_post_node(node);
     }
 
-    Ok(graph)
+    Ok(GraphSpec { graph, init_objects: init_vec })
 }
 
 /// Parse the `network_config` JSON block into a [`GraphNetworkConfig`].
@@ -301,7 +309,6 @@ fn parse_single_node(
         la.iter().map(|a| parse_arg(a, init_vec, obj_id_map, name_to_id, workers)).collect()
     });
 
-    let func_ptr = get_func(&node_json.function);
     let factor = node_json.factor.as_ref()
         .map_or(1, |f| f.resolve(init_vec, obj_id_map, workers));
     let group_size = node_json.group_size.as_ref()
@@ -312,9 +319,6 @@ fn parse_single_node(
     });
 
     let condition = node_json.condition.as_ref().map(|cond_json| {
-        let func_name = &cond_json.function;
-        let cond_func_ptr = get_func(func_name)
-            .unwrap_or_else(|| panic!("Condition function '{}' not found", func_name));
         let cond_operation = CondOp::from_str(&cond_json.operation)
             .unwrap_or_else(|| panic!("Invalid condition operation: {}", cond_json.operation));
         let cond_value = string_to_cmtype(cond_json.value_type.clone(), cond_json.value.clone())
@@ -325,7 +329,7 @@ fn parse_single_node(
         NodeCondition {
             operation: cond_operation,
             eval_value: cond_value,
-            func_ptr: cond_func_ptr,
+            func_name: cond_json.function.clone(),
             args: cond_args,
         }
     });
@@ -343,7 +347,7 @@ fn parse_single_node(
         loop_args,
         factor,
         group_size,
-        func_ptr,
+        func_name: node_json.function.clone(),
         loop_,
         condition,
         priority,

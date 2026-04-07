@@ -82,12 +82,13 @@ impl InitCondition {
 }
 
 /// Runtime condition gating a node's execution: the node only runs if
-/// `operation(func_ptr(args), eval_value)` is true when the node is ready to fire.
+/// `func_name(args) op eval_value` is true when the node is ready to fire.
+/// The function pointer is resolved at cache-build time via the function registry.
 #[derive(Clone, Debug)]
 pub struct NodeCondition {
     pub operation: CondOp,
     pub eval_value: CmTypes,
-    pub func_ptr: CmPtr,
+    pub func_name: String,
     pub args: Vec<Arg>,
 }
 
@@ -122,6 +123,44 @@ pub struct Predecessor {
     pub indexes: Vec<isize>,
     /// If set, group this many predecessor completions before spawning one successor.
     pub group_by: Option<usize>,
+}
+
+impl Predecessor {
+    /// Computes the predecessor index filter range if this edge should be filtered.
+    ///
+    /// Returns `Some((min_idx, max_idx_exclusive))` when only instances in `[min, max)` of
+    /// the predecessor will send dependency decrements to the successor. Returns `None` when
+    /// all `pred_factor` instances contribute.
+    ///
+    /// This is the single authoritative definition of the filter predicate — consumed by
+    /// `Graph::dependency_count_vec()` (graph.rs) and `build_predecessor_tables()` (runtime/init.rs).
+    pub fn index_filter(&self, pred_factor: usize, succ_factor: usize) -> Option<(usize, usize)> {
+        if self.indexes.is_empty() {
+            return None;
+        }
+        let min_idx = *self.indexes.iter().min().unwrap() as usize;
+        let max_idx = *self.indexes.iter().max().unwrap() as usize;
+        let range_len = max_idx - min_idx + 1;
+
+        let should_filter = if self.group_by.is_some() {
+            true
+        } else {
+            range_len < pred_factor && range_len == self.indexes.len() && range_len == succ_factor
+        };
+
+        if should_filter { Some((min_idx, max_idx + 1)) } else { None }
+    }
+
+    /// Returns the number of predecessor instances that send dependency decrements to this successor.
+    ///
+    /// When `index_filter` applies, only the filtered subset (indexes.len()) contributes.
+    /// Otherwise all `pred_factor` instances contribute.
+    pub fn contributing_instances(&self, pred_factor: usize, succ_factor: usize) -> usize {
+        match self.index_filter(pred_factor, succ_factor) {
+            Some(_) => self.indexes.len(),
+            None => pred_factor,
+        }
+    }
 }
 
 /// A single argument to a graph node.
@@ -167,7 +206,7 @@ pub struct Loop {
 pub struct Node {
     /// Human-readable node name (used for JSON lookup and debug output).
     pub name: String,
-    /// Argument list passed to `func_ptr` at execution time.
+    /// Argument list passed to the node function at execution time.
     pub args: Vec<Arg>,
     /// Unique numeric identifier assigned during graph construction.
     pub id: IdType,
@@ -177,8 +216,9 @@ pub struct Node {
     pub factor: usize,
     /// If set, instances are grouped in batches of this size before the node fires.
     pub group_size: Option<usize>,
-    /// Resolved function pointer called when the node executes.
-    pub func_ptr: Option<CmPtr>,
+    /// Plugin function name looked up in the function registry at cache-build time.
+    /// Empty string for virtual nodes (e.g. `$network`) that have no associated function.
+    pub func_name: String,
     /// If set, the node loops back to the named node after execution.
     pub loop_: Option<Loop>,
     /// Optional runtime condition — the node only fires when the condition evaluates to true.

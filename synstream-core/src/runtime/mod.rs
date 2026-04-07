@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 use crate::async_recorder::AsyncRecorder;
 use crate::debug::print_debug;
 use crate::graph::*;
+use crate::graph_gen::GraphSpec;
 use crate::resolution_state::{MultiThreadedState, ResolutionState};
 use crate::scheduler::SchedulerImpl;
 use crate::time_buffer::TimeBufferManager;
@@ -49,7 +50,7 @@ pub const RUN_SLEEP: Duration = Duration::from_secs(10);
 ///
 /// # Example
 /// ```ignore
-/// let synrt = SynRtBuilder::new(graph, scheduler)
+/// let synrt = SynRtBuilder::new(spec, scheduler)
 ///     .slots(4)
 ///     .max_streams(100)
 ///     .max_runtime(60)
@@ -58,6 +59,7 @@ pub const RUN_SLEEP: Duration = Duration::from_secs(10);
 /// ```
 pub struct SynRtBuilder {
     graph: Graph,
+    init_objects: Vec<Vec<synstream_types::CmTypes>>,
     scheduler: SchedulerImpl,
     slots: usize,
     max_streams: usize,
@@ -80,9 +82,11 @@ pub struct SynRtBuilder {
 
 impl SynRtBuilder {
     /// Create a builder with required fields and defaults for everything else.
-    pub fn new(graph: Graph, scheduler: SchedulerImpl) -> Self {
+    pub fn new(spec: GraphSpec, scheduler: SchedulerImpl) -> Self {
+        let GraphSpec { graph, init_objects } = spec;
         Self {
             graph,
+            init_objects,
             scheduler,
             slots: 1,
             max_streams: 1,
@@ -132,7 +136,7 @@ impl SynRtBuilder {
         let app_graph = &self.graph;
 
         // --- Node cache ---
-        let node_cache = build_node_cache(app_graph, &self.scheduler);
+        let node_cache = build_node_cache(app_graph, &self.init_objects, &self.scheduler);
 
         // --- Predecessor routing tables ---
         let (pred_index_filter, pred_group_by, pred_succ_1to1_offset) =
@@ -233,6 +237,7 @@ impl SynRtBuilder {
                 pred_succ_1to1_offset: Arc::new(pred_succ_1to1_offset),
                 total_tasks,
                 total_cond_tasks,
+                init_objects: self.init_objects,
             },
             config: RuntimeConfig {
                 slots,

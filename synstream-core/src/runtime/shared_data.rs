@@ -29,6 +29,9 @@ pub struct GraphCache {
     pub pred_succ_1to1_offset: Arc<Vec<Vec<Option<isize>>>>,
     pub total_tasks: usize,
     pub total_cond_tasks: usize,
+    /// Materialized initialization objects, indexed by `$ref` IDs in `Arg` values.
+    /// Moved here from `Graph` so the graph remains a pure topological description.
+    pub init_objects: Vec<Vec<CmTypes>>,
 }
 
 /// Tuning parameters for the worker spin-wait loop.

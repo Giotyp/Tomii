@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use synstream_types::*;
 
-use super::node_cache::ArgCacheEntry;
+use super::node_cache::{ArgCacheEntry, ResPredCache};
 
 /// Per-worker execution state shared between arg resolution and task execution.
 /// Consolidated into one struct to make cross-file coupling explicit and grep-able.
@@ -81,7 +81,7 @@ pub(super) fn populate_cached_args_into(
     buf: &mut Vec<CmTypes>,
     shared: &Arc<SharedData>,
     args_cache: &ArgCacheEntry,
-    node_id: IdType,
+    _node_id: IdType,
     node_index: usize,
     slot: usize,
     pred_index: usize,
@@ -105,27 +105,12 @@ pub(super) fn populate_cached_args_into(
     process_buffer_refs(buf, args_cache, node_index);
     process_runtime_refs(buf, args_cache, node_index, workers);
 
-    for (res_idx, real_idx) in args_cache
+    for (res_idx, rp) in args_cache
         .res_indexes
         .iter()
-        .zip(args_cache.real_res_indexes.iter())
+        .zip(args_cache.res_predecessors.iter())
     {
-        let arg = shared.graph.nodes[node_id as usize]
-            .args
-            .get(*real_idx)
-            .expect("Argument index out of bounds");
-
-        let node_factor = shared.graph.nodes[node_id as usize].factor;
-        let result_opt = collect_arg_result(
-            arg,
-            node_id,
-            node_index,
-            node_factor,
-            slot,
-            pred_index,
-            None,
-            shared,
-        );
+        let result_opt = collect_res_from_cache(rp, node_index, slot, pred_index, None, shared);
         if let Some(mut result) = result_opt {
             if result.len() == 1 {
                 buf[*res_idx] = result.remove(0);
@@ -229,6 +214,95 @@ fn spin_wait_for_result(
     }
 }
 
+/// Hot-path variant of [`collect_arg_result`] for `$res`/`$dep` arguments.
+///
+/// Uses pre-resolved [`ResPredCache`] metadata (built once at startup) instead of reading
+/// `shared.graph.nodes[...]` on every task dispatch.  Mirrors the `Res`/`Dep` branches of
+/// `collect_arg_result` exactly — any logic change there must be reflected here too.
+#[inline(always)]
+fn collect_res_from_cache(
+    rp: &ResPredCache,
+    node_index: usize,
+    slot: usize,
+    pred_index: usize,
+    custom_res: Option<&CmTypes>,
+    shared: &Arc<SharedData>,
+) -> Option<Vec<CmTypes>> {
+    if rp.is_dep {
+        return Some(vec![CmTypes::None]);
+    }
+
+    // Short-circuit: if a previous arg already detected stale, skip remaining
+    if !shared.config.single_slot_mode && WORKER_STATE.with(|ws| ws.borrow().stale_task_detected) {
+        return None;
+    }
+
+    if let Some(custom) = custom_res {
+        return Some(vec![(*custom).clone()]);
+    }
+
+    if rp.indexes.is_empty() {
+        return None;
+    }
+
+    // Single explicit index: use the declared index, not pred_index.
+    if rp.indexes.len() == 1 {
+        let dep_idx = if let Some(ngs) = rp.node_group_size {
+            let symbol = node_index / ngs;
+            let pred_eff_gs = rp.pred_group_size.unwrap_or_else(|| {
+                shared.graph_cache.pred_group_by[rp.node_id as usize][rp.res_node_id as usize]
+                    .unwrap_or(rp.pred_factor)
+            });
+            let offset = rp.indexes[0] as usize;
+            symbol * pred_eff_gs + offset
+        } else {
+            find_pred_index(node_index, rp.indexes[0], rp.pred_factor)
+        };
+        let node_info = NodeInfo::new(rp.res_node_id, slot, dep_idx, 0);
+        if let Some(result) = shared.exec.node_results.get(&node_info) {
+            return Some(vec![result]);
+        }
+        return match spin_wait_for_result(shared, &node_info) {
+            Some(result) => Some(vec![result]),
+            None => None,
+        };
+    }
+
+    // 1:1 mapping: each instance reads exactly one predecessor result via pred_index.
+    if rp.indexes.len() > 1 && rp.indexes.len() == rp.node_factor {
+        let node_info = NodeInfo::new(rp.res_node_id, slot, pred_index % rp.pred_factor, 0);
+        if let Some(result) = shared.exec.node_results.get(&node_info) {
+            return Some(vec![result]);
+        }
+        return match spin_wait_for_result(shared, &node_info) {
+            Some(result) => Some(vec![result]),
+            None => None,
+        };
+    }
+
+    // Collect-all path: factor != indexes.len() (e.g., write_res)
+    let mut indices = Vec::with_capacity(rp.indexes.len());
+    for &pred_idx in rp.indexes.iter() {
+        indices.push(find_pred_index(node_index, pred_idx, rp.pred_factor));
+    }
+    let mut result_vec = Vec::with_capacity(indices.len());
+    for dep_idx in indices.iter() {
+        let node_info = NodeInfo::new(rp.res_node_id, slot, *dep_idx, 0);
+        if let Some(result) = shared.exec.node_results.get(&node_info) {
+            result_vec.push(result);
+        } else {
+            match spin_wait_for_result(shared, &node_info) {
+                Some(result) => result_vec.push(result),
+                None => return None,
+            }
+        }
+    }
+    if result_vec.len() == indices.len() {
+        return Some(result_vec);
+    }
+    None
+}
+
 #[inline]
 pub(super) fn collect_arg_result(
     arg: &Arg,
@@ -247,7 +321,7 @@ pub(super) fn collect_arg_result(
                 return Some(result);
             }
 
-            let obj_vec = &shared.graph.init_objects.as_ref().unwrap()[obj_id as usize];
+            let obj_vec = &shared.graph_cache.init_objects[obj_id as usize];
             Some(vec![get_object_value(obj_vec, node_index)])
         }
         CmTypes::Dep(_) => {
