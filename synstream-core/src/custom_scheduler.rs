@@ -30,22 +30,16 @@
 //! +---------------------------------------------------------------+
 //! ```
 
-#![allow(unused_imports)]
-#![allow(dead_code)]
-
 use core_affinity::{self, CoreId};
 use crossbeam_channel::{Receiver, Sender};
 use std::cell::Cell;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::async_recorder::{set_worker_recorder, submit_record, AsyncRecorder};
-use crate::buffers::NodeInfo;
 use crate::{IdType, Record};
-use synstream_types::CmTypes;
 
 // ============================================================================
 // SECTION 1: Priority Types and Task Definition
@@ -126,6 +120,7 @@ impl ChannelSet {
 
     /// Non-blocking priority-ordered receive.
     /// Checks High first, then Normal, then Low.
+    #[allow(dead_code)] // used by future work-stealing / load-balancing path
     #[inline]
     fn try_recv_prioritized(&self) -> Option<ScheduledTask> {
         self.high_rx
@@ -135,6 +130,7 @@ impl ChannelSet {
             .or_else(|| self.low_rx.try_recv().ok())
     }
 
+    #[allow(dead_code)] // used by future load-balancing / backpressure path
     #[inline]
     fn is_empty(&self) -> bool {
         self.high_rx.is_empty() && self.normal_rx.is_empty() && self.low_rx.is_empty()
@@ -212,6 +208,7 @@ impl Default for WorkerGroupConfig {
 
 /// Internal state for a worker group
 struct WorkerGroup {
+    #[allow(dead_code)] // retained for future per-group config queries
     config: WorkerGroupConfig,
     /// Worker thread handles
     handles: Vec<JoinHandle<()>>,
@@ -228,9 +225,12 @@ thread_local! {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct WorkerState {
+    #[allow(dead_code)] // future per-worker metrics / diagnostics
     worker_id: usize,      // Global worker index
+    #[allow(dead_code)] // future per-group routing decisions
     group_id: usize,       // Which group this worker belongs to
     core_id: usize,        // Physical core ID
+    #[allow(dead_code)] // future per-worker throughput reporting
     tasks_executed: usize, // Counter for metrics
 }
 

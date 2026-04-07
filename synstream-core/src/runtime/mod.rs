@@ -21,8 +21,6 @@ pub(crate) use shared_data::{
     BatchQueueRx, BatchQueueTx, ExecCtx, GraphCache, NetworkInfra, RuntimeConfig,
     SlotData, SlotState, Telemetry,
 };
-pub(crate) use node_cache::NodeCacheEntry;
-
 use init::{build_node_cache, build_predecessor_tables, build_slot_counters};
 use network_init::prepare_network_infrastructure;
 use parking_lot::RwLock;
