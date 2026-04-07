@@ -9,7 +9,6 @@ use crate::async_recorder::{set_worker_recorder, submit_record};
 use crate::buffers::*;
 use crate::debug::print_debug;
 use crate::network::PacketMessage;
-use crate::time_buffer::TimingMethod;
 use crate::Record;
 use crate::IdType;
 use std::cell::RefCell;
@@ -142,11 +141,7 @@ impl super::SynRt {
                 }
             }
 
-            let start_proc = if let Some(tb) = &shared.telemetry.time_buffer {
-                tb.measure_time()
-            } else {
-                TimingMethod::Instant(Instant::now())
-            };
+            let start_proc = shared.telemetry.measure_start();
             // Check slots for completion
             Self::check_slots(
                 &shared,
@@ -158,11 +153,7 @@ impl super::SynRt {
                 &mut cached_slots,
                 &mut slots_dirty,
             );
-            if let Some(tb) = &shared.telemetry.time_buffer {
-                let end_proc = tb.measure_time();
-                let dur = tb.measure_duration(start_proc, end_proc);
-                tb.add_task_time(thread_slot, "Slot Check", usize::MAX, dur);
-            }
+            shared.telemetry.record_timing(start_proc, thread_slot, "Slot Check", usize::MAX);
 
             // Check for completion of all streams
             let completed_streams = shared.telemetry.stream_complete_counter.load(Ordering::Acquire);
@@ -385,32 +376,24 @@ fn poll_and_process_network_packets(
         let receiver_core_id = packet_msg.receiver_core_id;
         let packet_timestamp = packet_msg.timestamp;
         let packet_socket_id = packet_msg.socket_id;
-        if let Some(tb) = &shared.telemetry.time_buffer {
-            // Use Instant for this measurement since PacketMessage.timestamp
-            // is always Instant (from network receiver threads)
+        // Use Instant for this measurement since PacketMessage.timestamp
+        // is always Instant (from network receiver threads)
+        shared.telemetry.with_timing(|tb| {
             let dur = packet_rcv_instant.duration_since(packet_msg.timestamp);
             tb.add_task_time(thread_slot, "Packet Received", usize::MAX, dur);
-        }
+        });
 
         // Process packet — Bytes variant avoids Arc/RwLock/Box overhead.
         // received_bytes_cm is kept alive (not moved) so we can reclaim
         // its underlying Vec<u8> back into buffer_pool after the call.
         let received_bytes_cm = CmTypes::from_bytes(packet_msg.packet_bytes);
-        let start_proc = if let Some(tb) = &shared.telemetry.time_buffer {
-            tb.measure_time()
-        } else {
-            TimingMethod::Instant(Instant::now())
-        };
+        let start_proc = shared.telemetry.measure_start();
 
         // Pass a clone (cheap Arc increment) so received_bytes_cm stays
         // alive for the pool reclaim below.
         let packet_cm = packet_process_func(&[received_bytes_cm.clone()]);
 
-        if let Some(tb) = &shared.telemetry.time_buffer {
-            let end_proc = tb.measure_time();
-            let dur = tb.measure_duration(start_proc, end_proc);
-            tb.add_task_time(thread_slot, "Packet Processing", usize::MAX, dur);
-        }
+        shared.telemetry.record_timing(start_proc, thread_slot, "Packet Processing", usize::MAX);
 
         // Reclaim the raw packet buffer back to the originating receiver thread.
         // try_unwrap succeeds when refcount == 1 (plugin only borrowed via &[CmTypes],
@@ -430,19 +413,11 @@ fn poll_and_process_network_packets(
         let mut node_info = NodeInfo::new(0, 0, 0, 0); // network node id=0
 
         // Call id_function to determine which stream this packet belongs to
-        let start_id = if let Some(tb) = &shared.telemetry.time_buffer {
-            tb.measure_time()
-        } else {
-            TimingMethod::Instant(Instant::now())
-        };
+        let start_id = shared.telemetry.measure_start();
 
         let new_stream_opt = process_id_function(shared, &packet_cm);
 
-        if let Some(tb) = &shared.telemetry.time_buffer {
-            let end_id = tb.measure_time();
-            let dur = tb.measure_duration(start_id, end_id);
-            tb.add_task_time(thread_slot, "ID Function", usize::MAX, dur);
-        }
+        shared.telemetry.record_timing(start_id, thread_slot, "ID Function", usize::MAX);
 
         if let Some(new_stream) = new_stream_opt {
             // Fast-path: if this frame was already dropped, discard all
@@ -454,11 +429,7 @@ fn poll_and_process_network_packets(
             }
 
             // Assign stream to an available slot
-            let start_sa = if let Some(tb) = &shared.telemetry.time_buffer {
-                tb.measure_time()
-            } else {
-                TimingMethod::Instant(Instant::now())
-            };
+            let start_sa = shared.telemetry.measure_start();
 
             let (assigned_slot, newly_activated) =
                 match assign_stream_to_available_slot(shared, new_stream) {
@@ -490,11 +461,7 @@ fn poll_and_process_network_packets(
                 };
             node_info.slot = assigned_slot;
 
-            if let Some(tb) = &shared.telemetry.time_buffer {
-                let end_sa = tb.measure_time();
-                let dur = tb.measure_duration(start_sa, end_sa);
-                tb.add_task_time(thread_slot, "Slot Assignment", usize::MAX, dur);
-            }
+            shared.telemetry.record_timing(start_sa, thread_slot, "Slot Assignment", usize::MAX);
 
             if newly_activated {
                 *slots_dirty = true;
@@ -639,11 +606,7 @@ fn poll_and_process_network_packets(
     // Process all active packets as a single batch
     if !active_packet_batch.is_empty() {
         let start_ns_batch = shared.telemetry.base_instant.elapsed().as_nanos();
-        let start_proc = if let Some(tb) = &shared.telemetry.time_buffer {
-            tb.measure_time()
-        } else {
-            TimingMethod::Instant(Instant::now())
-        };
+        let start_proc = shared.telemetry.measure_start();
         super::SynRt::process_batch_resolution(
             shared,
             &mut active_packet_batch,
@@ -654,11 +617,7 @@ fn poll_and_process_network_packets(
             stream_slot_activity,
             start_ns_batch,
         );
-        if let Some(tb) = &shared.telemetry.time_buffer {
-            let end_proc = tb.measure_time();
-            let dur = tb.measure_duration(start_proc, end_proc);
-            tb.add_task_time(thread_slot, "Batch Resolution", usize::MAX, dur);
-        }
+        shared.telemetry.record_timing(start_proc, thread_slot, "Batch Resolution", usize::MAX);
     }
 }
 
@@ -708,11 +667,7 @@ fn drain_and_process_batch_queue(
     }
 
     let start_ns_batch = shared.telemetry.base_instant.elapsed().as_nanos();
-    let start_proc = if let Some(tb) = &shared.telemetry.time_buffer {
-        tb.measure_time()
-    } else {
-        TimingMethod::Instant(Instant::now())
-    };
+    let start_proc = shared.telemetry.measure_start();
     TASK_COMP_BUF.with(|tbuf| {
         let mut comp_batch = tbuf.borrow_mut();
         comp_batch.clear();
@@ -759,11 +714,7 @@ fn drain_and_process_batch_queue(
         );
         // comp_batch is now empty (drained); capacity is retained for the next call.
     });
-    if let Some(tb) = &shared.telemetry.time_buffer {
-        let end_proc = tb.measure_time();
-        let dur = tb.measure_duration(start_proc, end_proc);
-        tb.add_task_time(thread_slot, "Batch Resolution", usize::MAX, dur);
-    }
+    shared.telemetry.record_timing(start_proc, thread_slot, "Batch Resolution", usize::MAX);
 }
 
 /// Inner body of `process_batch_resolution` executed with all four thread-local buffers

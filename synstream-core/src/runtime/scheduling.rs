@@ -4,13 +4,11 @@ use super::arg_resolution::WORKER_STATE;
 use super::task_execution::execute_task;
 use crate::async_recorder::submit_record;
 use crate::buffers::*;
-use crate::time_buffer::TimingMethod;
 use crate::Record;
 use crate::IdType;
 use std::cell::RefCell;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
 use synstream_types::*;
 
 thread_local! {
@@ -113,11 +111,7 @@ impl super::SynRt {
         thread_core: usize,
         thread_slot: usize,
     ) {
-        let start_time = if let Some(tb) = &shared.telemetry.time_buffer {
-            tb.measure_time()
-        } else {
-            TimingMethod::Instant(Instant::now())
-        };
+        let start_time = shared.telemetry.measure_start();
         let start_ns = shared.telemetry.base_instant.elapsed().as_nanos();
 
         // Schedule Task - args will be built in the worker thread.
@@ -130,11 +124,7 @@ impl super::SynRt {
             send_to_scheduler(shared, nodes_to_schedule, &*args_buf, None);
         });
 
-        if let Some(tb) = &shared.telemetry.time_buffer {
-            let end_time = tb.measure_time();
-            let duration = tb.measure_duration(start_time, end_time);
-            tb.add_task_time(thread_slot, "Preparation", usize::MAX, duration);
-        }
+        shared.telemetry.record_timing(start_time, thread_slot, "Preparation", usize::MAX);
 
         // Lock-free recording via per-worker channel
         let should_record = shared.telemetry.async_recorder.is_some()

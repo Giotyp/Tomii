@@ -35,7 +35,7 @@ use crate::network::multi_socket_receiver_loop;
 use crate::resolution_state::{MultiThreadedState, ResolutionState};
 use crate::scheduler::SchedulerImpl;
 use crate::time_buffer::TimeBufferManager;
-use crate::{graph_struct::*, IdType};
+use crate::IdType;
 use crossbeam_channel::bounded as cb_bounded;
 
 pub const RUN_SLEEP: Duration = Duration::from_secs(10);
@@ -343,9 +343,7 @@ impl SynRt {
         // Start timing for system thread slots
         for thread_id in 0..self.shared.config.system_threads {
             let system_slot = self.shared.config.slots + thread_id;
-            if let Some(tb) = &self.shared.telemetry.time_buffer {
-                tb.start_slot_processing(system_slot);
-            }
+            self.shared.telemetry.with_timing(|tb| tb.start_slot_processing(system_slot));
         }
 
         let receiver_handles = self.spawn_receiver_threads();
@@ -390,9 +388,7 @@ impl SynRt {
         // Finish timing for system thread slots
         for thread_id in 0..self.shared.config.system_threads {
             let system_slot = self.shared.config.slots + thread_id;
-            if let Some(tb) = &self.shared.telemetry.time_buffer {
-                let _ = tb.finish_slot_processing(system_slot);
-            }
+            self.shared.telemetry.with_timing(|tb| { let _ = tb.finish_slot_processing(system_slot); });
         }
     }
 
