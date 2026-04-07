@@ -74,14 +74,14 @@ impl super::SynRt {
         // Packet Process Function
         let network_config_opt = shared.graph.network_config();
 
-        let _receive_timeout = Duration::from_micros(shared.config.batch_timeout_us);
+        let _receive_timeout = Duration::from_micros(shared.config.batch.timeout_us);
 
         // Reusable drain buffer — allocated once, keeps capacity across loop iterations.
         // Avoids a Vec<PacketMessage> allocation on every drain call.
         let mut packet_buf: Vec<PacketMessage> = Vec::new();
 
         // Reusable batch buffer — keeps capacity warm in L1 cache across iterations.
-        let mut batch_buf: Vec<NodeInfo> = Vec::with_capacity(shared.config.target_batch_size);
+        let mut batch_buf: Vec<NodeInfo> = Vec::with_capacity(shared.config.batch.target_size);
 
         // Process completed nodes with dynamic batching from scheduler
         loop {
@@ -350,10 +350,10 @@ fn drain_and_process_batch_queue(
     // flows through batch_queue).
     batch_buf.clear();
     batch_buf
-        .extend(shared.exec.batch_queue_rx.try_iter().take(shared.config.target_batch_size));
+        .extend(shared.exec.batch_queue_rx.try_iter().take(shared.config.batch.target_size));
     if batch_buf.is_empty() {
         // Brief spin to catch burst completions landing just after try_iter()
-        for _ in 0..shared.config.spin_iterations {
+        for _ in 0..shared.config.batch.poll_spin_iters {
             std::hint::spin_loop();
             if let Ok(item) = shared.exec.batch_queue_rx.try_recv() {
                 batch_buf.push(item);
@@ -362,7 +362,7 @@ fn drain_and_process_batch_queue(
                         .exec
                         .batch_queue_rx
                         .try_iter()
-                        .take(shared.config.target_batch_size - 1),
+                        .take(shared.config.batch.target_size - 1),
                 );
                 break;
             }

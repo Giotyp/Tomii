@@ -157,7 +157,7 @@ pub(super) fn process_batch_inner(
         // as soon as we have enough, rather than waiting for the entire
         // batch to finish. This eliminates the dead zone where workers
         // idle while the system thread processes a large batch.
-        if batch_sched.len() >= shared.config.sched_flush_threshold {
+        if batch_sched.len() >= shared.config.batch.flush_threshold {
             super::SynRt::preparation(shared, batch_sched, thread_core, thread_slot);
             batch_sched.clear();
         }

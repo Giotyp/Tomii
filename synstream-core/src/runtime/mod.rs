@@ -17,6 +17,7 @@ mod threading;
 // SharedData is pub because network.rs (a non-runtime module) takes &Arc<SharedData>
 // in the receiver loop signatures. All other runtime internals are pub(crate).
 pub use shared_data::SharedData;
+pub use shared_data::{BatchConfig, SpinWaitConfig};
 pub(crate) use shared_data::{
     BatchQueueRx, BatchQueueTx, ExecCtx, GraphCache, NetworkInfra, RuntimeConfig,
     SlotData, SlotState, Telemetry,
@@ -68,18 +69,13 @@ pub struct SynRtBuilder {
     base_instant: Instant,
     slot_priority_enabled: bool,
     async_recorder: Option<Arc<AsyncRecorder>>,
-    target_batch_size: usize,
-    batch_timeout_us: u64,
     coalesce_barriers: bool,
     inline_continuation: bool,
     batch_queue_capacity: usize,
-    spin_iterations: u32,
-    sched_flush_threshold: usize,
     socket_recv_buf_bytes: usize,
     recv_pool_size: usize,
-    spin_wait_spin_iters: u32,
-    spin_wait_yield_iters: u32,
-    spin_wait_park_ns: u64,
+    spin_wait: SpinWaitConfig,
+    batch: BatchConfig,
 }
 
 impl SynRtBuilder {
@@ -98,18 +94,13 @@ impl SynRtBuilder {
             base_instant: Instant::now(),
             slot_priority_enabled: false,
             async_recorder: None,
-            target_batch_size: 1,
-            batch_timeout_us: 10,
             coalesce_barriers: false,
             inline_continuation: false,
             batch_queue_capacity: 65536,
-            spin_iterations: 32,
-            sched_flush_threshold: 32,
             socket_recv_buf_bytes: 16_777_216,
             recv_pool_size: 1024,
-            spin_wait_spin_iters: 64,
-            spin_wait_yield_iters: 256,
-            spin_wait_park_ns: 100,
+            spin_wait: SpinWaitConfig::default(),
+            batch: BatchConfig::default(),
         }
     }
 
@@ -125,18 +116,15 @@ impl SynRtBuilder {
     pub fn slot_priority_enabled(mut self, v: bool) -> Self { self.slot_priority_enabled = v; self }
     /// Attach a pre-created [`AsyncRecorder`] shared with the scheduler.
     pub fn async_recorder(mut self, r: Option<Arc<AsyncRecorder>>) -> Self { self.async_recorder = r; self }
-    pub fn target_batch_size(mut self, n: usize) -> Self { self.target_batch_size = n; self }
-    pub fn batch_timeout_us(mut self, us: u64) -> Self { self.batch_timeout_us = us; self }
     pub fn coalesce_barriers(mut self, v: bool) -> Self { self.coalesce_barriers = v; self }
     pub fn inline_continuation(mut self, v: bool) -> Self { self.inline_continuation = v; self }
     pub fn batch_queue_capacity(mut self, n: usize) -> Self { self.batch_queue_capacity = n; self }
-    pub fn spin_iterations(mut self, n: u32) -> Self { self.spin_iterations = n; self }
-    pub fn sched_flush_threshold(mut self, n: usize) -> Self { self.sched_flush_threshold = n; self }
     pub fn socket_recv_buf_bytes(mut self, n: usize) -> Self { self.socket_recv_buf_bytes = n; self }
     pub fn recv_pool_size(mut self, n: usize) -> Self { self.recv_pool_size = n; self }
-    pub fn spin_wait_spin_iters(mut self, n: u32) -> Self { self.spin_wait_spin_iters = n; self }
-    pub fn spin_wait_yield_iters(mut self, n: u32) -> Self { self.spin_wait_yield_iters = n; self }
-    pub fn spin_wait_park_ns(mut self, ns: u64) -> Self { self.spin_wait_park_ns = ns; self }
+    /// Set all worker spin-wait parameters at once.
+    pub fn spin_wait(mut self, cfg: SpinWaitConfig) -> Self { self.spin_wait = cfg; self }
+    /// Set all batch-processing parameters at once.
+    pub fn batch(mut self, cfg: BatchConfig) -> Self { self.batch = cfg; self }
 
     /// Construct the runtime. This is cheap — no threads are spawned until [`SynRt::run`].
     pub fn build(self) -> SynRt {
@@ -260,14 +248,9 @@ impl SynRtBuilder {
                 inline_continuation: self.inline_continuation,
                 single_slot_mode: slots == 1,
                 record_stream: self.record_stream,
-                target_batch_size: self.target_batch_size,
-                batch_timeout_us: self.batch_timeout_us,
-                spin_iterations: self.spin_iterations,
-                sched_flush_threshold: self.sched_flush_threshold,
-                spin_wait_spin_iters: self.spin_wait_spin_iters,
-                spin_wait_yield_iters: self.spin_wait_yield_iters,
-                spin_wait_park_ns: self.spin_wait_park_ns,
                 recv_pool_size: self.recv_pool_size,
+                spin_wait: self.spin_wait,
+                batch: self.batch,
             },
             slot_data: SlotData {
                 generation: Arc::new((0..slots).map(|_| AtomicU64::new(0)).collect()),

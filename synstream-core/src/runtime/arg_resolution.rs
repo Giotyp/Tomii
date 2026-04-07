@@ -218,12 +218,13 @@ fn spin_wait_for_result(
             }
         }
         spin_count += 1;
-        if spin_count < shared.config.spin_wait_spin_iters {
+        let sw = &shared.config.spin_wait;
+        if spin_count < sw.spin_iters {
             std::hint::spin_loop();
-        } else if spin_count < shared.config.spin_wait_yield_iters {
+        } else if spin_count < sw.yield_iters {
             std::thread::yield_now();
         } else {
-            std::thread::park_timeout(std::time::Duration::from_nanos(shared.config.spin_wait_park_ns));
+            std::thread::park_timeout(std::time::Duration::from_nanos(sw.park_ns));
         }
     }
 }
