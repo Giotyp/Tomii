@@ -5,6 +5,11 @@ use std::{env, fs};
 use synstream_converter::generate_from_file;
 
 fn main() {
+    // Signal to lib.rs that the build script ran (used for cfg-gating OUT_DIR includes
+    // so rust-analyzer, which skips build scripts, sees empty stubs instead of errors).
+    println!("cargo::rustc-check-cfg=cfg(build_rs_ran)");
+    println!("cargo:rustc-cfg=build_rs_ran");
+
     // Re-run the build script whenever the wrapper/registry/func env vars change
     // so that cargo detects the new paths and recompiles with the correct functions.
     println!("cargo:rerun-if-env-changed=WRAP_PATH");
