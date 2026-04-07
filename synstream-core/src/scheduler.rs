@@ -481,25 +481,31 @@ pub enum SchedulerImpl {
     Custom(crate::custom_scheduler::CustomScheduler),
 }
 
+/// Dispatch a method call to the inner Rayon or Custom scheduler variant.
+///
+/// Usage: `dispatch!(self, rayon_var => rayon_expr, custom_var => custom_expr)`
+macro_rules! dispatch {
+    ($self:expr, $rv:ident => $re:expr, $cv:ident => $ce:expr) => {
+        match $self {
+            SchedulerImpl::Rayon($rv) => $re,
+            SchedulerImpl::Custom($cv) => $ce,
+        }
+    };
+}
+
 impl SchedulerImpl {
     pub fn spawn_task<F>(&self, task: F)
     where
         F: FnOnce() + Send + 'static,
     {
-        match self {
-            SchedulerImpl::Rayon(scheduler) => scheduler.spawn_task(task),
-            SchedulerImpl::Custom(scheduler) => scheduler.spawn(task),
-        }
+        dispatch!(self, s => s.spawn_task(task), s => s.spawn(task))
     }
 
     pub fn spawn_task_with_meta<F>(&self, meta: Option<crate::TaskMeta>, task: F)
     where
         F: FnOnce() + Send + 'static,
     {
-        match self {
-            SchedulerImpl::Rayon(scheduler) => scheduler.spawn_task_with_meta(meta, task),
-            SchedulerImpl::Custom(scheduler) => scheduler.spawn_with_meta(meta, task),
-        }
+        dispatch!(self, s => s.spawn_task_with_meta(meta, task), s => s.spawn_with_meta(meta, task))
     }
 
     /// Spawn task with metadata and priority (Custom scheduler respects priority, others ignore it)
@@ -511,12 +517,9 @@ impl SchedulerImpl {
     ) where
         F: FnOnce() + Send + 'static,
     {
-        match self {
-            SchedulerImpl::Rayon(scheduler) => scheduler.spawn_task_with_meta(meta, task),
-            SchedulerImpl::Custom(scheduler) => {
-                scheduler.spawn_with_meta_priority(priority, meta, task)
-            }
-        }
+        dispatch!(self,
+            s => s.spawn_task_with_meta(meta, task),
+            s => s.spawn_with_meta_priority(priority, meta, task))
     }
 
     /// Spawn task to specific worker group (Custom scheduler only, others fallback to normal spawn)
@@ -529,107 +532,60 @@ impl SchedulerImpl {
     ) where
         F: FnOnce() + Send + 'static,
     {
-        match self {
-            SchedulerImpl::Rayon(scheduler) => scheduler.spawn_task_with_meta(meta, task),
-            SchedulerImpl::Custom(scheduler) => {
-                scheduler.spawn_to_group_with_meta(group_id, priority, meta, task)
-            }
-        }
+        dispatch!(self,
+            s => s.spawn_task_with_meta(meta, task),
+            s => s.spawn_to_group_with_meta(group_id, priority, meta, task))
     }
 
-    /// Get the affinity group for a given use_workers spec
-    /// Returns:
-    /// - 0 for None (no affinity), Count specs, or non-Custom schedulers
-    /// - group_id for Range specs in Custom scheduler
+    /// Get the affinity group for a given use_workers spec.
+    /// Returns 0 (global pool) for Rayon; delegates to CustomScheduler for Custom.
     pub fn get_affinity_group(&self, use_workers: Option<&crate::WorkerRangeSpec>) -> usize {
-        match self {
-            SchedulerImpl::Rayon(_) => {
-                // Non-custom schedulers don't support affinity groups
-                0
-            }
-            SchedulerImpl::Custom(scheduler) => {
-                // Delegate to CustomScheduler's affinity logic
-                scheduler.get_affinity_group(use_workers)
-            }
-        }
+        dispatch!(self, _s => 0, s => s.get_affinity_group(use_workers))
     }
 
     pub fn workers(&self) -> usize {
-        match self {
-            SchedulerImpl::Rayon(scheduler) => scheduler.base.workers(),
-            SchedulerImpl::Custom(scheduler) => scheduler.workers(),
-        }
+        dispatch!(self, s => s.base.workers(), s => s.workers())
     }
 
     pub fn pending_jobs(&self) -> usize {
-        match self {
-            SchedulerImpl::Rayon(scheduler) => scheduler.base.pending_jobs(),
-            SchedulerImpl::Custom(scheduler) => scheduler.pending_tasks(),
-        }
+        dispatch!(self, s => s.base.pending_jobs(), s => s.pending_tasks())
     }
 
     pub fn total_jobs_spawned(&self) -> usize {
-        match self {
-            SchedulerImpl::Rayon(scheduler) => scheduler.base.total_jobs_spawned(),
-            SchedulerImpl::Custom(scheduler) => scheduler.total_spawned(),
-        }
+        dispatch!(self, s => s.base.total_jobs_spawned(), s => s.total_spawned())
     }
 
     pub fn total_jobs_completed(&self) -> usize {
-        match self {
-            SchedulerImpl::Rayon(scheduler) => scheduler.base.total_jobs_completed(),
-            SchedulerImpl::Custom(scheduler) => scheduler.total_completed(),
-        }
+        dispatch!(self, s => s.base.total_jobs_completed(), s => s.total_completed())
     }
 
     pub fn core_offset(&self) -> usize {
-        match self {
-            SchedulerImpl::Rayon(scheduler) => scheduler.base.core_offset(),
-            SchedulerImpl::Custom(scheduler) => scheduler.core_offset(),
-        }
+        dispatch!(self, s => s.base.core_offset(), s => s.core_offset())
     }
 
     pub fn system_threads(&self) -> usize {
-        match self {
-            SchedulerImpl::Rayon(scheduler) => scheduler.base.system_threads(),
-            SchedulerImpl::Custom(scheduler) => scheduler.system_threads(),
-        }
+        dispatch!(self, s => s.base.system_threads(), s => s.system_threads())
     }
 
     pub fn receiver_core_offset(&self) -> usize {
-        match self {
-            SchedulerImpl::Rayon(scheduler) => scheduler.base.receiver_core_offset(),
-            SchedulerImpl::Custom(scheduler) => scheduler.receiver_core_offset(),
-        }
+        dispatch!(self, s => s.base.receiver_core_offset(), s => s.receiver_core_offset())
     }
 
     pub fn receiver_threads(&self) -> usize {
-        match self {
-            SchedulerImpl::Rayon(scheduler) => scheduler.base.receiver_threads(),
-            SchedulerImpl::Custom(scheduler) => scheduler.receiver_threads(),
-        }
+        dispatch!(self, s => s.base.receiver_threads(), s => s.receiver_threads())
     }
 
     /// Dump recorded schedule to CSV at `path` (slot,job_id,start_ns,end_ns,worker,task_name)
     pub fn write_record(&self, path: &str) {
-        match self {
-            SchedulerImpl::Rayon(s) => s.base.write_records_to_csv(path),
-            SchedulerImpl::Custom(s) => s.write_record(path),
-        }
+        dispatch!(self, s => s.base.write_records_to_csv(path), s => s.write_record(path))
     }
 
     pub fn get_async_recorder(&self) -> Option<Arc<AsyncRecorder>> {
-        match self {
-            SchedulerImpl::Rayon(s) => s.base.get_async_recorder(),
-            SchedulerImpl::Custom(s) => s.get_async_recorder(),
-        }
+        dispatch!(self, s => s.base.get_async_recorder(), s => s.get_async_recorder())
     }
 
     pub fn main_core(&self) -> Option<core_affinity::CoreId> {
-        match self {
-            SchedulerImpl::Rayon(s) => s.base.get_main_core(),
-            SchedulerImpl::Custom(s) => s.main_core(),
-        }
+        dispatch!(self, s => s.base.get_main_core(), s => s.main_core())
     }
 }
 

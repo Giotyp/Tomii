@@ -2,19 +2,6 @@ use crate::network::SocketType;
 use crate::prelude::*;
 use synstream_types::*;
 
-/// Core graph operations shared between the mutable build phase and the immutable runtime.
-pub trait GraphStruct {
-    /// Append a node to the graph and update the successor table.
-    fn add_node(&mut self, node: Node);
-    /// Append a post-processing node (run after all streams complete).
-    fn add_post_node(&mut self, node: Node);
-    /// Return the list of node IDs that depend on `node_id`.
-    fn find_successors(&self, node_id: IdType) -> &Vec<IdType>;
-    /// Return the total number of incoming edges for each node (indexed by node ID).
-    fn dependency_count_vec(&self) -> Vec<usize>;
-}
-
-/// Helper functions
 /// Find the adjusted index of a predecessor node
 pub fn find_pred_index(node_idx: usize, pred_idx: isize, pred_factor: usize) -> usize {
     // Find the index of the node in the results
