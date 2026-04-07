@@ -1,7 +1,7 @@
 pub mod functions;
 pub mod kernel_perf;
 pub mod validation;
-pub mod wrap;
+pub mod wrap_perf;
 
 use nalgebra::DMatrix;
 use num_complex::Complex32;
