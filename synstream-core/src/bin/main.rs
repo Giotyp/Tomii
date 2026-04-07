@@ -6,7 +6,7 @@ use std::time::Instant;
 use synstream_core::debug::*;
 use synstream_core::graph::Graph;
 use synstream_core::graph_gen::from_json;
-use synstream_core::runtime::{SynRt, SynRtBuilder};
+use synstream_core::runtime::{BatchConfig, SpinWaitConfig, SynRt, SynRtBuilder};
 use synstream_core::scheduler::{create_scheduler, SchedulerConfig, SchedulerType};
 use synstream_core::utils_rdtsc;
 
@@ -221,19 +221,23 @@ fn main() {
         args.record_stream,
         args.use_rdtsc,
         timing_enabled,
-        args.batching_size,
-        args.batching_limit,
         args.slot_priority,
         args.coalesce_barriers,
         args.inline_continuation,
         args.batch_queue_capacity,
-        args.spin_iterations,
-        args.sched_flush_threshold,
         args.socket_recv_buf_bytes,
         args.recv_pool_size,
-        args.spin_wait_spin_iters,
-        args.spin_wait_yield_iters,
-        args.spin_wait_park_ns,
+        SpinWaitConfig {
+            spin_iters: args.spin_wait_spin_iters,
+            yield_iters: args.spin_wait_yield_iters,
+            park_ns: args.spin_wait_park_ns,
+        },
+        BatchConfig {
+            target_size: args.batching_size,
+            timeout_us: args.batching_limit,
+            poll_spin_iters: args.spin_iterations,
+            flush_threshold: args.sched_flush_threshold,
+        },
     );
 
     let time_file = args.timing;
@@ -274,19 +278,14 @@ pub fn run_graph(
     record_stream: Option<usize>,
     use_rdtsc: bool,
     timing_enabled: bool,
-    batching_size: usize,
-    batching_limit: u64,
     slot_priority_enabled: bool,
     coalesce_barriers: bool,
     inline_continuation: bool,
     batch_queue_capacity: usize,
-    spin_iterations: u32,
-    sched_flush_threshold: usize,
     socket_recv_buf_bytes: usize,
     recv_pool_size: usize,
-    spin_wait_spin_iters: u32,
-    spin_wait_yield_iters: u32,
-    spin_wait_park_ns: u64,
+    spin_wait: SpinWaitConfig,
+    batch: BatchConfig,
 ) -> SynRt {
     let receiver_threads = if graph.network_config().is_some() {
         receiver_threads
@@ -346,8 +345,8 @@ pub fn run_graph(
         base_instant,
         system_threads,
         receiver_threads,
-        target_batch_size: batching_size,
-        batch_timeout_us: batching_limit,
+        target_batch_size: batch.target_size,
+        batch_timeout_us: batch.timeout_us,
         worker_affinity,
     });
 
@@ -367,18 +366,13 @@ pub fn run_graph(
         .timing_enabled(timing_enabled)
         .slot_priority_enabled(slot_priority_enabled)
         .async_recorder(shared_recorder)
-        .target_batch_size(batching_size)
-        .batch_timeout_us(batching_limit)
         .coalesce_barriers(coalesce_barriers)
         .inline_continuation(inline_continuation)
         .batch_queue_capacity(batch_queue_capacity)
-        .spin_iterations(spin_iterations)
-        .sched_flush_threshold(sched_flush_threshold)
         .socket_recv_buf_bytes(socket_recv_buf_bytes)
         .recv_pool_size(recv_pool_size)
-        .spin_wait_spin_iters(spin_wait_spin_iters)
-        .spin_wait_yield_iters(spin_wait_yield_iters)
-        .spin_wait_park_ns(spin_wait_park_ns)
+        .spin_wait(spin_wait)
+        .batch(batch)
         .build();
 
     synrt.run();

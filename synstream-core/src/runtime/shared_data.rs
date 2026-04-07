@@ -31,6 +31,45 @@ pub struct GraphCache {
     pub total_cond_tasks: usize,
 }
 
+/// Tuning parameters for the worker spin-wait loop.
+///
+/// Controls the three-phase back-off when a worker is waiting on a
+/// predecessor result: spin → yield → park.
+#[derive(Debug, Clone, Copy)]
+pub struct SpinWaitConfig {
+    /// Iterations of `spin_loop()` before switching to `yield_now()`.
+    pub spin_iters: u32,
+    /// Iterations of `yield_now()` before switching to `park_timeout()`.
+    pub yield_iters: u32,
+    /// Duration (nanoseconds) per `park_timeout()` call.
+    pub park_ns: u64,
+}
+
+impl Default for SpinWaitConfig {
+    fn default() -> Self {
+        Self { spin_iters: 64, yield_iters: 256, park_ns: 100 }
+    }
+}
+
+/// Tuning parameters for the resolution-loop batch processor.
+#[derive(Debug, Clone, Copy)]
+pub struct BatchConfig {
+    /// Maximum tasks drained from the batch queue per loop iteration.
+    pub target_size: usize,
+    /// Microseconds to wait on an empty queue before moving on.
+    pub timeout_us: u64,
+    /// Spin iterations when the queue is initially empty (catches burst completions).
+    pub poll_spin_iters: u32,
+    /// Flush accumulated successors to workers every this many items.
+    pub flush_threshold: usize,
+}
+
+impl Default for BatchConfig {
+    fn default() -> Self {
+        Self { target_size: 1, timeout_us: 10, poll_spin_iters: 32, flush_threshold: 32 }
+    }
+}
+
 /// All immutable configuration and tuning knobs.
 pub struct RuntimeConfig {
     pub slots: usize,
@@ -46,14 +85,9 @@ pub struct RuntimeConfig {
     pub inline_continuation: bool,
     pub single_slot_mode: bool,
     pub record_stream: Option<usize>,
-    pub target_batch_size: usize,
-    pub batch_timeout_us: u64,
-    pub spin_iterations: u32,
-    pub sched_flush_threshold: usize,
-    pub spin_wait_spin_iters: u32,
-    pub spin_wait_yield_iters: u32,
-    pub spin_wait_park_ns: u64,
     pub recv_pool_size: usize,
+    pub spin_wait: SpinWaitConfig,
+    pub batch: BatchConfig,
 }
 
 /// All per-slot atomics and lock-protected slot state.
