@@ -2,11 +2,8 @@ use nalgebra::*;
 use num_complex::Complex32;
 use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;
-use synstream_macro::synstream_export;
 /// Generates a vector of complex float numbers
 /// in the form [(1.0, 1.0), (2.0, 2.0), ..., (n.0, n.0)]
-
-#[synstream_export]
 pub fn generate_vector(n: usize) -> Vec<Complex32> {
     let mut data = Vec::with_capacity(n);
     for i in 1..(n + 1) {
