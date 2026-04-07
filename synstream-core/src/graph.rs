@@ -53,8 +53,8 @@ fn contributing_instances(
     }
 }
 
-impl GraphStruct for Graph {
-    fn add_node(&mut self, node: Node) {
+impl Graph {
+    pub fn add_node(&mut self, node: Node) {
         // assert that node.id === self.nodes.len()
         assert!(node.id as usize == self.nodes.len());
 
@@ -99,7 +99,7 @@ impl GraphStruct for Graph {
         self.nodes.push(node);
     }
 
-    fn add_post_node(&mut self, node: Node) {
+    pub fn add_post_node(&mut self, node: Node) {
         if let Some(post_nodes) = &mut self.post_nodes {
             assert!(node.id as usize == post_nodes.len());
             post_nodes.push(node);
@@ -111,7 +111,7 @@ impl GraphStruct for Graph {
         }
     }
 
-    fn find_successors(&self, node_id: IdType) -> &Vec<IdType> {
+    pub fn find_successors(&self, node_id: IdType) -> &Vec<IdType> {
         if node_id as usize >= self.successors.len() {
             panic!(
                 "Node id {} out of bounds for successors with length {}",
@@ -122,7 +122,7 @@ impl GraphStruct for Graph {
         &self.successors[node_id as usize]
     }
 
-    fn dependency_count_vec(&self) -> Vec<usize> {
+    pub fn dependency_count_vec(&self) -> Vec<usize> {
         // Return a vector with the dependency count for each node.
         //
         // dep_count must equal the total number of decrements the node will
@@ -223,9 +223,7 @@ impl GraphStruct for Graph {
         }
         dep_count_vec
     }
-}
 
-impl Graph {
     pub fn new() -> Graph {
         Graph {
             nodes: Vec::new(),
@@ -317,10 +315,7 @@ impl Graph {
     pub fn network_config(&self) -> Option<Arc<GraphNetworkConfig>> {
         self.network_config.clone()
     }
-}
 
-// Display functions
-impl Graph {
     pub fn print_init_objects(&self) {
         if let Some(init_objects) = &self.init_objects {
             println!("Initialized Objects:");
