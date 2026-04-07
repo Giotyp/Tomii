@@ -570,10 +570,10 @@ fn render_wrappers(entries: &[ExportedFn]) -> String {
     let mut out = String::new();
 
     out.push_str("use libloading::{Library, Symbol};\n");
-    out.push_str("use once_cell::sync::Lazy;\n");
+    out.push_str("use std::sync::LazyLock;\n");
     out.push_str("use synstream_types::*;\n");
     out.push('\n');
-    out.push_str("static DYN_LIB: Lazy<Library> = Lazy::new(|| {\n");
+    out.push_str("static DYN_LIB: LazyLock<Library> = LazyLock::new(|| {\n");
     out.push_str(
         "    let path = std::env::var(\"PLUGIN_LIB\").expect(\"PLUGIN_LIB must be set to your .so/.dll\");\n",
     );
@@ -582,14 +582,14 @@ fn render_wrappers(entries: &[ExportedFn]) -> String {
     );
     out.push_str("});\n\n");
     out.push_str("pub fn init_wrappers() {\n");
-    out.push_str("    Lazy::force(&DYN_LIB);\n");
+    out.push_str("    LazyLock::force(&DYN_LIB);\n");
     out.push_str("}\n\n");
     out.push_str("macro_rules! cache_sym {\n");
     out.push_str(
         "    ($vis:vis static $sym:ident : $typ:ty = $name:expr;) => {\n",
     );
     out.push_str(
-        "        $vis static $sym: Lazy<$typ> = Lazy::new(|| {\n",
+        "        $vis static $sym: LazyLock<$typ> = LazyLock::new(|| {\n",
     );
     out.push_str("            let lib = &*DYN_LIB;\n");
     out.push_str(
