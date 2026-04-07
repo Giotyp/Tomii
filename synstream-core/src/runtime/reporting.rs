@@ -26,7 +26,7 @@ impl super::SynRt {
     }
 
     pub fn write_json_report(&self, path: &str, exclude_streams: usize) {
-        if let Some(tb) = &self.shared.telemetry.time_buffer {
+        self.shared.telemetry.with_timing(|tb| {
             let graph_edges: Vec<(String, Vec<String>)> = self
                 .shared
                 .graph
@@ -46,7 +46,7 @@ impl super::SynRt {
                 })
                 .collect();
             tb.write_json_report(&graph_edges, path, exclude_streams);
-        }
+        });
     }
 
     pub fn write_record(&self, path: &str) {
