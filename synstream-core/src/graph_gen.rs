@@ -3,6 +3,7 @@ use core::panic;
 use std::fs::File;
 use std::io::Read;
 
+use crate::debug::print_debug;
 use crate::func_reg::*;
 use crate::graph::*;
 use crate::graph_struct::*;
@@ -358,32 +359,12 @@ fn parse_post_nodes(
     name_to_id: &RapidHashMap<String, IdType>,
     workers: usize,
 ) -> Result<Vec<Node>, crate::SynError> {
-    let mut post_counter: IdType = 0;
-    let mut nodes = Vec::with_capacity(post_nodes_json.len());
-    for pn_json in post_nodes_json {
-        let args: Vec<Arg> = pn_json.args.iter()
-            .map(|a| parse_arg(a, init_vec, obj_id_map, name_to_id, workers))
-            .collect();
-        let func_ptr = get_func(&pn_json.function);
-        let factor = pn_json.factor.as_ref().map_or(1, |f| f.resolve(init_vec, obj_id_map, workers));
-        println!("Adding post-node: {}", pn_json.name);
-        let post_id = post_counter;
-        post_counter += 1;
-        nodes.push(Node {
-            name: pn_json.name.clone(),
-            args,
-            id: post_id,
-            loop_args: None,
-            factor,
-            group_size: None,
-            func_ptr,
-            loop_: None,
-            condition: None,
-            priority: NodePriority::default(),
-            use_workers: None,
-        });
-    }
-    Ok(nodes)
+    post_nodes_json.iter().enumerate().map(|(i, pn_json)| {
+        print_debug(|| format!("Adding post-node: {}", pn_json.name));
+        let mut node = parse_single_node(pn_json, init_vec, obj_id_map, name_to_id, workers)?;
+        node.id = i as IdType;
+        Ok(node)
+    }).collect()
 }
 
 #[cfg(test)]

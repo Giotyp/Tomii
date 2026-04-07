@@ -75,71 +75,7 @@ fn process_runtime_refs(
     }
 }
 
-#[inline(always)]
-pub(super) fn parse_cached_args(
-    shared: &Arc<SharedData>,
-    args_cache: &ArgCacheEntry,
-    node_id: IdType,
-    node_index: usize,
-    slot: usize,
-    pred_index: usize,
-    custom_res: Option<&CmTypes>,
-) -> Vec<CmTypes> {
-    if args_cache.buffer_ref_indexes.is_empty()
-        && args_cache.rt_idxs_indexes.is_empty()
-        && args_cache.rt_workers_indexes.is_empty()
-        && args_cache.res_indexes.is_empty()
-    {
-        return args_cache.args.clone();
-    }
-
-    let mut arg_vec = args_cache.args.clone();
-
-    // Pre-fetch workers count if needed
-    let workers = if !args_cache.rt_workers_indexes.is_empty() {
-        shared.config.workers
-    } else {
-        0
-    };
-
-    process_buffer_refs(&mut arg_vec, args_cache, node_index);
-    process_runtime_refs(&mut arg_vec, args_cache, node_index, workers);
-
-    for (res_idx, real_idx) in args_cache
-        .res_indexes
-        .iter()
-        .zip(args_cache.real_res_indexes.iter())
-    {
-        let arg = shared.graph.nodes[node_id as usize]
-            .args
-            .get(*real_idx)
-            .expect("Argument index out of bounds");
-
-        let node_factor = shared.graph.nodes[node_id as usize].factor;
-        let result_opt = collect_arg_result(
-            arg,
-            node_id,
-            node_index,
-            node_factor,
-            slot,
-            pred_index,
-            custom_res,
-            shared,
-        );
-        if let Some(mut result) = result_opt {
-            if result.len() == 1 {
-                arg_vec[*res_idx] = result.remove(0);
-            } else {
-                // insert to res_idx and next positions by expanding vec
-                arg_vec.splice(*res_idx..*res_idx + 1, result);
-            }
-        }
-    }
-    arg_vec
-}
-
 /// Populate args directly into a provided buffer, avoiding heap allocation.
-/// Mirrors `parse_cached_args` but reuses the caller's Vec instead of allocating a new one.
 #[inline(always)]
 pub(super) fn populate_cached_args_into(
     buf: &mut Vec<CmTypes>,

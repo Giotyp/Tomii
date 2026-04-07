@@ -87,14 +87,15 @@ pub(super) fn evaluate_node_condition(
     node_cond: &crate::graph_struct::NodeCondition,
 ) -> bool {
     // Build condition args using cached arg data
-    let cond_args = super::arg_resolution::parse_cached_args(
+    let mut cond_args = Vec::with_capacity(cond_cache.arg_cache.args.len());
+    super::arg_resolution::populate_cached_args_into(
+        &mut cond_args,
         shared,
         &cond_cache.arg_cache,
         node_info.id,
         node_info.index,
         node_info.slot,
         node_info.pred_index,
-        None,
     );
 
     // Execute condition function to get result
