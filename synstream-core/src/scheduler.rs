@@ -1,23 +1,14 @@
-#![allow(unused_imports)]
-#![allow(dead_code)]
 use core_affinity;
-use rayon::{prelude::*, vec};
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::cell::Cell;
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use parking_lot::Mutex;
 
 use crate::async_recorder::{set_worker_recorder, submit_record, AsyncRecorder};
-use crate::debug::print_debug;
 use crate::{IdType, Record};
-use synstream_types::CmTypes;
 
 thread_local! {
     // Physical core ID where this thread is pinned. usize::MAX means unassigned.
@@ -242,7 +233,6 @@ struct SchedulerBase {
     system_threads: usize,
     receiver_core_offset: usize,
     receiver_threads: usize,
-    worker_core_offset: usize,
     // Optional reserved core for main/orchestrator thread
     main_core: Option<core_affinity::CoreId>,
     pending_jobs: Arc<AtomicUsize>,
@@ -250,8 +240,6 @@ struct SchedulerBase {
     total_completed: Arc<AtomicUsize>,
     async_recorder: Option<Arc<AsyncRecorder>>,
     base_instant: Arc<Instant>,
-    target_batch_size: usize,
-    batch_timeout_us: u64,
     // Phase 4: Worker utilization metrics (optional)
     worker_metrics: Option<Arc<WorkerMetrics>>,
 }
@@ -265,8 +253,6 @@ impl SchedulerBase {
         base_instant: Instant,
         system_threads: usize,
         receiver_threads: usize,
-        target_batch_size: usize,
-        batch_timeout_us: u64,
     ) -> Self {
         let total_recorders = workers + receiver_threads + system_threads;
         let async_recorder = if record {
@@ -299,15 +285,12 @@ impl SchedulerBase {
             system_threads: tp.system_threads,
             receiver_core_offset: tp.receiver_core_offset,
             receiver_threads: tp.receiver_threads,
-            worker_core_offset: tp.worker_core_offset,
             main_core: tp.main_core,
             pending_jobs: Arc::new(AtomicUsize::new(0)),
             total_spawned: Arc::new(AtomicUsize::new(0)),
             total_completed: Arc::new(AtomicUsize::new(0)),
             async_recorder,
             base_instant: Arc::new(base_instant),
-            target_batch_size,
-            batch_timeout_us,
             worker_metrics,
         }
     }
@@ -353,14 +336,6 @@ impl SchedulerBase {
 
     fn total_jobs_completed(&self) -> usize {
         self.total_completed.load(Ordering::SeqCst)
-    }
-
-    fn get_target_batch_size(&self) -> usize {
-        self.target_batch_size
-    }
-
-    fn get_batch_timeout_us(&self) -> u64 {
-        self.batch_timeout_us
     }
 
     /// Common task spawning logic. `spawn_fn` handles the specific spawning (e.g., FIFO or work-stealing).
@@ -459,8 +434,6 @@ impl RayonScheduler {
         base_instant: Instant,
         system_threads: usize,
         receiver_threads: usize,
-        target_batch_size: usize,
-        batch_timeout_us: u64,
     ) -> Self {
         Self {
             base: SchedulerBase::new(
@@ -471,8 +444,6 @@ impl RayonScheduler {
                 base_instant,
                 system_threads,
                 receiver_threads,
-                target_batch_size,
-                batch_timeout_us,
             ),
             mode,
         }
@@ -834,8 +805,8 @@ pub fn create_scheduler(cfg: SchedulerConfig) -> SchedulerImpl {
         base_instant,
         system_threads,
         receiver_threads,
-        target_batch_size,
-        batch_timeout_us,
+        target_batch_size: _,
+        batch_timeout_us: _,
         worker_affinity,
     } = cfg;
     match scheduler_type {
@@ -848,8 +819,6 @@ pub fn create_scheduler(cfg: SchedulerConfig) -> SchedulerImpl {
             base_instant,
             system_threads,
             receiver_threads,
-            target_batch_size,
-            batch_timeout_us,
         )),
         SchedulerType::WorkStealing => SchedulerImpl::Rayon(RayonScheduler::new(
             SpawnMode::WorkStealing,
@@ -860,8 +829,6 @@ pub fn create_scheduler(cfg: SchedulerConfig) -> SchedulerImpl {
             base_instant,
             system_threads,
             receiver_threads,
-            target_batch_size,
-            batch_timeout_us,
         )),
         SchedulerType::Custom => {
             let mut builder = crate::custom_scheduler::CustomScheduler::builder()

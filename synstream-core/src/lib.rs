@@ -8,9 +8,9 @@
 #![allow(clippy::new_without_default)]
 
 pub mod async_recorder;
-pub mod buffers;
+pub(crate) mod buffers;
 pub(crate) mod core_alloc;
-pub mod custom_scheduler;
+pub(crate) mod custom_scheduler;
 pub mod debug;
 pub mod graph;
 pub mod graph_gen;
@@ -22,7 +22,7 @@ pub(crate) mod obj_gen;
 pub(crate) mod resolution_state;
 pub mod runtime;
 pub mod scheduler;
-pub mod time_buffer;
+pub(crate) mod time_buffer;
 pub mod utils_rdtsc;
 
 /// Node and object identifier type. `u16` supports up to 65 535 graph nodes.

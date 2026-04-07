@@ -340,9 +340,6 @@ impl SynRt {
 
     /// Spawn all threads and run the graph to completion (or until max_runtime).
     pub fn run(&mut self) {
-        // Lock-free result map is already initialised in the builder
-        self.init_results(self.shared.config.slots);
-
         // Start timing for system thread slots
         for thread_id in 0..self.shared.config.system_threads {
             let system_slot = self.shared.config.slots + thread_id;
@@ -610,10 +607,6 @@ impl SynRt {
         }
     }
 
-    fn init_results(&mut self, _slots: usize) {
-        // Lock-free result map is already initialized in constructor.
-        // No runtime initialization needed — atomic pointers start as null.
-    }
 }
 
 // ---------------------------------------------------------------------------
