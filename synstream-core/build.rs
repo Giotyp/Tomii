@@ -70,7 +70,24 @@ fn main() {
         return;
     }
 
-    let func_file = env::var("FUNC_PATH").expect("FUNC_PATH environment variable is not set");
+    // No WRAP_PATH and no FUNC_PATH: write no-op stubs so `cargo test` works
+    // without requiring a plugin source tree.
+    let func_env = env::var("FUNC_PATH").ok();
+    if func_env.is_none() {
+        fs::write(&copied_file, "// No plugin — stub for cargo test\n")
+            .expect("write funcs.rs stub");
+        fs::write(&wrapper_file, "pub fn init_wrappers() {}\n")
+            .expect("write wrappers.rs stub");
+        fs::write(
+            &registry_file,
+            "use synstream_types::*;\npub fn get_func(_: &str) -> Option<CmPtr> { None }\n",
+        )
+        .expect("write func_reg.rs stub");
+        info!("No FUNC_PATH set — wrote empty stubs for cargo test");
+        return;
+    }
+
+    let func_file = func_env.unwrap();
     // println!("cargo:rerun-if-changed={}", func_file);
     let path = PathBuf::from(func_file.clone());
 
