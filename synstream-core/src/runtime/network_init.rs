@@ -1,6 +1,6 @@
 use super::shared_data::SharedData;
-use crate::network::{bind_udp_socket_range, NetworkSocket};
 use crate::graph::Graph;
+use crate::network::{bind_udp_socket_range, NetworkSocket};
 use flume;
 use parking_lot;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,7 +19,10 @@ pub(super) fn process_id_function(shared: &Arc<SharedData>, result: &CmTypes) ->
         // Extract stream from the result
         if let Some(new_stream) = id_result.valid_number_to_usize() {
             // Validate stream range
-            let current_counter = shared.telemetry.stream_complete_counter.load(Ordering::SeqCst);
+            let current_counter = shared
+                .telemetry
+                .stream_complete_counter
+                .load(Ordering::SeqCst);
             let max_allowed_stream = current_counter + shared.config.slots;
 
             if new_stream >= max_allowed_stream {

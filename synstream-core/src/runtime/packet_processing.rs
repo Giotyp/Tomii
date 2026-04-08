@@ -60,11 +60,16 @@ pub(super) fn poll_and_process_network_packets(
 
         let start_id = shared.telemetry.measure_start();
         let new_stream_opt = process_id_function(shared, &packet_cm);
-        shared.telemetry.record_timing(start_id, thread_slot, "ID Function", usize::MAX);
+        shared
+            .telemetry
+            .record_timing(start_id, thread_slot, "ID Function", usize::MAX);
 
         let Some(new_stream) = new_stream_opt else {
             print_debug(|| {
-                format!("Thread {:?} -- Skipping packet: ID function returned None", thread_id)
+                format!(
+                    "Thread {:?} -- Skipping packet: ID function returned None",
+                    thread_id
+                )
             });
             continue;
         };
@@ -126,7 +131,9 @@ pub(super) fn poll_and_process_network_packets(
             stream_slot_activity,
             start_ns_batch,
         );
-        shared.telemetry.record_timing(start_proc, thread_slot, "Batch Resolution", usize::MAX);
+        shared
+            .telemetry
+            .record_timing(start_proc, thread_slot, "Batch Resolution", usize::MAX);
     }
 }
 
@@ -145,7 +152,9 @@ fn decode_packet(
     let start_proc = shared.telemetry.measure_start();
     // Pass a clone (cheap Arc increment) so received_bytes_cm stays alive for reclaim.
     let packet_cm = packet_process_func(&[received_bytes_cm.clone()]);
-    shared.telemetry.record_timing(start_proc, thread_slot, "Packet Processing", usize::MAX);
+    shared
+        .telemetry
+        .record_timing(start_proc, thread_slot, "Packet Processing", usize::MAX);
     // try_unwrap succeeds when plugin only borrowed via &[CmTypes] and did not clone the Arc.
     // Routes via per-socket SPSC return channel; try_send is non-blocking.
     if let CmTypes::Bytes(arc) = received_bytes_cm {
@@ -180,7 +189,8 @@ fn assign_packet_to_slot(
     }
 
     let start_sa = shared.telemetry.measure_start();
-    let (assigned_slot, newly_activated) = match assign_stream_to_available_slot(shared, new_stream) {
+    let (assigned_slot, newly_activated) = match assign_stream_to_available_slot(shared, new_stream)
+    {
         Some(v) => v,
         None => {
             // All slots occupied — drop this frame, mark exactly once.
@@ -188,9 +198,11 @@ fn assign_packet_to_slot(
                 let already_marked =
                     shared.net.frame_dropped[new_stream].swap(true, Ordering::AcqRel);
                 if !already_marked {
-                    shared.telemetry.stream_complete_counter.fetch_add(1, Ordering::SeqCst);
-                    let dropped =
-                        shared.net.dropped_streams.fetch_add(1, Ordering::Relaxed) + 1;
+                    shared
+                        .telemetry
+                        .stream_complete_counter
+                        .fetch_add(1, Ordering::SeqCst);
+                    let dropped = shared.net.dropped_streams.fetch_add(1, Ordering::Relaxed) + 1;
                     eprintln!(
                         "Frame {} dropped: no available slots ({} dropped total)",
                         new_stream, dropped
@@ -200,7 +212,9 @@ fn assign_packet_to_slot(
             return None;
         }
     };
-    shared.telemetry.record_timing(start_sa, thread_slot, "Slot Assignment", usize::MAX);
+    shared
+        .telemetry
+        .record_timing(start_sa, thread_slot, "Slot Assignment", usize::MAX);
 
     if newly_activated {
         *slots_dirty = true;
@@ -210,7 +224,9 @@ fn assign_packet_to_slot(
             print_debug(|| {
                 format!(
                     "Slot {} newly activated (stream {}), spawning {} initial nodes",
-                    assigned_slot, new_stream, init_nodes.len()
+                    assigned_slot,
+                    new_stream,
+                    init_nodes.len()
                 )
             });
             super::SynRt::preparation(shared, &init_nodes, thread_core, thread_slot);
@@ -221,9 +237,9 @@ fn assign_packet_to_slot(
         let additional_args = super::arg_resolution::parse_args(
             shared,
             idx_args,
-            0,             // node_index (network node)
+            0, // node_index (network node)
             assigned_slot,
-            0,             // pred_index
+            0, // pred_index
             None,
         );
         let mut full_args = Vec::with_capacity(1 + additional_args.len());
@@ -256,8 +272,7 @@ fn check_stream_completion(
     }
 
     // Exactly-once semantics: atomically claim completion ownership.
-    let already_completed =
-        shared.slot_data.packet_complete[slot].swap(true, Ordering::SeqCst);
+    let already_completed = shared.slot_data.packet_complete[slot].swap(true, Ordering::SeqCst);
     if already_completed {
         print_debug(|| {
             format!(
@@ -277,8 +292,11 @@ fn check_stream_completion(
         )
     });
 
-    let completed_streams =
-        shared.net.streams_receive_counter.fetch_add(1, Ordering::AcqRel) + 1;
+    let completed_streams = shared
+        .net
+        .streams_receive_counter
+        .fetch_add(1, Ordering::AcqRel)
+        + 1;
     if completed_streams >= shared.config.max_streams {
         println!(
             "All {} streams received ({} packets each) - receivers will shutdown",

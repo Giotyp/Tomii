@@ -5,12 +5,14 @@ use std::sync::atomic::Ordering;
 /// Returns true if recording is enabled for all streams (None) or if the slot's
 /// current stream matches the target stream.
 #[inline(always)]
-pub(super) fn should_record_slot(config: &RuntimeConfig, slot_data: &SlotData, slot: usize) -> bool {
+pub(super) fn should_record_slot(
+    config: &RuntimeConfig,
+    slot_data: &SlotData,
+    slot: usize,
+) -> bool {
     match config.record_stream {
         None => true, // Record all streams
-        Some(target_stream) => {
-            slot_data.stream_id[slot].load(Ordering::Relaxed) == target_stream
-        }
+        Some(target_stream) => slot_data.stream_id[slot].load(Ordering::Relaxed) == target_stream,
     }
 }
 
@@ -21,7 +23,9 @@ impl super::SynRt {
         out_file: Option<&str>,
         exclude_streams: usize,
     ) {
-        self.shared.telemetry.with_timing(|tb| tb.print_stats(bench_name, out_file, exclude_streams));
+        self.shared
+            .telemetry
+            .with_timing(|tb| tb.print_stats(bench_name, out_file, exclude_streams));
     }
 
     pub fn write_json_report(&self, path: &str, exclude_streams: usize) {

@@ -4,14 +4,14 @@ use super::packet_processing::poll_and_process_network_packets;
 use super::reporting::should_record_slot;
 use super::shared_data::SharedData;
 use super::slot_management::{assign_stream_to_available_slot, initial_nodes};
-use super::thread_locals::{BATCH_INNER_BUFS, TASK_COMP_BUF, BatchInnerBuffers};
+use super::thread_locals::{BatchInnerBuffers, BATCH_INNER_BUFS, TASK_COMP_BUF};
 use crate::async_recorder::{set_worker_recorder, submit_record};
 use crate::buffers::*;
 use crate::debug::print_debug;
 #[cfg(feature = "network")]
 use crate::network::PacketMessage;
-use crate::Record;
 use crate::IdType;
+use crate::Record;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -73,8 +73,8 @@ impl super::SynRt {
             // Poll packet channels if there is a network config AND receivers are still active
             #[cfg(feature = "network")]
             {
-                let should_poll_packets =
-                    network_config_opt.is_some() && !shared.net.receive_finished.load(Ordering::Acquire);
+                let should_poll_packets = network_config_opt.is_some()
+                    && !shared.net.receive_finished.load(Ordering::Acquire);
 
                 if should_poll_packets {
                     if let Some(network_config) = network_config_opt.as_ref() {
@@ -115,7 +115,10 @@ impl super::SynRt {
             // Also check stream completion here (before processing batch)
             // This ensures threads exit promptly even if shutdown_flag hasn't been set yet
             {
-                let completed_streams = shared.telemetry.stream_complete_counter.load(Ordering::Acquire);
+                let completed_streams = shared
+                    .telemetry
+                    .stream_complete_counter
+                    .load(Ordering::Acquire);
                 if completed_streams >= shared.config.max_streams {
                     println!(
                         "Thread {} detected all streams completed (after recv_batch), exiting",
@@ -137,10 +140,15 @@ impl super::SynRt {
                 &mut cached_slots,
                 &mut slots_dirty,
             );
-            shared.telemetry.record_timing(start_proc, thread_slot, "Slot Check", usize::MAX);
+            shared
+                .telemetry
+                .record_timing(start_proc, thread_slot, "Slot Check", usize::MAX);
 
             // Check for completion of all streams
-            let completed_streams = shared.telemetry.stream_complete_counter.load(Ordering::Acquire);
+            let completed_streams = shared
+                .telemetry
+                .stream_complete_counter
+                .load(Ordering::Acquire);
 
             if completed_streams >= shared.config.max_streams {
                 println!(
@@ -201,7 +209,12 @@ impl super::SynRt {
         // This reduces scheduler submissions from O(batch_size) to O(1) per batch.
         BATCH_INNER_BUFS.with(|bufs| {
             let mut bufs = bufs.borrow_mut();
-            let BatchInnerBuffers { succ_updates, schedule, ready, batch_sched } = &mut *bufs;
+            let BatchInnerBuffers {
+                succ_updates,
+                schedule,
+                ready,
+                batch_sched,
+            } = &mut *bufs;
             process_batch_inner(
                 shared,
                 batch,
@@ -271,7 +284,8 @@ impl super::SynRt {
         }
         // Ensure only one thread does initial preparation
         if shared
-            .exec.initial_prep_done
+            .exec
+            .initial_prep_done
             .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
@@ -328,8 +342,13 @@ fn drain_and_process_batch_queue(
     // path is only taken when no worker-resolvable nodes exist (all traffic
     // flows through batch_queue).
     batch_buf.clear();
-    batch_buf
-        .extend(shared.exec.batch_queue_rx.try_iter().take(shared.config.batch.target_size));
+    batch_buf.extend(
+        shared
+            .exec
+            .batch_queue_rx
+            .try_iter()
+            .take(shared.config.batch.target_size),
+    );
     if batch_buf.is_empty() {
         // Brief spin to catch burst completions landing just after try_iter()
         for _ in 0..shared.config.batch.poll_spin_iters {
@@ -400,5 +419,7 @@ fn drain_and_process_batch_queue(
         );
         // comp_batch is now empty (drained); capacity is retained for the next call.
     });
-    shared.telemetry.record_timing(start_proc, thread_slot, "Batch Resolution", usize::MAX);
+    shared
+        .telemetry
+        .record_timing(start_proc, thread_slot, "Batch Resolution", usize::MAX);
 }

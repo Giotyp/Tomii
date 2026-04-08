@@ -10,7 +10,11 @@ use synstream_types::CmTypes;
 ///
 /// Sets: `successor_count`, `worker_resolvable`, `needs_result_store`,
 /// `priority`, and `affinity_group` in addition to the base cache entry.
-pub(super) fn build_node_cache(app_graph: &Graph, init_objects: &[Vec<synstream_types::CmTypes>], scheduler: &SchedulerImpl) -> Vec<NodeCacheEntry> {
+pub(super) fn build_node_cache(
+    app_graph: &Graph,
+    init_objects: &[Vec<synstream_types::CmTypes>],
+    scheduler: &SchedulerImpl,
+) -> Vec<NodeCacheEntry> {
     let mut cache: Vec<NodeCacheEntry> = app_graph
         .nodes
         .iter()
@@ -84,44 +88,53 @@ pub(super) fn build_node_cache(app_graph: &Graph, init_objects: &[Vec<synstream_
 
         // Helper closure: build ResPredCache entries from an arg slice.
         // `skip_cond` mirrors the `skip_conditions` flag used in build_arg_cache.
-        let build_res_preds = |args: &[crate::graph_struct::Arg], skip_cond: bool| -> Vec<ResPredCache> {
-            let mut v = Vec::new();
-            for arg in args {
-                if skip_cond && arg.is_condition() { continue; }
-                match &arg.type_ {
-                    CmTypes::Res(res_nid) => {
-                        let pred_node = &app_graph.nodes[*res_nid as usize];
-                        v.push(ResPredCache {
-                            node_id: node_id as IdType,
-                            res_node_id: *res_nid as IdType,
-                            indexes: arg.predecessor.as_ref().map_or_else(Vec::new, |p| p.indexes.clone()),
-                            pred_factor: pred_node.factor,
-                            pred_group_size: pred_node.group_size,
-                            node_group_size: node.group_size,
-                            node_factor: node.factor,
-                            is_dep: false,
-                        });
+        let build_res_preds =
+            |args: &[crate::graph_struct::Arg], skip_cond: bool| -> Vec<ResPredCache> {
+                let mut v = Vec::new();
+                for arg in args {
+                    if skip_cond && arg.is_condition() {
+                        continue;
                     }
-                    CmTypes::Dep(res_nid) => {
-                        v.push(ResPredCache {
-                            node_id: node_id as IdType,
-                            res_node_id: *res_nid as IdType,
-                            indexes: Vec::new(),
-                            pred_factor: 0,
-                            pred_group_size: None,
-                            node_group_size: None,
-                            node_factor: node.factor,
-                            is_dep: true,
-                        });
+                    match &arg.type_ {
+                        CmTypes::Res(res_nid) => {
+                            let pred_node = &app_graph.nodes[*res_nid as usize];
+                            v.push(ResPredCache {
+                                node_id: node_id as IdType,
+                                res_node_id: *res_nid as IdType,
+                                indexes: arg
+                                    .predecessor
+                                    .as_ref()
+                                    .map_or_else(Vec::new, |p| p.indexes.clone()),
+                                pred_factor: pred_node.factor,
+                                pred_group_size: pred_node.group_size,
+                                node_group_size: node.group_size,
+                                node_factor: node.factor,
+                                is_dep: false,
+                            });
+                        }
+                        CmTypes::Dep(res_nid) => {
+                            v.push(ResPredCache {
+                                node_id: node_id as IdType,
+                                res_node_id: *res_nid as IdType,
+                                indexes: Vec::new(),
+                                pred_factor: 0,
+                                pred_group_size: None,
+                                node_group_size: None,
+                                node_factor: node.factor,
+                                is_dep: true,
+                            });
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
-            v
-        };
+                v
+            };
 
         let main_res_preds = build_res_preds(&node.args, true);
-        let cond_res_preds = node.condition.as_ref().map(|cond| build_res_preds(&cond.args, false));
+        let cond_res_preds = node
+            .condition
+            .as_ref()
+            .map(|cond| build_res_preds(&cond.args, false));
 
         cache[node_id].arg_cache.res_predecessors = main_res_preds;
         if let (Some(nc), Some(cp)) = (cache[node_id].node_condition.as_mut(), cond_res_preds) {
@@ -157,7 +170,9 @@ pub(super) fn build_predecessor_tables(
         let succ_factor = succ_node.factor;
 
         for arg in &succ_node.args {
-            let Some(pred) = &arg.predecessor else { continue };
+            let Some(pred) = &arg.predecessor else {
+                continue;
+            };
             let pred_id = pred.id as usize;
             let pred_factor = app_graph.nodes[pred_id].factor;
 
@@ -206,9 +221,8 @@ pub(super) fn build_slot_counters(
         .map(|nc| nc.factor)
         .sum();
 
-    let pending_tasks: Vec<AtomicUsize> = (0..slots)
-        .map(|_| AtomicUsize::new(total_tasks))
-        .collect();
+    let pending_tasks: Vec<AtomicUsize> =
+        (0..slots).map(|_| AtomicUsize::new(total_tasks)).collect();
     let pending_cond_tasks: Vec<AtomicUsize> = (0..slots)
         .map(|_| AtomicUsize::new(total_cond_tasks))
         .collect();

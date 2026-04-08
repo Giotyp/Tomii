@@ -54,7 +54,11 @@ pub struct SpinWaitConfig {
 
 impl Default for SpinWaitConfig {
     fn default() -> Self {
-        Self { spin_iters: 64, yield_iters: 256, park_ns: 100 }
+        Self {
+            spin_iters: 64,
+            yield_iters: 256,
+            park_ns: 100,
+        }
     }
 }
 
@@ -73,7 +77,12 @@ pub struct BatchConfig {
 
 impl Default for BatchConfig {
     fn default() -> Self {
-        Self { target_size: 1, timeout_us: 10, poll_spin_iters: 32, flush_threshold: 32 }
+        Self {
+            target_size: 1,
+            timeout_us: 10,
+            poll_spin_iters: 32,
+            flush_threshold: 32,
+        }
     }
 }
 

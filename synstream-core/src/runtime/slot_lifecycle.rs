@@ -135,8 +135,7 @@ fn reset_slot_state(shared: &SharedData, slot: usize) {
 
     shared.slot_data.packet_complete[slot].store(false, Ordering::SeqCst);
     shared.slot_data.packet_counters[slot].store(0, Ordering::SeqCst);
-    shared.slot_data.pending_tasks[slot]
-        .store(shared.graph_cache.total_tasks, Ordering::SeqCst);
+    shared.slot_data.pending_tasks[slot].store(shared.graph_cache.total_tasks, Ordering::SeqCst);
     shared.slot_data.pending_cond_tasks[slot]
         .store(shared.graph_cache.total_cond_tasks, Ordering::SeqCst);
     shared.slot_data.needs_check[slot].store(false, Ordering::SeqCst);
@@ -151,7 +150,12 @@ fn reset_slot_state(shared: &SharedData, slot: usize) {
     // Unmark so the slot can complete again for the next stream.
     shared.exec.resolution_state.unmark_slot_completed(slot);
 
-    print_debug(|| format!("Cleared all state for slot {} before spawning new stream", slot));
+    print_debug(|| {
+        format!(
+            "Cleared all state for slot {} before spawning new stream",
+            slot
+        )
+    });
 }
 
 /// In slot-priority mode: activate the next buffering slot, spawn its initial nodes,
@@ -247,7 +251,10 @@ fn restart_slot_nonnetwork(
             .iter()
             .filter(|&&s| s == SlotState::Active || s == SlotState::Buffering)
             .count();
-        let completed = shared.telemetry.stream_complete_counter.load(Ordering::Acquire);
+        let completed = shared
+            .telemetry
+            .stream_complete_counter
+            .load(Ordering::Acquire);
         // Monotonically increasing stream ID: avoids conflicts with IDs assigned during init.
         let next_stream_id = completed + currently_active;
 
@@ -261,7 +268,9 @@ fn restart_slot_nonnetwork(
     }
     // slots_dirty was already set by the caller after process_slot_completion.
 
-    shared.telemetry.with_timing(|tb| tb.start_slot_processing(slot));
+    shared
+        .telemetry
+        .with_timing(|tb| tb.start_slot_processing(slot));
 
     let compute_nodes = initial_nodes(&shared.graph, vec![slot]);
     print_debug(|| {

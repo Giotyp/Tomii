@@ -236,7 +236,11 @@ impl AsyncTimeBuffer {
 
     /// Finish slot processing and get stats (blocking - returns result)
     /// End timestamp is captured at call site for precise timing (matches start_slot_processing_async)
-    pub fn finish_slot_processing(&self, slot_id: usize, use_rdtsc: bool) -> Result<SlotStats, &'static str> {
+    pub fn finish_slot_processing(
+        &self,
+        slot_id: usize,
+        use_rdtsc: bool,
+    ) -> Result<SlotStats, &'static str> {
         // Capture end timestamp at call site, before channel send
         let end_time = if use_rdtsc {
             TimingMethod::Rdtsc(rdtsc())
@@ -458,7 +462,11 @@ impl TimeBuffer {
 
     /// Finish processing for a slot using a pre-captured end time
     /// Used by async mode to ensure precise timing regardless of channel latency
-    pub fn finish_slot_processing_with_time(&mut self, slot_id: usize, end_time: TimingMethod) -> SlotStats {
+    pub fn finish_slot_processing_with_time(
+        &mut self,
+        slot_id: usize,
+        end_time: TimingMethod,
+    ) -> SlotStats {
         if slot_id >= self.slots {
             panic!(
                 "Slot ID {} out of bounds (max: {})",
@@ -656,8 +664,7 @@ impl TimeBuffer {
             .collect();
         sorted_latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-        let avg_latency_us: f64 =
-            sorted_latencies.iter().sum::<f64>() / num_included as f64;
+        let avg_latency_us: f64 = sorted_latencies.iter().sum::<f64>() / num_included as f64;
 
         let percentile = |pct: f64| -> f64 {
             let idx = ((pct / 100.0) * (num_included as f64 - 1.0)).round() as usize;
@@ -677,8 +684,7 @@ impl TimeBuffer {
         };
 
         // ── 5+6. Aggregate per-node timing and compute stats ──────────────────────
-        let (node_stats_map, worker_busy_us) =
-            compute_node_stats(&included_tasks, total_wall_us);
+        let (node_stats_map, worker_busy_us) = compute_node_stats(&included_tasks, total_wall_us);
 
         // ── 7. Critical path via Kahn's topo-sort + DP ────────────────────────────
         let critical_path = compute_critical_path_report(graph_edges, &node_stats_map);
@@ -747,14 +753,26 @@ impl TimeBuffer {
         // Total tasks spawned per stream (sum of all node factors).
         let total_tasks_per_stream: usize = node_stats_map
             .values()
-            .map(|s| if num_included > 0 { s.invocations / num_included } else { 0 })
+            .map(|s| {
+                if num_included > 0 {
+                    s.invocations / num_included
+                } else {
+                    0
+                }
+            })
             .sum();
 
         // Max factor among critical-path nodes (key input for tile-size suggestion).
         let max_cp_factor: usize = critical_path_node_set
             .iter()
             .filter_map(|name| node_stats_map.get(*name))
-            .map(|s| if num_included > 0 { s.invocations / num_included } else { 0 })
+            .map(|s| {
+                if num_included > 0 {
+                    s.invocations / num_included
+                } else {
+                    0
+                }
+            })
             .max()
             .unwrap_or(0);
 
@@ -762,8 +780,16 @@ impl TimeBuffer {
         let cp_exec_us = critical_path
             .as_ref()
             .map_or(0.0, |cp| (cp.estimated_latency_us * 100.0).round() / 100.0);
-        let overhead_us = (avg_latency_us - critical_path.as_ref().map_or(0.0, |cp| cp.estimated_latency_us)).max(0.0);
-        let overhead_pct = if avg_latency_us > 0.0 { overhead_us / avg_latency_us * 100.0 } else { 0.0 };
+        let overhead_us = (avg_latency_us
+            - critical_path
+                .as_ref()
+                .map_or(0.0, |cp| cp.estimated_latency_us))
+        .max(0.0);
+        let overhead_pct = if avg_latency_us > 0.0 {
+            overhead_us / avg_latency_us * 100.0
+        } else {
+            0.0
+        };
         let sched_interpretation = if critical_path.is_none() {
             "critical path unavailable — pass graph edges to enable diagnostics".to_string()
         } else if overhead_pct >= 80.0 {

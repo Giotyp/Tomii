@@ -1,7 +1,7 @@
 use super::shared_data::{SharedData, SlotState};
 use crate::buffers::*;
-use crate::graph::Graph;
 use crate::debug::print_debug;
+use crate::graph::Graph;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use synstream_types::*;
@@ -29,7 +29,8 @@ pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> 
 
     // Increment global completion counter
     let completed_streams = shared
-        .telemetry.stream_complete_counter
+        .telemetry
+        .stream_complete_counter
         .fetch_add(1, Ordering::SeqCst)
         + 1;
 
@@ -55,7 +56,8 @@ pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> 
         // could pick up the Inactive slot, spawn initial tasks (storing results), and then
         // reinit_slot would clear those new-stream results → panic in legitimate tasks.
         shared
-            .exec.node_results
+            .exec
+            .node_results
             .reinit_slot(&shared.graph.nodes, slot, None);
 
         // Release the slot (makes it available for next stream assignment)
@@ -98,7 +100,10 @@ pub(super) fn assign_stream_to_available_slot(
     // Check last assigned first
     if slot_states[last_slot_assigned] == SlotState::Inactive {
         slot_states[last_slot_assigned] = SlotState::Active; // Mark slot as active immediately
-        shared.slot_data.active_bitmap.fetch_or(1u64 << last_slot_assigned, Ordering::Release);
+        shared
+            .slot_data
+            .active_bitmap
+            .fetch_or(1u64 << last_slot_assigned, Ordering::Release);
         shared.slot_data.needs_check[last_slot_assigned].store(true, Ordering::Release);
         running_streams.push((stream, last_slot_assigned));
         shared.slot_data.stream_id[last_slot_assigned].store(stream, Ordering::Relaxed);
@@ -118,7 +123,9 @@ pub(super) fn assign_stream_to_available_slot(
         shared.slot_data.generation[last_slot_assigned].fetch_add(1, Ordering::SeqCst);
 
         // Start timing for the slot immediately upon assignment
-        shared.telemetry.with_timing(|tb| tb.start_slot_processing(last_slot_assigned));
+        shared
+            .telemetry
+            .with_timing(|tb| tb.start_slot_processing(last_slot_assigned));
 
         return Some((last_slot_assigned, true)); // Newly activated from Inactive → Active
     }
@@ -130,7 +137,10 @@ pub(super) fn assign_stream_to_available_slot(
             *state = SlotState::Buffering; // Mark slot as Buffering
             running_streams.push((stream, slot_id));
             shared.slot_data.stream_id[slot_id].store(stream, Ordering::Relaxed);
-            shared.slot_data.last_assigned.store(slot_id, Ordering::SeqCst);
+            shared
+                .slot_data
+                .last_assigned
+                .store(slot_id, Ordering::SeqCst);
             print_debug(|| {
                 format!(
                     "Assigned stream {} to slot {} (Inactive) -> Buffering",
@@ -138,15 +148,17 @@ pub(super) fn assign_stream_to_available_slot(
                 )
             });
             drop(running_streams); // Release lock before returning
-            // In non-network mode, initial nodes are spawned immediately for
-            // Buffering slots too (see initial_nodes call site). Without this
-            // start_slot_processing call the timing controller panics when
-            // finish_slot_processing is called at stream completion because it
-            // never saw a StartSlotProcessing for this slot.
-            // In network mode, activate_next_slot will call start_slot_processing
-            // again (overwriting the start time) when the slot transitions to
-            // Active — that is fine; the later timestamp is more accurate there.
-            shared.telemetry.with_timing(|tb| tb.start_slot_processing(slot_id));
+                                   // In non-network mode, initial nodes are spawned immediately for
+                                   // Buffering slots too (see initial_nodes call site). Without this
+                                   // start_slot_processing call the timing controller panics when
+                                   // finish_slot_processing is called at stream completion because it
+                                   // never saw a StartSlotProcessing for this slot.
+                                   // In network mode, activate_next_slot will call start_slot_processing
+                                   // again (overwriting the start time) when the slot transitions to
+                                   // Active — that is fine; the later timestamp is more accurate there.
+            shared
+                .telemetry
+                .with_timing(|tb| tb.start_slot_processing(slot_id));
             return Some((slot_id, false)); // Assigned but Buffering, not Active
         }
     }
@@ -161,7 +173,10 @@ pub(super) fn release_slot(shared: &Arc<SharedData>, slot: usize) {
 
     let old_state = slot_states[slot];
     slot_states[slot] = SlotState::Inactive; // Mark as inactive
-    shared.slot_data.active_bitmap.fetch_and(!(1u64 << slot), Ordering::Release);
+    shared
+        .slot_data
+        .active_bitmap
+        .fetch_and(!(1u64 << slot), Ordering::Release);
     shared.slot_data.stream_id[slot].store(usize::MAX, Ordering::Relaxed);
 
     // Remove from running streams
@@ -184,7 +199,6 @@ pub(super) fn release_slot(shared: &Arc<SharedData>, slot: usize) {
     drop(slot_states);
     drop(running_streams);
 }
-
 
 /// Activate the next buffering slot in round-robin order
 /// Returns (activated_slot_id, buffered_nodes) for processing
@@ -210,9 +224,15 @@ pub(super) fn activate_next_slot(
         for (stream, slot) in running_streams.iter() {
             if states[*slot] == SlotState::Buffering {
                 states[*slot] = SlotState::Active;
-                shared.slot_data.active_bitmap.fetch_or(1u64 << *slot, Ordering::Release);
+                shared
+                    .slot_data
+                    .active_bitmap
+                    .fetch_or(1u64 << *slot, Ordering::Release);
                 shared.slot_data.needs_check[*slot].store(true, Ordering::Release);
-                shared.slot_data.last_assigned.store(*slot, Ordering::SeqCst);
+                shared
+                    .slot_data
+                    .last_assigned
+                    .store(*slot, Ordering::SeqCst);
                 print_debug(|| {
                     format!(
                         "Round-Robin: Activated slot {} for stream {} after completing slot {}",
@@ -245,7 +265,9 @@ pub(super) fn activate_next_slot(
         // new stream's dependency counters or cause spurious task spawning.
         shared.slot_data.generation[slot_id].fetch_add(1, Ordering::SeqCst);
 
-        shared.telemetry.with_timing(|tb| tb.start_slot_processing(slot_id));
+        shared
+            .telemetry
+            .with_timing(|tb| tb.start_slot_processing(slot_id));
 
         Some((slot_id, buffered))
     } else {

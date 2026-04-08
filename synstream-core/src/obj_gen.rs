@@ -57,10 +57,9 @@ pub fn init_objects(
         } else {
             // function call needed
             let func_name = init.function.as_ref().unwrap();
-            let func_ptr = get_func(func_name)
-                .ok_or_else(|| -> crate::SynError {
-                    format!("Function '{}' not found in registry", func_name).into()
-                })?;
+            let func_ptr = get_func(func_name).ok_or_else(|| -> crate::SynError {
+                format!("Function '{}' not found in registry", func_name).into()
+            })?;
 
             let mut value_vec: Vec<CmTypes> = Vec::new();
             for i in 0..factor {

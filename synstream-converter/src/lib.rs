@@ -17,8 +17,8 @@
 use std::path::Path;
 
 use syn::{
-    Attribute, FnArg, File, Item, ItemFn, Pat, PatType, ReturnType, Type, TypePath,
-    TypeReference, parse_str,
+    parse_str, Attribute, File, FnArg, Item, ItemFn, Pat, PatType, ReturnType, Type, TypePath,
+    TypeReference,
 };
 
 // ---------------------------------------------------------------------------
@@ -247,7 +247,9 @@ fn ref_is_vec_cm_types(r: &TypeReference) -> bool {
             if let syn::PathArguments::AngleBracketed(ab) = &path.segments[0].arguments {
                 if ab.args.len() == 1 {
                     if let syn::GenericArgument::Type(inner) = &ab.args[0] {
-                        return type_path_ident(inner).map(|n| n == "CmTypes").unwrap_or(false);
+                        return type_path_ident(inner)
+                            .map(|n| n == "CmTypes")
+                            .unwrap_or(false);
                     }
                 }
             }
@@ -382,17 +384,25 @@ fn infer_cm_return(ret: &ReturnType) -> CmRet {
 fn has_attr(attrs: &[Attribute], name: &str) -> bool {
     attrs.iter().any(|a| {
         let path = a.path();
-        path.segments.last().map(|s| s.ident == name).unwrap_or(false)
+        path.segments
+            .last()
+            .map(|s| s.ident == name)
+            .unwrap_or(false)
     })
 }
 
 /// Returns true if `#[synstream_export(variadic)]` is present.
 fn has_variadic_export(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|a| {
-        let is_export = a.path().segments.last()
+        let is_export = a
+            .path()
+            .segments
+            .last()
             .map(|s| s.ident == "synstream_export")
             .unwrap_or(false);
-        if !is_export { return false; }
+        if !is_export {
+            return false;
+        }
         // Check if the attribute tokens contain "variadic"
         matches!(a.meta, syn::Meta::List(_)) && {
             if let syn::Meta::List(ref ml) = a.meta {
@@ -577,27 +587,17 @@ fn render_wrappers(entries: &[ExportedFn]) -> String {
     out.push_str(
         "    let path = std::env::var(\"PLUGIN_LIB\").expect(\"PLUGIN_LIB must be set to your .so/.dll\");\n",
     );
-    out.push_str(
-        "    unsafe { Library::new(path).expect(\"Failed to open plugin library\") }\n",
-    );
+    out.push_str("    unsafe { Library::new(path).expect(\"Failed to open plugin library\") }\n");
     out.push_str("});\n\n");
     out.push_str("pub fn init_wrappers() {\n");
     out.push_str("    LazyLock::force(&DYN_LIB);\n");
     out.push_str("}\n\n");
     out.push_str("macro_rules! cache_sym {\n");
-    out.push_str(
-        "    ($vis:vis static $sym:ident : $typ:ty = $name:expr;) => {\n",
-    );
-    out.push_str(
-        "        $vis static $sym: LazyLock<$typ> = LazyLock::new(|| {\n",
-    );
+    out.push_str("    ($vis:vis static $sym:ident : $typ:ty = $name:expr;) => {\n");
+    out.push_str("        $vis static $sym: LazyLock<$typ> = LazyLock::new(|| {\n");
     out.push_str("            let lib = &*DYN_LIB;\n");
-    out.push_str(
-        "            let sym: Symbol<$typ> =\n",
-    );
-    out.push_str(
-        "                unsafe { lib.get($name) }\n",
-    );
+    out.push_str("            let sym: Symbol<$typ> =\n");
+    out.push_str("                unsafe { lib.get($name) }\n");
     out.push_str(
         "                    .unwrap_or_else(|e| panic!(\"couldn't load symbol {:?}: {}\", $name, e));\n",
     );
@@ -633,13 +633,17 @@ fn render_entry_wrapper(entry: &ExportedFn) -> String {
     ));
 
     // Determine which params are "variadic" (VecCmTypes or SliceCmTypes)
-    let variadic_idx = entry.cm_params.iter().position(|p| {
-        matches!(p.kind, CmParamKind::VecCmTypes | CmParamKind::SliceCmTypes)
-    });
+    let variadic_idx = entry
+        .cm_params
+        .iter()
+        .position(|p| matches!(p.kind, CmParamKind::VecCmTypes | CmParamKind::SliceCmTypes));
 
     // Emit extraction for each non-variadic param
     for (i, param) in entry.cm_params.iter().enumerate() {
-        if matches!(param.kind, CmParamKind::VecCmTypes | CmParamKind::SliceCmTypes) {
+        if matches!(
+            param.kind,
+            CmParamKind::VecCmTypes | CmParamKind::SliceCmTypes
+        ) {
             break; // variadic handled below
         }
         let name = &param.name;
@@ -659,9 +663,7 @@ fn render_entry_wrapper(entry: &ExportedFn) -> String {
                 out.push_str(&format!(
                     "    let {name}_s = match &args[{i}] {{ CmTypes::String(x) => x.to_string(), _ => panic!(\"{fn_name_str}: expected String for {name}\") }};\n"
                 ));
-                out.push_str(&format!(
-                    "    let {name} = {name}_s.as_str();\n"
-                ));
+                out.push_str(&format!("    let {name} = {name}_s.as_str();\n"));
             }
             CmParamKind::OwnedString => {
                 out.push_str(&format!(
@@ -751,18 +753,12 @@ fn render_registry(entries: &[ExportedFn]) -> String {
     for entry in entries {
         let key = &entry.registry_key;
         let wrap_fn = wrap_fn_name(&entry.cm_name);
-        out.push_str(&format!(
-            "        \"{key}\" => Some({wrap_fn}),\n"
-        ));
+        out.push_str(&format!("        \"{key}\" => Some({wrap_fn}),\n"));
     }
 
     out.push_str("        _ => {\n");
-    out.push_str(
-        "            println!(\"Function {} not found in registry\", func_name);\n",
-    );
-    out.push_str(
-        "            panic!(\"Function not found: {}\", func_name);\n",
-    );
+    out.push_str("            println!(\"Function {} not found in registry\", func_name);\n");
+    out.push_str("            panic!(\"Function not found: {}\", func_name);\n");
     out.push_str("        }\n");
     out.push_str("    }\n");
     out.push_str("}\n");
@@ -797,7 +793,10 @@ mod tests {
         assert_eq!(e.cm_name, "generate_vector_cm");
         assert_eq!(e.registry_key, "generate_vector");
         assert_eq!(e.cm_params.len(), 1);
-        assert!(matches!(e.cm_params[0].kind, CmParamKind::Primitive(PrimKind::Usize)));
+        assert!(matches!(
+            e.cm_params[0].kind,
+            CmParamKind::Primitive(PrimKind::Usize)
+        ));
         assert!(matches!(e.cm_ret, CmRet::CmTypes));
     }
 

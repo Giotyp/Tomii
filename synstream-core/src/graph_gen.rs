@@ -162,10 +162,9 @@ pub struct GraphSpec {
 }
 
 pub fn from_json(graph_json: &str, workers: usize) -> Result<GraphSpec, crate::SynError> {
-    let mut file = File::open(graph_json)
-        .map_err(|e| -> crate::SynError {
-            format!("Cannot open graph file '{}': {}", graph_json, e).into()
-        })?;
+    let mut file = File::open(graph_json).map_err(|e| -> crate::SynError {
+        format!("Cannot open graph file '{}': {}", graph_json, e).into()
+    })?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
 
@@ -211,7 +210,10 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<GraphSpec, crate::S
         let node_id = node_counter;
         node_counter += 1;
         name_to_id.insert(node_json.name.clone(), node_id);
-        graph.add_node(Node { id: node_id, ..node });
+        graph.add_node(Node {
+            id: node_id,
+            ..node
+        });
     }
 
     for node in parse_post_nodes(
@@ -224,7 +226,10 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<GraphSpec, crate::S
         graph.add_post_node(node);
     }
 
-    Ok(GraphSpec { graph, init_objects: init_vec })
+    Ok(GraphSpec {
+        graph,
+        init_objects: init_vec,
+    })
 }
 
 /// Parse the `network_config` JSON block into a [`GraphNetworkConfig`].
@@ -237,14 +242,20 @@ fn parse_network_config(
 ) -> Result<GraphNetworkConfig, crate::SynError> {
     let socket_type = match nc_json.socket_type.to_lowercase().as_str() {
         "udp" => SocketType::Udp,
-        other => return Err(format!(
-            "Unsupported socket type '{}'. Only 'udp' is currently supported.", other
-        ).into()),
+        other => {
+            return Err(format!(
+                "Unsupported socket type '{}'. Only 'udp' is currently supported.",
+                other
+            )
+            .into())
+        }
     };
 
     let num_sockets = nc_json.num_sockets.resolve(init_vec, obj_id_map, workers);
     let packet_length = nc_json.packet_length.resolve(init_vec, obj_id_map, workers);
-    let stream_packets = nc_json.stream_packets.resolve(init_vec, obj_id_map, workers);
+    let stream_packets = nc_json
+        .stream_packets
+        .resolve(init_vec, obj_id_map, workers);
     let address: String = {
         let given = &nc_json.address;
         if let Some(&obj_id) = obj_id_map.get(given) {
@@ -262,7 +273,10 @@ fn parse_network_config(
     let id_function = get_func(&nc_json.id_function);
     let index_function = {
         let func_ptr = get_func(&nc_json.index_function.function);
-        let args = nc_json.index_function.args.iter()
+        let args = nc_json
+            .index_function
+            .args
+            .iter()
             .map(|a| parse_arg(a, init_vec, obj_id_map, name_to_id, workers))
             .collect();
         Some(IndexFunction { func_ptr, args })
@@ -302,21 +316,32 @@ fn parse_single_node(
     name_to_id: &RapidHashMap<String, IdType>,
     workers: usize,
 ) -> Result<Node, crate::SynError> {
-    let args: Vec<Arg> = node_json.args.iter()
+    let args: Vec<Arg> = node_json
+        .args
+        .iter()
         .map(|a| parse_arg(a, init_vec, obj_id_map, name_to_id, workers))
         .collect();
 
     let loop_args: Option<Vec<Arg>> = node_json.loop_args.as_ref().map(|la| {
-        la.iter().map(|a| parse_arg(a, init_vec, obj_id_map, name_to_id, workers)).collect()
+        la.iter()
+            .map(|a| parse_arg(a, init_vec, obj_id_map, name_to_id, workers))
+            .collect()
     });
 
-    let factor = node_json.factor.as_ref()
+    let factor = node_json
+        .factor
+        .as_ref()
         .map_or(1, |f| f.resolve(init_vec, obj_id_map, workers));
-    let group_size = node_json.group_size.as_ref()
+    let group_size = node_json
+        .group_size
+        .as_ref()
         .map(|gs| gs.resolve(init_vec, obj_id_map, workers));
     let loop_ = node_json.loop_.as_ref().map(|lj| Loop {
         name: lj.name.clone(),
-        factor: lj.factor.as_ref().map_or(1, |f| f.resolve(init_vec, obj_id_map, workers)),
+        factor: lj
+            .factor
+            .as_ref()
+            .map_or(1, |f| f.resolve(init_vec, obj_id_map, workers)),
     });
 
     let condition = node_json.condition.as_ref().map(|cond_json| {
@@ -324,7 +349,9 @@ fn parse_single_node(
             .unwrap_or_else(|| panic!("Invalid condition operation: {}", cond_json.operation));
         let cond_value = string_to_cmtype(cond_json.value_type.clone(), cond_json.value.clone())
             .unwrap_or_else(|_| panic!("Failed to parse condition value: {}", cond_json.value));
-        let cond_args: Vec<Arg> = cond_json.args.iter()
+        let cond_args: Vec<Arg> = cond_json
+            .args
+            .iter()
             .map(|a| parse_arg(a, init_vec, obj_id_map, name_to_id, workers))
             .collect();
         NodeCondition {
@@ -335,7 +362,11 @@ fn parse_single_node(
         }
     });
 
-    let priority = node_json.priority.as_deref().map(NodePriority::from_str).unwrap_or_default();
+    let priority = node_json
+        .priority
+        .as_deref()
+        .map(NodePriority::from_str)
+        .unwrap_or_default();
     let use_workers = node_json.use_workers.as_ref().map(|spec_str| {
         crate::WorkerRangeSpec::parse(spec_str)
             .unwrap_or_else(|e| panic!("Invalid use_workers spec '{}': {}", spec_str, e))
@@ -364,12 +395,16 @@ fn parse_post_nodes(
     name_to_id: &RapidHashMap<String, IdType>,
     workers: usize,
 ) -> Result<Vec<Node>, crate::SynError> {
-    post_nodes_json.iter().enumerate().map(|(i, pn_json)| {
-        print_debug(|| format!("Adding post-node: {}", pn_json.name));
-        let mut node = parse_single_node(pn_json, init_vec, obj_id_map, name_to_id, workers)?;
-        node.id = i as IdType;
-        Ok(node)
-    }).collect()
+    post_nodes_json
+        .iter()
+        .enumerate()
+        .map(|(i, pn_json)| {
+            print_debug(|| format!("Adding post-node: {}", pn_json.name));
+            let mut node = parse_single_node(pn_json, init_vec, obj_id_map, name_to_id, workers)?;
+            node.id = i as IdType;
+            Ok(node)
+        })
+        .collect()
 }
 
 #[cfg(test)]

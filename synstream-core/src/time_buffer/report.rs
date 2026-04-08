@@ -146,7 +146,11 @@ pub(super) fn aggregate_task_data(
         }
     }
 
-    (global_task_data, global_per_worker_counts, global_per_worker_totals)
+    (
+        global_task_data,
+        global_per_worker_counts,
+        global_per_worker_totals,
+    )
 }
 
 /// Format the header and global timing statistics block (stream counts, averages, min/max).
@@ -185,7 +189,11 @@ pub(super) fn format_timing_summary(
         }
 
         let steady_state_times: Vec<Duration> = if excluded_count > 0 && steady_state_count > 0 {
-            global_total_times.iter().skip(excluded_count).copied().collect()
+            global_total_times
+                .iter()
+                .skip(excluded_count)
+                .copied()
+                .collect()
         } else {
             global_total_times.to_vec()
         };
@@ -504,8 +512,8 @@ pub(super) fn compute_node_stats(
         };
         let mut sorted_us: Vec<f64> = entries.iter().map(|(_, us)| *us).collect();
         sorted_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let p99_idx = ((0.99 * (sorted_us.len() as f64 - 1.0)).round() as usize)
-            .min(sorted_us.len() - 1);
+        let p99_idx =
+            ((0.99 * (sorted_us.len() as f64 - 1.0)).round() as usize).min(sorted_us.len() - 1);
         let p99_exec_us = sorted_us[p99_idx];
         node_stats_map.insert(
             name.clone(),
@@ -534,8 +542,7 @@ pub(super) fn compute_critical_path_report(
         return None;
     }
 
-    let mut name_to_idx: std::collections::HashMap<&str, usize> =
-        std::collections::HashMap::new();
+    let mut name_to_idx: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for (i, (name, _)) in graph_edges.iter().enumerate() {
         name_to_idx.insert(name.as_str(), i);
     }
@@ -761,7 +768,10 @@ pub(super) fn generate_optimization_suggestions(
 
     // D. Worker underutilization after coarsening.
     if !worker_busy_pct.is_empty() && max_cp_factor > 8 && overhead_pct < 60.0 {
-        let max_util = worker_busy_pct.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let max_util = worker_busy_pct
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
         if max_util < 50.0 {
             if let Some(cp) = critical_path {
                 if cp.length_nodes > 10 {

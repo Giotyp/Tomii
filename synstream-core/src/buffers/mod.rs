@@ -59,12 +59,12 @@
 //! This is complementary to the lazy-reinit pattern: lazy reinit handles
 //! counter reset correctness; stale detection handles task-level correctness.
 
-mod node_info;
 mod node_dep;
+mod node_info;
 mod result_map;
 
-pub use node_info::*;
 pub use node_dep::*;
+pub use node_info::*;
 pub use result_map::*;
 
 // ---------------------------------------------------------------------------
