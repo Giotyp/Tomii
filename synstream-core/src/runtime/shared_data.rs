@@ -1,9 +1,13 @@
+#[cfg(feature = "network")]
 use crate::network::{NetworkSocket, PacketMessage};
 use crate::resolution_state::ResolutionState;
 use crate::time_buffer::TimeBufferManager;
 use crate::{buffers::*, graph::*, scheduler::*};
+#[cfg(feature = "network")]
 use flume::{Receiver, Sender};
-use parking_lot::{Mutex, RwLock};
+#[cfg(feature = "network")]
+use parking_lot::Mutex;
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -114,9 +118,9 @@ pub struct SlotData {
     pub last_assigned: Arc<AtomicUsize>,
 }
 
-/// Network receiver infrastructure.
+/// Network receiver infrastructure — present only when the `network` feature is enabled.
+#[cfg(feature = "network")]
 pub struct NetworkInfra {
-    pub shutdown_flag: Arc<AtomicBool>,
     pub receive_finished: Arc<AtomicBool>,
     /// Flume MPSC channel from network receivers to resolution threads.
     pub packet_sender: Sender<PacketMessage>,
@@ -193,6 +197,10 @@ pub struct SharedData {
     pub graph_cache: GraphCache,
     pub config: RuntimeConfig,
     pub slot_data: SlotData,
+    /// Runtime shutdown signal — set by the main thread on max_runtime or stream completion.
+    /// Read by resolution threads to exit their loops. Always present (not network-specific).
+    pub shutdown_flag: Arc<AtomicBool>,
+    #[cfg(feature = "network")]
     pub net: NetworkInfra,
     pub exec: ExecCtx,
     pub telemetry: Telemetry,

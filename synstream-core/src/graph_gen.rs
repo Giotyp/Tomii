@@ -186,6 +186,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<GraphSpec, crate::S
     let mut node_counter: IdType = 0;
 
     // Reserve id:0 for the virtual $network node when a network config is present.
+    #[cfg(feature = "network")]
     if let Some(network_config) = graph.network_config().as_ref() {
         let node_id = node_counter;
         node_counter += 1;
