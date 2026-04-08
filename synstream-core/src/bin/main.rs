@@ -119,31 +119,76 @@ struct Args {
         help = "Number of initial streams to exclude from timing statistics (for steady-state measurement)"
     )]
     exclude_streams: usize,
-    #[clap(long, value_name = "FILE", required = false, help = "Write JSON performance report to FILE")]
+    #[clap(
+        long,
+        value_name = "FILE",
+        required = false,
+        help = "Write JSON performance report to FILE"
+    )]
     report: Option<String>,
-    #[clap(long, value_name = "N", required = false, default_value = "65536",
-        help = "Capacity of the lock-free task-completion ring-buffer")]
+    #[clap(
+        long,
+        value_name = "N",
+        required = false,
+        default_value = "65536",
+        help = "Capacity of the lock-free task-completion ring-buffer"
+    )]
     batch_queue_capacity: usize,
-    #[clap(long, value_name = "N", required = false, default_value = "32",
-        help = "Spin iterations before blocking recv in resolution threads")]
+    #[clap(
+        long,
+        value_name = "N",
+        required = false,
+        default_value = "32",
+        help = "Spin iterations before blocking recv in resolution threads"
+    )]
     spin_iterations: u32,
-    #[clap(long, value_name = "N", required = false, default_value = "32",
-        help = "Flush accumulated successors to workers every N items during batch processing")]
+    #[clap(
+        long,
+        value_name = "N",
+        required = false,
+        default_value = "32",
+        help = "Flush accumulated successors to workers every N items during batch processing"
+    )]
     sched_flush_threshold: usize,
-    #[clap(long, value_name = "BYTES", required = false, default_value = "16777216",
-        help = "UDP socket kernel receive buffer size in bytes")]
+    #[clap(
+        long,
+        value_name = "BYTES",
+        required = false,
+        default_value = "16777216",
+        help = "UDP socket kernel receive buffer size in bytes"
+    )]
     socket_recv_buf_bytes: usize,
-    #[clap(long, value_name = "N", required = false, default_value = "1024",
-        help = "Pre-allocated packet buffer pool size per receiver thread")]
+    #[clap(
+        long,
+        value_name = "N",
+        required = false,
+        default_value = "1024",
+        help = "Pre-allocated packet buffer pool size per receiver thread"
+    )]
     recv_pool_size: usize,
-    #[clap(long, value_name = "N", required = false, default_value = "64",
-        help = "spin_wait: iterations of spin_loop() before switching to yield_now()")]
+    #[clap(
+        long,
+        value_name = "N",
+        required = false,
+        default_value = "64",
+        help = "spin_wait: iterations of spin_loop() before switching to yield_now()"
+    )]
     spin_wait_spin_iters: u32,
-    #[clap(long, value_name = "N", required = false, default_value = "256",
-        help = "spin_wait: iterations of yield_now() before switching to park_timeout()")]
+    #[clap(
+        long,
+        value_name = "N",
+        required = false,
+        default_value = "256",
+        help = "spin_wait: iterations of yield_now() before switching to park_timeout()"
+    )]
     spin_wait_yield_iters: u32,
-    #[clap(long, value_name = "NS", required = false, default_value = "100",
-        help = "spin_wait: park_timeout duration in nanoseconds")]
+    #[clap(
+        long,
+        value_name = "NS",
+        required = false,
+        default_value = "100",
+        help = "spin_wait: park_timeout duration in nanoseconds"
+    )]
     spin_wait_park_ns: u64,
 }
 
@@ -328,11 +373,17 @@ pub fn run_graph(
         }
 
         if !unique_worker_specs.is_empty() {
-            println!("Detected {} unique worker specs:", unique_worker_specs.len());
+            println!(
+                "Detected {} unique worker specs:",
+                unique_worker_specs.len()
+            );
             for ws in &unique_worker_specs {
                 println!("  {}", ws);
             }
-            Some(WorkerAffinityConfig::from_worker_specs(&unique_worker_specs, workers))
+            Some(WorkerAffinityConfig::from_worker_specs(
+                &unique_worker_specs,
+                workers,
+            ))
         } else {
             None
         }

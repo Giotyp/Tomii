@@ -148,7 +148,11 @@ impl Predecessor {
             range_len < pred_factor && range_len == self.indexes.len() && range_len == succ_factor
         };
 
-        if should_filter { Some((min_idx, max_idx + 1)) } else { None }
+        if should_filter {
+            Some((min_idx, max_idx + 1))
+        } else {
+            None
+        }
     }
 
     /// Returns the number of predecessor instances that send dependency decrements to this successor.

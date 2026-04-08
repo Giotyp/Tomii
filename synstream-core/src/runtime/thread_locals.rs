@@ -69,9 +69,9 @@ pub(super) struct WorkerResolutionBuffers {
 /// Written and read by: resolution threads inside `process_batch_inner` only.
 pub(super) struct BatchInnerBuffers {
     pub succ_updates: Vec<(NodeInfo, bool, IdType, Option<usize>)>,
-    pub schedule:     Vec<NodeInfo>,
-    pub ready:        Vec<usize>,
-    pub batch_sched:  Vec<NodeInfo>,
+    pub schedule: Vec<NodeInfo>,
+    pub ready: Vec<usize>,
+    pub batch_sched: Vec<NodeInfo>,
 }
 
 // ---------------------------------------------------------------------------

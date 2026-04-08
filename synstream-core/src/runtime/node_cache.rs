@@ -127,7 +127,12 @@ pub(super) fn node_cache_entry(
     initial_nodes: &[crate::IdType],
     condition_nodes: &std::collections::HashSet<crate::IdType>,
 ) -> NodeCacheEntry {
-    print_debug(|| format!("Creating node cache entry for node {} name {}", node.id, node.name));
+    print_debug(|| {
+        format!(
+            "Creating node cache entry for node {} name {}",
+            node.id, node.name
+        )
+    });
 
     if node.name == "$network" {
         return NodeCacheEntry {
@@ -152,7 +157,10 @@ pub(super) fn node_cache_entry(
     let pred_vec = build_pred_vec(pred_hash);
 
     let cond_index = if condition_nodes.contains(&node.id) {
-        condition_nodes.iter().position(|&x| x == node.id).unwrap_or(0)
+        condition_nodes
+            .iter()
+            .position(|&x| x == node.id)
+            .unwrap_or(0)
     } else {
         0
     };
@@ -187,7 +195,6 @@ fn build_arg_cache(
     init_objects: &[Vec<CmTypes>],
     skip_conditions: bool,
 ) -> (ArgCacheEntry, std::collections::HashMap<IdType, Vec<usize>>) {
-
     let mut rt_idxs_indexes = Vec::new();
     let mut buffer_ref_indexes = Vec::new();
     let mut buffer_values = Vec::new();
@@ -223,7 +230,10 @@ fn build_arg_cache(
                 res_indexes.push(idx_count);
                 real_res_indexes.push(idx);
                 if let Some(pred) = arg.predecessor.as_ref() {
-                    pred_hash.entry(pred.id).or_default().push(pred.indexes.len());
+                    pred_hash
+                        .entry(pred.id)
+                        .or_default()
+                        .push(pred.indexes.len());
                 }
             }
             CmTypes::Barrier(_) => {}
@@ -267,8 +277,12 @@ fn build_condition_cache(node: &Node, init_objects: &[Vec<CmTypes>]) -> Option<N
     Some(NodeConditionCache {
         operation: cond.operation.clone(),
         eval_value: cond.eval_value.clone(),
-        func_ptr: get_func(&cond.func_name)
-            .unwrap_or_else(|| panic!("Condition function '{}' not found in registry", cond.func_name)),
+        func_ptr: get_func(&cond.func_name).unwrap_or_else(|| {
+            panic!(
+                "Condition function '{}' not found in registry",
+                cond.func_name
+            )
+        }),
         arg_cache,
     })
 }

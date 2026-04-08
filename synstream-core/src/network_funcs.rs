@@ -80,4 +80,3 @@ pub fn synstream_bind_udp_range(args: &[CmTypes]) -> CmTypes {
 
     CmTypes::from_any_vec(sockets)
 }
-

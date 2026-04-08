@@ -51,8 +51,8 @@ pub(super) fn process_batch_inner(
         let node_cache_entry = &shared.graph_cache.node_cache[node_id_usize];
 
         if node_cache_entry.is_condition {
-            let prev_cond = shared.slot_data.pending_cond_tasks[node_info.slot]
-                .fetch_sub(1, Ordering::SeqCst);
+            let prev_cond =
+                shared.slot_data.pending_cond_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
             if prev_cond <= 10 || prev_cond % 100 == 0 {
                 print_debug(|| {
                     format!(
@@ -63,8 +63,7 @@ pub(super) fn process_batch_inner(
                 });
             }
         } else if !node_cache_entry.is_initial {
-            let _ = shared.slot_data.pending_tasks[node_info.slot]
-                .fetch_sub(1, Ordering::SeqCst);
+            let _ = shared.slot_data.pending_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
         }
 
         // Phase 3: Collect successors and process them (no allocations)
@@ -72,8 +71,7 @@ pub(super) fn process_batch_inner(
         sched.clear();
 
         // Load slot generation once per node (all successors share same slot)
-        let slot_gen = shared.slot_data.generation[node_info.slot]
-            .load(Ordering::SeqCst) as u32;
+        let slot_gen = shared.slot_data.generation[node_info.slot].load(Ordering::SeqCst) as u32;
 
         for (_succ_info, has_cond, succ_id, pred_group) in succ_buf.iter() {
             let succ_node_id = *succ_id as usize;
@@ -99,7 +97,8 @@ pub(super) fn process_batch_inner(
             // exact successor instance that reads this predecessor fires,
             // guaranteeing its result is available (no spin_wait needed).
             let specific_succ_idx = shared
-                .graph_cache.pred_succ_1to1_offset
+                .graph_cache
+                .pred_succ_1to1_offset
                 .get(succ_node_id)
                 .and_then(|v| v.get(node_info.id as usize))
                 .and_then(|o| *o)
@@ -185,10 +184,7 @@ fn dispatch_condition_successor(
     let succ_cache = &shared.graph_cache.node_cache[succ_node_id];
 
     let condition_passed = if let Some(cond_cache) = &succ_cache.node_condition {
-        let node_cond = shared.graph.nodes[succ_node_id]
-            .condition
-            .as_ref()
-            .unwrap();
+        let node_cond = shared.graph.nodes[succ_node_id].condition.as_ref().unwrap();
         evaluate_node_condition(shared, &scheduled_succ_info, cond_cache, node_cond)
     } else {
         conditions_met(shared, &scheduled_succ_info, &cond_indexes[cond_idx])
@@ -198,8 +194,7 @@ fn dispatch_condition_successor(
         sched.push(scheduled_succ_info.clone());
         // Decrement cond_instances_to_spawn with generational lazy reinit
         let factor = shared.graph_cache.node_cache[succ_node_id].factor as u32;
-        let prev_packed = shared.slot_data.cond_instances_to_spawn[node_info.slot]
-            [succ_node_id]
+        let prev_packed = shared.slot_data.cond_instances_to_spawn[node_info.slot][succ_node_id]
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |packed| {
                 let stored_gen = gen_unpack_gen(packed);
                 let current = if stored_gen == slot_gen {
@@ -230,7 +225,8 @@ fn dispatch_condition_successor(
         });
     } else {
         shared
-            .exec.resolution_state
+            .exec
+            .resolution_state
             .increment_dependency(&scheduled_succ_info, slot_gen);
         shared.exec.resolution_state.reset_sent(
             node_info.slot,

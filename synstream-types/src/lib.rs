@@ -333,7 +333,9 @@ impl CmTypes {
             CmTypes::Bytes(bytes) => Some(f(bytes.as_slice())),
             CmTypes::Any(lock) => {
                 let guard = lock.read();
-                guard.downcast_ref::<Vec<u8>>().map(|bytes| f(bytes.as_slice()))
+                guard
+                    .downcast_ref::<Vec<u8>>()
+                    .map(|bytes| f(bytes.as_slice()))
             }
             _ => None,
         }

@@ -48,7 +48,10 @@ impl SynRt {
         let mut handles = Vec::with_capacity(receiver_threads);
 
         // Extract shared receiver context once — avoid passing all of SharedData into network.rs.
-        let packet_length = self.shared.graph.network_config()
+        let packet_length = self
+            .shared
+            .graph
+            .network_config()
             .expect("Network config must be present for receiver threads")
             .packet_length;
         let recv_pool_size = self.shared.config.recv_pool_size;
@@ -67,16 +70,25 @@ impl SynRt {
                     .expect("buffer_return_receivers already taken");
                 let (pl, rps) = (packet_length, recv_pool_size);
                 let (sd, tx2, socks, drops) = (
-                    Arc::clone(&shutdown), tx.clone(),
-                    Arc::clone(&sockets), Arc::clone(&drop_counters),
+                    Arc::clone(&shutdown),
+                    tx.clone(),
+                    Arc::clone(&sockets),
+                    Arc::clone(&drop_counters),
                 );
 
                 let handle = thread::Builder::new()
                     .name(format!("rx-{}", socket_id))
                     .spawn(move || {
                         multi_socket_receiver_loop(
-                            pl, rps, sd, tx2, socks, drops,
-                            socket_id, socket_id..socket_id + 1, core_id,
+                            pl,
+                            rps,
+                            sd,
+                            tx2,
+                            socks,
+                            drops,
+                            socket_id,
+                            socket_id..socket_id + 1,
+                            core_id,
                             vec![return_rx],
                         );
                     })
@@ -112,16 +124,26 @@ impl SynRt {
                 let core_id = receiver_offset + thread_id;
                 let (pl, rps) = (packet_length, recv_pool_size);
                 let (sd, tx2, socks, drops) = (
-                    Arc::clone(&shutdown), tx.clone(),
-                    Arc::clone(&sockets), Arc::clone(&drop_counters),
+                    Arc::clone(&shutdown),
+                    tx.clone(),
+                    Arc::clone(&sockets),
+                    Arc::clone(&drop_counters),
                 );
 
                 let handle = thread::Builder::new()
                     .name(format!("rx-multi-{}", thread_id))
                     .spawn(move || {
                         multi_socket_receiver_loop(
-                            pl, rps, sd, tx2, socks, drops,
-                            thread_id, socket_range, core_id, return_rxs,
+                            pl,
+                            rps,
+                            sd,
+                            tx2,
+                            socks,
+                            drops,
+                            thread_id,
+                            socket_range,
+                            core_id,
+                            return_rxs,
                         );
                     })
                     .expect("Failed to spawn receiver thread");
@@ -200,8 +222,7 @@ impl SynRt {
             let mut total_drops = 0;
             println!("\nPacket Drop Statistics:");
             for socket_id in 0..num_sockets {
-                let drops = self.shared.net.packet_drop_counters[socket_id]
-                    .load(Ordering::SeqCst);
+                let drops = self.shared.net.packet_drop_counters[socket_id].load(Ordering::SeqCst);
                 total_drops += drops;
                 if drops > 0 {
                     println!("  Socket {}: {} packets dropped", socket_id, drops);
@@ -210,7 +231,10 @@ impl SynRt {
             if total_drops == 0 {
                 println!("  No packets dropped!");
             } else {
-                println!("  TOTAL: {} packets dropped across all sockets", total_drops);
+                println!(
+                    "  TOTAL: {} packets dropped across all sockets",
+                    total_drops
+                );
             }
         }
 

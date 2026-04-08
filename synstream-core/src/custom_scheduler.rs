@@ -226,10 +226,10 @@ thread_local! {
 #[derive(Debug, Clone, Copy, Default)]
 struct WorkerState {
     #[allow(dead_code)] // future per-worker metrics / diagnostics
-    worker_id: usize,      // Global worker index
+    worker_id: usize, // Global worker index
     #[allow(dead_code)] // future per-group routing decisions
-    group_id: usize,       // Which group this worker belongs to
-    core_id: usize,        // Physical core ID
+    group_id: usize, // Which group this worker belongs to
+    core_id: usize, // Physical core ID
     #[allow(dead_code)] // future per-worker throughput reporting
     tasks_executed: usize, // Counter for metrics
 }
@@ -704,15 +704,15 @@ fn create_channels_and_state(
     total_recorders: usize,
 ) -> (Arc<SharedWorkerState>, Vec<Arc<ChannelSet>>) {
     let async_recorder = if record {
-        external_recorder
-            .or_else(|| Some(Arc::new(AsyncRecorder::new(total_recorders, 100))))
+        external_recorder.or_else(|| Some(Arc::new(AsyncRecorder::new(total_recorders, 100))))
     } else {
         None
     };
 
     let global_channels = ChannelSet::new();
-    let group_channels: Vec<Arc<ChannelSet>> =
-        (0..num_groups).map(|_| Arc::new(ChannelSet::new())).collect();
+    let group_channels: Vec<Arc<ChannelSet>> = (0..num_groups)
+        .map(|_| Arc::new(ChannelSet::new()))
+        .collect();
 
     let shared = Arc::new(SharedWorkerState {
         global_channels,
@@ -759,7 +759,10 @@ fn spawn_worker_threads(
     for worker_id in 0..total_workers {
         let group_idx = worker_to_group_idx[worker_id];
         let core_id = all_core_ids[worker_core_offset + worker_id];
-        println!("  Worker {}: Group {} -> Core {}", worker_id, group_idx, core_id.id);
+        println!(
+            "  Worker {}: Group {} -> Core {}",
+            worker_id, group_idx, core_id.id
+        );
     }
     println!("================================================");
 
@@ -883,18 +886,25 @@ impl CustomScheduler {
         let job_id = self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
         self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
 
-        let record_meta = meta.and_then(|crate::TaskMeta { task_id, slot, index, should_record }| {
-            if should_record {
-                Some(RecordMeta {
-                    job_id,
-                    task_id,
-                    slot,
-                    index,
-                })
-            } else {
-                None
-            }
-        });
+        let record_meta = meta.and_then(
+            |crate::TaskMeta {
+                 task_id,
+                 slot,
+                 index,
+                 should_record,
+             }| {
+                if should_record {
+                    Some(RecordMeta {
+                        job_id,
+                        task_id,
+                        slot,
+                        index,
+                    })
+                } else {
+                    None
+                }
+            },
+        );
 
         self.shared.global_channels.send(
             Priority::Normal,
@@ -917,18 +927,25 @@ impl CustomScheduler {
         let job_id = self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
         self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
 
-        let record_meta = meta.and_then(|crate::TaskMeta { task_id, slot, index, should_record }| {
-            if should_record {
-                Some(RecordMeta {
-                    job_id,
-                    task_id,
-                    slot,
-                    index,
-                })
-            } else {
-                None
-            }
-        });
+        let record_meta = meta.and_then(
+            |crate::TaskMeta {
+                 task_id,
+                 slot,
+                 index,
+                 should_record,
+             }| {
+                if should_record {
+                    Some(RecordMeta {
+                        job_id,
+                        task_id,
+                        slot,
+                        index,
+                    })
+                } else {
+                    None
+                }
+            },
+        );
 
         self.shared.global_channels.send(
             priority,
@@ -953,18 +970,25 @@ impl CustomScheduler {
             let job_id = self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
             self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
 
-            let record_meta = meta.and_then(|crate::TaskMeta { task_id, slot, index, should_record }| {
-                if should_record {
-                    Some(RecordMeta {
-                        job_id,
-                        task_id,
-                        slot,
-                        index,
-                    })
-                } else {
-                    None
-                }
-            });
+            let record_meta = meta.and_then(
+                |crate::TaskMeta {
+                     task_id,
+                     slot,
+                     index,
+                     should_record,
+                 }| {
+                    if should_record {
+                        Some(RecordMeta {
+                            job_id,
+                            task_id,
+                            slot,
+                            index,
+                        })
+                    } else {
+                        None
+                    }
+                },
+            );
 
             self.shared.group_channels[group_id].send(
                 priority,

@@ -76,8 +76,7 @@ fn main() {
     if func_env.is_none() {
         fs::write(&copied_file, "// No plugin — stub for cargo test\n")
             .expect("write funcs.rs stub");
-        fs::write(&wrapper_file, "pub fn init_wrappers() {}\n")
-            .expect("write wrappers.rs stub");
+        fs::write(&wrapper_file, "pub fn init_wrappers() {}\n").expect("write wrappers.rs stub");
         fs::write(
             &registry_file,
             "use synstream_types::*;\npub fn get_func(_: &str) -> Option<CmPtr> { None }\n",
@@ -103,8 +102,11 @@ fn main() {
 
     if file_extension == "rs" {
         // Write an empty funcs.rs — functions are loaded from the dylib at runtime
-        fs::write(&copied_file, "// Functions are loaded from the plugin dylib via wrappers.rs\n")
-            .unwrap_or_else(|err| panic!("Failed to write funcs.rs to OUT_DIR: {}", err));
+        fs::write(
+            &copied_file,
+            "// Functions are loaded from the plugin dylib via wrappers.rs\n",
+        )
+        .unwrap_or_else(|err| panic!("Failed to write funcs.rs to OUT_DIR: {}", err));
 
         // Generate wrappers and registry using the Rust converter
         generate_from_file(&path, &wrapper_file, &registry_file)

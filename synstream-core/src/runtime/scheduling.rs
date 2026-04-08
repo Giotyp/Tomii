@@ -5,8 +5,8 @@ use super::thread_locals::{PREP_ARGS_BUF, WORKER_STATE};
 use crate::async_recorder::submit_record;
 use crate::buffers::*;
 use crate::func_reg::get_func;
-use crate::Record;
 use crate::IdType;
+use crate::Record;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use synstream_types::*;
@@ -30,9 +30,14 @@ pub(super) fn send_to_scheduler(
                 .expect("Post nodes not initialized");
             let node = &nodes[node_info.id as usize];
 
-            let func = custom_func
-                .unwrap_or_else(|| get_func(&node.func_name)
-                    .unwrap_or_else(|| panic!("Post-node function '{}' not found in registry", node.func_name)));
+            let func = custom_func.unwrap_or_else(|| {
+                get_func(&node.func_name).unwrap_or_else(|| {
+                    panic!(
+                        "Post-node function '{}' not found in registry",
+                        node.func_name
+                    )
+                })
+            });
 
             use crate::custom_scheduler::Priority;
             use crate::graph_struct::NodePriority;
@@ -42,7 +47,8 @@ pub(super) fn send_to_scheduler(
                 NodePriority::Low => Priority::Low,
             };
             let group = shared
-                .exec.scheduler
+                .exec
+                .scheduler
                 .get_affinity_group(node.use_workers.as_ref());
             (func, priority, group)
         } else {
@@ -53,7 +59,12 @@ pub(super) fn send_to_scheduler(
 
         let shared_clone = Arc::clone(shared);
         let should_record = should_record_slot(&shared.config, &shared.slot_data, node_info.slot);
-        let meta_data = crate::TaskMeta { task_id: node_info.id, slot: node_info.slot, index: node_info.index, should_record };
+        let meta_data = crate::TaskMeta {
+            task_id: node_info.id,
+            slot: node_info.slot,
+            index: node_info.index,
+            should_record,
+        };
         let mut node_info = node_info.clone();
         // Stamp the current slot generation so execute_task can detect stale tasks.
         // Post-nodes are exempt: they run after all streams complete and have no generation risk.
@@ -75,7 +86,8 @@ pub(super) fn send_to_scheduler(
                 execute_task(&shared_clone, current_func, &current, args, spawn_ns);
                 match WORKER_STATE.with(|ws| ws.borrow_mut().inline_continuation.take()) {
                     Some(next) => {
-                        current_func = shared_clone.graph_cache.node_cache[next.id as usize].func_ptr;
+                        current_func =
+                            shared_clone.graph_cache.node_cache[next.id as usize].func_ptr;
                         current = next;
                     }
                     None => break,
@@ -91,9 +103,11 @@ pub(super) fn send_to_scheduler(
                 task,
             );
         } else {
-            shared
-                .exec.scheduler
-                .spawn_task_with_meta_priority(task_priority, Some(meta_data), task);
+            shared.exec.scheduler.spawn_task_with_meta_priority(
+                task_priority,
+                Some(meta_data),
+                task,
+            );
         }
     }
 }
@@ -118,7 +132,9 @@ impl super::SynRt {
             send_to_scheduler(shared, nodes_to_schedule, &*args_buf, None);
         });
 
-        shared.telemetry.record_timing(start_time, thread_slot, "Preparation", usize::MAX);
+        shared
+            .telemetry
+            .record_timing(start_time, thread_slot, "Preparation", usize::MAX);
 
         // Lock-free recording via per-worker channel
         let should_record = shared.telemetry.async_recorder.is_some()
@@ -154,15 +170,26 @@ impl super::SynRt {
                     let mut node_info = NodeInfo::new(post_node.id, stream_use, index, 0);
                     node_info.set_post_node(true);
 
-                    let arg_vec =
-                        super::arg_resolution::parse_args(&self.shared, &post_node.args, index, stream_use, 0, None);
+                    let arg_vec = super::arg_resolution::parse_args(
+                        &self.shared,
+                        &post_node.args,
+                        index,
+                        stream_use,
+                        0,
+                        None,
+                    );
 
                     let func: Option<CmPtr> = get_func(&post_node.func_name);
                     pre_build_args.push(Some(arg_vec));
                     functions.push(func);
                     post_schedule.push(node_info);
                 }
-                send_to_scheduler(&self.shared, &post_schedule, &pre_build_args, Some(&functions));
+                send_to_scheduler(
+                    &self.shared,
+                    &post_schedule,
+                    &pre_build_args,
+                    Some(&functions),
+                );
                 crate::debug::print_debug(|| format!("Added post node: {}", post_node.name));
                 // Wait until all are completed by checking node_results
                 let mut completed_count = 0;

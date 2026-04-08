@@ -353,8 +353,17 @@ impl SchedulerBase {
         let recorder_enabled = self.async_recorder.is_some();
         let metrics = self.worker_metrics.clone(); // Phase 4
 
-        let crate::TaskMeta { task_id, slot, index, should_record } =
-            meta.unwrap_or(crate::TaskMeta { task_id: IdType::MIN, slot: usize::MIN, index: usize::MIN, should_record: false });
+        let crate::TaskMeta {
+            task_id,
+            slot,
+            index,
+            should_record,
+        } = meta.unwrap_or(crate::TaskMeta {
+            task_id: IdType::MIN,
+            slot: usize::MIN,
+            index: usize::MIN,
+            should_record: false,
+        });
 
         let wrapped_task = move || {
             let worker = get_current_worker_id().unwrap_or(usize::MAX);

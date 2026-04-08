@@ -6,7 +6,6 @@ use synstream_types::*;
 
 use super::node_cache::{ArgCacheEntry, ResPredCache};
 
-
 #[inline(always)]
 fn process_buffer_refs(arg_vec: &mut Vec<CmTypes>, cache: &ArgCacheEntry, node_index: usize) {
     for (i, idx) in cache.buffer_ref_indexes.iter().enumerate() {
@@ -160,8 +159,7 @@ fn spin_wait_for_result(
             (ws.executing_slot, ws.executing_gen)
         });
         if exec_slot != usize::MAX {
-            let current_gen =
-                shared.slot_data.generation[exec_slot].load(Ordering::Acquire) as u32;
+            let current_gen = shared.slot_data.generation[exec_slot].load(Ordering::Acquire) as u32;
             if exec_gen != current_gen {
                 if !shared.config.single_slot_mode {
                     WORKER_STATE.with(|ws| ws.borrow_mut().stale_task_detected = true);
@@ -299,7 +297,9 @@ pub(super) fn collect_arg_result(
         }
         CmTypes::Res(res_node_id) => {
             // Short-circuit: if a previous arg already detected stale, skip remaining
-            if !shared.config.single_slot_mode && WORKER_STATE.with(|ws| ws.borrow().stale_task_detected) {
+            if !shared.config.single_slot_mode
+                && WORKER_STATE.with(|ws| ws.borrow().stale_task_detected)
+            {
                 return None;
             }
 

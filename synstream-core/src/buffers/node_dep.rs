@@ -65,11 +65,7 @@ impl NodeDependencyEntry {
         } else {
             0
         };
-        let deps_per_instance = if group_size > 0 {
-            dpg / group_size
-        } else {
-            0
-        };
+        let deps_per_instance = if group_size > 0 { dpg / group_size } else { 0 };
         let deps_per_group = dpg as u32;
 
         // Initialise with generation=0, value=initial_deps_per_group
@@ -177,7 +173,12 @@ impl NodeDependencyEntry {
                             }
                             let new_packed = gen_pack(slot_gen, 1);
                             if self.instances_sent[idx]
-                                .compare_exchange(cur, new_packed, Ordering::SeqCst, Ordering::SeqCst)
+                                .compare_exchange(
+                                    cur,
+                                    new_packed,
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                )
                                 .is_ok()
                             {
                                 // Won the CAS: instance is newly ready for this generation

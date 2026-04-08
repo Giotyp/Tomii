@@ -20,7 +20,6 @@ pub struct Graph {
     pub network_config: Option<Arc<GraphNetworkConfig>>,
 }
 
-
 impl Graph {
     pub fn add_node(&mut self, node: Node) {
         // assert that node.id === self.nodes.len()

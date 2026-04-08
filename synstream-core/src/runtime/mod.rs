@@ -19,18 +19,17 @@ mod threading;
 
 // SharedData is pub because network.rs (a non-runtime module) takes &Arc<SharedData>
 // in the receiver loop signatures. All other runtime internals are pub(crate).
-pub use shared_data::SharedData;
-pub use shared_data::{BatchConfig, SpinWaitConfig};
-pub(crate) use shared_data::{
-    BatchQueueRx, BatchQueueTx, ExecCtx, GraphCache, RuntimeConfig,
-    SlotData, SlotState, Telemetry,
-};
-#[cfg(feature = "network")]
-pub(crate) use shared_data::NetworkInfra;
 use init::{build_node_cache, build_predecessor_tables, build_slot_counters};
 #[cfg(feature = "network")]
 use network_init::prepare_network_infrastructure;
 use parking_lot::RwLock;
+#[cfg(feature = "network")]
+pub(crate) use shared_data::NetworkInfra;
+pub use shared_data::SharedData;
+pub use shared_data::{BatchConfig, SpinWaitConfig};
+pub(crate) use shared_data::{
+    BatchQueueRx, BatchQueueTx, ExecCtx, GraphCache, RuntimeConfig, SlotData, SlotState, Telemetry,
+};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::sleep;
@@ -89,7 +88,10 @@ pub struct SynRtBuilder {
 impl SynRtBuilder {
     /// Create a builder with required fields and defaults for everything else.
     pub fn new(spec: GraphSpec, scheduler: SchedulerImpl) -> Self {
-        let GraphSpec { graph, init_objects } = spec;
+        let GraphSpec {
+            graph,
+            init_objects,
+        } = spec;
         Self {
             graph,
             init_objects,
@@ -114,27 +116,78 @@ impl SynRtBuilder {
         }
     }
 
-    pub fn slots(mut self, n: usize) -> Self { self.slots = n; self }
-    pub fn max_streams(mut self, n: usize) -> Self { self.max_streams = n; self }
-    pub fn max_runtime(mut self, secs: Option<u64>) -> Self { self.max_runtime = secs; self }
-    pub fn use_rdtsc(mut self, v: bool) -> Self { self.use_rdtsc = v; self }
-    pub fn record(mut self, v: bool) -> Self { self.record = v; self }
-    pub fn record_stream(mut self, v: Option<usize>) -> Self { self.record_stream = v; self }
-    pub fn timing_enabled(mut self, v: bool) -> Self { self.timing_enabled = v; self }
+    pub fn slots(mut self, n: usize) -> Self {
+        self.slots = n;
+        self
+    }
+    pub fn max_streams(mut self, n: usize) -> Self {
+        self.max_streams = n;
+        self
+    }
+    pub fn max_runtime(mut self, secs: Option<u64>) -> Self {
+        self.max_runtime = secs;
+        self
+    }
+    pub fn use_rdtsc(mut self, v: bool) -> Self {
+        self.use_rdtsc = v;
+        self
+    }
+    pub fn record(mut self, v: bool) -> Self {
+        self.record = v;
+        self
+    }
+    pub fn record_stream(mut self, v: Option<usize>) -> Self {
+        self.record_stream = v;
+        self
+    }
+    pub fn timing_enabled(mut self, v: bool) -> Self {
+        self.timing_enabled = v;
+        self
+    }
     /// Override the base instant (useful when the scheduler was created with the same instant).
-    pub fn base_instant(mut self, t: Instant) -> Self { self.base_instant = t; self }
-    pub fn slot_priority_enabled(mut self, v: bool) -> Self { self.slot_priority_enabled = v; self }
+    pub fn base_instant(mut self, t: Instant) -> Self {
+        self.base_instant = t;
+        self
+    }
+    pub fn slot_priority_enabled(mut self, v: bool) -> Self {
+        self.slot_priority_enabled = v;
+        self
+    }
     /// Attach a pre-created [`AsyncRecorder`] shared with the scheduler.
-    pub fn async_recorder(mut self, r: Option<Arc<AsyncRecorder>>) -> Self { self.async_recorder = r; self }
-    pub fn coalesce_barriers(mut self, v: bool) -> Self { self.coalesce_barriers = v; self }
-    pub fn inline_continuation(mut self, v: bool) -> Self { self.inline_continuation = v; self }
-    pub fn batch_queue_capacity(mut self, n: usize) -> Self { self.batch_queue_capacity = n; self }
-    pub fn socket_recv_buf_bytes(mut self, n: usize) -> Self { self.socket_recv_buf_bytes = n; self }
-    pub fn recv_pool_size(mut self, n: usize) -> Self { self.recv_pool_size = n; self }
+    pub fn async_recorder(mut self, r: Option<Arc<AsyncRecorder>>) -> Self {
+        self.async_recorder = r;
+        self
+    }
+    pub fn coalesce_barriers(mut self, v: bool) -> Self {
+        self.coalesce_barriers = v;
+        self
+    }
+    pub fn inline_continuation(mut self, v: bool) -> Self {
+        self.inline_continuation = v;
+        self
+    }
+    pub fn batch_queue_capacity(mut self, n: usize) -> Self {
+        self.batch_queue_capacity = n;
+        self
+    }
+    pub fn socket_recv_buf_bytes(mut self, n: usize) -> Self {
+        self.socket_recv_buf_bytes = n;
+        self
+    }
+    pub fn recv_pool_size(mut self, n: usize) -> Self {
+        self.recv_pool_size = n;
+        self
+    }
     /// Set all worker spin-wait parameters at once.
-    pub fn spin_wait(mut self, cfg: SpinWaitConfig) -> Self { self.spin_wait = cfg; self }
+    pub fn spin_wait(mut self, cfg: SpinWaitConfig) -> Self {
+        self.spin_wait = cfg;
+        self
+    }
     /// Set all batch-processing parameters at once.
-    pub fn batch(mut self, cfg: BatchConfig) -> Self { self.batch = cfg; self }
+    pub fn batch(mut self, cfg: BatchConfig) -> Self {
+        self.batch = cfg;
+        self
+    }
 
     /// Construct the runtime. This is cheap — no threads are spawned until [`SynRt::run`].
     pub fn build(self) -> SynRt {
@@ -225,7 +278,11 @@ impl SynRtBuilder {
             packet_drop_counters,
             buffer_return_senders,
             buffer_return_receivers,
-        ) = prepare_network_infrastructure(app_graph, self.socket_recv_buf_bytes, self.recv_pool_size);
+        ) = prepare_network_infrastructure(
+            app_graph,
+            self.socket_recv_buf_bytes,
+            self.recv_pool_size,
+        );
 
         // --- Assemble SharedData ---
         // node_results must be created before moving self.graph into SharedData.
@@ -338,7 +395,9 @@ impl SynRt {
         // Start timing for system thread slots
         for thread_id in 0..self.shared.config.system_threads {
             let system_slot = self.shared.config.slots + thread_id;
-            self.shared.telemetry.with_timing(|tb| tb.start_slot_processing(system_slot));
+            self.shared
+                .telemetry
+                .with_timing(|tb| tb.start_slot_processing(system_slot));
         }
 
         #[cfg(feature = "network")]
@@ -352,7 +411,10 @@ impl SynRt {
             sleep(RUN_SLEEP);
             let mut finish = false;
             loop {
-                let completed_streams = self.shared.telemetry.stream_complete_counter
+                let completed_streams = self
+                    .shared
+                    .telemetry
+                    .stream_complete_counter
                     .load(Ordering::Acquire);
                 let completed = completed_streams == self.shared.config.max_streams;
 
@@ -385,8 +447,9 @@ impl SynRt {
         // Finish timing for system thread slots
         for thread_id in 0..self.shared.config.system_threads {
             let system_slot = self.shared.config.slots + thread_id;
-            self.shared.telemetry.with_timing(|tb| { let _ = tb.finish_slot_processing(system_slot); });
+            self.shared.telemetry.with_timing(|tb| {
+                let _ = tb.finish_slot_processing(system_slot);
+            });
         }
     }
-
 }

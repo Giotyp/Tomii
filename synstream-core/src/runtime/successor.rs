@@ -53,7 +53,8 @@ pub(super) fn conditions_met(
 
     for arg_idx in arg_indexes {
         let arg = &node.args[*arg_idx];
-        let init_condition: &crate::graph_struct::InitCondition = &arg.init_condition.as_ref().unwrap();
+        let init_condition: &crate::graph_struct::InitCondition =
+            &arg.init_condition.as_ref().unwrap();
         // We assume condition has a single predecessor
         let node_factor = shared.graph.nodes[node_info.id as usize].factor;
         let result = &super::arg_resolution::collect_arg_result(
@@ -134,7 +135,8 @@ pub(super) fn collect_successors_for_node_into(
         // Predecessor index range filter: skip if this predecessor instance is outside
         // the declared index range for this successor
         if let Some(Some((start, end))) = shared
-            .graph_cache.pred_index_filter
+            .graph_cache
+            .pred_index_filter
             .get(succ_id_usize)
             .and_then(|v| v.get(node_id_usize))
         {
@@ -151,13 +153,15 @@ pub(super) fn collect_successors_for_node_into(
         // Compute predecessor group for group_by barriers
         let pred_group: Option<usize> = {
             if let Some(Some(gb)) = shared
-                .graph_cache.pred_group_by
+                .graph_cache
+                .pred_group_by
                 .get(succ_id_usize)
                 .and_then(|v| v.get(node_id_usize))
             {
                 // Compute relative index within the declared range
                 let range_start = shared
-                    .graph_cache.pred_index_filter
+                    .graph_cache
+                    .pred_index_filter
                     .get(succ_id_usize)
                     .and_then(|v| v.get(node_id_usize))
                     .and_then(|f| f.map(|(s, _)| s))
@@ -190,4 +194,3 @@ pub(super) fn collect_successors_for_node_into(
         }
     }
 }
-

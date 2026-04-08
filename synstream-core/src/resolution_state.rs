@@ -30,7 +30,16 @@ pub trait ResolutionState: Send + Sync {
 
     // Hot-path variant: writes ready indices into caller-supplied buffer (no allocation).
     // `specific_succ_idx`: when Some(i), fire exactly instance i (1:1 non-barrier dispatch).
-    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize, specific_succ_idx: Option<usize>, ready: &mut Vec<usize>);
+    fn decrease_and_get_ready_into(
+        &self,
+        slot: usize,
+        node_id: usize,
+        slot_gen: u32,
+        group: Option<usize>,
+        count: usize,
+        specific_succ_idx: Option<usize>,
+        ready: &mut Vec<usize>,
+    );
 
     // Debug info for trait object printing
     fn debug_info(&self) -> String;
@@ -66,7 +75,8 @@ impl ResolutionState for MultiThreadedState {
     #[inline]
     fn reset_sent(&self, slot: usize, node_id: usize, index: usize, slot_gen: u32) {
         // Delegate to NodeDepMap
-        self.node_dep_map.reset_sent_flag(slot, node_id, slot_gen, index);
+        self.node_dep_map
+            .reset_sent_flag(slot, node_id, slot_gen, index);
     }
 
     #[inline]
@@ -98,13 +108,34 @@ impl ResolutionState for MultiThreadedState {
     #[inline]
     fn increment_dependency(&self, node_info: &NodeInfo, slot_gen: u32) -> Option<usize> {
         // Delegate to NodeDepMap
-        self.node_dep_map
-            .increment_dependency(node_info.slot, node_info.id as usize, slot_gen, Some(node_info.index))
+        self.node_dep_map.increment_dependency(
+            node_info.slot,
+            node_info.id as usize,
+            slot_gen,
+            Some(node_info.index),
+        )
     }
 
     #[inline]
-    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize, specific_succ_idx: Option<usize>, ready: &mut Vec<usize>) {
-        self.node_dep_map.decrease_and_get_ready_into(slot, node_id, slot_gen, group, count, specific_succ_idx, ready);
+    fn decrease_and_get_ready_into(
+        &self,
+        slot: usize,
+        node_id: usize,
+        slot_gen: u32,
+        group: Option<usize>,
+        count: usize,
+        specific_succ_idx: Option<usize>,
+        ready: &mut Vec<usize>,
+    ) {
+        self.node_dep_map.decrease_and_get_ready_into(
+            slot,
+            node_id,
+            slot_gen,
+            group,
+            count,
+            specific_succ_idx,
+            ready,
+        );
     }
 
     fn debug_info(&self) -> String {
