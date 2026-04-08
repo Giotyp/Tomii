@@ -28,27 +28,9 @@ pub trait ResolutionState: Send + Sync {
     // slot_gen: current slot generation for lazy generational reinit
     fn increment_dependency(&self, node_info: &NodeInfo, slot_gen: u32) -> Option<usize>;
 
-    // NEW: Optimized per-node decrements returning batch of ready instances
-    // Decrements the dependency counter for a node in a slot by `count` and returns
-    // all instance indices that are now ready to spawn. This replaces N per-instance
-    // decrements with aggregated decrements, enabling threshold-based spawning.
-    // slot_gen: current slot generation (u32) for lazy generational reinit
-    // group: None → global decrement (all groups), Some(g) → decrement group g only
-    // count: number of decrements to apply (when multiple predecessors complete in same batch)
-    fn decrease_and_get_ready(&self, _slot: usize, _node_id: usize, _slot_gen: u32, _group: Option<usize>, _count: usize) -> Vec<usize> {
-        // Default implementation for backward compatibility: return empty
-        // This allows implementations that don't override it to continue working
-        Vec::new()
-    }
-
     // Hot-path variant: writes ready indices into caller-supplied buffer (no allocation).
     // `specific_succ_idx`: when Some(i), fire exactly instance i (1:1 non-barrier dispatch).
-    // Default delegates to the Vec-returning version for backward compatibility.
-    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize, specific_succ_idx: Option<usize>, ready: &mut Vec<usize>) {
-        ready.clear();
-        ready.extend(self.decrease_and_get_ready(slot, node_id, slot_gen, group, count));
-        let _ = specific_succ_idx; // default impl ignores specific_succ_idx
-    }
+    fn decrease_and_get_ready_into(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize, specific_succ_idx: Option<usize>, ready: &mut Vec<usize>);
 
     // Debug info for trait object printing
     fn debug_info(&self) -> String;
@@ -118,13 +100,6 @@ impl ResolutionState for MultiThreadedState {
         // Delegate to NodeDepMap
         self.node_dep_map
             .increment_dependency(node_info.slot, node_info.id as usize, slot_gen, Some(node_info.index))
-    }
-
-    #[inline]
-    fn decrease_and_get_ready(&self, slot: usize, node_id: usize, slot_gen: u32, group: Option<usize>, count: usize) -> Vec<usize> {
-        let mut ready = Vec::new();
-        self.node_dep_map.decrease_and_get_ready_into(slot, node_id, slot_gen, group, count, None, &mut ready);
-        ready
     }
 
     #[inline]
