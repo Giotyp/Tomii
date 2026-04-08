@@ -1,8 +1,10 @@
 mod arg_resolution;
 mod batch_resolution;
 mod init;
+#[cfg(feature = "network")]
 mod network_init;
 mod node_cache;
+#[cfg(feature = "network")]
 mod packet_processing;
 mod reporting;
 mod resolution_loop;
@@ -20,10 +22,13 @@ mod threading;
 pub use shared_data::SharedData;
 pub use shared_data::{BatchConfig, SpinWaitConfig};
 pub(crate) use shared_data::{
-    BatchQueueRx, BatchQueueTx, ExecCtx, GraphCache, NetworkInfra, RuntimeConfig,
+    BatchQueueRx, BatchQueueTx, ExecCtx, GraphCache, RuntimeConfig,
     SlotData, SlotState, Telemetry,
 };
+#[cfg(feature = "network")]
+pub(crate) use shared_data::NetworkInfra;
 use init::{build_node_cache, build_predecessor_tables, build_slot_counters};
+#[cfg(feature = "network")]
 use network_init::prepare_network_infrastructure;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -212,6 +217,7 @@ impl SynRtBuilder {
             cb_bounded(self.batch_queue_capacity);
 
         // --- Network infrastructure ---
+        #[cfg(feature = "network")]
         let (
             receiver_sockets,
             packet_sender,
@@ -274,8 +280,9 @@ impl SynRtBuilder {
                 buffers: slot_buffers,
                 last_assigned: Arc::new(AtomicUsize::new(0)),
             },
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "network")]
             net: NetworkInfra {
-                shutdown_flag: Arc::new(AtomicBool::new(false)),
                 receive_finished: Arc::new(AtomicBool::new(false)),
                 packet_sender,
                 packet_receiver,
@@ -334,6 +341,7 @@ impl SynRt {
             self.shared.telemetry.with_timing(|tb| tb.start_slot_processing(system_slot));
         }
 
+        #[cfg(feature = "network")]
         let receiver_handles = self.spawn_receiver_threads();
         let resolution_handles = self.spawn_resolution_threads();
 
@@ -357,7 +365,7 @@ impl SynRt {
                 }
 
                 if finish {
-                    self.shared.net.shutdown_flag.store(true, Ordering::SeqCst);
+                    self.shared.shutdown_flag.store(true, Ordering::SeqCst);
                     println!("Shutdown flag set - signaling resolution threads to exit");
                     println!("Processing possible post-nodes...");
                     self.schedule_post_nodes();
@@ -371,6 +379,7 @@ impl SynRt {
             handle.join().unwrap();
         }
 
+        #[cfg(feature = "network")]
         self.shutdown_receiver_threads(receiver_handles);
 
         // Finish timing for system thread slots

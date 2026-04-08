@@ -2,14 +2,17 @@
 use super::SynRt;
 use crate::async_recorder::set_worker_recorder;
 use crate::debug::print_debug;
+#[cfg(feature = "network")]
 use crate::network::multi_socket_receiver_loop;
 use core_affinity;
+#[cfg(feature = "network")]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 impl SynRt {
     /// Spawn dedicated network receiver threads (one per socket, or round-robin if fewer threads).
+    #[cfg(feature = "network")]
     pub(super) fn spawn_receiver_threads(&self) -> Vec<JoinHandle<()>> {
         let Some(ref network_config) = self.shared.graph.network_config() else {
             println!("No network_config present - skipping network receiver setup");
@@ -49,7 +52,7 @@ impl SynRt {
             .expect("Network config must be present for receiver threads")
             .packet_length;
         let recv_pool_size = self.shared.config.recv_pool_size;
-        let shutdown = Arc::clone(&self.shared.net.shutdown_flag);
+        let shutdown = Arc::clone(&self.shared.shutdown_flag);
         let tx = self.shared.net.packet_sender.clone();
         let sockets = Arc::clone(&self.shared.net.receiver_sockets);
         let drop_counters = Arc::clone(&self.shared.net.packet_drop_counters);
@@ -177,13 +180,14 @@ impl SynRt {
     }
 
     /// Signal receiver threads to stop and join them, then report drop statistics.
+    #[cfg(feature = "network")]
     pub(super) fn shutdown_receiver_threads(&self, handles: Vec<JoinHandle<()>>) {
         if handles.is_empty() {
             return;
         }
 
         println!("Shutting down {} receiver threads...", handles.len());
-        self.shared.net.shutdown_flag.store(true, Ordering::SeqCst);
+        self.shared.shutdown_flag.store(true, Ordering::SeqCst);
 
         for (idx, handle) in handles.into_iter().enumerate() {
             handle.join().unwrap();

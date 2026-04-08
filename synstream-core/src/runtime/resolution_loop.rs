@@ -1,4 +1,5 @@
 use super::batch_resolution::process_batch_inner;
+#[cfg(feature = "network")]
 use super::packet_processing::poll_and_process_network_packets;
 use super::reporting::should_record_slot;
 use super::shared_data::SharedData;
@@ -7,6 +8,7 @@ use super::thread_locals::{BATCH_INNER_BUFS, TASK_COMP_BUF, BatchInnerBuffers};
 use crate::async_recorder::{set_worker_recorder, submit_record};
 use crate::buffers::*;
 use crate::debug::print_debug;
+#[cfg(feature = "network")]
 use crate::network::PacketMessage;
 use crate::Record;
 use crate::IdType;
@@ -45,13 +47,13 @@ impl super::SynRt {
         let mut cached_slots: Vec<usize> = Vec::new();
         let mut slots_dirty = true; // force refresh on first check_slots call
 
-        // Packet Process Function
+        #[cfg(feature = "network")]
         let network_config_opt = shared.graph.network_config();
 
         let _receive_timeout = Duration::from_micros(shared.config.batch.timeout_us);
 
         // Reusable drain buffer — allocated once, keeps capacity across loop iterations.
-        // Avoids a Vec<PacketMessage> allocation on every drain call.
+        #[cfg(feature = "network")]
         let mut packet_buf: Vec<PacketMessage> = Vec::new();
 
         // Reusable batch buffer — keeps capacity warm in L1 cache across iterations.
@@ -60,7 +62,7 @@ impl super::SynRt {
         // Process completed nodes with dynamic batching from scheduler
         loop {
             // Check shutdown flag first to exit immediately when signaled
-            if shared.net.shutdown_flag.load(Ordering::Acquire) {
+            if shared.shutdown_flag.load(Ordering::Acquire) {
                 println!(
                     "Thread {} detected shutdown signal, exiting resolution loop",
                     thread_id
@@ -69,22 +71,25 @@ impl super::SynRt {
             }
 
             // Poll packet channels if there is a network config AND receivers are still active
-            let should_poll_packets =
-                network_config_opt.is_some() && !shared.net.receive_finished.load(Ordering::Acquire);
+            #[cfg(feature = "network")]
+            {
+                let should_poll_packets =
+                    network_config_opt.is_some() && !shared.net.receive_finished.load(Ordering::Acquire);
 
-            if should_poll_packets {
-                if let Some(network_config) = network_config_opt.as_ref() {
-                    poll_and_process_network_packets(
-                        &shared,
-                        network_config,
-                        &mut packet_buf,
-                        &mut slots_dirty,
-                        &cond_indexes,
-                        &mut stream_slot_activity,
-                        thread_core,
-                        thread_id,
-                        thread_slot,
-                    );
+                if should_poll_packets {
+                    if let Some(network_config) = network_config_opt.as_ref() {
+                        poll_and_process_network_packets(
+                            &shared,
+                            network_config,
+                            &mut packet_buf,
+                            &mut slots_dirty,
+                            &cond_indexes,
+                            &mut stream_slot_activity,
+                            thread_core,
+                            thread_id,
+                            thread_slot,
+                        );
+                    }
                 }
             }
 
@@ -99,7 +104,7 @@ impl super::SynRt {
             );
 
             // Check shutdown immediately after blocking call returns
-            if shared.net.shutdown_flag.load(Ordering::Acquire) {
+            if shared.shutdown_flag.load(Ordering::Acquire) {
                 println!(
                     "Thread {} detected shutdown after receive, exiting",
                     thread_id
