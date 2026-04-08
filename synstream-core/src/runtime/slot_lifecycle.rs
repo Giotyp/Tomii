@@ -1,4 +1,4 @@
-use super::shared_data::{SharedData, SlotState};
+use super::shared_data::{ExecCtx, SharedData, SlotData, SlotState};
 use super::slot_management::{activate_next_slot, initial_nodes, process_slot_completion};
 use crate::debug::print_debug;
 use std::collections::HashMap;
@@ -53,7 +53,7 @@ impl super::SynRt {
                 continue;
             }
 
-            if !detect_and_claim_slot_completion(shared, proc_slot) {
+            if !detect_and_claim_slot_completion(&shared.slot_data, &shared.exec, proc_slot) {
                 continue;
             }
 
@@ -96,26 +96,26 @@ impl super::SynRt {
 /// Loads the three counters with SeqCst, tries a CAS via `try_complete_slot`, then
 /// re-reads to rule out a stale win. Returns `true` iff this thread now owns the
 /// completion (counters confirmed zero, CAS succeeded, double-check passed).
-fn detect_and_claim_slot_completion(shared: &SharedData, slot: usize) -> bool {
-    let pending_regular = shared.slot_data.pending_tasks[slot].load(Ordering::SeqCst);
-    let pending_cond = shared.slot_data.pending_cond_tasks[slot].load(Ordering::SeqCst);
-    let processing_count = shared.slot_data.processing_count[slot].load(Ordering::SeqCst);
+fn detect_and_claim_slot_completion(slot_data: &SlotData, exec: &ExecCtx, slot: usize) -> bool {
+    let pending_regular = slot_data.pending_tasks[slot].load(Ordering::SeqCst);
+    let pending_cond = slot_data.pending_cond_tasks[slot].load(Ordering::SeqCst);
+    let processing_count = slot_data.processing_count[slot].load(Ordering::SeqCst);
 
     if pending_regular != 0 || pending_cond != 0 || processing_count != 0 {
         return false;
     }
 
-    if !shared.exec.resolution_state.try_complete_slot(slot) {
+    if !exec.resolution_state.try_complete_slot(slot) {
         return false; // Another thread already owns this completion
     }
 
     // Double-check after winning the CAS: re-read counters with SeqCst to rule
     // out a stale win (another thread completed and reset this slot already).
-    let re_pending = shared.slot_data.pending_tasks[slot].load(Ordering::SeqCst);
-    let re_cond = shared.slot_data.pending_cond_tasks[slot].load(Ordering::SeqCst);
-    let re_proc = shared.slot_data.processing_count[slot].load(Ordering::SeqCst);
+    let re_pending = slot_data.pending_tasks[slot].load(Ordering::SeqCst);
+    let re_cond = slot_data.pending_cond_tasks[slot].load(Ordering::SeqCst);
+    let re_proc = slot_data.processing_count[slot].load(Ordering::SeqCst);
     if re_pending != 0 || re_cond != 0 || re_proc != 0 {
-        shared.exec.resolution_state.unmark_slot_completed(slot);
+        exec.resolution_state.unmark_slot_completed(slot);
         return false;
     }
 
@@ -183,7 +183,7 @@ fn activate_buffered_slot(
     });
 
     // Spawn initial compute nodes for the activated slot first
-    let initial = initial_nodes(shared, vec![activated_slot]);
+    let initial = initial_nodes(&shared.graph, vec![activated_slot]);
     print_debug(|| {
         format!(
             "Spawning {} initial nodes for activated slot {}",
@@ -263,7 +263,7 @@ fn restart_slot_nonnetwork(
 
     shared.telemetry.with_timing(|tb| tb.start_slot_processing(slot));
 
-    let compute_nodes = initial_nodes(shared, vec![slot]);
+    let compute_nodes = initial_nodes(&shared.graph, vec![slot]);
     print_debug(|| {
         format!(
             "Spawned {} initial nodes for restarting slot {}",

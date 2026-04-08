@@ -1,5 +1,6 @@
 use super::shared_data::{SharedData, SlotState};
 use crate::buffers::*;
+use crate::graph::Graph;
 use crate::debug::print_debug;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -254,15 +255,12 @@ pub(super) fn activate_next_slot(
     }
 }
 
-pub(super) fn initial_nodes(shared: &Arc<SharedData>, slots: Vec<usize>) -> Vec<NodeInfo> {
+pub(super) fn initial_nodes(graph: &Graph, slots: Vec<usize>) -> Vec<NodeInfo> {
     let mut node_infos = Vec::new();
     for slot in slots {
-        let initial_nodes = &shared.graph.initial_nodes;
-        for node_id in initial_nodes {
-            let node = &shared.graph.nodes[*node_id as usize];
-            let node_factor = node.factor;
-            let indexes: Vec<usize> = (0..node_factor).collect();
-            for index in indexes {
+        for node_id in &graph.initial_nodes {
+            let node_factor = graph.nodes[*node_id as usize].factor;
+            for index in 0..node_factor {
                 node_infos.push(NodeInfo::new(*node_id, slot, index, 0));
             }
         }

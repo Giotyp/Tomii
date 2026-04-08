@@ -223,7 +223,7 @@ fn execute_single_task(
     let exec_start_ns = shared.telemetry.base_instant.elapsed().as_nanos();
     let worker_id = crate::scheduler::get_current_worker_id().unwrap_or(usize::MAX);
 
-    if shared.telemetry.async_recorder.is_some() && super::reporting::should_record_slot(shared, node_info.slot) {
+    if shared.telemetry.async_recorder.is_some() && super::reporting::should_record_slot(&shared.config, &shared.slot_data, node_info.slot) {
         let job_id = shared.telemetry.job_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         crate::async_recorder::submit_record(crate::Record {
             slot: node_info.slot,

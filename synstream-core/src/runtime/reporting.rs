@@ -1,16 +1,15 @@
-use super::shared_data::SharedData;
+use super::shared_data::{RuntimeConfig, SlotData};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 /// Check if we should record for a given slot based on its current stream ID.
 /// Returns true if recording is enabled for all streams (None) or if the slot's
 /// current stream matches the target stream.
 #[inline(always)]
-pub(super) fn should_record_slot(shared: &Arc<SharedData>, slot: usize) -> bool {
-    match shared.config.record_stream {
+pub(super) fn should_record_slot(config: &RuntimeConfig, slot_data: &SlotData, slot: usize) -> bool {
+    match config.record_stream {
         None => true, // Record all streams
         Some(target_stream) => {
-            shared.slot_data.stream_id[slot].load(Ordering::Relaxed) == target_stream
+            slot_data.stream_id[slot].load(Ordering::Relaxed) == target_stream
         }
     }
 }
