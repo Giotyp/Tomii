@@ -12,6 +12,7 @@ mod slot_lifecycle;
 mod slot_management;
 mod successor;
 mod task_execution;
+mod thread_locals;
 mod threading;
 
 // SharedData is pub because network.rs (a non-runtime module) takes &Arc<SharedData>

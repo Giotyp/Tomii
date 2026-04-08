@@ -1,43 +1,10 @@
 use super::shared_data::SharedData;
+use super::thread_locals::WORKER_STATE;
 use crate::{buffers::*, graph_struct::*, IdType};
-use std::cell::RefCell;
 use std::sync::Arc;
 use synstream_types::*;
 
 use super::node_cache::{ArgCacheEntry, ResPredCache};
-
-/// Per-worker execution state shared between arg resolution and task execution.
-/// Consolidated into one struct to make cross-file coupling explicit and grep-able.
-pub(super) struct WorkerThreadState {
-    /// Set by `collect_arg_result` when a gen mismatch is detected mid-arg-collection.
-    /// Checked by `execute_task` to drop stale tasks without corrupting new-stream counters.
-    pub stale_task_detected: bool,
-    /// Slot being executed on this worker (`usize::MAX` when idle).
-    pub executing_slot: usize,
-    /// Generation stamp of the executing slot at task dispatch time.
-    pub executing_gen: u32,
-    /// Populated by `worker_resolve_successors` when `inline_continuation` is enabled.
-    /// Consumed by the `send_to_scheduler` trampoline loop after `execute_task` returns.
-    pub inline_continuation: Option<NodeInfo>,
-}
-
-impl WorkerThreadState {
-    const fn new() -> Self {
-        Self {
-            stale_task_detected: false,
-            executing_slot: usize::MAX,
-            executing_gen: 0,
-            inline_continuation: None,
-        }
-    }
-}
-
-thread_local! {
-    pub(super) static ARG_BUF: RefCell<Vec<CmTypes>> = RefCell::new(Vec::with_capacity(16));
-    /// Combined worker execution state — replaces the former per-field thread_locals
-    /// (STALE_TASK_DETECTED, EXECUTING_SLOT, EXECUTING_GEN, INLINE_CONTINUATION).
-    pub(super) static WORKER_STATE: RefCell<WorkerThreadState> = RefCell::new(WorkerThreadState::new());
-}
 
 
 #[inline(always)]

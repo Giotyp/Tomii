@@ -1,32 +1,12 @@
-use super::arg_resolution::{populate_cached_args_into, ARG_BUF, WORKER_STATE};
+use super::arg_resolution::populate_cached_args_into;
 use super::scheduling::send_to_scheduler;
 use super::shared_data::{SharedData, slot_load_ordering, slot_rmw_ordering};
 use super::successor::{collect_successors_for_node_into, push_ready_chunked};
+use super::thread_locals::{ARG_BUF, WORKER_BUFS, WORKER_STATE, WorkerResolutionBuffers};
 use crate::buffers::*;
 use crate::debug::print_debug;
-use std::cell::RefCell;
 use std::sync::Arc;
 use synstream_types::*;
-
-/// Reusable scratch buffers for worker-side successor resolution.
-/// Bundled into one struct so a single `thread_local!` entry replaces four,
-/// eliminating the 4-deep `.with()` nesting in `worker_resolve_successors`.
-struct WorkerResolutionBuffers {
-    succ: Vec<(NodeInfo, bool, crate::IdType, Option<usize>)>,
-    ready: Vec<usize>,
-    sched: Vec<NodeInfo>,
-    args: Vec<Option<Vec<CmTypes>>>,
-}
-
-thread_local! {
-    // Worker-side dependency resolution buffers — all four in one allocation.
-    static WORKER_BUFS: RefCell<WorkerResolutionBuffers> = RefCell::new(WorkerResolutionBuffers {
-        succ:  Vec::with_capacity(32),
-        ready: Vec::with_capacity(32),
-        sched: Vec::with_capacity(32),
-        args:  Vec::with_capacity(32),
-    });
-}
 
 /// Worker-side dependency resolution: resolves successors directly on the worker
 /// thread that completed the task, bypassing the batch_queue → resolution thread

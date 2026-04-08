@@ -1,23 +1,15 @@
 use super::reporting::should_record_slot;
 use super::shared_data::SharedData;
-use super::arg_resolution::WORKER_STATE;
 use super::task_execution::execute_task;
+use super::thread_locals::{PREP_ARGS_BUF, WORKER_STATE};
 use crate::async_recorder::submit_record;
 use crate::buffers::*;
 use crate::func_reg::get_func;
 use crate::Record;
 use crate::IdType;
-use std::cell::RefCell;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use synstream_types::*;
-
-thread_local! {
-    // Reusable buffer for preparation() — eliminates vec![None; N] heap allocation
-    // on every incremental flush (~77 flushes/stream).
-    static PREP_ARGS_BUF: RefCell<Vec<Option<Vec<synstream_types::CmTypes>>>> =
-        RefCell::new(Vec::with_capacity(64));
-}
 
 #[inline]
 pub(super) fn send_to_scheduler(
