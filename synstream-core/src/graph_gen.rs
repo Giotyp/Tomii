@@ -384,7 +384,7 @@ mod tests {
                 e.to_string().contains("Cannot open graph file"),
                 "unexpected error: {e}"
             ),
-            Ok(_) => panic!("expected Err, got Ok"),
+            Ok(_) => ::core::panic!("expected Err, got Ok"),
         }
     }
 
