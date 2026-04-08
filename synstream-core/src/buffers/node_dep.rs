@@ -417,24 +417,6 @@ impl NodeDepMap {
         }
     }
 
-    /// Get ready instances for a node in a slot by decrementing dependencies by count.
-    /// `slot_gen`: current slot generation for lazy generational reinit.
-    /// `group`: None → global decrement, Some(g) → decrement group g only.
-    /// `count`: number of decrements to apply.
-    #[cfg(test)]
-    pub fn decrease_and_get_ready(
-        &self,
-        slot: usize,
-        node_id: usize,
-        slot_gen: u32,
-        group: Option<usize>,
-        count: usize,
-    ) -> Vec<usize> {
-        let mut ready = Vec::new();
-        self.decrease_and_get_ready_into(slot, node_id, slot_gen, group, count, None, &mut ready);
-        ready
-    }
-
     /// Increment dependency for a specific node (used when condition fails).
     /// `slot_gen`: current slot generation for lazy generational reinit.
     /// Returns the new dependency count.
