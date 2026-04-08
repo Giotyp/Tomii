@@ -3,44 +3,18 @@ use super::packet_processing::poll_and_process_network_packets;
 use super::reporting::should_record_slot;
 use super::shared_data::SharedData;
 use super::slot_management::{assign_stream_to_available_slot, initial_nodes};
+use super::thread_locals::{BATCH_INNER_BUFS, TASK_COMP_BUF, BatchInnerBuffers};
 use crate::async_recorder::{set_worker_recorder, submit_record};
 use crate::buffers::*;
 use crate::debug::print_debug;
 use crate::network::PacketMessage;
 use crate::Record;
 use crate::IdType;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use synstream_types::*;
-
-/// Reusable scratch buffers for `process_batch_resolution` → `process_batch_inner`.
-/// Bundled into one struct so a single `thread_local!` entry replaces four,
-/// collapsing the former 4-deep `.with()` nesting to one level.
-struct BatchInnerBuffers {
-    succ_updates: Vec<(NodeInfo, bool, IdType, Option<usize>)>,
-    schedule:     Vec<NodeInfo>,
-    ready:        Vec<usize>,
-    batch_sched:  Vec<NodeInfo>,
-}
-
-thread_local! {
-    // Batch resolution inner buffers — all four in one allocation.
-    static BATCH_INNER_BUFS: RefCell<BatchInnerBuffers> = RefCell::new(BatchInnerBuffers {
-        succ_updates: Vec::with_capacity(32),
-        schedule:     Vec::with_capacity(32),
-        ready:        Vec::with_capacity(16),
-        batch_sched:  Vec::with_capacity(256),
-    });
-    // Staging buffer for task completions drained from batch_queue.
-    // Kept separate from BATCH_INNER_BUFS because drain_and_process_batch_queue holds
-    // this borrow while calling process_batch_resolution (which borrows BATCH_INNER_BUFS),
-    // so merging them would cause a re-entrant borrow panic.
-    static TASK_COMP_BUF: RefCell<Vec<(NodeInfo, Option<CmTypes>)>> =
-        RefCell::new(Vec::with_capacity(256));
-}
 
 impl super::SynRt {
     /// Resolution Thread: Processes completed compute tasks and manages stream lifecycle
