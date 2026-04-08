@@ -52,7 +52,7 @@ pub(super) fn send_to_scheduler(
         };
 
         let shared_clone = Arc::clone(shared);
-        let should_record = should_record_slot(shared, node_info.slot);
+        let should_record = should_record_slot(&shared.config, &shared.slot_data, node_info.slot);
         let meta_data = crate::TaskMeta { task_id: node_info.id, slot: node_info.slot, index: node_info.index, should_record };
         let mut node_info = node_info.clone();
         // Stamp the current slot generation so execute_task can detect stale tasks.
@@ -124,7 +124,7 @@ impl super::SynRt {
         let should_record = shared.telemetry.async_recorder.is_some()
             && nodes_to_schedule
                 .iter()
-                .any(|n| should_record_slot(&shared, n.slot));
+                .any(|n| should_record_slot(&shared.config, &shared.slot_data, n.slot));
         if should_record {
             let end_ns = shared.telemetry.base_instant.elapsed().as_nanos();
             let job_id = shared.telemetry.job_counter.fetch_add(1, Ordering::SeqCst);

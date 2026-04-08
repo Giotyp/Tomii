@@ -92,7 +92,7 @@ pub(super) fn poll_and_process_network_packets(
         }
 
         if shared.telemetry.async_recorder.is_some()
-            && should_record_slot(shared, node_info.slot)
+            && should_record_slot(&shared.config, &shared.slot_data, node_info.slot)
         {
             let receiver_slot = shared.config.slots + shared.config.system_threads;
             let job_id = shared.telemetry.job_counter.fetch_add(1, Ordering::SeqCst);
@@ -205,7 +205,7 @@ fn assign_packet_to_slot(
     if newly_activated {
         *slots_dirty = true;
         // Spawn initial nodes immediately so workers start while remaining packets arrive.
-        let init_nodes = initial_nodes(shared, vec![assigned_slot]);
+        let init_nodes = initial_nodes(&shared.graph, vec![assigned_slot]);
         if !init_nodes.is_empty() {
             print_debug(|| {
                 format!(

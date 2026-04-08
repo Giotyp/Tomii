@@ -219,7 +219,7 @@ impl super::SynRt {
             while bits != 0 {
                 let slot = bits.trailing_zeros() as usize;
                 bits &= bits - 1;
-                if should_record_slot(&shared, slot) {
+                if should_record_slot(&shared.config, &shared.slot_data, slot) {
                     any = true;
                     break;
                 }
@@ -299,7 +299,7 @@ impl super::SynRt {
                 })
                 .collect();
 
-            let compute_nodes = initial_nodes(shared, assigned_slots);
+            let compute_nodes = initial_nodes(&shared.graph, assigned_slots);
             if !compute_nodes.is_empty() {
                 Self::preparation(shared, &compute_nodes, thread_core, thread_slot);
             }
