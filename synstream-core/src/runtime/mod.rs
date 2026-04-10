@@ -19,7 +19,12 @@ mod threading;
 
 // SharedData is pub because network.rs (a non-runtime module) takes &Arc<SharedData>
 // in the receiver loop signatures. All other runtime internals are pub(crate).
-use init::{build_node_cache, build_predecessor_tables, build_slot_counters};
+//
+// build_node_cache and build_predecessor_tables are re-exported pub(crate) so that
+// graph_gen::GraphSpec::compile() can call them without going through the runtime builder.
+pub(crate) use init::{build_node_cache, build_predecessor_tables};
+use init::build_slot_counters;
+pub(crate) use node_cache::NodeCacheEntry;
 #[cfg(feature = "network")]
 use network_init::prepare_network_infrastructure;
 use parking_lot::RwLock;
@@ -37,8 +42,7 @@ use std::time::{Duration, Instant};
 
 use crate::async_recorder::AsyncRecorder;
 use crate::debug::print_debug;
-use crate::graph::*;
-use crate::graph_gen::GraphSpec;
+use crate::graph_gen::GraphCompiled;
 use crate::resolution_state::{MultiThreadedState, ResolutionState};
 use crate::scheduler::SchedulerImpl;
 use crate::time_buffer::TimeBufferManager;
@@ -55,7 +59,8 @@ pub const RUN_SLEEP: Duration = Duration::from_secs(10);
 ///
 /// # Example
 /// ```ignore
-/// let synrt = SynRtBuilder::new(spec, scheduler)
+/// let compiled = spec.compile(&scheduler);
+/// let synrt = SynRtBuilder::new(compiled, scheduler)
 ///     .slots(4)
 ///     .max_streams(100)
 ///     .max_runtime(60)
@@ -63,8 +68,7 @@ pub const RUN_SLEEP: Duration = Duration::from_secs(10);
 ///     .build();
 /// ```
 pub struct SynRtBuilder {
-    graph: Graph,
-    init_objects: Vec<Vec<synstream_types::CmTypes>>,
+    compiled: GraphCompiled,
     scheduler: SchedulerImpl,
     slots: usize,
     max_streams: usize,
@@ -86,15 +90,12 @@ pub struct SynRtBuilder {
 }
 
 impl SynRtBuilder {
-    /// Create a builder with required fields and defaults for everything else.
-    pub fn new(spec: GraphSpec, scheduler: SchedulerImpl) -> Self {
-        let GraphSpec {
-            graph,
-            init_objects,
-        } = spec;
+    /// Create a builder from a compiled graph IR and scheduler.
+    ///
+    /// Obtain the `compiled` argument via [`crate::graph_gen::GraphSpec::compile`].
+    pub fn new(compiled: GraphCompiled, scheduler: SchedulerImpl) -> Self {
         Self {
-            graph,
-            init_objects,
+            compiled,
             scheduler,
             slots: 1,
             max_streams: 1,
@@ -192,29 +193,25 @@ impl SynRtBuilder {
     /// Construct the runtime. This is cheap — no threads are spawned until [`SynRt::run`].
     pub fn build(self) -> SynRt {
         let slots = std::cmp::min(self.slots, self.max_streams);
-        let app_graph = &self.graph;
 
-        // --- Node cache ---
-        let node_cache = build_node_cache(app_graph, &self.init_objects, &self.scheduler);
+        // --- Destructure compiled graph IR ---
+        let GraphCompiled {
+            graph,
+            node_cache,
+            pred_index_filter,
+            pred_group_by,
+            pred_succ_1to1_offset,
+            total_tasks,
+            total_cond_tasks,
+            init_objects,
+            dependency_count_vec,
+            max_factor,
+            num_nodes,
+        } = self.compiled;
 
-        // --- Predecessor routing tables ---
-        let (pred_index_filter, pred_group_by, pred_succ_1to1_offset) =
-            build_predecessor_tables(app_graph);
-
-        // --- Slot counters & condition tracking ---
+        // --- Slot counters & condition tracking (slot-count-dependent) ---
         let (slot_pending_tasks, slot_pending_cond_tasks, cond_instances_to_spawn) =
             build_slot_counters(slots, &node_cache);
-
-        let total_tasks: usize = node_cache
-            .iter()
-            .filter(|nc| !nc.is_initial && !nc.is_condition)
-            .map(|nc| nc.factor)
-            .sum();
-        let total_cond_tasks: usize = node_cache
-            .iter()
-            .filter(|nc| nc.is_condition)
-            .map(|nc| nc.factor)
-            .sum();
 
         // --- Thread pool parameters from scheduler ---
         let system_threads = self.scheduler.system_threads();
@@ -246,18 +243,14 @@ impl SynRtBuilder {
         };
 
         // --- Resolution state ---
-        let num_nodes = app_graph.nodes.len();
-        let max_factor = node_cache.iter().map(|n| n.factor).max().unwrap_or(1);
-        let dependency_count_vec: Vec<usize> = app_graph.dependency_count_vec();
-
         let resolution_state: Arc<dyn ResolutionState> = {
             println!("Using multi-threaded resolution state (lock-free atomics)");
             Arc::new(MultiThreadedState::new(
                 num_nodes,
                 slots,
                 max_factor,
-                dependency_count_vec.clone(),
-                &app_graph.nodes,
+                dependency_count_vec,
+                &graph.nodes,
             ))
         };
         println!(
@@ -279,21 +272,17 @@ impl SynRtBuilder {
             buffer_return_senders,
             buffer_return_receivers,
         ) = prepare_network_infrastructure(
-            app_graph,
+            &graph,
             self.socket_recv_buf_bytes,
             self.recv_pool_size,
         );
 
         // --- Assemble SharedData ---
-        // node_results must be created before moving self.graph into SharedData.
-        let node_results = Arc::new(crate::buffers::LockFreeResultMap::new(
-            &self.graph.nodes,
-            slots,
-        ));
+        let node_results = Arc::new(crate::buffers::LockFreeResultMap::new(&graph.nodes, slots));
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
         let shared = Arc::new(SharedData {
-            graph: self.graph,
+            graph,
             graph_cache: GraphCache {
                 node_cache,
                 pred_index_filter: Arc::new(pred_index_filter),
@@ -301,7 +290,7 @@ impl SynRtBuilder {
                 pred_succ_1to1_offset: Arc::new(pred_succ_1to1_offset),
                 total_tasks,
                 total_cond_tasks,
-                init_objects: self.init_objects,
+                init_objects,
             },
             config: RuntimeConfig {
                 slots,

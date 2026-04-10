@@ -154,11 +154,92 @@ fn parse_condition(condition_json: &ConditionJson) -> InitCondition {
 ///
 /// `init_objects` is separated from `Graph` because it contains live Rust values
 /// (`CmTypes::Any` wrapping heap-allocated objects) that should not be part of the
-/// pure-description `Graph` type.  Callers pass this to `SynRtBuilder::new`.
+/// pure-description `Graph` type.
+///
+/// Call [`GraphSpec::compile`] to produce a [`GraphCompiled`] IR, then pass that to
+/// [`crate::runtime::SynRtBuilder::new`].
 pub struct GraphSpec {
     pub graph: Graph,
     /// Materialized initialization objects, indexed by `$ref` IDs embedded in `Arg` values.
     pub init_objects: Vec<Vec<CmTypes>>,
+}
+
+impl GraphSpec {
+    /// Compile the parsed graph into a fully precomputed [`GraphCompiled`] IR.
+    ///
+    /// This resolves function pointers, pre-builds the node cache, predecessor routing
+    /// tables, and dependency counts.  The result is immutable and can be passed directly
+    /// to [`crate::runtime::SynRtBuilder::new`].
+    ///
+    /// Graph transformation passes (fusion, pruning, partitioning, etc.) should operate
+    /// on `self.graph` *before* calling `compile` — the compilation step rebuilds all
+    /// derived tables from the final topology.
+    pub fn compile(self, scheduler: &crate::scheduler::SchedulerImpl) -> GraphCompiled {
+        let node_cache =
+            crate::runtime::build_node_cache(&self.graph, &self.init_objects, scheduler);
+        let (pred_index_filter, pred_group_by, pred_succ_1to1_offset) =
+            crate::runtime::build_predecessor_tables(&self.graph);
+
+        let total_tasks: usize = node_cache
+            .iter()
+            .filter(|nc| !nc.is_initial && !nc.is_condition)
+            .map(|nc| nc.factor)
+            .sum();
+        let total_cond_tasks: usize = node_cache
+            .iter()
+            .filter(|nc| nc.is_condition)
+            .map(|nc| nc.factor)
+            .sum();
+        let dependency_count_vec = self.graph.dependency_count_vec();
+        let max_factor = node_cache.iter().map(|n| n.factor).max().unwrap_or(1);
+        let num_nodes = self.graph.nodes.len();
+
+        GraphCompiled {
+            graph: self.graph,
+            node_cache,
+            pred_index_filter,
+            pred_group_by,
+            pred_succ_1to1_offset,
+            total_tasks,
+            total_cond_tasks,
+            init_objects: self.init_objects,
+            dependency_count_vec,
+            max_factor,
+            num_nodes,
+        }
+    }
+}
+
+/// Fully compiled graph IR — all precomputed tables ready for runtime construction.
+///
+/// Produced by [`GraphSpec::compile`]. Consumed by [`crate::runtime::SynRtBuilder::new`].
+///
+/// This is the "graph IR" referred to in the SynStream architecture: the output of the
+/// graph compiler, distinct from the parsed topology (`GraphSpec`) and from the mutable
+/// runtime state (`SharedData`).  It is immutable after construction.
+pub struct GraphCompiled {
+    /// Original graph topology — still accessed at runtime by hot-path functions.
+    pub graph: Graph,
+    /// Per-node precomputed cache (function pointers, arg caches, flags, priorities).
+    pub node_cache: Vec<crate::runtime::NodeCacheEntry>,
+    /// Per-(succ, pred) index range filter: which predecessor instances drive a successor.
+    pub pred_index_filter: Vec<Vec<Option<(usize, usize)>>>,
+    /// Per-(succ, pred) group_by divisor for grouped barriers.
+    pub pred_group_by: Vec<Vec<Option<usize>>>,
+    /// Per-(succ, pred) offset for 1:1 equal-factor non-barrier `$res` edges.
+    pub pred_succ_1to1_offset: Vec<Vec<Option<isize>>>,
+    /// Sum of factors for all non-initial, non-condition nodes.
+    pub total_tasks: usize,
+    /// Sum of factors for all condition nodes.
+    pub total_cond_tasks: usize,
+    /// Materialized initialization objects, indexed by `$ref` IDs in `Arg` values.
+    pub init_objects: Vec<Vec<CmTypes>>,
+    /// Per-node total dependency counts; used to initialize the resolution state.
+    pub dependency_count_vec: Vec<usize>,
+    /// Maximum factor across all nodes; used to size the resolution state.
+    pub max_factor: usize,
+    /// Number of nodes; used to size the resolution state.
+    pub num_nodes: usize,
 }
 
 pub fn from_json(graph_json: &str, workers: usize) -> Result<GraphSpec, crate::SynError> {

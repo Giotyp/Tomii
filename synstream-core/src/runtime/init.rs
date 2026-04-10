@@ -1,4 +1,8 @@
-/// Private helpers for `SynRtBuilder::build()` — pure computation, no threading.
+/// Compilation helpers — pure graph analysis, no threading.
+///
+/// `build_node_cache` and `build_predecessor_tables` are `pub(crate)` so that
+/// `graph_gen::GraphSpec::compile()` can call them directly.  `build_slot_counters`
+/// remains `pub(super)` because it depends on the runtime `slots` parameter.
 use super::node_cache::{node_cache_entry, NodeCacheEntry, ResPredCache};
 use crate::graph::*;
 use crate::scheduler::SchedulerImpl;
@@ -10,7 +14,7 @@ use synstream_types::CmTypes;
 ///
 /// Sets: `successor_count`, `worker_resolvable`, `needs_result_store`,
 /// `priority`, and `affinity_group` in addition to the base cache entry.
-pub(super) fn build_node_cache(
+pub(crate) fn build_node_cache(
     app_graph: &Graph,
     init_objects: &[Vec<synstream_types::CmTypes>],
     scheduler: &SchedulerImpl,
@@ -153,7 +157,7 @@ pub(super) fn build_node_cache(
 /// - `pred_group_by`: the `group_by` divisor for grouped predecessors.
 /// - `pred_succ_1to1_offset`: `indexes[0]` offset for 1:1 non-barrier single-index `$res` deps
 ///   with equal factor. Enables exact successor dispatch, eliminating `spin_wait` deadlocks.
-pub(super) fn build_predecessor_tables(
+pub(crate) fn build_predecessor_tables(
     app_graph: &Graph,
 ) -> (
     Vec<Vec<Option<(usize, usize)>>>,

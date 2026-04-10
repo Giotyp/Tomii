@@ -4,7 +4,7 @@ use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::time::Instant;
 use synstream_core::debug::*;
-use synstream_core::graph_gen::{from_json, GraphSpec};
+use synstream_core::graph_gen::{from_json, GraphSpec}; // GraphCompiled produced via spec.compile()
 use synstream_core::runtime::{BatchConfig, SpinWaitConfig, SynRt, SynRtBuilder};
 use synstream_core::scheduler::{create_scheduler, SchedulerConfig, SchedulerType};
 use synstream_core::utils_rdtsc;
@@ -408,7 +408,12 @@ pub fn run_graph(
         println!("Pinned main thread to core {:?}", core_id);
     }
 
-    let mut synrt = SynRtBuilder::new(spec, scheduler)
+    // Compile the parsed graph into the IR (resolves function pointers, builds routing tables).
+    // This step is separate from the runtime builder so transformation passes can be
+    // inserted on `spec.graph` before this point.
+    let compiled = spec.compile(&scheduler);
+
+    let mut synrt = SynRtBuilder::new(compiled, scheduler)
         .base_instant(base_instant)
         .slots(slots)
         .max_streams(max_streams)
