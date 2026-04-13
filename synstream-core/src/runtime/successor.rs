@@ -106,6 +106,86 @@ pub(super) fn evaluate_node_condition(
     node_cond.evaluate(&cond_result)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_chunked(ready: &[usize], num_workers: usize, coalesce: bool) -> Vec<NodeInfo> {
+        let mut out = Vec::new();
+        push_ready_chunked(ready, 1, 0, 0, num_workers, coalesce, &mut out);
+        out
+    }
+
+    #[test]
+    fn test_empty_ready_produces_no_output() {
+        assert!(run_chunked(&[], 4, true).is_empty());
+    }
+
+    #[test]
+    fn test_non_contiguous_always_individual() {
+        // Non-contiguous indices → individual dispatch even with coalesce=true
+        let ready = vec![0, 2, 5];
+        let out = run_chunked(&ready, 2, true);
+        assert_eq!(out.len(), 3);
+        let indices: Vec<usize> = out.iter().map(|ni| ni.index).collect();
+        assert_eq!(indices, vec![0, 2, 5]);
+        assert!(out.iter().all(|ni| ni.bulk_count == 1));
+    }
+
+    #[test]
+    fn test_small_contiguous_below_worker_count_individual() {
+        // len <= num_workers → no chunking even when contiguous and coalesce=true
+        let ready = vec![0, 1, 2, 3];
+        let out = run_chunked(&ready, 4, true);
+        assert_eq!(out.len(), 4);
+        assert!(out.iter().all(|ni| ni.bulk_count == 1));
+    }
+
+    #[test]
+    fn test_coalesce_false_always_individual() {
+        let ready: Vec<usize> = (0..16).collect();
+        let out = run_chunked(&ready, 4, false);
+        assert_eq!(out.len(), 16);
+        assert!(out.iter().all(|ni| ni.bulk_count == 1));
+    }
+
+    #[test]
+    fn test_coalesce_true_chunks_into_worker_count() {
+        // 16 ready, 4 workers → 4 bulk chunks
+        let ready: Vec<usize> = (0..16).collect();
+        let out = run_chunked(&ready, 4, true);
+        assert_eq!(out.len(), 4);
+        let total: usize = out.iter().map(|ni| ni.bulk_count).sum();
+        assert_eq!(total, 16);
+    }
+
+    #[test]
+    fn test_coalesce_bulk_count_sum_equals_total() {
+        // Remainder distribution: 10 tasks / 3 workers → chunks of 4, 3, 3
+        let ready: Vec<usize> = (0..10).collect();
+        let out = run_chunked(&ready, 3, true);
+        assert_eq!(out.len(), 3);
+        let total: usize = out.iter().map(|ni| ni.bulk_count).sum();
+        assert_eq!(total, 10);
+    }
+
+    #[test]
+    fn test_coalesce_chunks_cover_all_indices_contiguously() {
+        // Chunks must cover exactly [start..start+total) with no gaps or overlaps
+        let ready: Vec<usize> = (5..21).collect(); // 16 items starting at 5
+        let out = run_chunked(&ready, 4, true);
+        let mut covered: Vec<usize> = Vec::new();
+        for ni in &out {
+            for k in 0..ni.bulk_count {
+                covered.push(ni.index + k);
+            }
+        }
+        covered.sort();
+        let expected: Vec<usize> = (5..21).collect();
+        assert_eq!(covered, expected);
+    }
+}
+
 /// Collect successor descriptors for `node_info`, appending into `out` (cleared first).
 /// Avoids a heap allocation on the hot path when the caller supplies a reusable buffer.
 #[inline]

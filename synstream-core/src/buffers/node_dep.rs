@@ -616,6 +616,127 @@ mod tests {
         assert!(ready.contains(&5));
     }
 
+    // -----------------------------------------------------------------------
+    // specific_succ_idx dispatch path (1:1 mapping — zero pre-existing coverage)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_specific_succ_idx_fires_exact_instance() {
+        // factor=4, deps=4. With specific_succ_idx=Some(2) the function should
+        // immediately mark instance 2 as ready, bypassing the threshold scan.
+        let entry = NodeDependencyEntry::new(4, 4, false, None);
+        let gen: u32 = 0;
+        let mut ready = Vec::new();
+        entry.decrease_and_get_ready_into(gen, None, 1, Some(2), &mut ready);
+        assert_eq!(ready, vec![2]);
+    }
+
+    #[test]
+    fn test_specific_succ_idx_no_double_fire() {
+        // Calling twice with the same specific_succ_idx should NOT re-add the instance.
+        let entry = NodeDependencyEntry::new(4, 4, false, None);
+        let gen: u32 = 0;
+        let mut ready = Vec::new();
+        entry.decrease_and_get_ready_into(gen, None, 1, Some(1), &mut ready);
+        assert_eq!(ready, vec![1]);
+
+        let mut ready2 = Vec::new();
+        entry.decrease_and_get_ready_into(gen, None, 1, Some(1), &mut ready2);
+        assert!(ready2.is_empty(), "instance already sent — must not fire again");
+    }
+
+    #[test]
+    fn test_specific_succ_idx_generation_reset() {
+        // After a generation bump, the same specific_succ_idx fires again (lazy reinit).
+        let entry = NodeDependencyEntry::new(4, 4, false, None);
+
+        let mut ready = Vec::new();
+        entry.decrease_and_get_ready_into(0, None, 1, Some(3), &mut ready);
+        assert_eq!(ready, vec![3]);
+
+        // Simulate new stream: gen=1 → stale gen=0 entry reinits, instance 3 can fire again
+        let mut ready2 = Vec::new();
+        entry.decrease_and_get_ready_into(1, None, 1, Some(3), &mut ready2);
+        assert_eq!(ready2, vec![3]);
+    }
+
+    #[test]
+    fn test_specific_succ_idx_out_of_range_ignored() {
+        // specific_succ_idx >= factor → silently ignored, no panic, no ready instances.
+        let entry = NodeDependencyEntry::new(4, 4, false, None);
+        let mut ready = Vec::new();
+        entry.decrease_and_get_ready_into(0, None, 1, Some(10), &mut ready);
+        assert!(ready.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Concurrent stress: each instance ready exactly once
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_concurrent_decrease_each_instance_ready_once() {
+        use std::sync::{Arc as StdArc, Mutex};
+        use std::thread;
+
+        // factor=8, total_deps=8 (1 dep per instance, deps_per_instance=1).
+        // Dispatch 8 threads each doing 1 decrement. Every instance must appear
+        // in the ready list exactly once across all threads — no double-spawn.
+        let entry = StdArc::new(NodeDependencyEntry::new(8, 8, false, None));
+        let all_ready = StdArc::new(Mutex::new(Vec::<usize>::new()));
+        let gen: u32 = 0;
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let entry = StdArc::clone(&entry);
+                let all_ready = StdArc::clone(&all_ready);
+                thread::spawn(move || {
+                    let mut ready = Vec::new();
+                    entry.decrease_and_get_ready_into(gen, None, 1, None, &mut ready);
+                    all_ready.lock().unwrap().extend(ready);
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let mut result = all_ready.lock().unwrap().clone();
+        result.sort();
+        assert_eq!(result, (0..8).collect::<Vec<_>>(), "every instance must fire exactly once");
+    }
+
+    #[test]
+    fn test_concurrent_barrier_no_double_spawn() {
+        use std::sync::{Arc as StdArc, Mutex};
+        use std::thread;
+
+        // Barrier node: factor=4, total_deps=4, has_barrier=true.
+        // 4 threads each decrement once. When the last one brings counter to 0,
+        // all 4 instances become ready — but only once per instance.
+        let entry = StdArc::new(NodeDependencyEntry::new(4, 4, true, None));
+        let all_ready = StdArc::new(Mutex::new(Vec::<usize>::new()));
+        let gen: u32 = 0;
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let entry = StdArc::clone(&entry);
+                let all_ready = StdArc::clone(&all_ready);
+                thread::spawn(move || {
+                    let mut ready = Vec::new();
+                    entry.decrease_and_get_ready_into(gen, None, 1, None, &mut ready);
+                    all_ready.lock().unwrap().extend(ready);
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let mut result = all_ready.lock().unwrap().clone();
+        result.sort();
+        assert_eq!(result, vec![0, 1, 2, 3], "barrier: all instances fire exactly once");
+    }
+
     #[test]
     fn test_node_dep_map_creation() {
         let nodes = vec![
