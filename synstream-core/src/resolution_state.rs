@@ -1,7 +1,6 @@
 use crate::buffers::*;
-use parking_lot::Mutex;
-use std::collections::HashSet;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 // Trait for resolution state operations
@@ -50,7 +49,9 @@ pub struct MultiThreadedState {
     // Per-node dependency tracking with threshold-based spawning
     node_dep_map: Arc<crate::buffers::NodeDepMap>,
 
-    completed_slots: Arc<Mutex<HashSet<usize>>>,
+    // Bitset where bit i = 1 means slot i has been claimed as completed.
+    // AtomicU64 supports up to 64 slots (enforced by SynRtBuilder::build assert).
+    completed_slots: AtomicU64,
 }
 
 impl MultiThreadedState {
@@ -66,7 +67,7 @@ impl MultiThreadedState {
 
         Self {
             node_dep_map: Arc::new(node_dep_map),
-            completed_slots: Arc::new(Mutex::new(HashSet::new())),
+            completed_slots: AtomicU64::new(0),
         }
     }
 }
@@ -81,28 +82,24 @@ impl ResolutionState for MultiThreadedState {
 
     #[inline]
     fn is_slot_completed(&self, slot: usize) -> bool {
-        self.completed_slots.lock().contains(&slot)
+        self.completed_slots.load(Ordering::SeqCst) & (1u64 << slot) != 0
     }
 
     #[inline]
     fn mark_slot_completed(&self, slot: usize) {
-        self.completed_slots.lock().insert(slot);
+        self.completed_slots.fetch_or(1u64 << slot, Ordering::SeqCst);
     }
 
     #[inline]
     fn unmark_slot_completed(&self, slot: usize) {
-        self.completed_slots.lock().remove(&slot);
+        self.completed_slots.fetch_and(!(1u64 << slot), Ordering::SeqCst);
     }
 
     #[inline]
     fn try_complete_slot(&self, slot: usize) -> bool {
-        let mut guard = self.completed_slots.lock();
-        if guard.contains(&slot) {
-            false
-        } else {
-            guard.insert(slot);
-            true
-        }
+        // Atomically set the bit; returns true only for the thread that transitions 0→1.
+        let prev = self.completed_slots.fetch_or(1u64 << slot, Ordering::SeqCst);
+        prev & (1u64 << slot) == 0
     }
 
     #[inline]
@@ -145,12 +142,11 @@ impl ResolutionState for MultiThreadedState {
 
 impl fmt::Debug for MultiThreadedState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Collect completed slots from mutex
-        let completed_slots = self.completed_slots.lock().clone();
-
+        let bitmap = self.completed_slots.load(Ordering::Relaxed);
+        let completed: Vec<usize> = (0..64).filter(|i| bitmap & (1u64 << i) != 0).collect();
         f.debug_struct("MultiThreadedState")
             .field("\nnode_dep_map", &self.node_dep_map)
-            .field("\ncompleted_slots", &completed_slots)
+            .field("\ncompleted_slots", &completed)
             .finish()
     }
 }

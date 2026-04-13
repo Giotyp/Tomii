@@ -194,10 +194,17 @@ impl SynRtBuilder {
     pub fn build(self) -> SynRt {
         let slots = std::cmp::min(self.slots, self.max_streams);
 
+        assert!(slots >= 1, "slots must be >= 1 (got 0)");
         assert!(
             slots <= 64,
-            "SynStream supports at most 64 concurrent slots (got {}); this limit is enforced by the u64 completion bitmaps",
+            "SynStream supports at most 64 concurrent slots (got {}); \
+             this limit is enforced by the u64 completion bitmaps",
             slots
+        );
+        assert!(self.max_streams >= 1, "max_streams must be >= 1 (got 0)");
+        assert!(
+            self.batch_queue_capacity > 0,
+            "batch_queue_capacity must be > 0 (got 0)"
         );
 
         // --- Destructure compiled graph IR ---
