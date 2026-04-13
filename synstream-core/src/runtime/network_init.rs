@@ -26,10 +26,13 @@ pub(super) fn process_id_function(shared: &Arc<SharedData>, result: &CmTypes) ->
             let max_allowed_stream = current_counter + shared.config.slots;
 
             if new_stream >= max_allowed_stream {
-                eprintln!(
-                                "ID function returned stream {} which exceeds maximum allowed {} (current_counter: {}, slots: {})",
-                                new_stream, max_allowed_stream, current_counter, shared.config.slots
-                            );
+                tracing::warn!(
+                    new_stream,
+                    max_allowed_stream,
+                    current_counter,
+                    slots = shared.config.slots,
+                    "ID function returned out-of-range stream"
+                );
                 return None;
             }
             return Some(new_stream);

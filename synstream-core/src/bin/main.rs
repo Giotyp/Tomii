@@ -3,7 +3,8 @@ use core_affinity;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::time::Instant;
-use synstream_core::debug::*;
+use tracing_subscriber::EnvFilter;
+use synstream_core::debug::init_debug;
 use synstream_core::graph_gen::{from_json, GraphSpec}; // GraphCompiled produced via spec.compile()
 use synstream_core::runtime::{BatchConfig, SpinWaitConfig, SynRt, SynRtBuilder};
 use synstream_core::scheduler::{create_scheduler, SchedulerConfig, SchedulerType};
@@ -195,6 +196,16 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
+    // Initialize tracing subscriber. RUST_LOG overrides the --debug flag.
+    let default_level = if args.debug { "debug" } else { "info" };
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new(default_level)),
+        )
+        .init();
+
+    // init_debug is now a no-op; kept for source compatibility.
     init_debug(args.debug);
 
     let _stdout_guard = if args.output != "stdout" {
@@ -204,9 +215,9 @@ fn main() {
             .truncate(true)
             .open(&args.output)
             .expect("Failed to create output file");
-        print_debug(|| "Output file opened".to_string());
+        tracing::debug!("output file opened");
 
-        // Redirect stdout to file
+        // Redirect stdout to file (captures any remaining println! from plugins etc.)
         Some(gag::Redirect::stdout(file).expect("Failed to redirect stdout"))
     } else {
         None
@@ -231,9 +242,9 @@ fn main() {
         SchedulerType::WorkStealing
     };
 
-    print_debug(|| "Starting Graph Initialization".to_string());
+    tracing::debug!("starting graph initialization");
     let spec = from_json(&args.json, args.workers).expect("Failed to parse graph from JSON file");
-    print_debug(|| "Graph Initialized".to_string());
+    tracing::debug!("graph initialized");
     // check if inits flag is set
     if args.inits {
         println!();
@@ -245,7 +256,7 @@ fn main() {
         }
         println!();
     }
-    print_debug(|| "Objects Initialized".to_string());
+    tracing::debug!("objects initialized");
 
     // Eagerly calibrate RDTSC frequency once at startup (avoids 1M-iteration loop on hot path)
     if args.use_rdtsc {

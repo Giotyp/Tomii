@@ -269,7 +269,7 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<GraphSpec, crate::S
         let nc = parse_network_config(nc_json, &init_vec, &obj_id_map, &name_to_id, workers)?;
         graph.set_network_config(&nc);
     } else {
-        println!("No network_config found - skipping network receiver setup");
+        tracing::debug!("no network_config found, skipping network receiver setup");
     }
 
     let mut node_counter: IdType = 0;
@@ -385,14 +385,16 @@ fn parse_network_config(
         index_function,
     };
 
-    println!("Network configuration parsed:");
-    println!("  Socket type: {:?}", nc.socket_type);
-    println!("  Number of sockets: {}", nc.num_sockets);
-    println!("  Packet length: {}", nc.packet_length);
-    println!("  Buffer depth: {} packets", nc.buffer_depth);
-    println!("  Address: {}", nc.address);
-    println!("  Start port: {}", nc.start_port);
-    println!("  Extract packet function: {}", nc_json.extract_packet_func);
+    tracing::info!(
+        socket_type = ?nc.socket_type,
+        num_sockets = nc.num_sockets,
+        packet_length = nc.packet_length,
+        buffer_depth = nc.buffer_depth,
+        address = %nc.address,
+        start_port = nc.start_port,
+        extract_packet_func = %nc_json.extract_packet_func,
+        "network configuration parsed"
+    );
 
     Ok(nc)
 }

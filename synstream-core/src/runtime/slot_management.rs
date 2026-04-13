@@ -11,7 +11,7 @@ pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> 
     // Complete timing - use unwrap_or to handle errors gracefully
     shared.telemetry.with_timing(|tb| {
         if let Err(e) = tb.finish_slot_processing(slot) {
-            eprintln!("Warning: Failed to finish slot {} timing: {}", slot, e);
+            tracing::warn!("Failed to finish slot {} timing: {}", slot, e);
         }
     });
 
@@ -41,14 +41,14 @@ pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> 
     let can_restart = total_streams_processed < shared.config.max_streams;
 
     if can_restart {
-        println!(
-                "SynRt -- Slot {} completed stream. Starting new: completed={}, active={}, total={}, max={}",
-                slot,
-                completed_streams,
-                currently_active_streams,
-                total_streams_processed,
-                shared.config.max_streams
-            );
+        tracing::info!(
+            slot,
+            completed = completed_streams,
+            active = currently_active_streams,
+            total = total_streams_processed,
+            max = shared.config.max_streams,
+            "slot completed stream, starting new"
+        );
 
         // Clear completed nodes BEFORE releasing the slot.
         // reinit_slot must finish before release_slot makes the slot available for a new
@@ -65,9 +65,12 @@ pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> 
 
         true // Signal to caller: slot should restart
     } else {
-        println!(
-            "SynRt -- Slot {} completed. Max streams ({}) reached: completed={}, active={}",
-            slot, shared.config.max_streams, completed_streams, currently_active_streams
+        tracing::info!(
+            slot,
+            max = shared.config.max_streams,
+            completed = completed_streams,
+            active = currently_active_streams,
+            "slot completed, max streams reached"
         );
 
         // Release the slot

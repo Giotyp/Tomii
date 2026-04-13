@@ -148,13 +148,13 @@ impl AsyncRecorder {
         let records = match records_opt {
             Some(r) => r,
             None => {
-                eprintln!("[AsyncRecorder] No records collected");
+                tracing::debug!("no records collected");
                 return Ok(());
             }
         };
 
         if records.is_empty() {
-            eprintln!("[AsyncRecorder] No records to write");
+            tracing::debug!("no records to write");
             return Ok(());
         }
 
@@ -182,10 +182,7 @@ impl AsyncRecorder {
         }
 
         writer.flush()?;
-        println!(
-            "[AsyncRecorder] Wrote {} records to {}",
-            total_written, path
-        );
+        tracing::info!(total_written, path, "records written");
         Ok(())
     }
 

@@ -151,7 +151,7 @@ impl AsyncTimeBuffer {
         };
         // Send is non-blocking if the channel has capacity
         if let Err(_) = self.request_tx.send(request) {
-            eprintln!("Warning: Failed to send timing request - controller may have shut down");
+            tracing::warn!("failed to send timing request - controller may have shut down");
         }
     }
 
@@ -170,7 +170,7 @@ impl AsyncTimeBuffer {
             cycles,
         };
         if let Err(_) = self.request_tx.send(request) {
-            eprintln!("Warning: Failed to send timing request - controller may have shut down");
+            tracing::warn!("failed to send timing request - controller may have shut down");
         }
     }
 
@@ -191,7 +191,7 @@ impl AsyncTimeBuffer {
             end,
         };
         if let Err(_) = self.request_tx.send(request) {
-            eprintln!("Warning: Failed to send timing request - controller may have shut down");
+            tracing::warn!("failed to send timing request - controller may have shut down");
         }
     }
 
@@ -212,7 +212,7 @@ impl AsyncTimeBuffer {
             end_cycles,
         };
         if let Err(_) = self.request_tx.send(request) {
-            eprintln!("Warning: Failed to send timing request - controller may have shut down");
+            tracing::warn!("failed to send timing request - controller may have shut down");
         }
     }
 
@@ -230,7 +230,7 @@ impl AsyncTimeBuffer {
             start_time,
         };
         if let Err(_) = self.request_tx.send(request) {
-            eprintln!("Warning: Failed to send timing request - controller may have shut down");
+            tracing::warn!("failed to send timing request - controller may have shut down");
         }
     }
 
@@ -314,12 +314,12 @@ impl AsyncTimeBuffer {
     /// Shutdown the controller and wait for it to finish
     pub fn shutdown(mut self) {
         if let Err(_) = self.request_tx.send(TimingRequest::Shutdown) {
-            eprintln!("Warning: Failed to send shutdown request");
+            tracing::warn!("failed to send shutdown request");
         }
 
         if let Some(handle) = self.controller_handle.take() {
             if let Err(_) = handle.join() {
-                eprintln!("Warning: Controller thread panicked during shutdown");
+                tracing::warn!("controller thread panicked during shutdown");
             }
         }
     }
@@ -648,7 +648,7 @@ impl TimeBuffer {
         ) {
             Some(data) => data,
             None => {
-                eprintln!("[SynStream] No streams to report after exclusion.");
+                tracing::warn!("no streams to report after exclusion");
                 return;
             }
         };
@@ -853,13 +853,13 @@ impl TimeBuffer {
         match std::fs::File::create(path) {
             Ok(file) => {
                 if let Err(e) = serde_json::to_writer_pretty(file, &report) {
-                    eprintln!("[SynStream] Failed to write JSON report: {}", e);
+                    tracing::error!(error = %e, "failed to write JSON report");
                 } else {
-                    println!("[SynStream] Report written to {}", path);
+                    tracing::info!(path, "report written");
                 }
             }
             Err(e) => {
-                eprintln!("[SynStream] Failed to create report file '{}': {}", path, e);
+                tracing::error!(path, error = %e, "failed to create report file");
             }
         }
     }

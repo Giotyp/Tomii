@@ -63,10 +63,7 @@ impl super::SynRt {
         loop {
             // Check shutdown flag first to exit immediately when signaled
             if shared.shutdown_flag.load(Ordering::Acquire) {
-                println!(
-                    "Thread {} detected shutdown signal, exiting resolution loop",
-                    thread_id
-                );
+                tracing::debug!(thread_id, "detected shutdown signal, exiting resolution loop");
                 break;
             }
 
@@ -105,10 +102,7 @@ impl super::SynRt {
 
             // Check shutdown immediately after blocking call returns
             if shared.shutdown_flag.load(Ordering::Acquire) {
-                println!(
-                    "Thread {} detected shutdown after receive, exiting",
-                    thread_id
-                );
+                tracing::debug!(thread_id, "detected shutdown after receive, exiting");
                 break;
             }
 
@@ -120,10 +114,7 @@ impl super::SynRt {
                     .stream_complete_counter
                     .load(Ordering::Acquire);
                 if completed_streams >= shared.config.max_streams {
-                    println!(
-                        "Thread {} detected all streams completed (after recv_batch), exiting",
-                        thread_id
-                    );
+                    tracing::debug!(thread_id, "all streams completed (after recv), exiting");
                     break;
                 }
             }
@@ -151,10 +142,7 @@ impl super::SynRt {
                 .load(Ordering::Acquire);
 
             if completed_streams >= shared.config.max_streams {
-                println!(
-                    "Thread {} detected all streams completed, exiting resolution loop",
-                    thread_id
-                );
+                tracing::debug!(thread_id, "all streams completed, exiting resolution loop");
                 break;
             }
         }

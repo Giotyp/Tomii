@@ -59,11 +59,9 @@ impl super::SynRt {
 
     pub fn write_runtime_record(&self, _path: &str) {
         if let Some(_rec) = &self.shared.telemetry.async_recorder {
-            // The AsyncRecorder handles all record writing via write_to_csv
-            // This method is a no-op since AsyncRecorder already exported everything
-            println!("Runtime: async_recorder records already written via scheduler");
+            tracing::debug!("async_recorder records already written via scheduler");
         } else {
-            println!("Runtime: recorder not enabled");
+            tracing::debug!("recorder not enabled");
         }
     }
 }
