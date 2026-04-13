@@ -1,5 +1,5 @@
-use crossbeam_channel::{Receiver, Sender};
 use super::Priority;
+use crossbeam_channel::{Receiver, Sender};
 
 /// Recording metadata carried alongside task.
 /// Eliminates Arc::clone per spawn - worker loop handles metrics directly.

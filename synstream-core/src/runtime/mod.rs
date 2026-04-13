@@ -19,11 +19,11 @@ mod threading;
 
 // build_node_cache and build_predecessor_tables are re-exported pub(crate) so that
 // graph_gen::GraphSpec::compile() can call them without going through the runtime builder.
-pub(crate) use init::{build_node_cache, build_predecessor_tables};
 use init::build_slot_counters;
-pub(crate) use node_cache::NodeCacheEntry;
+pub(crate) use init::{build_node_cache, build_predecessor_tables};
 #[cfg(feature = "network")]
 use network_init::prepare_network_infrastructure;
+pub(crate) use node_cache::NodeCacheEntry;
 use parking_lot::RwLock;
 #[cfg(feature = "network")]
 pub(crate) use shared_data::NetworkInfra;
@@ -278,11 +278,7 @@ impl SynRtBuilder {
             packet_drop_counters,
             buffer_return_senders,
             buffer_return_receivers,
-        ) = prepare_network_infrastructure(
-            &graph,
-            self.socket_recv_buf_bytes,
-            self.recv_pool_size,
-        );
+        ) = prepare_network_infrastructure(&graph, self.socket_recv_buf_bytes, self.recv_pool_size);
 
         // --- Assemble SharedData ---
         let node_results = Arc::new(crate::buffers::LockFreeResultMap::new(&graph.nodes, slots));

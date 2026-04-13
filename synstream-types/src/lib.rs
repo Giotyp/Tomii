@@ -443,7 +443,10 @@ impl CmTypes {
         }
     }
 
-    pub fn from_any_sliced<T: Any + Send + Sync + Sliceable<U>, U: Clone + Send + Sync + 'static>(
+    pub fn from_any_sliced<
+        T: Any + Send + Sync + Sliceable<U>,
+        U: Clone + Send + Sync + 'static,
+    >(
         mut value: T,
     ) -> CmTypes {
         // Get the mutable slice from the value
@@ -586,9 +589,7 @@ impl CmTypes {
             // keepalive prevents the allocation from being dropped.
             let ptr = {
                 let guard = lock.read();
-                guard
-                    .downcast_ref::<T>()
-                    .map(|r| r as *const T as *mut T)
+                guard.downcast_ref::<T>().map(|r| r as *const T as *mut T)
             };
             ptr.map(|p| RawMutGuard {
                 ptr: p,
@@ -1126,7 +1127,12 @@ impl<T> SlicedContainer<T> {
                 let ptr = self.data_ptr.0.add(start);
                 let slice = std::slice::from_raw_parts(ptr, 0);
                 // Zero-length: no bits needed; release_read_range is a no-op for len==0
-                return Some(ReadSliceGuard { slice, container: self, start, len });
+                return Some(ReadSliceGuard {
+                    slice,
+                    container: self,
+                    start,
+                    len,
+                });
             }
         }
 
@@ -1137,7 +1143,12 @@ impl<T> SlicedContainer<T> {
         unsafe {
             let ptr = self.data_ptr.0.add(start);
             let slice = std::slice::from_raw_parts(ptr, len);
-            Some(ReadSliceGuard { slice, container: self, start, len })
+            Some(ReadSliceGuard {
+                slice,
+                container: self,
+                start,
+                len,
+            })
         }
     }
 
@@ -1157,7 +1168,12 @@ impl<T> SlicedContainer<T> {
             unsafe {
                 let ptr = self.data_ptr.0.add(start);
                 let slice = std::slice::from_raw_parts(ptr, 0);
-                return Some(ReadSliceGuard { slice, container: self, start, len });
+                return Some(ReadSliceGuard {
+                    slice,
+                    container: self,
+                    start,
+                    len,
+                });
             }
         }
 
@@ -1168,7 +1184,12 @@ impl<T> SlicedContainer<T> {
                 unsafe {
                     let ptr = self.data_ptr.0.add(start);
                     let slice = std::slice::from_raw_parts(ptr, len);
-                    return Some(ReadSliceGuard { slice, container: self, start, len });
+                    return Some(ReadSliceGuard {
+                        slice,
+                        container: self,
+                        start,
+                        len,
+                    });
                 }
             }
 

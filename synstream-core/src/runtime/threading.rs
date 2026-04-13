@@ -22,7 +22,11 @@ impl SynRt {
         let num_sockets = network_config.num_sockets;
         let buffer_depth = network_config.buffer_depth;
 
-        tracing::info!(num_sockets, buffer_depth, "initializing network receiver infrastructure");
+        tracing::info!(
+            num_sockets,
+            buffer_depth,
+            "initializing network receiver infrastructure"
+        );
 
         assert_eq!(
             self.shared.net.receiver_sockets.len(),
@@ -145,7 +149,12 @@ impl SynRt {
                     })
                     .expect("Failed to spawn receiver thread");
                 handles.push(handle);
-                tracing::debug!(thread_id, ?socket_range_display, core_id, "multi-socket receiver spawned");
+                tracing::debug!(
+                    thread_id,
+                    ?socket_range_display,
+                    core_id,
+                    "multi-socket receiver spawned"
+                );
             }
         }
 
@@ -171,9 +180,18 @@ impl SynRt {
                 }
 
                 if core_affinity::set_for_current(core_affinity::CoreId { id: thread_core }) {
-                    tracing::debug!(thread_id, core = thread_core, slot = thread_slot, "resolution thread pinned");
+                    tracing::debug!(
+                        thread_id,
+                        core = thread_core,
+                        slot = thread_slot,
+                        "resolution thread pinned"
+                    );
                 } else {
-                    tracing::warn!(thread_id, core = thread_core, "failed to pin resolution thread");
+                    tracing::warn!(
+                        thread_id,
+                        core = thread_core,
+                        "failed to pin resolution thread"
+                    );
                 }
 
                 Self::resolution(shared_clone, thread_core, thread_id, thread_slot);

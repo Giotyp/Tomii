@@ -63,7 +63,10 @@ impl super::SynRt {
         loop {
             // Check shutdown flag first to exit immediately when signaled
             if shared.shutdown_flag.load(Ordering::Acquire) {
-                tracing::debug!(thread_id, "detected shutdown signal, exiting resolution loop");
+                tracing::debug!(
+                    thread_id,
+                    "detected shutdown signal, exiting resolution loop"
+                );
                 break;
             }
 

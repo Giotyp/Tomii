@@ -1,5 +1,5 @@
 use super::channels::ChannelSet;
-use super::worker::{SharedWorkerState, worker_loop};
+use super::worker::{worker_loop, SharedWorkerState};
 use crate::async_recorder::AsyncRecorder;
 use core_affinity::CoreId;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
@@ -197,7 +197,12 @@ impl CustomSchedulerBuilder {
         sorted_groups.sort_by_key(|(gid, _)| *gid);
 
         for (group_id, range) in sorted_groups {
-            tracing::info!(group_id, start = range.start, end = range.end, "configuring range group");
+            tracing::info!(
+                group_id,
+                start = range.start,
+                end = range.end,
+                "configuring range group"
+            );
 
             self = self.add_group(WorkerGroupConfig {
                 num_workers: range.len(),
@@ -354,7 +359,12 @@ pub(super) fn spawn_worker_threads(
     for worker_id in 0..total_workers {
         let group_idx = worker_to_group_idx[worker_id];
         let core_id = all_core_ids[worker_core_offset + worker_id];
-        tracing::debug!(worker_id, group_idx, core = core_id.id, "worker-to-group assignment");
+        tracing::debug!(
+            worker_id,
+            group_idx,
+            core = core_id.id,
+            "worker-to-group assignment"
+        );
     }
 
     // Spawn workers
@@ -392,7 +402,12 @@ pub(super) fn spawn_worker_threads(
     for (group_idx, config) in group_configs.iter().enumerate() {
         let actual_workers = group_worker_handles[group_idx].len();
         if actual_workers != config.num_workers {
-            tracing::warn!(group_idx, expected = config.num_workers, actual = actual_workers, "worker count mismatch");
+            tracing::warn!(
+                group_idx,
+                expected = config.num_workers,
+                actual = actual_workers,
+                "worker count mismatch"
+            );
         }
         let worker_ids: Vec<usize> = worker_to_group_idx
             .iter()
@@ -404,7 +419,13 @@ pub(super) fn spawn_worker_threads(
             .iter()
             .map(|&wid| all_core_ids[worker_core_offset + wid].id)
             .collect();
-        tracing::info!(group_idx, actual_workers, ?worker_ids, ?core_ids, "worker group ready");
+        tracing::info!(
+            group_idx,
+            actual_workers,
+            ?worker_ids,
+            ?core_ids,
+            "worker group ready"
+        );
     }
 
     group_worker_handles

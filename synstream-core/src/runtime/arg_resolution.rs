@@ -283,9 +283,9 @@ fn collect_res_from_cache(
         return Some(vec![(*custom).clone()]);
     }
 
-    let pred_eff_gs = rp.pred_group_size.or_else(|| {
-        shared.graph_cache.pred_group_by[rp.node_id as usize][rp.res_node_id as usize]
-    });
+    let pred_eff_gs = rp
+        .pred_group_size
+        .or_else(|| shared.graph_cache.pred_group_by[rp.node_id as usize][rp.res_node_id as usize]);
 
     fetch_res_results(
         rp.res_node_id,

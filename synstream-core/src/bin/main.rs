@@ -3,12 +3,12 @@ use core_affinity;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::time::Instant;
-use tracing_subscriber::EnvFilter;
 use synstream_core::debug::init_debug;
 use synstream_core::graph_gen::{from_json, GraphSpec}; // GraphCompiled produced via spec.compile()
 use synstream_core::runtime::{BatchConfig, SpinWaitConfig, SynRt, SynRtBuilder};
 use synstream_core::scheduler::{create_scheduler, SchedulerConfig, SchedulerType};
 use synstream_core::utils_rdtsc;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[clap(author = "George Typaldos", version, about)]
@@ -200,8 +200,7 @@ fn main() {
     let default_level = if args.debug { "debug" } else { "info" };
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(default_level)),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level)),
         )
         .init();
 
@@ -409,7 +408,10 @@ pub fn run_graph(spec: GraphSpec, cfg: RunGraphConfig) -> SynRt {
         }
 
         if !unique_worker_specs.is_empty() {
-            tracing::info!(count = unique_worker_specs.len(), "detected unique worker specs");
+            tracing::info!(
+                count = unique_worker_specs.len(),
+                "detected unique worker specs"
+            );
             for ws in &unique_worker_specs {
                 tracing::debug!(%ws, "worker spec");
             }
