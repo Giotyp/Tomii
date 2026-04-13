@@ -194,6 +194,12 @@ impl SynRtBuilder {
     pub fn build(self) -> SynRt {
         let slots = std::cmp::min(self.slots, self.max_streams);
 
+        assert!(
+            slots <= 64,
+            "SynStream supports at most 64 concurrent slots (got {}); this limit is enforced by the u64 completion bitmaps",
+            slots
+        );
+
         // --- Destructure compiled graph IR ---
         let GraphCompiled {
             graph,

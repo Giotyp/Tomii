@@ -317,7 +317,7 @@ fn build_companion(func: &ItemFn, variadic: bool) -> proc_macro2::TokenStream {
 
     quote! {
         #[no_mangle]
-        #vis fn #cm_name(#(#cm_params),*) -> ::synstream_types::CmTypes {
+        #vis extern "C" fn #cm_name(#(#cm_params),*) -> ::synstream_types::CmTypes {
             #full_body
         }
     }
