@@ -206,6 +206,7 @@ pub(super) fn release_slot(shared: &Arc<SharedData>, slot: usize) {
 /// Activate the next buffering slot in round-robin order
 /// Returns (activated_slot_id, buffered_nodes) for processing
 /// When slot-priority is enabled, automatically uses round-robin activation
+#[allow(clippy::type_complexity)]
 pub(super) fn activate_next_slot(
     shared: &Arc<SharedData>,
     completing_slot: Option<usize>,

@@ -134,6 +134,7 @@ pub fn bind_udp_socket_range(
 /// Each thread polls multiple sockets with short timeouts to avoid head-of-line blocking.
 ///
 /// Thread naming is handled by the caller via `thread::Builder::name()`.
+#[allow(clippy::too_many_arguments)]
 pub fn multi_socket_receiver_loop(
     packet_length: usize,
     recv_pool_size: usize,

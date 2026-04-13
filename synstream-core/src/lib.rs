@@ -1,11 +1,3 @@
-// Allow some clippy warnings that are acceptable in this crate:
-// - too_many_arguments: Runtime functions need many parameters for context
-// - type_complexity: Graph processing uses complex nested types intentionally
-// - ptr_arg: &Vec is sometimes needed for trait compatibility
-// - new_without_default: Some constructors need parameters
-#![allow(clippy::too_many_arguments)]
-#![allow(clippy::type_complexity)]
-#![allow(clippy::new_without_default)]
 
 pub mod async_recorder;
 pub(crate) mod buffers;

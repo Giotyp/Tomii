@@ -18,6 +18,7 @@ use synstream_types::*;
 /// the active ones as a single batch.  The outer `if should_poll_packets` and
 /// `if let Some(network_config)` guards remain in `resolution()`; this function
 /// is called only when both conditions are true.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn poll_and_process_network_packets(
     shared: &Arc<SharedData>,
     network_config: &crate::graph_struct::GraphNetworkConfig,

@@ -22,9 +22,10 @@ pub enum CondOp {
 }
 
 /// Task priority for scheduling
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum NodePriority {
     High,
+    #[default]
     Normal,
     Low,
 }
@@ -39,11 +40,6 @@ impl NodePriority {
     }
 }
 
-impl Default for NodePriority {
-    fn default() -> Self {
-        NodePriority::Normal
-    }
-}
 
 impl CondOp {
     pub fn from_str(op: &str) -> Option<CondOp> {

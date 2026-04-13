@@ -28,6 +28,7 @@ pub enum SlotState {
 /// Precomputed node cache and predecessor routing tables.
 pub struct GraphCache {
     pub node_cache: Vec<super::node_cache::NodeCacheEntry>,
+    #[allow(clippy::type_complexity)]
     pub pred_index_filter: Arc<Vec<Vec<Option<(usize, usize)>>>>,
     pub pred_group_by: Arc<Vec<Vec<Option<usize>>>>,
     pub pred_succ_1to1_offset: Arc<Vec<Vec<Option<isize>>>>,
@@ -123,6 +124,7 @@ pub struct SlotData {
     pub states: Arc<RwLock<Vec<SlotState>>>,
     pub running_streams: Arc<RwLock<Vec<(usize, usize)>>>,
     /// Per-slot buffering: holds ready nodes with packet data waiting for slot activation.
+    #[allow(clippy::type_complexity)]
     pub buffers: Arc<RwLock<Vec<Vec<(NodeInfo, Option<CmTypes>)>>>>,
     pub last_assigned: Arc<AtomicUsize>,
 }

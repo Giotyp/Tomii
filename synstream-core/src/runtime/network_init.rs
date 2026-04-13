@@ -44,6 +44,7 @@ pub(super) fn process_id_function(shared: &Arc<SharedData>, result: &CmTypes) ->
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub(super) fn prepare_network_infrastructure(
     graph: &Graph,
     socket_recv_buf_bytes: usize,

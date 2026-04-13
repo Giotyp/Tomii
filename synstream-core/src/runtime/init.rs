@@ -157,6 +157,7 @@ pub(crate) fn build_node_cache(
 /// - `pred_group_by`: the `group_by` divisor for grouped predecessors.
 /// - `pred_succ_1to1_offset`: `indexes[0]` offset for 1:1 non-barrier single-index `$res` deps
 ///   with equal factor. Enables exact successor dispatch, eliminating `spin_wait` deadlocks.
+#[allow(clippy::type_complexity)]
 pub(crate) fn build_predecessor_tables(
     app_graph: &Graph,
 ) -> (

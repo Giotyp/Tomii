@@ -12,6 +12,7 @@ use synstream_types::*;
 /// Inner body of `process_batch_resolution` executed with all four thread-local buffers
 /// already borrowed. Separated from the outer function to eliminate the 4-deep
 /// `thread_local!` `.with()` nesting while keeping the thread-local declarations intact.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn process_batch_inner(
     shared: &Arc<SharedData>,
     batch: &mut Vec<(NodeInfo, Option<CmTypes>)>,

@@ -416,6 +416,7 @@ pub struct RayonScheduler {
 }
 
 impl RayonScheduler {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         mode: SpawnMode,
         core_offset: usize,

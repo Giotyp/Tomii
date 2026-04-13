@@ -28,6 +28,7 @@ pub(super) struct ReportCriticalPath {
 /// and collect system-thread task times grouped by slot.
 ///
 /// Returns `(global_total_times, per_stream_task_data, system_task_data_by_slot, total_streams)`.
+#[allow(clippy::type_complexity)]
 pub(super) fn collect_print_stats_data(
     slot_statistics: &[Vec<SlotStats>],
     slots: usize,
@@ -98,6 +99,7 @@ pub(super) fn collect_print_stats_data(
 /// (i.e. after skipping the first `exclude_streams` streams).
 ///
 /// Returns `(global_task_data, per_worker_counts, per_worker_totals)`.
+#[allow(clippy::type_complexity)]
 pub(super) fn aggregate_task_data(
     per_stream_task_data: &[std::collections::HashMap<String, Vec<(usize, Duration)>>],
     exclude_streams: usize,
@@ -425,6 +427,7 @@ pub(super) fn format_system_thread_stats(
 /// (worker slots only, with warm-up exclusion applied).
 ///
 /// Returns `None` if no streams remain after exclusion.
+#[allow(clippy::type_complexity)]
 pub(super) fn collect_report_stream_data(
     slot_statistics: &[Vec<SlotStats>],
     worker_slots_end: usize,

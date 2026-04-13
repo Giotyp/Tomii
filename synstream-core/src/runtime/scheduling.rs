@@ -14,7 +14,7 @@ use synstream_types::*;
 #[inline]
 pub(super) fn send_to_scheduler(
     shared: &Arc<SharedData>,
-    nodes_to_schedule: &Vec<NodeInfo>,
+    nodes_to_schedule: &[NodeInfo],
     pre_built_args_vec: &[Option<Vec<CmTypes>>],
     custom_func_vec: Option<&[Option<CmPtr>]>,
 ) {
@@ -115,7 +115,7 @@ pub(super) fn send_to_scheduler(
 impl super::SynRt {
     pub(super) fn preparation(
         shared: &Arc<SharedData>,
-        nodes_to_schedule: &Vec<NodeInfo>,
+        nodes_to_schedule: &[NodeInfo],
         thread_core: usize,
         thread_slot: usize,
     ) {

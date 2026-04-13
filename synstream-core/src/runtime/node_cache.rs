@@ -68,7 +68,7 @@ pub struct ResPredCache {
     pub is_dep: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ArgCacheEntry {
     // initially store ref indexes for node id
     pub args: Vec<CmTypes>,
@@ -90,20 +90,6 @@ pub struct ArgCacheEntry {
     pub res_predecessors: Vec<ResPredCache>,
 }
 
-impl Default for ArgCacheEntry {
-    fn default() -> Self {
-        ArgCacheEntry {
-            args: Vec::new(),
-            buffer_ref_indexes: Vec::new(),
-            buffer_values: Vec::new(),
-            rt_idxs_indexes: Vec::new(),
-            rt_workers_indexes: Vec::new(),
-            res_indexes: Vec::new(),
-            real_res_indexes: Vec::new(),
-            res_predecessors: Vec::new(),
-        }
-    }
-}
 
 impl std::fmt::Debug for ArgCacheEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

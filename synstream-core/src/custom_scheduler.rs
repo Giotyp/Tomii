@@ -49,18 +49,13 @@ use crate::{IdType, Record};
 pub type BoxedTask = Box<dyn FnOnce() + Send + 'static>;
 
 /// Priority levels for task scheduling
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(u8)]
 pub enum Priority {
     High = 0,   // Checked first
+    #[default]
     Normal = 1, // Default priority
     Low = 2,    // Background tasks
-}
-
-impl Default for Priority {
-    fn default() -> Self {
-        Priority::Normal
-    }
 }
 
 // ============================================================================

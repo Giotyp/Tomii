@@ -306,7 +306,7 @@ pub struct NodeDepMap {
 
 impl NodeDepMap {
     /// Create a new NodeDepMap initialized for all slots and nodes
-    pub fn new(nodes: &Vec<Node>, slots: usize, dep_counts: &Vec<usize>) -> Self {
+    pub fn new(nodes: &[Node], slots: usize, dep_counts: &[usize]) -> Self {
         let num_nodes = nodes.len();
         let mut map_slots = Vec::with_capacity(slots);
 
@@ -395,6 +395,7 @@ impl NodeDepMap {
     /// `specific_succ_idx`: when Some(i), fire exactly instance i (1:1 dispatch).
     /// Writes results into `ready` (cleared before use). No allocation on the hot path.
     #[inline]
+    #[allow(clippy::too_many_arguments)]
     pub fn decrease_and_get_ready_into(
         &self,
         slot: usize,
