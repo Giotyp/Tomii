@@ -107,7 +107,9 @@ cond_node = app.node("filter", func="filter_fn", factor=num_nodes,
 
 ```python
 app.build(
-    func_path="plugin/src/lib.rs",     # Auto-generate wrappers from source
+    func_path="plugin/src/lib.rs",     # Auto-generate wrappers from Rust source
+    # -- OR --
+    func_path="include/plugin.h",      # Auto-generate wrappers from annotated C header
     # -- OR --
     wrap_path="wrappers.rs",           # Use pre-generated wrapper files
     reg_path="reg.rs",
@@ -136,12 +138,28 @@ app.run(
 )
 ```
 
-### Real-World Example
+### Real-World Examples
 
-See `examples/matrix-compute/run_bench.py` for a complete pipeline (FFT + matrix multiply) that replaces the shell script + JSON pair with a single Python file.
+`examples/matrix-compute/run_bench.py` — Rust plugin (FFT + matrix multiply):
 
 ```bash
 python examples/matrix-compute/run_bench.py --workers 4 --no-clean
+```
+
+`examples/matrix-compute-C/run_bench.py` — Same DAG backed by a C library (FFTW + OpenBLAS). Point `func_path` at the annotated C header and the converter generates `libloading`-based wrappers automatically:
+
+```bash
+python examples/matrix-compute-C/run_bench.py --workers 4 --no-clean
+```
+
+C functions are exported by annotating declarations in the header with `// @synstream_export`:
+
+```c
+// @synstream_export
+void* fft_planner(size_t buf_size);
+
+// @synstream_export(out_len=n, free=free_matrix)
+complex_f32* generate_vector(size_t n);
 ```
 
 ---
@@ -255,23 +273,28 @@ Options:
 **Workspace crates:**
 - `synstream-core` — Runtime, scheduler, graph engine, and network receiver infrastructure
 - `synstream-types` — `CmTypes` enum for type-erased value passing across plugin boundaries
+- `synstream-converter` — Code-generation library; produces `wrappers.rs`/`reg.rs` from annotated Rust source or C headers (`.h`/`.hpp`)
 - `synstream-macro` — Procedural macros for plugin wrapping (WIP)
 - `synstream/` — Python API package
-- `examples/matrix-compute` — FFT and matrix computation benchmark
+- `examples/matrix-compute` — FFT and matrix computation benchmark (Rust plugin)
+- `examples/matrix-compute-C` — Same DAG using a C plugin (FFTW + OpenBLAS via annotated C header)
 - `examples/mimolib` — MIMO streaming benchmark
 
 **Core modules in `synstream-core/src`:**
-- `runtime.rs` / `runtime_funcs.rs` — Main execution orchestration, slot and stream management
-- `scheduler.rs` — Task scheduling strategies: work-stealing (default), FIFO, and lock-free custom
+- `runtime/` — Main execution orchestration split into focused submodules: `mod.rs`, `init.rs`, `threading.rs`, `scheduling.rs`, `task_execution.rs`, `batch_resolution.rs`, `packet_processing.rs`, `slot_lifecycle.rs`, `slot_management.rs`, `successor.rs`, `arg_resolution.rs`, `node_cache.rs`, `shared_data.rs`, `thread_locals.rs`, `resolution_loop.rs`, `reporting.rs`, `network_init.rs`
+- `scheduler.rs` — Unified `RayonScheduler` (work-stealing + FIFO modes); `custom_scheduler/` for the lock-free priority scheduler
 - `graph.rs` / `graph_gen.rs` — DAG representation, JSON parsing, dependency resolution
-- `network.rs` / `network_funcs.rs` — Dedicated receiver threads for UDP/TCP packet injection
-- `buffers.rs` — Per-slot, per-node result storage with lock-free dependency tracking
+- `network.rs` / `network_funcs.rs` — Dedicated receiver threads for UDP/TCP packet injection (feature-gated: `--features network`)
+- `buffers/` — Per-slot, per-node result storage: `node_dep.rs` (atomic threshold spawning), `node_info.rs`, `result_map.rs` (lock-free result storage)
+- `resolution_state.rs` — Multi-threaded atomic dependency tracking
+- `time_buffer/` — Telemetry collection and JSON report generation
+- `worker_range.rs` — Worker CPU affinity configuration
 - `async_recorder.rs` — Lock-free timing and event recording
 
 **Threading model:**
 - Worker threads (Rayon or custom pool) with CPU affinity for kernel execution
 - System (resolution) threads for dependency checking and task scheduling
-- Dedicated network receiver threads for low-latency packet ingestion
+- Dedicated network receiver threads for low-latency packet ingestion (requires `network` feature)
 - Async recorder thread for non-blocking timing output
 
 ## JSON Graph Format
@@ -309,3 +332,7 @@ cargo check --lib
 # Regenerate Python bindings after changing json_structs.rs
 make schema
 ```
+
+## License
+
+[Apache License 2.0](LICENSE)
