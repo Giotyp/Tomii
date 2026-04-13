@@ -267,34 +267,36 @@ fn main() {
 
     let synrt = run_graph(
         spec,
-        scheduler_type,
-        args.workers,
-        args.core_offset,
-        args.system_threads,
-        args.receiver_threads,
-        args.slots,
-        args.max_streams,
-        runtime,
-        args.record,
-        args.record_stream,
-        args.use_rdtsc,
-        timing_enabled,
-        args.slot_priority,
-        args.coalesce_barriers,
-        args.inline_continuation,
-        args.batch_queue_capacity,
-        args.socket_recv_buf_bytes,
-        args.recv_pool_size,
-        SpinWaitConfig {
-            spin_iters: args.spin_wait_spin_iters,
-            yield_iters: args.spin_wait_yield_iters,
-            park_ns: args.spin_wait_park_ns,
-        },
-        BatchConfig {
-            target_size: args.batching_size,
-            timeout_us: args.batching_limit,
-            poll_spin_iters: args.spin_iterations,
-            flush_threshold: args.sched_flush_threshold,
+        RunGraphConfig {
+            scheduler_type,
+            workers: args.workers,
+            core_offset: args.core_offset,
+            system_threads: args.system_threads,
+            receiver_threads: args.receiver_threads,
+            slots: args.slots,
+            max_streams: args.max_streams,
+            max_runtime: runtime,
+            record: args.record,
+            record_stream: args.record_stream,
+            use_rdtsc: args.use_rdtsc,
+            timing_enabled,
+            slot_priority_enabled: args.slot_priority,
+            coalesce_barriers: args.coalesce_barriers,
+            inline_continuation: args.inline_continuation,
+            batch_queue_capacity: args.batch_queue_capacity,
+            socket_recv_buf_bytes: args.socket_recv_buf_bytes,
+            recv_pool_size: args.recv_pool_size,
+            spin_wait: SpinWaitConfig {
+                spin_iters: args.spin_wait_spin_iters,
+                yield_iters: args.spin_wait_yield_iters,
+                park_ns: args.spin_wait_park_ns,
+            },
+            batch: BatchConfig {
+                target_size: args.batching_size,
+                timeout_us: args.batching_limit,
+                poll_spin_iters: args.spin_iterations,
+                flush_threshold: args.sched_flush_threshold,
+            },
         },
     );
 
@@ -322,29 +324,52 @@ fn main() {
     }
 }
 
-pub fn run_graph(
-    spec: GraphSpec,
-    scheduler_type: SchedulerType,
-    workers: usize,
-    core_offset: usize,
-    system_threads: usize,
-    receiver_threads: usize,
-    slots: usize,
-    max_streams: usize,
-    max_runtime: Option<u64>,
-    record: bool,
-    record_stream: Option<usize>,
-    use_rdtsc: bool,
-    timing_enabled: bool,
-    slot_priority_enabled: bool,
-    coalesce_barriers: bool,
-    inline_continuation: bool,
-    batch_queue_capacity: usize,
-    socket_recv_buf_bytes: usize,
-    recv_pool_size: usize,
-    spin_wait: SpinWaitConfig,
-    batch: BatchConfig,
-) -> SynRt {
+pub struct RunGraphConfig {
+    pub scheduler_type: SchedulerType,
+    pub workers: usize,
+    pub core_offset: usize,
+    pub system_threads: usize,
+    pub receiver_threads: usize,
+    pub slots: usize,
+    pub max_streams: usize,
+    pub max_runtime: Option<u64>,
+    pub record: bool,
+    pub record_stream: Option<usize>,
+    pub use_rdtsc: bool,
+    pub timing_enabled: bool,
+    pub slot_priority_enabled: bool,
+    pub coalesce_barriers: bool,
+    pub inline_continuation: bool,
+    pub batch_queue_capacity: usize,
+    pub socket_recv_buf_bytes: usize,
+    pub recv_pool_size: usize,
+    pub spin_wait: SpinWaitConfig,
+    pub batch: BatchConfig,
+}
+
+pub fn run_graph(spec: GraphSpec, cfg: RunGraphConfig) -> SynRt {
+    let RunGraphConfig {
+        scheduler_type,
+        workers,
+        core_offset,
+        system_threads,
+        receiver_threads,
+        slots,
+        max_streams,
+        max_runtime,
+        record,
+        record_stream,
+        use_rdtsc,
+        timing_enabled,
+        slot_priority_enabled,
+        coalesce_barriers,
+        inline_continuation,
+        batch_queue_capacity,
+        socket_recv_buf_bytes,
+        recv_pool_size,
+        spin_wait,
+        batch,
+    } = cfg;
     let receiver_threads = if spec.graph.network_config().is_some() {
         receiver_threads
     } else {
@@ -384,12 +409,9 @@ pub fn run_graph(
         }
 
         if !unique_worker_specs.is_empty() {
-            println!(
-                "Detected {} unique worker specs:",
-                unique_worker_specs.len()
-            );
+            tracing::info!(count = unique_worker_specs.len(), "detected unique worker specs");
             for ws in &unique_worker_specs {
-                println!("  {}", ws);
+                tracing::debug!(%ws, "worker spec");
             }
             Some(WorkerAffinityConfig::from_worker_specs(
                 &unique_worker_specs,
@@ -416,7 +438,7 @@ pub fn run_graph(
 
     if let Some(core_id) = scheduler.main_core() {
         core_affinity::set_for_current(core_id);
-        println!("Pinned main thread to core {:?}", core_id);
+        tracing::info!(core = core_id.id, "pinned main thread");
     }
 
     // Compile the parsed graph into the IR (resolves function pointers, builds routing tables).

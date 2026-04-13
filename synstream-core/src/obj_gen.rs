@@ -4,8 +4,9 @@ use crate::json_structs::*;
 use rapidhash::{HashMapExt, RapidHashMap};
 use synstream_types::*;
 
+#[allow(clippy::type_complexity)]
 pub fn init_objects(
-    initializations_json: &Vec<InitJson>,
+    initializations_json: &[InitJson],
     workers: usize,
 ) -> Result<(Vec<Vec<CmTypes>>, RapidHashMap<String, usize>), crate::SynError> {
     // Create a new RapidHashMap to store the initialized objects

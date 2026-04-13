@@ -10,6 +10,7 @@ impl super::SynRt {
     ///
     /// Called unconditionally every resolution-loop iteration to ensure completions are
     /// never missed (Bug #21 fix: conditional calling caused hangs when all threads went idle).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn check_slots(
         shared: &Arc<SharedData>,
         stream_slot_activity: &mut HashMap<usize, bool>,

@@ -7,7 +7,7 @@ use synstream_types::*;
 use super::node_cache::{ArgCacheEntry, ResPredCache};
 
 #[inline(always)]
-fn process_buffer_refs(arg_vec: &mut Vec<CmTypes>, cache: &ArgCacheEntry, node_index: usize) {
+fn process_buffer_refs(arg_vec: &mut [CmTypes], cache: &ArgCacheEntry, node_index: usize) {
     for (i, idx) in cache.buffer_ref_indexes.iter().enumerate() {
         arg_vec[*idx] = get_object_value(&cache.buffer_values[i], node_index);
     }
@@ -15,7 +15,7 @@ fn process_buffer_refs(arg_vec: &mut Vec<CmTypes>, cache: &ArgCacheEntry, node_i
 
 #[inline(always)]
 fn process_runtime_refs(
-    arg_vec: &mut Vec<CmTypes>,
+    arg_vec: &mut [CmTypes],
     cache: &ArgCacheEntry,
     node_index: usize,
     workers: usize,
@@ -90,7 +90,7 @@ pub(super) fn populate_cached_args_into(
 #[inline]
 pub(super) fn parse_args(
     shared: &Arc<SharedData>,
-    args: &Vec<Arg>,
+    args: &[Arg],
     node_index: usize,
     slot: usize,
     pred_index: usize,
@@ -194,6 +194,7 @@ fn spin_wait_for_result(
 /// - `node_group_size`: `group_size` of the successor node (for grouped barrier edges)
 /// - `pred_eff_group_size`: effective group size of the predecessor (pre-resolved by caller)
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn fetch_res_results(
     res_node_id: IdType,
     indexes: &[isize],
@@ -301,6 +302,7 @@ fn collect_res_from_cache(
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn collect_arg_result(
     arg: &Arg,
     node_id: IdType,

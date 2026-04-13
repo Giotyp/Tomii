@@ -17,7 +17,7 @@ pub struct LockFreeResultMap {
 }
 
 impl LockFreeResultMap {
-    pub fn new(nodes: &Vec<Node>, slots: usize) -> Self {
+    pub fn new(nodes: &[Node], slots: usize) -> Self {
         let nodes_len = nodes.len();
         let mut node_factors = Vec::with_capacity(nodes_len);
         let mut node_offsets = Vec::with_capacity(nodes_len);
@@ -159,7 +159,7 @@ impl LockFreeResultMap {
     }
 
     /// Extend with a new slot (for dynamic slot addition)
-    pub fn extend_slot(&mut self, _nodes: &Vec<Node>) {
+    pub fn extend_slot(&mut self, _nodes: &[Node]) {
         for _ in 0..self.per_slot_size {
             self.buffer.push(AtomicPtr::new(std::ptr::null_mut()));
         }

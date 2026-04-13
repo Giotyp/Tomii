@@ -29,6 +29,7 @@ pub trait ResolutionState: Send + Sync {
 
     // Hot-path variant: writes ready indices into caller-supplied buffer (no allocation).
     // `specific_succ_idx`: when Some(i), fire exactly instance i (1:1 non-barrier dispatch).
+    #[allow(clippy::too_many_arguments)]
     fn decrease_and_get_ready_into(
         &self,
         slot: usize,
@@ -60,7 +61,7 @@ impl MultiThreadedState {
         slots: usize,
         _max_factor: usize,
         dependency_count_vec: Vec<usize>,
-        nodes: &Vec<crate::graph_struct::Node>,
+        nodes: &[crate::graph_struct::Node],
     ) -> Self {
         // Initialize per-node dependency map with threshold-based spawning
         let node_dep_map = crate::buffers::NodeDepMap::new(nodes, slots, &dependency_count_vec);
