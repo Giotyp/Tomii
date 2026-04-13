@@ -9,18 +9,12 @@ pub trait ResolutionState: Send + Sync {
     // slot_gen: current slot generation for generational sent-flag reset
     fn reset_sent(&self, slot: usize, node_id: usize, index: usize, slot_gen: u32);
 
-    // Check if a slot has been marked as completed
-    fn is_slot_completed(&self, slot: usize) -> bool;
-
-    // Mark a slot as completed
-    fn mark_slot_completed(&self, slot: usize);
-
     // Remove slot from completed set (for new iteration)
     fn unmark_slot_completed(&self, slot: usize);
 
     // Atomically check-and-mark a slot as completed in a single critical section.
     // Returns true only for the one thread that wins the race — all others return false.
-    // This eliminates the TOCTOU window between is_slot_completed() and mark_slot_completed().
+    // This eliminates the TOCTOU window between a read-then-set sequence.
     fn try_complete_slot(&self, slot: usize) -> bool;
 
     // Increase dependency count and return new count
@@ -79,16 +73,6 @@ impl ResolutionState for MultiThreadedState {
         // Delegate to NodeDepMap
         self.node_dep_map
             .reset_sent_flag(slot, node_id, slot_gen, index);
-    }
-
-    #[inline]
-    fn is_slot_completed(&self, slot: usize) -> bool {
-        self.completed_slots.load(Ordering::SeqCst) & (1u64 << slot) != 0
-    }
-
-    #[inline]
-    fn mark_slot_completed(&self, slot: usize) {
-        self.completed_slots.fetch_or(1u64 << slot, Ordering::SeqCst);
     }
 
     #[inline]

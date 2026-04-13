@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::graph_struct::Node;
-
 use super::NodeInfo;
 
 /// Lock-free result storage using atomic pointer swaps
@@ -132,12 +131,7 @@ impl LockFreeResultMap {
     }
 
     /// Clear a slot for reinitialization
-    pub fn reinit_slot(
-        &self,
-        _nodes: &Vec<Node>,
-        slot: usize,
-        _init_values: Option<&Vec<synstream_types::CmTypes>>,
-    ) {
+    pub fn reinit_slot(&self, slot: usize) {
         if slot >= self.slots {
             panic!("Slot {} out of bounds", slot);
         }
@@ -158,13 +152,6 @@ impl LockFreeResultMap {
         }
     }
 
-    /// Extend with a new slot (for dynamic slot addition)
-    pub fn extend_slot(&mut self, _nodes: &[Node]) {
-        for _ in 0..self.per_slot_size {
-            self.buffer.push(AtomicPtr::new(std::ptr::null_mut()));
-        }
-        self.slots += 1;
-    }
 }
 
 impl Drop for LockFreeResultMap {
@@ -258,7 +245,7 @@ mod tests {
         assert_eq!(map.get(&ni1), Some(CmTypes::I32(20)));
 
         // Reinit clears the slot
-        map.reinit_slot(&nodes, 0, None);
+        map.reinit_slot(0);
         assert!(map.get(&ni0).is_none());
         assert!(map.get(&ni1).is_none());
 
@@ -309,7 +296,7 @@ mod tests {
         assert!(!map.result_exists(&ni));
         map.set(&ni, CmTypes::Bool(true));
         assert!(map.result_exists(&ni));
-        map.reinit_slot(&nodes, 0, None);
+        map.reinit_slot(0);
         assert!(!map.result_exists(&ni));
     }
 
@@ -327,7 +314,7 @@ mod tests {
             map.set(&ni, CmTypes::I32(slot as i32));
         }
 
-        map.reinit_slot(&nodes, 1, None);
+        map.reinit_slot(1);
 
         assert_eq!(map.get(&make_node_info(0, 0, 0, 0)), Some(CmTypes::I32(0)));
         assert!(map.get(&make_node_info(1, 0, 0, 0)).is_none());

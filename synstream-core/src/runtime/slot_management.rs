@@ -55,10 +55,7 @@ pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> 
         // stream assignment.  If release_slot ran first, assign_stream_to_available_slot
         // could pick up the Inactive slot, spawn initial tasks (storing results), and then
         // reinit_slot would clear those new-stream results → panic in legitimate tasks.
-        shared
-            .exec
-            .node_results
-            .reinit_slot(&shared.graph.nodes, slot, None);
+        shared.exec.node_results.reinit_slot(slot);
 
         // Release the slot (makes it available for next stream assignment)
         release_slot(shared, slot);
