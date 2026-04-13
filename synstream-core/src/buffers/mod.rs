@@ -88,3 +88,40 @@ pub fn gen_unpack_gen(packed: u64) -> u32 {
 pub fn gen_unpack_val(packed: u64) -> u32 {
     packed as u32
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gen_pack_roundtrip() {
+        let packed = gen_pack(7, 42);
+        assert_eq!(gen_unpack_gen(packed), 7);
+        assert_eq!(gen_unpack_val(packed), 42);
+    }
+
+    #[test]
+    fn test_gen_pack_boundaries() {
+        let packed = gen_pack(u32::MAX, u32::MAX);
+        assert_eq!(gen_unpack_gen(packed), u32::MAX);
+        assert_eq!(gen_unpack_val(packed), u32::MAX);
+
+        let packed = gen_pack(0, 0);
+        assert_eq!(gen_unpack_gen(packed), 0);
+        assert_eq!(gen_unpack_val(packed), 0);
+    }
+
+    #[test]
+    fn test_gen_independence() {
+        // Changing gen does not affect val and vice versa.
+        let p1 = gen_pack(1, 100);
+        let p2 = gen_pack(2, 100);
+        assert_eq!(gen_unpack_val(p1), gen_unpack_val(p2));
+        assert_ne!(gen_unpack_gen(p1), gen_unpack_gen(p2));
+
+        let p3 = gen_pack(5, 0);
+        let p4 = gen_pack(5, 999);
+        assert_eq!(gen_unpack_gen(p3), gen_unpack_gen(p4));
+        assert_ne!(gen_unpack_val(p3), gen_unpack_val(p4));
+    }
+}

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::graph_struct::*;
 use crate::{debug::print_debug, IdType};
 
+
 /// Pure topological description of a task graph.
 ///
 /// Contains nodes, edges, and metadata derived purely from the graph structure.
@@ -294,5 +295,244 @@ impl Graph {
         }
         println!("Initial Nodes: {:?}", self.initial_nodes);
         println!("Successors: {:?}", self.successors);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use synstream_types::CmTypes;
+
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
+
+    fn make_node(id: IdType, factor: usize, args: Vec<Arg>) -> Node {
+        Node {
+            name: format!("n{}", id),
+            args,
+            id,
+            loop_args: None,
+            factor,
+            group_size: None,
+            func_name: String::new(),
+            loop_: None,
+            condition: None,
+            use_workers: None,
+            priority: NodePriority::Normal,
+        }
+    }
+
+    fn make_node_grouped(id: IdType, factor: usize, group_size: usize, args: Vec<Arg>) -> Node {
+        let mut n = make_node(id, factor, args);
+        n.group_size = Some(group_size);
+        n
+    }
+
+    fn res_arg(pred_id: IdType, indexes: Vec<isize>) -> Arg {
+        Arg {
+            type_: CmTypes::Res(0),
+            predecessor: Some(Predecessor { id: pred_id, indexes, group_by: None }),
+            init_condition: None,
+        }
+    }
+
+    fn barrier_arg(pred_id: IdType, indexes: Vec<isize>) -> Arg {
+        Arg {
+            type_: CmTypes::Barrier(Arc::from("$barrier")),
+            predecessor: Some(Predecessor { id: pred_id, indexes, group_by: None }),
+            init_condition: None,
+        }
+    }
+
+    fn barrier_arg_group_by(pred_id: IdType, indexes: Vec<isize>, group_by: usize) -> Arg {
+        Arg {
+            type_: CmTypes::Barrier(Arc::from("$barrier")),
+            predecessor: Some(Predecessor { id: pred_id, indexes, group_by: Some(group_by) }),
+            init_condition: None,
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // add_node / structural tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_add_node_no_preds_is_initial() {
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 1, vec![]));
+        assert_eq!(g.initial_nodes, vec![0]);
+    }
+
+    #[test]
+    fn test_add_node_with_pred_not_initial() {
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 1, vec![]));
+        g.add_node(make_node(1, 1, vec![res_arg(0, vec![0])]));
+        assert_eq!(g.initial_nodes, vec![0]);
+        assert!(!g.initial_nodes.contains(&1));
+    }
+
+    #[test]
+    fn test_add_node_builds_successor_list() {
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 1, vec![]));
+        g.add_node(make_node(1, 1, vec![res_arg(0, vec![0])]));
+        assert_eq!(g.find_successors(0), &vec![1]);
+    }
+
+    #[test]
+    fn test_add_node_fan_out_successor_list() {
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 1, vec![])); // A
+        g.add_node(make_node(1, 1, vec![res_arg(0, vec![0])])); // B → A
+        g.add_node(make_node(2, 1, vec![res_arg(0, vec![0])])); // C → A
+        let succs = g.find_successors(0);
+        assert_eq!(succs.len(), 2);
+        assert!(succs.contains(&1));
+        assert!(succs.contains(&2));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_find_successors_out_of_bounds_panics() {
+        let g = Graph::new();
+        g.find_successors(0);
+    }
+
+    #[test]
+    fn test_add_node_condition_detected() {
+        let cond_arg = Arg {
+            type_: CmTypes::Res(0),
+            predecessor: Some(Predecessor { id: 0, indexes: vec![0], group_by: None }),
+            init_condition: Some(InitCondition {
+                operation: CondOp::Eq,
+                eval_value: CmTypes::Bool(true),
+            }),
+        };
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 1, vec![]));
+        g.add_node(make_node(1, 1, vec![cond_arg]));
+        assert!(g.condition_nodes.contains(&1));
+        assert!(!g.condition_nodes.contains(&0));
+    }
+
+    // ------------------------------------------------------------------
+    // dependency_count_vec — the Bug #33 regression suite
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_dep_count_single_node_no_preds() {
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 1, vec![]));
+        assert_eq!(g.dependency_count_vec(), vec![0]);
+    }
+
+    #[test]
+    fn test_dep_count_linear_chain() {
+        // A(f=1) → B(f=1): B needs 1 dep, threshold = 1/1 = 1
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 1, vec![]));
+        g.add_node(make_node(1, 1, vec![res_arg(0, vec![0])]));
+        let counts = g.dependency_count_vec();
+        assert_eq!(counts[0], 0);
+        assert_eq!(counts[1], 1);
+    }
+
+    #[test]
+    fn test_dep_count_fan_in_barrier() {
+        // A(f=4) → B(f=1, barrier): B needs all 4 deps (contributing=4)
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 4, vec![]));
+        g.add_node(make_node(1, 1, vec![barrier_arg(0, vec![0, 1, 2, 3])]));
+        let counts = g.dependency_count_vec();
+        assert_eq!(counts[0], 0);
+        assert_eq!(counts[1], 4);
+    }
+
+    #[test]
+    fn test_dep_count_fan_out_broadcast() {
+        // A(f=1) → B(f=4): pred_factor=1, no filter, contributing=1, dep_count=1
+        // All 4 B instances fire when A's single instance completes.
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 1, vec![]));
+        g.add_node(make_node(1, 4, vec![res_arg(0, vec![0])]));
+        let counts = g.dependency_count_vec();
+        assert_eq!(counts[1], 1);
+    }
+
+    #[test]
+    fn test_dep_count_equal_factor_bug33_fix() {
+        // Bug #33 regression: A(f=200) → B(f=200, res, indexes=[0]).
+        // Before fix: dep_count = indexes.len() = 1 → deps_per_instance=0 → all fire at once.
+        // After fix:  dep_count = pred_factor = 200 → 1 dep per instance (correct 1:1).
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 200, vec![]));
+        g.add_node(make_node(1, 200, vec![res_arg(0, vec![0])]));
+        let counts = g.dependency_count_vec();
+        assert_eq!(counts[1], 200, "dep_count must equal pred_factor for equal-factor non-filtered edge");
+    }
+
+    #[test]
+    fn test_dep_count_filtered_subset() {
+        // A(f=200) → B(f=2, indexes=[50, 51]): filter applies, contributing=2
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 200, vec![]));
+        g.add_node(make_node(1, 2, vec![res_arg(0, vec![50, 51])]));
+        let counts = g.dependency_count_vec();
+        assert_eq!(counts[1], 2);
+    }
+
+    #[test]
+    fn test_dep_count_global_barrier_with_groups() {
+        // A(f=8) → B(f=8, group_size=4, barrier, no group_by).
+        // num_groups=2, contributing=8 (no filter), dep_count = 8 * num_groups = 16
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 8, vec![]));
+        g.add_node(make_node_grouped(
+            1,
+            8,
+            4,
+            vec![barrier_arg(0, vec![0, 1, 2, 3, 4, 5, 6, 7])],
+        ));
+        let counts = g.dependency_count_vec();
+        assert_eq!(counts[1], 16);
+    }
+
+    #[test]
+    fn test_dep_count_per_group_barrier_group_by() {
+        // A(f=8) → B(f=8, barrier with group_by=4, indexes=[0..8]).
+        // num_barrier_groups = 8/4 = 2, barrier_deps = 2 * 4 = 8
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 8, vec![]));
+        g.add_node(make_node(
+            1,
+            8,
+            vec![barrier_arg_group_by(0, (0..8).map(|i| i as isize).collect(), 4)],
+        ));
+        let counts = g.dependency_count_vec();
+        assert_eq!(counts[1], 8);
+    }
+
+    #[test]
+    fn test_dep_count_multiple_predecessors() {
+        // A(f=1) → C, B(f=1) → C: C has two distinct preds, dep_count = 1 + 1 = 2
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 1, vec![])); // A
+        g.add_node(make_node(1, 1, vec![])); // B
+        g.add_node(make_node(2, 1, vec![res_arg(0, vec![0]), res_arg(1, vec![0])]));
+        let counts = g.dependency_count_vec();
+        assert_eq!(counts[2], 2);
+    }
+
+    #[test]
+    fn test_dep_count_same_pred_twice_deduped() {
+        // Same predecessor referenced from two args — preds_seen deduplicates it
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 1, vec![]));
+        g.add_node(make_node(1, 1, vec![res_arg(0, vec![0]), res_arg(0, vec![0])]));
+        let counts = g.dependency_count_vec();
+        assert_eq!(counts[1], 1, "same pred counted twice would give 2; preds_seen should prevent that");
     }
 }
