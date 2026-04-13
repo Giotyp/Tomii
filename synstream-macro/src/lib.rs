@@ -21,7 +21,7 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
 use syn::{
-    parse_macro_input, FnArg, GenericArgument, Ident, ItemFn, Pat, PathArguments, PatType,
+    parse_macro_input, FnArg, GenericArgument, Ident, ItemFn, Pat, PatType, PathArguments,
     ReturnType, Type, TypePath, TypeReference,
 };
 
@@ -50,9 +50,23 @@ fn is_primitive_or_string(ty: &Type) -> bool {
             let name = path.segments[0].ident.to_string();
             return matches!(
                 name.as_str(),
-                "bool" | "i8" | "i16" | "i32" | "i64" | "i128"
-                    | "u8" | "u16" | "u32" | "u64" | "u128"
-                    | "f32" | "f64" | "usize" | "isize" | "char" | "String"
+                "bool"
+                    | "i8"
+                    | "i16"
+                    | "i32"
+                    | "i64"
+                    | "i128"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "u128"
+                    | "f32"
+                    | "f64"
+                    | "usize"
+                    | "isize"
+                    | "char"
+                    | "String"
             );
         }
     }
@@ -140,21 +154,21 @@ fn classify_return(ty: &Type) -> RetKind {
             let name = path.segments[0].ident.to_string();
             return match name.as_str() {
                 "bool" => RetKind::Primitive("Bool".into()),
-                "i8"   => RetKind::Primitive("I8".into()),
-                "i16"  => RetKind::Primitive("I16".into()),
-                "i32"  => RetKind::Primitive("I32".into()),
-                "i64"  => RetKind::Primitive("I64".into()),
+                "i8" => RetKind::Primitive("I8".into()),
+                "i16" => RetKind::Primitive("I16".into()),
+                "i32" => RetKind::Primitive("I32".into()),
+                "i64" => RetKind::Primitive("I64".into()),
                 "i128" => RetKind::Primitive("I128".into()),
-                "u8"   => RetKind::Primitive("U8".into()),
-                "u16"  => RetKind::Primitive("U16".into()),
-                "u32"  => RetKind::Primitive("U32".into()),
-                "u64"  => RetKind::Primitive("U64".into()),
+                "u8" => RetKind::Primitive("U8".into()),
+                "u16" => RetKind::Primitive("U16".into()),
+                "u32" => RetKind::Primitive("U32".into()),
+                "u64" => RetKind::Primitive("U64".into()),
                 "u128" => RetKind::Primitive("U128".into()),
-                "f32"  => RetKind::Primitive("F32".into()),
-                "f64"  => RetKind::Primitive("F64".into()),
-                "usize"  => RetKind::Primitive("Usize".into()),
-                "isize"  => RetKind::Primitive("Isize".into()),
-                "char"   => RetKind::Primitive("Char".into()),
+                "f32" => RetKind::Primitive("F32".into()),
+                "f64" => RetKind::Primitive("F64".into()),
+                "usize" => RetKind::Primitive("Usize".into()),
+                "isize" => RetKind::Primitive("Isize".into()),
+                "char" => RetKind::Primitive("Char".into()),
                 "String" => RetKind::StringOwned,
                 "CmTypes" => RetKind::CmTypesDirect,
                 _ => RetKind::Other,
@@ -239,9 +253,12 @@ fn build_companion(func: &ItemFn, variadic: bool) -> proc_macro2::TokenStream {
     let cm_params = params.iter().map(|p| {
         let name = &p.name;
         match &p.kind {
-            ParamKind::Passthrough  => { let ty = &p.orig_ty; quote! { #name: #ty } }
-            ParamKind::Variadic(_)  => quote! { #name: &[::synstream_types::CmTypes] },
-            _                       => quote! { #name: &::synstream_types::CmTypes },
+            ParamKind::Passthrough => {
+                let ty = &p.orig_ty;
+                quote! { #name: #ty }
+            }
+            ParamKind::Variadic(_) => quote! { #name: &[::synstream_types::CmTypes] },
+            _ => quote! { #name: &::synstream_types::CmTypes },
         }
     });
 
@@ -252,7 +269,10 @@ fn build_companion(func: &ItemFn, variadic: bool) -> proc_macro2::TokenStream {
     };
 
     // --- Build call args (names as-is; closures shadow non-prim names) ---
-    let call_args = params.iter().map(|p| { let n = &p.name; quote! { #n } });
+    let call_args = params.iter().map(|p| {
+        let n = &p.name;
+        quote! { #n }
+    });
     let raw_call = quote! { #fn_name(#(#call_args),*) };
 
     // --- Innermost expression: call + return wrapping ---
@@ -272,7 +292,12 @@ fn build_companion(func: &ItemFn, variadic: bool) -> proc_macro2::TokenStream {
     // --- Collect the non-primitive, non-variadic params that need closures ---
     let closure_params: Vec<&Param> = params
         .iter()
-        .filter(|p| matches!(p.kind, ParamKind::SharedRef(_) | ParamKind::MutRef(_) | ParamKind::OwnedNonPrim(_)))
+        .filter(|p| {
+            matches!(
+                p.kind,
+                ParamKind::SharedRef(_) | ParamKind::MutRef(_) | ParamKind::OwnedNonPrim(_)
+            )
+        })
         .collect();
 
     // --- Wrap inner_expr in closures (innermost first, so iterate reversed) ---
@@ -301,9 +326,15 @@ fn build_companion(func: &ItemFn, variadic: bool) -> proc_macro2::TokenStream {
     }
 
     // --- Prepend variadic collection if needed ---
-    let full_body = if let Some(vp) = params.iter().find(|p| matches!(p.kind, ParamKind::Variadic(_))) {
+    let full_body = if let Some(vp) = params
+        .iter()
+        .find(|p| matches!(p.kind, ParamKind::Variadic(_)))
+    {
         let vname = &vp.name;
-        let elem_ty = match &vp.kind { ParamKind::Variadic(t) => t, _ => unreachable!() };
+        let elem_ty = match &vp.kind {
+            ParamKind::Variadic(t) => t,
+            _ => unreachable!(),
+        };
         let msg = format!("{}: failed to extract variadic element", fn_name_str);
         quote! {
             let #vname: Vec<#elem_ty> = #vname.iter()

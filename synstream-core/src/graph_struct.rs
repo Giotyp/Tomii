@@ -40,7 +40,6 @@ impl NodePriority {
     }
 }
 
-
 impl CondOp {
     pub fn from_str(op: &str) -> Option<CondOp> {
         match op {

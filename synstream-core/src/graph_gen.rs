@@ -66,9 +66,11 @@ fn parse_predecessor(
     workers: usize,
 ) -> Result<Predecessor, crate::SynError> {
     let pred_name = &pred_json.name;
-    let pred_id = *name_to_id.get(pred_name).ok_or_else(|| -> crate::SynError {
-        format!("Unknown predecessor node '{}'", pred_name).into()
-    })?;
+    let pred_id = *name_to_id
+        .get(pred_name)
+        .ok_or_else(|| -> crate::SynError {
+            format!("Unknown predecessor node '{}'", pred_name).into()
+        })?;
 
     let mut index_vec = Vec::new();
     let indexes = &pred_json.indexes;
@@ -77,9 +79,15 @@ fn parse_predecessor(
     if indexes.contains(',') {
         for predecessor_index in indexes.split(",") {
             let predecessor_index = predecessor_index.trim();
-            let val = predecessor_index.parse::<isize>().map_err(|_| -> crate::SynError {
-                format!("Invalid index '{}' in predecessor '{}'", predecessor_index, pred_name).into()
-            })?;
+            let val = predecessor_index
+                .parse::<isize>()
+                .map_err(|_| -> crate::SynError {
+                    format!(
+                        "Invalid index '{}' in predecessor '{}'",
+                        predecessor_index, pred_name
+                    )
+                    .into()
+                })?;
             index_vec.push(val);
         }
     }
@@ -90,24 +98,44 @@ fn parse_predecessor(
             Ok(val) => val,
             Err(_) => {
                 let obj_id = obj_id_map.get(range[0]).ok_or_else(|| -> crate::SynError {
-                    format!("Invalid range start '{}' in predecessor '{}'", range[0], pred_name).into()
+                    format!(
+                        "Invalid range start '{}' in predecessor '{}'",
+                        range[0], pred_name
+                    )
+                    .into()
                 })?;
                 let ref_val = &init_objects[*obj_id];
-                ref_val[0].valid_number_to_usize().ok_or_else(|| -> crate::SynError {
-                    format!("Range start '{}' is not a valid non-negative integer", range[0]).into()
-                })? as isize
+                ref_val[0]
+                    .valid_number_to_usize()
+                    .ok_or_else(|| -> crate::SynError {
+                        format!(
+                            "Range start '{}' is not a valid non-negative integer",
+                            range[0]
+                        )
+                        .into()
+                    })? as isize
             }
         };
         let end = match range[1].parse::<isize>() {
             Ok(end) => end + 1,
             Err(_) => {
                 let obj_id = obj_id_map.get(range[1]).ok_or_else(|| -> crate::SynError {
-                    format!("Invalid range end '{}' in predecessor '{}'", range[1], pred_name).into()
+                    format!(
+                        "Invalid range end '{}' in predecessor '{}'",
+                        range[1], pred_name
+                    )
+                    .into()
                 })?;
                 let ref_val = &init_objects[*obj_id];
-                ref_val[0].valid_number_to_usize().ok_or_else(|| -> crate::SynError {
-                    format!("Range end '{}' is not a valid non-negative integer", range[1]).into()
-                })? as isize
+                ref_val[0]
+                    .valid_number_to_usize()
+                    .ok_or_else(|| -> crate::SynError {
+                        format!(
+                            "Range end '{}' is not a valid non-negative integer",
+                            range[1]
+                        )
+                        .into()
+                    })? as isize
             }
         };
         for i in start..end {
@@ -118,13 +146,23 @@ fn parse_predecessor(
         match indexes.parse::<isize>() {
             Ok(val) => index_vec.push(val),
             Err(_) => {
-                let obj_id = obj_id_map.get(indexes.as_str()).ok_or_else(|| -> crate::SynError {
-                    format!("Invalid index '{}' in predecessor '{}'", indexes, pred_name).into()
-                })?;
+                let obj_id =
+                    obj_id_map
+                        .get(indexes.as_str())
+                        .ok_or_else(|| -> crate::SynError {
+                            format!("Invalid index '{}' in predecessor '{}'", indexes, pred_name)
+                                .into()
+                        })?;
                 let ref_val = &init_objects[*obj_id];
-                let val = ref_val[0].valid_number_to_usize().ok_or_else(|| -> crate::SynError {
-                    format!("Index ref '{}' is not a valid non-negative integer", indexes).into()
-                })? as isize;
+                let val = ref_val[0]
+                    .valid_number_to_usize()
+                    .ok_or_else(|| -> crate::SynError {
+                        format!(
+                            "Index ref '{}' is not a valid non-negative integer",
+                            indexes
+                        )
+                        .into()
+                    })? as isize;
                 index_vec.push(val);
             }
         }
@@ -144,9 +182,10 @@ fn parse_predecessor(
 }
 
 fn parse_condition(condition_json: &ConditionJson) -> Result<InitCondition, crate::SynError> {
-    let operation = CondOp::from_str(&condition_json.operation).ok_or_else(|| -> crate::SynError {
-        format!("Invalid condition operation '{}'", condition_json.operation).into()
-    })?;
+    let operation =
+        CondOp::from_str(&condition_json.operation).ok_or_else(|| -> crate::SynError {
+            format!("Invalid condition operation '{}'", condition_json.operation).into()
+        })?;
 
     let eval_value = string_to_cmtype(
         condition_json.value_type.to_string(),
@@ -449,11 +488,15 @@ fn parse_single_node(
                     format!("Invalid condition operation '{}'", cond_json.operation).into()
                 })?;
             let cond_value =
-                string_to_cmtype(cond_json.value_type.clone(), cond_json.value.clone())
-                    .map_err(|e| -> crate::SynError {
-                        format!("Failed to parse condition value '{}': {}", cond_json.value, e)
-                            .into()
-                    })?;
+                string_to_cmtype(cond_json.value_type.clone(), cond_json.value.clone()).map_err(
+                    |e| -> crate::SynError {
+                        format!(
+                            "Failed to parse condition value '{}': {}",
+                            cond_json.value, e
+                        )
+                        .into()
+                    },
+                )?;
             let cond_args: Vec<Arg> = cond_json
                 .args
                 .iter()

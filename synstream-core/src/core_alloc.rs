@@ -107,7 +107,10 @@ pub fn allocate_cores(
         )
     } else if total_needed <= available_cores {
         // Branch 4: Fit all threads but not with requested offset - use offset 0
-        tracing::warn!(core_offset, "cannot honor core_offset, using offset 0 instead");
+        tracing::warn!(
+            core_offset,
+            "cannot honor core_offset, using offset 0 instead"
+        );
         let sys_start = 0;
         let recv_start = system_threads;
         let worker_start = recv_start + receiver_threads;

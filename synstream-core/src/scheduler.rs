@@ -184,7 +184,12 @@ impl WorkerMetrics {
         {
             let task_count = tasks.load(Ordering::Relaxed);
             let idle_us = idle_ns.load(Ordering::Relaxed) / 1000;
-            tracing::info!(worker = idx, tasks = task_count, idle_us, "worker utilization");
+            tracing::info!(
+                worker = idx,
+                tasks = task_count,
+                idle_us,
+                "worker utilization"
+            );
         }
 
         let max_tasks = self
@@ -202,7 +207,10 @@ impl WorkerMetrics {
 
         if max_tasks > 0 {
             let imbalance = ((max_tasks - min_tasks) as f64 / max_tasks as f64) * 100.0;
-            tracing::info!(imbalance_pct = format!("{:.2}", imbalance), "load imbalance");
+            tracing::info!(
+                imbalance_pct = format!("{:.2}", imbalance),
+                "load imbalance"
+            );
         }
     }
 }

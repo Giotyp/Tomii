@@ -90,7 +90,6 @@ pub struct ArgCacheEntry {
     pub res_predecessors: Vec<ResPredCache>,
 }
 
-
 impl std::fmt::Debug for ArgCacheEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ArgCacheEntry")

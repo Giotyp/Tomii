@@ -30,14 +30,14 @@
 //! +---------------------------------------------------------------+
 //! ```
 
+pub mod builder;
 mod channels;
 mod worker;
-pub mod builder;
 
 pub use builder::CustomSchedulerBuilder;
 
 use builder::WorkerGroup;
-use channels::{ScheduledTask, RecordMeta};
+use channels::{RecordMeta, ScheduledTask};
 use core_affinity::CoreId;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -55,10 +55,10 @@ pub type BoxedTask = Box<dyn FnOnce() + Send + 'static>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(u8)]
 pub enum Priority {
-    High = 0,   // Checked first
+    High = 0, // Checked first
     #[default]
     Normal = 1, // Default priority
-    Low = 2,    // Background tasks
+    Low = 2,  // Background tasks
 }
 
 // ============================================================================

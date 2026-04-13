@@ -1,4 +1,4 @@
-use super::channels::{ChannelSet, ScheduledTask, try_recv_all};
+use super::channels::{try_recv_all, ChannelSet, ScheduledTask};
 use crate::async_recorder::{set_worker_recorder, submit_record, AsyncRecorder};
 use crate::Record;
 use core_affinity::CoreId;
