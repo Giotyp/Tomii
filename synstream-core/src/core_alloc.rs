@@ -107,10 +107,7 @@ pub fn allocate_cores(
         )
     } else if total_needed <= available_cores {
         // Branch 4: Fit all threads but not with requested offset - use offset 0
-        eprintln!(
-            "Warning: Cannot honor core_offset {}. Using offset 0 instead.",
-            core_offset
-        );
+        tracing::warn!(core_offset, "cannot honor core_offset, using offset 0 instead");
         let sys_start = 0;
         let recv_start = system_threads;
         let worker_start = recv_start + receiver_threads;
@@ -129,11 +126,13 @@ pub fn allocate_cores(
         let remaining = available_cores.saturating_sub(max_system);
         let max_receivers = receiver_threads.min(remaining / 2).max(0);
         let max_workers = remaining.saturating_sub(max_receivers).max(1);
-        eprintln!(
-            "Warning: Requested {} system + {} receivers + {} workers = {} total exceeds {} available cores.\n\
-             Using {} system at core 0, {} receivers starting at core {}, {} workers starting at core {}.",
-            system_threads, receiver_threads, worker_count, total_needed, available_cores,
-            max_system, max_receivers, max_system, max_workers, max_system + max_receivers
+        tracing::warn!(
+            requested = total_needed,
+            available = available_cores,
+            actual_system = max_system,
+            actual_receivers = max_receivers,
+            actual_workers = max_workers,
+            "over-subscription: scaling down thread counts"
         );
         (
             0,

@@ -91,35 +91,20 @@ pub fn create_threadpool(
     let worker_cores_to_use: Vec<core_affinity::CoreId> =
         alloc.all_core_ids[worker_offset..worker_offset + actual_workers].to_vec();
 
-    // Print core allocation
-    println!("========== Core Allocation ==========");
-    println!("Available cores: {}", alloc.all_core_ids.len());
-    if let Some(main_core) = main_core_opt.clone() {
-        println!("Main thread: pinned at core {:?}", main_core);
-    }
-    println!(
-        "System threads: {} at cores {}..{}",
-        actual_system_threads,
-        system_core_offset,
-        system_core_offset + actual_system_threads - 1
+    tracing::info!(
+        available_cores = alloc.all_core_ids.len(),
+        system_threads = actual_system_threads,
+        system_core_start = system_core_offset,
+        receiver_threads = actual_receivers,
+        receiver_core_start = receiver_offset,
+        worker_threads = actual_workers,
+        worker_core_start = worker_offset,
+        main_core = ?main_core_opt,
+        "core allocation"
     );
-    println!(
-        "Receiver threads: {} at cores {}..{} (managed by runtime, not Rayon)",
-        actual_receivers,
-        receiver_offset,
-        receiver_offset + actual_receivers - 1
-    );
-    println!(
-        "Worker threads: {} at cores {}..{}",
-        actual_workers,
-        worker_offset,
-        worker_offset + actual_workers - 1
-    );
-    println!("Worker -> Core Mapping:");
     for (idx, core_id) in worker_cores_to_use.iter().enumerate() {
-        println!("  Worker {}: Core {:?}", idx, core_id);
+        tracing::debug!(worker = idx, core = core_id.id, "worker core assignment");
     }
-    println!("======================================");
 
     let recorder_clone = async_recorder.clone();
     let worker_threadpool = ThreadPoolBuilder::new()
@@ -191,7 +176,6 @@ impl WorkerMetrics {
     }
 
     pub fn print_stats(&self) {
-        println!("\n=== Worker Utilization Statistics ===");
         for (idx, (tasks, idle_ns)) in self
             .tasks_per_worker
             .iter()
@@ -200,10 +184,9 @@ impl WorkerMetrics {
         {
             let task_count = tasks.load(Ordering::Relaxed);
             let idle_us = idle_ns.load(Ordering::Relaxed) / 1000;
-            println!("Worker {}: {} tasks, {}µs idle", idx, task_count, idle_us);
+            tracing::info!(worker = idx, tasks = task_count, idle_us, "worker utilization");
         }
 
-        // Calculate load imbalance
         let max_tasks = self
             .tasks_per_worker
             .iter()
@@ -219,9 +202,8 @@ impl WorkerMetrics {
 
         if max_tasks > 0 {
             let imbalance = ((max_tasks - min_tasks) as f64 / max_tasks as f64) * 100.0;
-            println!("Load imbalance: {:.2}%", imbalance);
+            tracing::info!(imbalance_pct = format!("{:.2}", imbalance), "load imbalance");
         }
-        println!("=====================================\n");
     }
 }
 
@@ -299,10 +281,10 @@ impl SchedulerBase {
         if let Some(recorder) = &self.async_recorder {
             match recorder.write_to_csv(path) {
                 Ok(()) => {}
-                Err(e) => eprintln!("Failed to write records: {}", e),
+                Err(e) => tracing::warn!(error = %e, "failed to write records"),
             }
         } else {
-            println!("SchedulerBase: recorder not enabled");
+            tracing::debug!("recorder not enabled");
         }
     }
 

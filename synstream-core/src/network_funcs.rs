@@ -29,7 +29,7 @@ pub fn synstream_bind_udp(args: &[CmTypes]) -> CmTypes {
         .set_nonblocking(false)
         .expect("Failed to set blocking mode");
 
-    println!("Syn-Net: Bound UDP socket: {}", bind_addr);
+    tracing::info!(addr = %bind_addr, "bound UDP socket");
     CmTypes::from_any(socket)
 }
 
@@ -70,12 +70,12 @@ pub fn synstream_bind_udp_range(args: &[CmTypes]) -> CmTypes {
         sockets.push(socket);
     }
 
-    println!(
-        "SynRt - Bound {} UDP sockets: {}:{}-{}",
+    tracing::info!(
         count,
-        address,
+        address = %address,
         start_port,
-        start_port + count - 1
+        end_port = start_port + count - 1,
+        "bound UDP sockets"
     );
 
     CmTypes::from_any_vec(sockets)

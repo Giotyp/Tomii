@@ -533,8 +533,6 @@ impl CustomSchedulerBuilder {
         // Track which worker indices are assigned to range groups
         let mut assigned_workers = HashSet::new();
 
-        println!("========== Configuring Worker Affinity Groups ==========");
-
         // Calculate remaining workers for global group first
         for (_, range) in &affinity.affinity_groups {
             for worker_idx in range.start..range.end {
@@ -547,10 +545,7 @@ impl CustomSchedulerBuilder {
 
         // Add global group at index 0 FIRST (even if 0 workers)
         if has_global_workers {
-            println!(
-                "  Global Group 0: {} workers (handles count-based and unspecified tasks)",
-                global_worker_count
-            );
+            tracing::info!(global_worker_count, "configuring global worker group");
             self = self.add_group(WorkerGroupConfig {
                 num_workers: global_worker_count,
                 core_ids: None,
@@ -559,8 +554,7 @@ impl CustomSchedulerBuilder {
                 spin_iterations: 64,
             });
         } else {
-            println!("  Warning: All workers assigned to ranges!");
-            println!("  Global tasks (count-based/unspecified) will be handled by range workers");
+            tracing::warn!("all workers assigned to ranges; global tasks handled by range workers");
             // Add dummy group with 0 workers to maintain indexing
             self = self.add_group(WorkerGroupConfig {
                 num_workers: 0,
@@ -576,13 +570,7 @@ impl CustomSchedulerBuilder {
         sorted_groups.sort_by_key(|(gid, _)| *gid);
 
         for (group_id, range) in sorted_groups {
-            println!(
-                "  Range Group {}: workers {}-{} ({} workers)",
-                group_id,
-                range.start,
-                range.end - 1,
-                range.len()
-            );
+            tracing::info!(group_id, start = range.start, end = range.end, "configuring range group");
 
             let allow_steal = true;
 
@@ -595,7 +583,6 @@ impl CustomSchedulerBuilder {
             });
         }
 
-        println!("========================================================");
 
         // Store the affinity config for routing
         self.worker_affinity(Some(affinity))
@@ -619,28 +606,16 @@ impl CustomSchedulerBuilder {
         let worker_core_offset = alloc.worker_offset;
         let main_core = alloc.main_core.clone();
 
-        println!("========== Custom Scheduler Core Allocation ==========");
-        println!("Available cores: {}", alloc.all_core_ids.len());
-        if let Some(ref mc) = main_core {
-            println!("Main thread: pinned at core {:?}", mc);
-        }
-        println!(
-            "System threads: {} at cores {}..{}",
-            alloc.system_threads,
-            system_core_offset,
-            system_core_offset + alloc.system_threads - 1
-        );
-        println!(
-            "Receiver threads: {} at cores {}..{}",
-            alloc.receiver_threads,
-            receiver_core_offset,
-            receiver_core_offset + alloc.receiver_threads - 1
-        );
-        println!(
-            "Worker threads: {} at cores {}..{}",
-            total_workers,
-            worker_core_offset,
-            worker_core_offset + total_workers - 1
+        tracing::info!(
+            available_cores = alloc.all_core_ids.len(),
+            system_threads = alloc.system_threads,
+            system_core_start = system_core_offset,
+            receiver_threads = alloc.receiver_threads,
+            receiver_core_start = receiver_core_offset,
+            worker_threads = total_workers,
+            worker_core_start = worker_core_offset,
+            main_core = ?main_core,
+            "custom scheduler core allocation"
         );
 
         let num_groups = self.groups.len();
@@ -678,7 +653,6 @@ impl CustomSchedulerBuilder {
             total_assigned, total_workers
         );
 
-        println!("======================================================");
 
         CustomScheduler {
             shared,
@@ -754,17 +728,11 @@ fn spawn_worker_threads(
         }
     }
 
-    // Diagnostic output
-    println!("========== Worker to Group Assignment ==========");
     for worker_id in 0..total_workers {
         let group_idx = worker_to_group_idx[worker_id];
         let core_id = all_core_ids[worker_core_offset + worker_id];
-        println!(
-            "  Worker {}: Group {} -> Core {}",
-            worker_id, group_idx, core_id.id
-        );
+        tracing::debug!(worker_id, group_idx, core = core_id.id, "worker-to-group assignment");
     }
-    println!("================================================");
 
     // Spawn workers
     let mut group_worker_handles: Vec<Vec<JoinHandle<()>>> =
@@ -801,10 +769,7 @@ fn spawn_worker_threads(
     for (group_idx, config) in group_configs.iter().enumerate() {
         let actual_workers = group_worker_handles[group_idx].len();
         if actual_workers != config.num_workers {
-            println!(
-                "Warning: Group {} expected {} workers but got {}",
-                group_idx, config.num_workers, actual_workers
-            );
+            tracing::warn!(group_idx, expected = config.num_workers, actual = actual_workers, "worker count mismatch");
         }
         let worker_ids: Vec<usize> = worker_to_group_idx
             .iter()
@@ -816,10 +781,7 @@ fn spawn_worker_threads(
             .iter()
             .map(|&wid| all_core_ids[worker_core_offset + wid].id)
             .collect();
-        println!(
-            "Worker Group {}: {} workers (indices: {:?}) on cores {:?}",
-            group_idx, actual_workers, worker_ids, core_ids
-        );
+        tracing::info!(group_idx, actual_workers, ?worker_ids, ?core_ids, "worker group ready");
     }
 
     group_worker_handles
@@ -1075,7 +1037,7 @@ impl CustomScheduler {
     pub fn write_record(&self, path: &str) {
         if let Some(ref recorder) = self.shared.async_recorder {
             if let Err(e) = recorder.write_to_csv(path) {
-                eprintln!("Failed to write scheduler records: {}", e);
+                tracing::warn!(error = %e, "failed to write scheduler records");
             }
         }
     }

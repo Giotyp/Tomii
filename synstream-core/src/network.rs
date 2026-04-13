@@ -87,10 +87,10 @@ fn set_socket_recv_buffer(socket: &UdpSocket, size: usize) {
         )
     };
     if ret != 0 {
-        eprintln!(
-            "Warning: failed to set SO_RCVBUF to {}: {}",
+        tracing::warn!(
             size,
-            std::io::Error::last_os_error()
+            error = %std::io::Error::last_os_error(),
+            "failed to set SO_RCVBUF"
         );
     }
 }
@@ -118,12 +118,12 @@ pub fn bind_udp_socket_range(
 
         sockets.push(NetworkSocket::Udp(socket));
     }
-    println!(
-        "Successfully bound UDP sockets {}-{} on address {} (recv_buf={}MB)",
+    tracing::info!(
         start_port,
-        start_port + count - 1,
+        end_port = start_port + count - 1,
         address,
-        socket_recv_buf_bytes / (1024 * 1024)
+        recv_buf_mb = socket_recv_buf_bytes / (1024 * 1024),
+        "bound UDP sockets"
     );
     sockets
 }
@@ -179,10 +179,7 @@ pub fn multi_socket_receiver_loop(
         })
         .collect();
 
-    println!(
-        "Multi-socket receiver thread {} polling sockets {:?} on core {}",
-        thread_id, socket_range, core_id
-    );
+    tracing::info!(thread_id, ?socket_range, core_id, "multi-socket receiver thread started");
 
     let tx = &tx;
 
@@ -194,11 +191,7 @@ pub fn multi_socket_receiver_loop(
         // Check shutdown once per full round-robin sweep, not per socket
         if shutdown.load(Ordering::Relaxed) {
             let last_first_dur = last_packet_timestamp.duration_since(first_packet_timestamp);
-            println!(
-                "Multi-socket receiver {}: Total receiving: {:?}",
-                thread_id, last_first_dur
-            );
-            println!("Multi-socket receiver {} shutting down", thread_id);
+            tracing::info!(thread_id, duration = ?last_first_dur, "multi-socket receiver shutting down");
             return;
         }
 
@@ -225,10 +218,7 @@ pub fn multi_socket_receiver_loop(
             match socket.recv(&mut packet_bytes) {
                 Ok(size) => {
                     if size != packet_length {
-                        eprintln!(
-                            "Receiver thread {} socket {}: unexpected packet size {} != {}",
-                            thread_id, socket_id, size, packet_length
-                        );
+                        tracing::warn!(thread_id, socket_id, size, packet_length, "unexpected packet size");
                         continue;
                     }
                     let packet_timestamp = Instant::now();
@@ -249,10 +239,7 @@ pub fn multi_socket_receiver_loop(
 
                     if tx.try_send(msg).is_err() {
                         drop_counter.fetch_add(1, Ordering::Relaxed);
-                        eprintln!(
-                            "Receiver thread {} socket {}: channel full, packet dropped",
-                            thread_id, socket_id
-                        );
+                        tracing::warn!(thread_id, socket_id, "channel full, packet dropped");
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -262,10 +249,7 @@ pub fn multi_socket_receiver_loop(
                     continue;
                 }
                 Err(e) => {
-                    eprintln!(
-                        "Receiver thread {} socket {}: recv error: {}",
-                        thread_id, socket_id, e
-                    );
+                    tracing::error!(thread_id, socket_id, error = %e, "recv error, exiting");
                     return;
                 }
             }

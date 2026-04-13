@@ -15,16 +15,14 @@ impl SynRt {
     #[cfg(feature = "network")]
     pub(super) fn spawn_receiver_threads(&self) -> Vec<JoinHandle<()>> {
         let Some(ref network_config) = self.shared.graph.network_config() else {
-            println!("No network_config present - skipping network receiver setup");
+            tracing::debug!("No network_config present - skipping network receiver setup");
             return Vec::new();
         };
 
         let num_sockets = network_config.num_sockets;
         let buffer_depth = network_config.buffer_depth;
 
-        println!("\n=== Initializing Network Receiver Infrastructure ===");
-        println!("Number of sockets: {}", num_sockets);
-        println!("Buffer depth: {} packets per socket", buffer_depth);
+        tracing::info!(num_sockets, buffer_depth, "initializing network receiver infrastructure");
 
         assert_eq!(
             self.shared.net.receiver_sockets.len(),
@@ -39,11 +37,12 @@ impl SynRt {
         let dylib_path =
             std::env::var("DYLIB_PATH").unwrap_or_else(|_| "./libmimolib.so".to_string());
 
-        println!(
-            "\nSpawning {} receiver threads starting at core {}",
-            receiver_threads, receiver_offset
+        tracing::info!(
+            receiver_threads,
+            receiver_offset,
+            dylib = %dylib_path,
+            "spawning receiver threads"
         );
-        println!("Using dylib: {} for frame ID extraction", dylib_path);
 
         let mut handles = Vec::with_capacity(receiver_threads);
 
@@ -61,7 +60,7 @@ impl SynRt {
         let drop_counters = Arc::clone(&self.shared.net.packet_drop_counters);
 
         if receiver_threads >= num_sockets {
-            println!("Using 1:1 thread-to-socket mapping (optimal)");
+            tracing::debug!("using 1:1 thread-to-socket mapping");
             for socket_id in 0..num_sockets {
                 let core_id = receiver_offset + socket_id;
                 let return_rx = self.shared.net.buffer_return_receivers[socket_id]
@@ -94,15 +93,13 @@ impl SynRt {
                     })
                     .expect("Failed to spawn receiver thread");
                 handles.push(handle);
-                println!(
-                    "  Receiver thread {} (socket {}) spawned on core {}",
-                    socket_id, socket_id, core_id
-                );
+                tracing::debug!(socket_id, core_id, "receiver thread spawned");
             }
         } else {
-            println!(
-                "WARNING: receiver_threads ({}) < num_sockets ({}). Using round-robin polling.",
-                receiver_threads, num_sockets
+            tracing::warn!(
+                receiver_threads,
+                num_sockets,
+                "receiver_threads < num_sockets, using round-robin polling"
             );
             let sockets_per_thread = (num_sockets + receiver_threads - 1) / receiver_threads;
 
@@ -148,14 +145,11 @@ impl SynRt {
                     })
                     .expect("Failed to spawn receiver thread");
                 handles.push(handle);
-                println!(
-                    "  Multi-socket receiver {} polling sockets {:?} on core {}",
-                    thread_id, socket_range_display, core_id
-                );
+                tracing::debug!(thread_id, ?socket_range_display, core_id, "multi-socket receiver spawned");
             }
         }
 
-        println!("=== Network Receiver Infrastructure Ready ===\n");
+        tracing::info!("network receiver infrastructure ready");
         handles
     }
 
@@ -177,15 +171,9 @@ impl SynRt {
                 }
 
                 if core_affinity::set_for_current(core_affinity::CoreId { id: thread_core }) {
-                    println!(
-                        "Resolution thread {} pinned to core {:?} with slot {}",
-                        thread_id, thread_core, thread_slot
-                    );
+                    tracing::debug!(thread_id, core = thread_core, slot = thread_slot, "resolution thread pinned");
                 } else {
-                    println!(
-                        "Failed to pin resolution thread {} to core {:?}",
-                        thread_id, thread_core
-                    );
+                    tracing::warn!(thread_id, core = thread_core, "failed to pin resolution thread");
                 }
 
                 Self::resolution(shared_clone, thread_core, thread_id, thread_slot);
@@ -208,43 +196,35 @@ impl SynRt {
             return;
         }
 
-        println!("Shutting down {} receiver threads...", handles.len());
+        tracing::info!(count = handles.len(), "shutting down receiver threads");
         self.shared.shutdown_flag.store(true, Ordering::SeqCst);
 
         for (idx, handle) in handles.into_iter().enumerate() {
             handle.join().unwrap();
-            println!("  Receiver thread {} shut down successfully", idx);
+            tracing::debug!(idx, "receiver thread shut down");
         }
 
         // Report packet drop statistics
         if let Some(ref network_config) = self.shared.graph.network_config {
             let num_sockets = network_config.num_sockets;
             let mut total_drops = 0;
-            println!("\nPacket Drop Statistics:");
             for socket_id in 0..num_sockets {
                 let drops = self.shared.net.packet_drop_counters[socket_id].load(Ordering::SeqCst);
                 total_drops += drops;
                 if drops > 0 {
-                    println!("  Socket {}: {} packets dropped", socket_id, drops);
+                    tracing::warn!(socket_id, drops, "packets dropped");
                 }
             }
             if total_drops == 0 {
-                println!("  No packets dropped!");
+                tracing::info!("no packets dropped");
             } else {
-                println!(
-                    "  TOTAL: {} packets dropped across all sockets",
-                    total_drops
-                );
+                tracing::warn!(total_drops, "total packets dropped across all sockets");
             }
         }
 
         let dropped_frames = self.shared.net.dropped_streams.load(Ordering::SeqCst);
         if dropped_frames > 0 {
-            println!("\nDropped Frame Statistics:");
-            println!(
-                "  TOTAL: {} frames dropped (no available slots)",
-                dropped_frames
-            );
+            tracing::warn!(dropped_frames, "frames dropped (no available slots)");
         }
     }
 }

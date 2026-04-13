@@ -39,7 +39,6 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use crate::async_recorder::AsyncRecorder;
-use crate::debug::print_debug;
 use crate::graph_gen::GraphCompiled;
 use crate::resolution_state::{MultiThreadedState, ResolutionState};
 use crate::scheduler::SchedulerImpl;
@@ -254,17 +253,14 @@ impl SynRtBuilder {
         };
 
         // --- Resolution state ---
-        let resolution_state: Arc<dyn ResolutionState> = {
-            println!("Using multi-threaded resolution state (lock-free atomics)");
-            Arc::new(MultiThreadedState::new(
-                num_nodes,
-                slots,
-                max_factor,
-                dependency_count_vec,
-                &graph.nodes,
-            ))
-        };
-        println!(
+        let resolution_state: Arc<dyn ResolutionState> = Arc::new(MultiThreadedState::new(
+            num_nodes,
+            slots,
+            max_factor,
+            dependency_count_vec,
+            &graph.nodes,
+        ));
+        tracing::debug!(
             "\nResolutionState initialized:\n{}\n",
             resolution_state.debug_info()
         );
@@ -406,7 +402,7 @@ impl SynRt {
 
         // Wait loop: sleep until max_runtime exceeded or all streams complete
         let start_time = Instant::now();
-        print_debug(|| "Max runtime check started".to_string());
+        tracing::debug!("Max runtime check started");
         if let Some(max_runtime) = self.shared.config.max_runtime {
             sleep(RUN_SLEEP);
             let mut finish = false;
@@ -419,17 +415,17 @@ impl SynRt {
                 let completed = completed_streams == self.shared.config.max_streams;
 
                 if start_time.elapsed().as_secs() > max_runtime {
-                    println!("Max runtime reached exiting...");
+                    tracing::info!("Max runtime reached, exiting");
                     finish = true;
                 } else if completed {
-                    println!("No pending jobs and all jobs completed, exiting...");
+                    tracing::info!("All streams completed, exiting");
                     finish = true;
                 }
 
                 if finish {
                     self.shared.shutdown_flag.store(true, Ordering::SeqCst);
-                    println!("Shutdown flag set - signaling resolution threads to exit");
-                    println!("Processing possible post-nodes...");
+                    tracing::info!("Shutdown flag set - signaling resolution threads to exit");
+                    tracing::debug!("Processing possible post-nodes");
                     self.schedule_post_nodes();
                     break;
                 }

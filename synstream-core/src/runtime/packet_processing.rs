@@ -203,9 +203,10 @@ fn assign_packet_to_slot(
                         .stream_complete_counter
                         .fetch_add(1, Ordering::SeqCst);
                     let dropped = shared.net.dropped_streams.fetch_add(1, Ordering::Relaxed) + 1;
-                    eprintln!(
-                        "Frame {} dropped: no available slots ({} dropped total)",
-                        new_stream, dropped
+                    tracing::warn!(
+                        stream = new_stream,
+                        total_dropped = dropped,
+                        "frame dropped: no available slots"
                     );
                 }
             }
@@ -298,9 +299,10 @@ fn check_stream_completion(
         .fetch_add(1, Ordering::AcqRel)
         + 1;
     if completed_streams >= shared.config.max_streams {
-        println!(
-            "All {} streams received ({} packets each) - receivers will shutdown",
-            shared.config.max_streams, stream_packets
+        tracing::info!(
+            streams = shared.config.max_streams,
+            packets_per_stream = stream_packets,
+            "all streams received, receivers will shut down"
         );
         shared.net.receive_finished.store(true, Ordering::Release);
     }

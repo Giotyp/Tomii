@@ -230,7 +230,7 @@ impl TimeBufferManager {
         if self.is_async {
             if let Some(ref async_buf) = self.async_buffer {
                 if let Err(e) = async_buf.print_stats(bench_name, out_file, exclude_streams) {
-                    eprintln!("Failed to print stats: {}", e);
+                    tracing::warn!(error = %e, "failed to print stats");
                 }
             }
         } else {
@@ -252,7 +252,7 @@ impl TimeBufferManager {
         if self.is_async {
             if let Some(ref async_buf) = self.async_buffer {
                 if let Err(e) = async_buf.write_json_report(graph_edges, path, exclude_streams) {
-                    eprintln!("Failed to write JSON report: {}", e);
+                    tracing::warn!(error = %e, "failed to write JSON report");
                 }
             }
         } else if let Some(ref sync_buf) = self.sync_buffer {

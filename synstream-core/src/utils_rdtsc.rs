@@ -57,7 +57,6 @@ fn measure_rdtsc_freq() -> f64 {
             sum = sum.wrapping_add(i.wrapping_add((sum.wrapping_add(i)).wrapping_mul(i % sum)));
         }
         if sum != 13_580_802_877_818_827_968u64 {
-            println!("Error in RDTSC freq measurement");
             panic!("Error in RDTSC freq measurement");
         }
 
@@ -69,8 +68,7 @@ fn measure_rdtsc_freq() -> f64 {
 
         // RDTSC frequencies outside these ranges are rare
         if freq_ghz < 1.0 || freq_ghz > 4.0 {
-            println!("Invalid RDTSC frequency {:.2?}", freq_ghz);
-            panic!("Invalid RDTSC frequency");
+            panic!("Invalid RDTSC frequency {:.2}", freq_ghz);
         }
         freq_ghz
     }
