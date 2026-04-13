@@ -17,9 +17,6 @@ mod task_execution;
 mod thread_locals;
 mod threading;
 
-// SharedData is pub because network.rs (a non-runtime module) takes &Arc<SharedData>
-// in the receiver loop signatures. All other runtime internals are pub(crate).
-//
 // build_node_cache and build_predecessor_tables are re-exported pub(crate) so that
 // graph_gen::GraphSpec::compile() can call them without going through the runtime builder.
 pub(crate) use init::{build_node_cache, build_predecessor_tables};
@@ -30,7 +27,8 @@ use network_init::prepare_network_infrastructure;
 use parking_lot::RwLock;
 #[cfg(feature = "network")]
 pub(crate) use shared_data::NetworkInfra;
-pub use shared_data::SharedData;
+// SharedData is crate-internal; only BatchConfig and SpinWaitConfig are part of the public API.
+pub(crate) use shared_data::SharedData;
 pub use shared_data::{BatchConfig, SpinWaitConfig};
 pub(crate) use shared_data::{
     BatchQueueRx, BatchQueueTx, ExecCtx, GraphCache, RuntimeConfig, SlotData, SlotState, Telemetry,

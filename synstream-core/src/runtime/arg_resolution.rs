@@ -179,11 +179,87 @@ fn spin_wait_for_result(
     }
 }
 
+/// Shared core of the `$res` resolution path.
+///
+/// Both [`collect_arg_result`] (live-graph path) and [`collect_res_from_cache`]
+/// (precomputed-cache path) converge here after resolving their metadata into a
+/// common form.  All three dispatch cases live in exactly one place.
+///
+/// # Parameters
+/// - `res_node_id`: the predecessor node whose result we are reading
+/// - `indexes`: the index spec from the graph edge (`Predecessor::indexes`)
+/// - `node_index` / `pred_index`: instance indices for this and the triggering predecessor
+/// - `node_factor`: parallelism factor of the successor (current) node
+/// - `pred_factor`: parallelism factor of the predecessor node
+/// - `node_group_size`: `group_size` of the successor node (for grouped barrier edges)
+/// - `pred_eff_group_size`: effective group size of the predecessor (pre-resolved by caller)
+#[inline(always)]
+fn fetch_res_results(
+    res_node_id: IdType,
+    indexes: &[isize],
+    node_index: usize,
+    pred_index: usize,
+    node_factor: usize,
+    pred_factor: usize,
+    node_group_size: Option<usize>,
+    pred_eff_group_size: Option<usize>,
+    slot: usize,
+    shared: &Arc<SharedData>,
+) -> Option<Vec<CmTypes>> {
+    if indexes.is_empty() {
+        return None;
+    }
+
+    // Single explicit index: use the declared index, not pred_index.
+    if indexes.len() == 1 {
+        let dep_idx = if let Some(ngs) = node_group_size {
+            let symbol = node_index / ngs;
+            let eff_gs = pred_eff_group_size.unwrap_or(pred_factor);
+            symbol * eff_gs + indexes[0] as usize
+        } else {
+            find_pred_index(node_index, indexes[0], pred_factor)
+        };
+        let node_info = NodeInfo::new(res_node_id, slot, dep_idx, 0);
+        if let Some(result) = shared.exec.node_results.get(&node_info) {
+            return Some(vec![result]);
+        }
+        return spin_wait_for_result(shared, &node_info).map(|r| vec![r]);
+    }
+
+    // 1:1 mapping: each successor instance reads one predecessor result via pred_index.
+    if indexes.len() > 1 && indexes.len() == node_factor {
+        let node_info = NodeInfo::new(res_node_id, slot, pred_index % pred_factor, 0);
+        if let Some(result) = shared.exec.node_results.get(&node_info) {
+            return Some(vec![result]);
+        }
+        return spin_wait_for_result(shared, &node_info).map(|r| vec![r]);
+    }
+
+    // Collect-all path: gather every explicitly listed predecessor index.
+    let mut result_vec = Vec::with_capacity(indexes.len());
+    for &pred_idx in indexes.iter() {
+        let dep_idx = find_pred_index(node_index, pred_idx, pred_factor);
+        let node_info = NodeInfo::new(res_node_id, slot, dep_idx, 0);
+        if let Some(result) = shared.exec.node_results.get(&node_info) {
+            result_vec.push(result);
+        } else {
+            match spin_wait_for_result(shared, &node_info) {
+                Some(result) => result_vec.push(result),
+                None => return None,
+            }
+        }
+    }
+    if result_vec.len() == indexes.len() {
+        Some(result_vec)
+    } else {
+        None
+    }
+}
+
 /// Hot-path variant of [`collect_arg_result`] for `$res`/`$dep` arguments.
 ///
-/// Uses pre-resolved [`ResPredCache`] metadata (built once at startup) instead of reading
-/// `shared.graph.nodes[...]` on every task dispatch.  Mirrors the `Res`/`Dep` branches of
-/// `collect_arg_result` exactly — any logic change there must be reflected here too.
+/// Uses pre-resolved [`ResPredCache`] metadata (built once at startup) instead of
+/// reading `shared.graph.nodes[...]` on every task dispatch.
 #[inline(always)]
 fn collect_res_from_cache(
     rp: &ResPredCache,
@@ -206,66 +282,22 @@ fn collect_res_from_cache(
         return Some(vec![(*custom).clone()]);
     }
 
-    if rp.indexes.is_empty() {
-        return None;
-    }
+    let pred_eff_gs = rp.pred_group_size.or_else(|| {
+        shared.graph_cache.pred_group_by[rp.node_id as usize][rp.res_node_id as usize]
+    });
 
-    // Single explicit index: use the declared index, not pred_index.
-    if rp.indexes.len() == 1 {
-        let dep_idx = if let Some(ngs) = rp.node_group_size {
-            let symbol = node_index / ngs;
-            let pred_eff_gs = rp.pred_group_size.unwrap_or_else(|| {
-                shared.graph_cache.pred_group_by[rp.node_id as usize][rp.res_node_id as usize]
-                    .unwrap_or(rp.pred_factor)
-            });
-            let offset = rp.indexes[0] as usize;
-            symbol * pred_eff_gs + offset
-        } else {
-            find_pred_index(node_index, rp.indexes[0], rp.pred_factor)
-        };
-        let node_info = NodeInfo::new(rp.res_node_id, slot, dep_idx, 0);
-        if let Some(result) = shared.exec.node_results.get(&node_info) {
-            return Some(vec![result]);
-        }
-        return match spin_wait_for_result(shared, &node_info) {
-            Some(result) => Some(vec![result]),
-            None => None,
-        };
-    }
-
-    // 1:1 mapping: each instance reads exactly one predecessor result via pred_index.
-    if rp.indexes.len() > 1 && rp.indexes.len() == rp.node_factor {
-        let node_info = NodeInfo::new(rp.res_node_id, slot, pred_index % rp.pred_factor, 0);
-        if let Some(result) = shared.exec.node_results.get(&node_info) {
-            return Some(vec![result]);
-        }
-        return match spin_wait_for_result(shared, &node_info) {
-            Some(result) => Some(vec![result]),
-            None => None,
-        };
-    }
-
-    // Collect-all path: factor != indexes.len() (e.g., write_res)
-    let mut indices = Vec::with_capacity(rp.indexes.len());
-    for &pred_idx in rp.indexes.iter() {
-        indices.push(find_pred_index(node_index, pred_idx, rp.pred_factor));
-    }
-    let mut result_vec = Vec::with_capacity(indices.len());
-    for dep_idx in indices.iter() {
-        let node_info = NodeInfo::new(rp.res_node_id, slot, *dep_idx, 0);
-        if let Some(result) = shared.exec.node_results.get(&node_info) {
-            result_vec.push(result);
-        } else {
-            match spin_wait_for_result(shared, &node_info) {
-                Some(result) => result_vec.push(result),
-                None => return None,
-            }
-        }
-    }
-    if result_vec.len() == indices.len() {
-        return Some(result_vec);
-    }
-    None
+    fetch_res_results(
+        rp.res_node_id,
+        &rp.indexes,
+        node_index,
+        pred_index,
+        rp.node_factor,
+        rp.pred_factor,
+        rp.node_group_size,
+        pred_eff_gs,
+        slot,
+        shared,
+    )
 }
 
 #[inline]
@@ -307,98 +339,32 @@ pub(super) fn collect_arg_result(
                 return Some(vec![(*custom_res).clone()]);
             }
 
-            // Get predecessor info
             let predecessor = match arg.predecessor.as_ref() {
                 Some(p) => p,
-                None => return None, // Early return if no predecessor
+                None => return None,
             };
 
-            // Single explicit index: use the declared index, NOT pred_index.
-            // The triggering predecessor may differ from the $res predecessor
-            // (e.g., demul's $res reads fft[0] but demul can be triggered by beam).
-            if predecessor.indexes.len() == 1 {
-                let res_node = &shared.graph.nodes[*res_node_id as usize];
-                let res_factor = res_node.factor;
-                let current_node = &shared.graph.nodes[node_id as usize];
+            let res_node = &shared.graph.nodes[*res_node_id as usize];
+            let pred_factor = res_node.factor;
+            let current_node = &shared.graph.nodes[node_id as usize];
 
-                let dep_idx = if let Some(ngs) = current_node.group_size {
-                    // Current node is grouped: map through symbol level.
-                    // symbol = which group/symbol this instance belongs to
-                    let symbol = node_index / ngs;
-                    // Predecessor's effective group size: its own group_size,
-                    // or the barrier's group_by, or fall back to full factor
-                    let pred_eff_gs = res_node.group_size.unwrap_or_else(|| {
-                        shared.graph_cache.pred_group_by[node_id as usize][*res_node_id as usize]
-                            .unwrap_or(res_factor)
-                    });
-                    let offset = predecessor.indexes[0] as usize;
-                    symbol * pred_eff_gs + offset
-                } else {
-                    find_pred_index(node_index, predecessor.indexes[0], res_factor)
-                };
+            // Pre-resolve effective group size for grouped barrier edges.
+            let pred_eff_gs = res_node.group_size.or_else(|| {
+                shared.graph_cache.pred_group_by[node_id as usize][*res_node_id as usize]
+            });
 
-                let node_info = NodeInfo::new(*res_node_id as IdType, slot, dep_idx, 0);
-                if let Some(result) = shared.exec.node_results.get(&node_info) {
-                    return Some(vec![result]);
-                }
-                // Result temporarily absent: predecessor may still be executing on a
-                // parallel worker (threshold dispatch fired before its store completed).
-                // Spin-wait until the result arrives or the slot becomes stale.
-                return match spin_wait_for_result(shared, &node_info) {
-                    Some(result) => Some(vec![result]),
-                    None => None,
-                };
-            }
-
-            // 1:1 mapping: indexes.len() == node_factor means each instance
-            // reads exactly one predecessor result via pred_index (the triggering
-            // predecessor IS the $res predecessor in this case).
-            if predecessor.indexes.len() > 1 && predecessor.indexes.len() == node_factor {
-                let res_node = &shared.graph.nodes[*res_node_id as usize];
-                let res_factor = res_node.factor;
-                let node_info =
-                    NodeInfo::new(*res_node_id as IdType, slot, pred_index % res_factor, 0);
-                if let Some(result) = shared.exec.node_results.get(&node_info) {
-                    return Some(vec![result]);
-                }
-                // Spin-wait: predecessor may still be in-flight on another worker.
-                return match spin_wait_for_result(shared, &node_info) {
-                    Some(result) => Some(vec![result]),
-                    None => None,
-                };
-            }
-
-            // Collect-all path: factor != indexes.len() (e.g., write_res)
-            let pred_node = &shared.graph.nodes[predecessor.id as usize];
-            let pred_factor = pred_node.factor;
-
-            // Pre-allocate vectors
-            let mut indices = Vec::with_capacity(predecessor.indexes.len());
-            for &pred_idx in predecessor.indexes.iter() {
-                indices.push(find_pred_index(node_index, pred_idx, pred_factor));
-            }
-
-            // Lock-free atomic loads - no RwLock contention
-            let mut result_vec = Vec::with_capacity(indices.len());
-
-            // Batch collect all results
-            for dep_idx in indices.iter() {
-                let node_info = NodeInfo::new(*res_node_id as IdType, slot, *dep_idx, 0);
-                if let Some(result) = shared.exec.node_results.get(&node_info) {
-                    result_vec.push(result);
-                } else {
-                    // Spin-wait: predecessor may still be in-flight on another worker.
-                    match spin_wait_for_result(shared, &node_info) {
-                        Some(result) => result_vec.push(result),
-                        None => return None, // Stale
-                    }
-                }
-            }
-
-            if result_vec.len() == indices.len() {
-                return Some(result_vec);
-            }
-            None
+            fetch_res_results(
+                *res_node_id as IdType,
+                &predecessor.indexes,
+                node_index,
+                pred_index,
+                node_factor,
+                pred_factor,
+                current_node.group_size,
+                pred_eff_gs,
+                slot,
+                shared,
+            )
         }
         CmTypes::Barrier(_) => None,
         _ => Some(vec![arg.type_.clone()]),
