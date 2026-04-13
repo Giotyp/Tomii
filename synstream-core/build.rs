@@ -1,6 +1,5 @@
 use build_print::info;
 use std::path::PathBuf;
-use std::process::Command;
 use std::{env, fs};
 use synstream_converter::generate_from_file;
 
@@ -117,43 +116,24 @@ fn main() {
             wrapper_file.display(),
             registry_file.display()
         );
-    } else if file_extension == "h" {
-        // Generate an empty funcs module placeholder for .h files
-        let empty_module = r#"
-        pub mod funcs {
-            // Placeholder for .h files
-        }
-        "#;
+    } else if file_extension == "h" || file_extension == "hpp" {
+        // Write a placeholder funcs.rs — C functions are loaded from the dylib
+        // at runtime via wrappers.rs (libloading), not via static linking.
+        fs::write(
+            &copied_file,
+            "// Functions are loaded from the C dylib via wrappers.rs\n",
+        )
+        .unwrap_or_else(|err| panic!("Failed to write funcs.rs to OUT_DIR: {}", err));
 
-        fs::write(&copied_file, empty_module)
-            .unwrap_or_else(|err| panic!("Failed to write empty module to OUT_DIR: {}", err));
+        // Generate wrappers and registry using the Rust converter (C header path)
+        generate_from_file(&path, &wrapper_file, &registry_file)
+            .unwrap_or_else(|e| panic!("Converter failed for C header: {}", e));
 
-        // Call the Python transformer for .h files (C++ interop path)
-        let output = Command::new("python3")
-            .arg("transformer.py")
-            .arg(&path)
-            .arg(wrapper_file.to_str().unwrap())
-            .arg(registry_file.to_str().unwrap())
-            .output()
-            .expect("Failed to execute Python script");
-
-        if !output.status.success() {
-            let out = String::from_utf8_lossy(&output.stdout);
-            let err = String::from_utf8_lossy(&output.stderr);
-            panic!(
-                "Python script failed (exit {:?})\n--- STDOUT ---\n{}\n--- STDERR ---\n{}",
-                output.status.code(),
-                out,
-                err
-            );
-        }
-
-        // .h files require linking with lib<file>.so
-        info!("Linking with {}/{}", func_path, file_name);
-        println!("cargo:rustc-link-lib=dylib=stdc++");
-        println!("cargo:rustc-link-search=native={}", func_path);
-        println!("cargo:rustc-link-lib=dylib={}", file_name);
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", func_path);
+        info!(
+            "Generated wrappers at {} and registry at {}",
+            wrapper_file.display(),
+            registry_file.display()
+        );
     } else {
         panic!("Unsupported file extension: {}", file_extension);
     }

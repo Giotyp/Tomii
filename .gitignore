@@ -5,6 +5,7 @@ scripts/__pycache__/*
 .penv/*
 Cargo.lock
 target/*
+*.so
 *.md
 *.png
 *.txt
