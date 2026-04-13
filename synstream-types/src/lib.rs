@@ -12,6 +12,13 @@ use std::time::Duration;
 // Re-export num_complex Complex types for convenience
 pub use num_complex::{Complex32, Complex64};
 
+/// Runtime ABI version. Plugins must export this symbol and the host verifies it matches.
+/// Increment when `CmTypes` layout changes (new variant, removed variant, changed repr).
+#[no_mangle]
+pub extern "C" fn synstream_abi_version() -> u32 {
+    1
+}
+
 #[derive(Clone)]
 pub enum CmTypes {
     // Small Copy types - remain unboxed for efficiency (≤8 bytes)
@@ -436,7 +443,7 @@ impl CmTypes {
         }
     }
 
-    pub fn from_any_sliced<T: Any + Send + Sync + Sliceable<U>, U: Clone + 'static>(
+    pub fn from_any_sliced<T: Any + Send + Sync + Sliceable<U>, U: Clone + Send + Sync + 'static>(
         mut value: T,
     ) -> CmTypes {
         // Get the mutable slice from the value
@@ -550,19 +557,43 @@ impl CmTypes {
         }
     }
 
-    /// Returns a raw mutable pointer to the inner type `T` if it matches.
+    /// Returns a raw mutable pointer to the inner type `T` if it matches, along
+    /// with an RAII guard that keeps the allocation alive.
+    ///
+    /// # When to use
+    /// Use this for performance-critical paths where per-access lock overhead is
+    /// unacceptable and you can statically guarantee that concurrent accesses to
+    /// *different sub-ranges* of the pointed-to data do not alias (e.g., a
+    /// partitioned buffer where each thread owns a unique slice).
+    ///
+    /// For exclusive single-thread mutation, prefer [`CmTypes::with_any_mut`].
     ///
     /// # Safety
-    /// The caller must ensure that:
-    /// - The returned pointer is not used to create multiple mutable references
-    /// - The pointer is not dereferenced after the `CmTypes` value is dropped
-    /// - Proper synchronization is used when accessing the data from multiple threads
-    pub unsafe fn as_mut_ptr<T: Any + Send + Sync>(&self) -> Option<SendPtr<T>> {
+    /// The caller must ensure:
+    /// 1. **No aliasing**: the returned pointer is not used to create overlapping
+    ///    mutable references concurrently.  If multiple threads each receive a
+    ///    `RawMutGuard` to the *same* value, they must partition their access
+    ///    ranges.
+    /// 2. **Guard lifetime**: all uses of `guard.ptr` must complete before the
+    ///    guard is dropped.  The pointer is valid for exactly as long as the
+    ///    guard is live.
+    /// 3. **No concurrent `with_any_mut`**: do not call [`CmTypes::with_any_mut`]
+    ///    on the *same* `CmTypes` value while a `RawMutGuard` is live.
+    pub unsafe fn as_mut_ptr<T: Any + Send + Sync>(&self) -> Option<RawMutGuard<T>> {
         if let CmTypes::Any(lock) = self {
-            let guard = lock.read();
-            guard
-                .downcast_ref::<T>()
-                .map(|r| SendPtr(r as *const T as *mut T))
+            // Brief read lock — only used to confirm the type matches.
+            // The lock is released before returning; the returned guard's Arc
+            // keepalive prevents the allocation from being dropped.
+            let ptr = {
+                let guard = lock.read();
+                guard
+                    .downcast_ref::<T>()
+                    .map(|r| r as *const T as *mut T)
+            };
+            ptr.map(|p| RawMutGuard {
+                ptr: p,
+                _keepalive: Arc::clone(lock),
+            })
         } else {
             None
         }
@@ -601,20 +632,29 @@ impl CmTypes {
         matches!(self, CmTypes::Barrier(_))
     }
 
-    /// Get a borrowed reference to a range without setting write bits
-    /// Returns Some(&[T]) if no mutable borrows are active in the range, None otherwise
-    pub fn sliced_get_range<T>(&self, start: usize, len: usize) -> Option<&[T]> {
+    /// Get a borrowed reference to a range without setting write bits.
+    /// Returns `Some(CmReadGuard)` if no mutable borrows are active in the range.
+    /// Returns `None` if there is a write conflict or type mismatch.
+    /// The guard holds read bits and releases them when dropped.
+    pub fn sliced_get_range<T>(&self, start: usize, len: usize) -> Option<CmReadGuard<T>> {
         if let CmTypes::AnySliced(container_arc) = self {
             unsafe {
                 if let Some((raw_ptr, byte_len)) = container_arc.get_range_raw(start, len) {
                     let element_size = std::mem::size_of::<T>();
                     if element_size == 0 || byte_len % element_size != 0 {
+                        // Release read bits before returning None
+                        container_arc.unset_read_range(start, len);
                         return None;
                     }
                     let element_len = byte_len / element_size;
-                    let typed_ptr = raw_ptr as *const T;
-                    let slice = std::slice::from_raw_parts(typed_ptr, element_len);
-                    Some(slice)
+                    let ptr = raw_ptr as *const T;
+                    Some(CmReadGuard {
+                        ptr,
+                        len: element_len,
+                        _keepalive: Arc::clone(container_arc),
+                        start,
+                        range_len: len,
+                    })
                 } else {
                     None
                 }
@@ -624,15 +664,16 @@ impl CmTypes {
         }
     }
 
-    /// Get a borrowed reference to a range with timeout
-    /// Waits up to the specified duration for mutable borrows to be released
-    /// Returns Some(&[T]) if successful, None if timeout or out of bounds
+    /// Get a borrowed reference to a range with timeout.
+    /// Waits up to the specified duration for mutable borrows to be released.
+    /// Returns `Some(CmReadGuard)` if successful, `None` if timeout or out of bounds.
+    /// The guard holds read bits and releases them when dropped.
     pub fn sliced_get_range_timeout<T>(
         &self,
         start: usize,
         len: usize,
         timeout: Duration,
-    ) -> Option<&[T]> {
+    ) -> Option<CmReadGuard<T>> {
         if let CmTypes::AnySliced(container_arc) = self {
             unsafe {
                 if let Some((raw_ptr, byte_len)) =
@@ -640,12 +681,19 @@ impl CmTypes {
                 {
                     let element_size = std::mem::size_of::<T>();
                     if element_size == 0 || byte_len % element_size != 0 {
+                        // Release read bits before returning None
+                        container_arc.unset_read_range(start, len);
                         return None;
                     }
                     let element_len = byte_len / element_size;
-                    let typed_ptr = raw_ptr as *const T;
-                    let slice = std::slice::from_raw_parts(typed_ptr, element_len);
-                    Some(slice)
+                    let ptr = raw_ptr as *const T;
+                    Some(CmReadGuard {
+                        ptr,
+                        len: element_len,
+                        _keepalive: Arc::clone(container_arc),
+                        start,
+                        range_len: len,
+                    })
                 } else {
                     None
                 }
@@ -697,6 +745,104 @@ impl<'a, T> Drop for MutSliceGuard<'a, T> {
     }
 }
 
+/// RAII guard returned by [`CmTypes::as_mut_ptr`].
+///
+/// Holds an `Arc` clone of the inner storage, ensuring the pointed-to data
+/// remains alive for the guard's entire lifetime.  The raw pointer can be
+/// used freely during that window — no lock is held, so it is the *caller's*
+/// responsibility to prevent aliasing (e.g. by operating on non-overlapping
+/// sub-ranges from separate threads).
+pub struct RawMutGuard<T> {
+    /// Raw pointer into the heap allocation owned by the inner Arc.
+    pub ptr: *mut T,
+    // Keeps the Arc<RwLock<Box<dyn Any>>> alive so the allocation cannot be
+    // freed while this guard is live.
+    _keepalive: Arc<RwLock<Box<dyn Any + Send + Sync>>>,
+}
+
+// SAFETY: `T: Send` ensures the value can be sent across threads.
+unsafe impl<T: Send> Send for RawMutGuard<T> {}
+// SAFETY: `T: Sync` ensures shared access (through *mut T) is safe, and
+// `T: Send` is required to move the guard between threads.
+unsafe impl<T: Send + Sync> Sync for RawMutGuard<T> {}
+
+/// RAII guard for automatic release of read bits.
+/// Returned by [`SlicedContainer::sliced_get_range`].
+pub struct ReadSliceGuard<'a, T> {
+    slice: &'a [T],
+    container: &'a SlicedContainer<T>,
+    start: usize,
+    len: usize,
+}
+
+impl<'a, T> std::ops::Deref for ReadSliceGuard<'a, T> {
+    type Target = [T];
+    fn deref(&self) -> &Self::Target {
+        self.slice
+    }
+}
+
+impl<'a, T> Drop for ReadSliceGuard<'a, T> {
+    fn drop(&mut self) {
+        self.container.release_read_range(self.start, self.len);
+    }
+}
+
+impl<'a, T: fmt::Debug> fmt::Debug for ReadSliceGuard<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.slice, f)
+    }
+}
+
+/// RAII guard for automatic release of read bits via the type-erased [`SlicedAccess`] trait.
+/// Returned by [`CmTypes::sliced_get_range`].
+///
+/// The data is heap-allocated and kept alive by the `Arc` inside this guard.
+/// No lifetime parameter is needed: the raw pointer is valid for the entire guard lifetime.
+pub struct CmReadGuard<T> {
+    // Raw pointer into the heap allocation owned by the inner Arc.
+    ptr: *const T,
+    len: usize,
+    // Keeps the underlying allocation alive.
+    _keepalive: Arc<dyn SlicedAccess>,
+    // Tracks which range to release on drop.
+    start: usize,
+    range_len: usize,
+}
+
+impl<T> CmReadGuard<T> {
+    /// Returns the guarded slice.
+    pub fn as_slice(&self) -> &[T] {
+        // SAFETY: ptr and len were validated when the guard was created.
+        // The Arc keepalive ensures the allocation is live.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl<T> std::ops::Deref for CmReadGuard<T> {
+    type Target = [T];
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl<T> Drop for CmReadGuard<T> {
+    fn drop(&mut self) {
+        self._keepalive.unset_read_range(self.start, self.range_len);
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for CmReadGuard<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_slice(), f)
+    }
+}
+
+// SAFETY: the Arc keepalive ensures the data stays alive; T: Send allows cross-thread use.
+unsafe impl<T: Send> Send for CmReadGuard<T> {}
+// SAFETY: shared read-only access is safe when T: Sync.
+unsafe impl<T: Sync> Sync for CmReadGuard<T> {}
+
 /// Trait for type-erased sliced access
 pub trait SlicedAccess: Any + Send + Sync {
     fn total_length(&self) -> usize;
@@ -726,21 +872,26 @@ pub trait SlicedAccess: Any + Send + Sync {
         retry: Duration,
     ) -> Option<(*mut u8, usize)>;
 
-    /// Get raw immutable pointer and length for a range without setting write bits
-    /// Returns None if any mutable borrows are active in the range
+    /// Get raw immutable pointer and length for a range.
+    /// Acquires read bits atomically; caller MUST call [`unset_read_range`] when
+    /// the pointer is no longer in use.
+    /// Returns None if any mutable borrows are active in the range.
     ///
     /// # Safety
     /// The caller must ensure that:
     /// - The returned pointer is only used within the valid range `[start, start + len)`
     /// - No mutable references are created to the same range while this pointer is in use
+    /// - [`unset_read_range`] is called exactly once after the pointer is no longer needed
     unsafe fn get_range_raw(&self, start: usize, len: usize) -> Option<(*const u8, usize)>;
 
-    /// Get raw immutable pointer with timeout
+    /// Get raw immutable pointer with timeout.
+    /// Acquires read bits atomically; caller MUST call [`unset_read_range`] when done.
     ///
     /// # Safety
     /// The caller must ensure that:
     /// - The returned pointer is only used within the valid range `[start, start + len)`
     /// - No mutable references are created to the same range while this pointer is in use
+    /// - [`unset_read_range`] is called exactly once after the pointer is no longer needed
     unsafe fn get_range_raw_timeout(
         &self,
         start: usize,
@@ -748,12 +899,17 @@ pub trait SlicedAccess: Any + Send + Sync {
         timeout: Duration,
     ) -> Option<(*const u8, usize)>;
 
+    /// Release read bits acquired by `get_range_raw`. Must be called exactly
+    /// once per successful `get_range_raw` call when the returned pointer is no
+    /// longer in use.
+    fn unset_read_range(&self, start: usize, len: usize);
+
     /// Non-blocking check if a range can be read without conflicts
     fn can_read_range(&self, start: usize, len: usize) -> bool;
 }
 
-unsafe impl<T> Send for SendPtr<T> {}
-unsafe impl<T> Sync for SendPtr<T> {}
+unsafe impl<T: Send> Send for SendPtr<T> {}
+unsafe impl<T: Send + Sync> Sync for SendPtr<T> {}
 
 pub trait Sliceable<T> {
     fn as_mut_slice(&mut self) -> &mut [T];
@@ -764,6 +920,7 @@ pub struct SlicedContainer<T> {
     data_ptr: SendPtr<T>,
     total_length: usize,
     write_chunks: Vec<AtomicU64>,
+    read_chunks: Vec<AtomicU64>,
     _data: Box<dyn Any + Send + Sync>,
 }
 
@@ -778,11 +935,13 @@ impl<T> SlicedContainer<T> {
     ) -> Self {
         let chunk_count = total_length.div_ceil(Self::CHUNK_BITS);
         let write_chunks = (0..chunk_count).map(|_| AtomicU64::new(0)).collect();
+        let read_chunks = (0..chunk_count).map(|_| AtomicU64::new(0)).collect();
 
         Self {
             data_ptr,
             total_length,
             write_chunks,
+            read_chunks,
             _data: value,
         }
     }
@@ -838,6 +997,14 @@ impl<T> SlicedContainer<T> {
             let mask = Self::mask_for_chunk(start, range_end, chunk_idx);
             if mask == 0 {
                 continue;
+            }
+
+            // Reject if any active read borrows exist in this range
+            if self.read_chunks[chunk_idx].load(Ordering::Acquire) & mask != 0 {
+                for (idx, release_mask) in acquired.into_iter() {
+                    self.write_chunks[idx].fetch_and(!release_mask, Ordering::Release);
+                }
+                return None;
             }
 
             let chunk = &self.write_chunks[chunk_idx];
@@ -947,70 +1114,61 @@ impl<T> SlicedContainer<T> {
         false
     }
 
-    /// Get a borrowed reference to a range without setting write bits
-    /// Returns Some(&[T]) if no mutable borrows are active in the range, None otherwise
-    /// This allows multiple concurrent read-only accesses to the same data
-    pub fn sliced_get_range(&self, start: usize, len: usize) -> Option<&[T]> {
+    /// Get a borrowed reference to a range without setting write bits.
+    /// Returns `Some(ReadSliceGuard)` if no mutable borrows are active in the range.
+    /// Returns `None` if there is a write conflict.
+    /// The guard automatically releases the read borrow when dropped.
+    pub fn sliced_get_range(&self, start: usize, len: usize) -> Option<ReadSliceGuard<'_, T>> {
         let range_end = self.range_end(start, len)?;
 
         if len == 0 {
             unsafe {
                 let ptr = self.data_ptr.0.add(start);
-                return Some(std::slice::from_raw_parts(ptr, 0));
+                let slice = std::slice::from_raw_parts(ptr, 0);
+                // Zero-length: no bits needed; release_read_range is a no-op for len==0
+                return Some(ReadSliceGuard { slice, container: self, start, len });
             }
         }
 
-        let first_chunk = start / Self::CHUNK_BITS;
-        let last_chunk = (range_end - 1) / Self::CHUNK_BITS;
-        for chunk_idx in first_chunk..=last_chunk {
-            let mask = Self::mask_for_chunk(start, range_end, chunk_idx);
-            if mask != 0 && (self.write_chunks[chunk_idx].load(Ordering::Acquire) & mask) != 0 {
-                return None;
-            }
+        if !self.acquire_read_range(start, range_end) {
+            return None;
         }
 
         unsafe {
             let ptr = self.data_ptr.0.add(start);
-            Some(std::slice::from_raw_parts(ptr, len))
+            let slice = std::slice::from_raw_parts(ptr, len);
+            Some(ReadSliceGuard { slice, container: self, start, len })
         }
     }
 
-    /// Get a borrowed reference to a range with timeout
-    /// Waits up to the specified duration for mutable borrows to be released
-    /// Returns Some(&[T]) if successful, None if timeout or out of bounds
+    /// Get a borrowed reference to a range with timeout.
+    /// Waits up to the specified duration for mutable borrows to be released.
+    /// Returns `Some(ReadSliceGuard)` if successful, `None` if timeout or out of bounds.
+    /// The guard automatically releases the read borrow when dropped.
     pub fn sliced_get_range_timeout(
         &self,
         start: usize,
         len: usize,
         timeout: Duration,
-    ) -> Option<&[T]> {
+    ) -> Option<ReadSliceGuard<'_, T>> {
         let range_end = self.range_end(start, len)?;
 
         if len == 0 {
             unsafe {
                 let ptr = self.data_ptr.0.add(start);
-                return Some(std::slice::from_raw_parts(ptr, 0));
+                let slice = std::slice::from_raw_parts(ptr, 0);
+                return Some(ReadSliceGuard { slice, container: self, start, len });
             }
         }
 
         let start_time = std::time::Instant::now();
 
         loop {
-            let first_chunk = start / Self::CHUNK_BITS;
-            let last_chunk = (range_end - 1) / Self::CHUNK_BITS;
-            let mut clear = true;
-            for chunk_idx in first_chunk..=last_chunk {
-                let mask = Self::mask_for_chunk(start, range_end, chunk_idx);
-                if mask != 0 && (self.write_chunks[chunk_idx].load(Ordering::Acquire) & mask) != 0 {
-                    clear = false;
-                    break;
-                }
-            }
-
-            if clear {
+            if self.acquire_read_range(start, range_end) {
                 unsafe {
                     let ptr = self.data_ptr.0.add(start);
-                    return Some(std::slice::from_raw_parts(ptr, len));
+                    let slice = std::slice::from_raw_parts(ptr, len);
+                    return Some(ReadSliceGuard { slice, container: self, start, len });
                 }
             }
 
@@ -1045,9 +1203,54 @@ impl<T> SlicedContainer<T> {
         }
         true
     }
+
+    /// Atomically acquire read bits for a range.
+    /// Returns false if any write borrow is active in the range (rolling back partial acquisitions).
+    fn acquire_read_range(&self, start: usize, range_end: usize) -> bool {
+        let first_chunk = start / Self::CHUNK_BITS;
+        let last_chunk = (range_end - 1) / Self::CHUNK_BITS;
+        let mut acquired: Vec<(usize, u64)> = Vec::with_capacity(last_chunk - first_chunk + 1);
+
+        for chunk_idx in first_chunk..=last_chunk {
+            let mask = Self::mask_for_chunk(start, range_end, chunk_idx);
+            if mask == 0 {
+                continue;
+            }
+            // Reject if a write borrow exists for any bit in this range
+            if self.write_chunks[chunk_idx].load(Ordering::Acquire) & mask != 0 {
+                // Release already-acquired read bits
+                for (idx, rmask) in acquired {
+                    self.read_chunks[idx].fetch_and(!rmask, Ordering::Release);
+                }
+                return false;
+            }
+            // Atomically mark this chunk as read-borrowed
+            self.read_chunks[chunk_idx].fetch_or(mask, Ordering::AcqRel);
+            acquired.push((chunk_idx, mask));
+        }
+        true
+    }
+
+    /// Release read bits for a range.
+    pub fn release_read_range(&self, start: usize, len: usize) {
+        let Some(range_end) = self.range_end(start, len) else {
+            return;
+        };
+        if len == 0 {
+            return;
+        }
+        let first_chunk = start / Self::CHUNK_BITS;
+        let last_chunk = (range_end - 1) / Self::CHUNK_BITS;
+        for chunk_idx in first_chunk..=last_chunk {
+            let mask = Self::mask_for_chunk(start, range_end, chunk_idx);
+            if mask != 0 {
+                self.read_chunks[chunk_idx].fetch_and(!mask, Ordering::Release);
+            }
+        }
+    }
 }
 
-impl<T: 'static> SlicedAccess for SlicedContainer<T> {
+impl<T: 'static + Send + Sync> SlicedAccess for SlicedContainer<T> {
     fn total_length(&self) -> usize {
         self.total_length()
     }
@@ -1088,13 +1291,19 @@ impl<T: 'static> SlicedAccess for SlicedContainer<T> {
     }
 
     unsafe fn get_range_raw(&self, start: usize, len: usize) -> Option<(*const u8, usize)> {
-        if let Some(slice) = self.sliced_get_range(start, len) {
-            let ptr = slice.as_ptr() as *const u8;
-            let byte_len = len * std::mem::size_of::<T>();
-            Some((ptr, byte_len))
-        } else {
-            None
+        let range_end = self.range_end(start, len)?;
+        if len == 0 {
+            let ptr = self.data_ptr.0.add(start) as *const u8;
+            return Some((ptr, 0));
         }
+        if !self.acquire_read_range(start, range_end) {
+            return None;
+        }
+        // SAFETY: range_end bounds-checked above. Read bits are held; caller must
+        // call unset_read_range(start, len) when done with the pointer.
+        let ptr = self.data_ptr.0.add(start) as *const u8;
+        let byte_len = len * std::mem::size_of::<T>();
+        Some((ptr, byte_len))
     }
 
     unsafe fn get_range_raw_timeout(
@@ -1103,13 +1312,28 @@ impl<T: 'static> SlicedAccess for SlicedContainer<T> {
         len: usize,
         timeout: Duration,
     ) -> Option<(*const u8, usize)> {
-        if let Some(slice) = self.sliced_get_range_timeout(start, len, timeout) {
-            let ptr = slice.as_ptr() as *const u8;
-            let byte_len = len * std::mem::size_of::<T>();
-            Some((ptr, byte_len))
-        } else {
-            None
+        let range_end = self.range_end(start, len)?;
+        if len == 0 {
+            let ptr = self.data_ptr.0.add(start) as *const u8;
+            return Some((ptr, 0));
         }
+        let start_time = std::time::Instant::now();
+        loop {
+            if self.acquire_read_range(start, range_end) {
+                // SAFETY: range_end bounds-checked above. Caller must call unset_read_range.
+                let ptr = self.data_ptr.0.add(start) as *const u8;
+                let byte_len = len * std::mem::size_of::<T>();
+                return Some((ptr, byte_len));
+            }
+            if start_time.elapsed() >= timeout {
+                return None;
+            }
+            thread::sleep(Duration::from_nanos(100));
+        }
+    }
+
+    fn unset_read_range(&self, start: usize, len: usize) {
+        self.release_read_range(start, len);
     }
 
     fn can_read_range(&self, start: usize, len: usize) -> bool {
@@ -1487,7 +1711,8 @@ mod tests {
             println!("Init Buffer: {:?}", buf.buffer);
         });
 
-        let ptr = unsafe { custombuf.as_mut_ptr::<CustomBuffer>().unwrap().0 as usize };
+        let guard = unsafe { custombuf.as_mut_ptr::<CustomBuffer>().unwrap() };
+        let ptr = guard.ptr as usize;
 
         std::thread::scope(|s| {
             for thread_index in 0..2 {
