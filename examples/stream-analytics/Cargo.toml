@@ -1,0 +1,12 @@
+[package]
+name = "stream-analytics"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "stream_analytics"
+crate-type = ["dylib", "rlib"]
+
+[dependencies]
+synstream-types = { path = "../../synstream-types" }
+synstream-macro = { path = "../../synstream-macro" }

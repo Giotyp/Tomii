@@ -1,0 +1,144 @@
+{
+    "initializations": [
+        {
+            "name": "num_sensors",
+            "args": [{"type": "usize", "value": "4"}]
+        },
+        {
+            "name": "readings_per_sensor",
+            "args": [{"type": "usize", "value": "8"}]
+        },
+        {
+            "name": "total_readings",
+            "args": [{"type": "usize", "value": "32"}]
+        },
+        {
+            "name": "anomaly_threshold",
+            "args": [{"type": "f64", "value": "5.0"}]
+        },
+        {
+            "name": "result_file",
+            "function": "get_out_file",
+            "args": [
+                {"type": "String", "value": "SCRIPT_DIR"},
+                {"type": "String", "value": "result.txt"}
+            ]
+        }
+    ],
+    "nodes": [
+        {
+            "name": "generate",
+            "factor": "total_readings",
+            "function": "generate_reading",
+            "args": [
+                {"type": "$ref", "value": "anomaly_threshold"}
+            ]
+        },
+        {
+            "name": "classify",
+            "factor": "total_readings",
+            "function": "classify_reading",
+            "args": [
+                {"type": "$res", "predecessor": {"name": "generate", "indexes": "0"}},
+                {"type": "$ref", "value": "anomaly_threshold"}
+            ]
+        },
+        {
+            "name": "handle_anomaly",
+            "factor": "total_readings",
+            "function": "amplify_reading",
+            "priority": "high",
+            "condition": {
+                "operation": "Eq",
+                "value": "true",
+                "value_type": "bool",
+                "function": "check_bool",
+                "args": [
+                    {"type": "$res", "predecessor": {"name": "classify", "indexes": "0"}}
+                ]
+            },
+            "args": [
+                {"type": "$res",     "predecessor": {"name": "generate", "indexes": "0"}},
+                {"type": "$barrier", "predecessor": {"name": "classify",  "indexes": "0"}}
+            ]
+        },
+        {
+            "name": "smooth",
+            "factor": "total_readings",
+            "function": "smooth_reading",
+            "priority": "low",
+            "condition": {
+                "operation": "Neq",
+                "value": "true",
+                "value_type": "bool",
+                "function": "check_bool",
+                "args": [
+                    {"type": "$res", "predecessor": {"name": "classify", "indexes": "0"}}
+                ]
+            },
+            "args": [
+                {"type": "$res",     "predecessor": {"name": "generate", "indexes": "0"}},
+                {"type": "$barrier", "predecessor": {"name": "classify",  "indexes": "0"}}
+            ]
+        },
+        {
+            "name": "compute_stats",
+            "factor": "num_sensors",
+            "function": "compute_sensor_stats",
+            "args": [
+                {
+                    "type": "$barrier",
+                    "predecessor": {
+                        "name": "generate",
+                        "indexes": "0-total_readings",
+                        "group_by": "readings_per_sensor"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "log_event",
+            "function": "log_stream_event",
+            "args": [
+                {
+                    "type": "$dep",
+                    "predecessor": {
+                        "name": "classify",
+                        "indexes": "0-total_readings"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "aggregate",
+            "factor": "num_sensors",
+            "function": "aggregate_results",
+            "args": [
+                {"type": "$res", "predecessor": {"name": "compute_stats", "indexes": "0"}},
+                {
+                    "type": "$barrier",
+                    "predecessor": {
+                        "name": "classify",
+                        "indexes": "0-total_readings",
+                        "group_by": "readings_per_sensor"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "report",
+            "function": "write_report",
+            "args": [
+                {"type": "$ref", "value": "result_file"},
+                {"type": "$res", "predecessor": {"name": "aggregate", "indexes": "0-num_sensors"}}
+            ]
+        }
+    ],
+    "post_nodes": [
+        {
+            "name": "cleanup",
+            "function": "cleanup_state",
+            "args": []
+        }
+    ]
+}
