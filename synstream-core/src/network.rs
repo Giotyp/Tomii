@@ -170,17 +170,17 @@ pub fn multi_socket_receiver_loop(
     let mut local_pools: Vec<Vec<Vec<u8>>> = (0..range_len)
         .map(|_| {
             (0..recv_pool_size)
-                .map(|_| {
-                    let mut v = Vec::with_capacity(packet_length);
-                    // SAFETY: recv() overwrites exactly packet_length bytes before any read.
-                    unsafe { v.set_len(packet_length) };
-                    v
-                })
+                .map(|_| vec![0u8; packet_length])
                 .collect()
         })
         .collect();
 
-    tracing::info!(thread_id, ?socket_range, core_id, "multi-socket receiver thread started");
+    tracing::info!(
+        thread_id,
+        ?socket_range,
+        core_id,
+        "multi-socket receiver thread started"
+    );
 
     let tx = &tx;
 
@@ -208,18 +208,20 @@ pub fn multi_socket_receiver_loop(
             }
 
             // Pop from local pool; fall back to fresh allocation on burst.
-            let mut packet_bytes = local_pools[local_idx].pop().unwrap_or_else(|| {
-                let mut v = Vec::with_capacity(packet_length);
-                // SAFETY: recv() overwrites exactly packet_length bytes.
-                // The size == packet_length check below ensures no uninitialized bytes are read.
-                unsafe { v.set_len(packet_length) };
-                v
-            });
+            let mut packet_bytes = local_pools[local_idx]
+                .pop()
+                .unwrap_or_else(|| vec![0u8; packet_length]);
 
             match socket.recv(&mut packet_bytes) {
                 Ok(size) => {
                     if size != packet_length {
-                        tracing::warn!(thread_id, socket_id, size, packet_length, "unexpected packet size");
+                        tracing::warn!(
+                            thread_id,
+                            socket_id,
+                            size,
+                            packet_length,
+                            "unexpected packet size"
+                        );
                         continue;
                     }
                     let packet_timestamp = Instant::now();

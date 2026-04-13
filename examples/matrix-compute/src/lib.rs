@@ -28,6 +28,7 @@ pub fn fft_planner(buf_size: usize) -> Arc<dyn Fft<f32>> {
 }
 
 /// Run an in-place FFT on `buffer` using the provided planner.
+#[allow(clippy::ptr_arg)] // synstream_export macro requires &mut Vec, not &mut [_]
 #[synstream_export]
 pub fn compute_fft(fft_planner: &Arc<dyn Fft<f32>>, buffer: &mut Vec<Complex32>) {
     functions::compute_fft(fft_planner.clone(), buffer)

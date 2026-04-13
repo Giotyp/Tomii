@@ -77,13 +77,16 @@ impl ResolutionState for MultiThreadedState {
 
     #[inline]
     fn unmark_slot_completed(&self, slot: usize) {
-        self.completed_slots.fetch_and(!(1u64 << slot), Ordering::SeqCst);
+        self.completed_slots
+            .fetch_and(!(1u64 << slot), Ordering::SeqCst);
     }
 
     #[inline]
     fn try_complete_slot(&self, slot: usize) -> bool {
         // Atomically set the bit; returns true only for the thread that transitions 0→1.
-        let prev = self.completed_slots.fetch_or(1u64 << slot, Ordering::SeqCst);
+        let prev = self
+            .completed_slots
+            .fetch_or(1u64 << slot, Ordering::SeqCst);
         prev & (1u64 << slot) == 0
     }
 
