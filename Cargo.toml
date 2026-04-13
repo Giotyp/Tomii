@@ -6,6 +6,10 @@ members = [
     "synstream-converter",
     "examples/*",
 ]
+exclude = [
+    # Pure-C example: no Rust source; built with Make, not Cargo.
+    "examples/matrix-compute-C",
+]
 resolver = "3"
 
 [profile.release]
