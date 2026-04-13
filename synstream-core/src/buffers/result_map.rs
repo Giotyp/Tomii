@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::graph_struct::Node;
 use super::NodeInfo;
+use crate::graph_struct::Node;
 
 /// Lock-free result storage using atomic pointer swaps
 /// Eliminates RwLock contention between resolution threads and rayon workers
@@ -151,7 +151,6 @@ impl LockFreeResultMap {
             }
         }
     }
-
 }
 
 impl Drop for LockFreeResultMap {
@@ -272,7 +271,11 @@ mod tests {
         // Slot 1 should still be empty
         for idx in 0..3 {
             let ni1 = make_node_info(1, 0, idx, 0);
-            assert!(map.get(&ni1).is_none(), "slot 1 idx {} leaked from slot 0", idx);
+            assert!(
+                map.get(&ni1).is_none(),
+                "slot 1 idx {} leaked from slot 0",
+                idx
+            );
         }
 
         // Setting slot 1 must not overwrite slot 0
