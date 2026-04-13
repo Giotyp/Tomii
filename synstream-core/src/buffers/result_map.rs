@@ -196,3 +196,173 @@ impl std::fmt::Debug for LockFreeResultMap {
         write!(f, "}}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph_struct::{Node, NodePriority};
+    use synstream_types::CmTypes;
+
+    fn make_nodes(factors: &[usize]) -> Vec<Node> {
+        factors
+            .iter()
+            .enumerate()
+            .map(|(i, &factor)| Node {
+                name: format!("node_{}", i),
+                args: Vec::new(),
+                id: i as crate::IdType,
+                loop_args: None,
+                factor,
+                group_size: None,
+                func_name: String::new(),
+                loop_: None,
+                condition: None,
+                priority: NodePriority::Normal,
+                use_workers: None,
+            })
+            .collect()
+    }
+
+    fn make_node_info(slot: usize, id: crate::IdType, index: usize, gen: u32) -> NodeInfo {
+        NodeInfo {
+            id,
+            slot,
+            index,
+            gen,
+            bulk_count: 1,
+            pred_index: 0,
+            post_node: false,
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Slot lifecycle: set → get → reinit → set again
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_slot_lifecycle_set_get_reinit_set() {
+        let nodes = make_nodes(&[2]); // one node, factor=2
+        let map = LockFreeResultMap::new(&nodes, 1);
+
+        let ni0 = make_node_info(0, 0, 0, 0);
+        let ni1 = make_node_info(0, 0, 1, 0);
+
+        // Initially no results
+        assert!(map.get(&ni0).is_none());
+        assert!(map.get(&ni1).is_none());
+
+        // Set both instances
+        map.set(&ni0, CmTypes::I32(10));
+        map.set(&ni1, CmTypes::I32(20));
+        assert_eq!(map.get(&ni0), Some(CmTypes::I32(10)));
+        assert_eq!(map.get(&ni1), Some(CmTypes::I32(20)));
+
+        // Reinit clears the slot
+        map.reinit_slot(&nodes, 0, None);
+        assert!(map.get(&ni0).is_none());
+        assert!(map.get(&ni1).is_none());
+
+        // Results can be set again after reinit (simulates next stream)
+        map.set(&ni0, CmTypes::I32(30));
+        assert_eq!(map.get(&ni0), Some(CmTypes::I32(30)));
+        assert!(map.get(&ni1).is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // Multi-slot isolation: results in slot 0 must not be visible in slot 1
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_multi_slot_result_isolation() {
+        let nodes = make_nodes(&[3]); // one node, factor=3
+        let map = LockFreeResultMap::new(&nodes, 2); // 2 slots
+
+        for idx in 0..3 {
+            let ni = make_node_info(0, 0, idx, 0);
+            map.set(&ni, CmTypes::I32(idx as i32 * 10));
+        }
+
+        // Slot 1 should still be empty
+        for idx in 0..3 {
+            let ni1 = make_node_info(1, 0, idx, 0);
+            assert!(map.get(&ni1).is_none(), "slot 1 idx {} leaked from slot 0", idx);
+        }
+
+        // Setting slot 1 must not overwrite slot 0
+        let ni1_0 = make_node_info(1, 0, 0, 0);
+        map.set(&ni1_0, CmTypes::I32(99));
+        let ni0_0 = make_node_info(0, 0, 0, 0);
+        assert_eq!(map.get(&ni0_0), Some(CmTypes::I32(0)));
+        assert_eq!(map.get(&ni1_0), Some(CmTypes::I32(99)));
+    }
+
+    // -------------------------------------------------------------------------
+    // result_exists is consistent with get
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_result_exists_consistent_with_get() {
+        let nodes = make_nodes(&[1]);
+        let map = LockFreeResultMap::new(&nodes, 1);
+        let ni = make_node_info(0, 0, 0, 0);
+
+        assert!(!map.result_exists(&ni));
+        map.set(&ni, CmTypes::Bool(true));
+        assert!(map.result_exists(&ni));
+        map.reinit_slot(&nodes, 0, None);
+        assert!(!map.result_exists(&ni));
+    }
+
+    // -------------------------------------------------------------------------
+    // reinit only clears the target slot
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_reinit_only_clears_target_slot() {
+        let nodes = make_nodes(&[1]);
+        let map = LockFreeResultMap::new(&nodes, 3);
+
+        for slot in 0..3 {
+            let ni = make_node_info(slot, 0, 0, 0);
+            map.set(&ni, CmTypes::I32(slot as i32));
+        }
+
+        map.reinit_slot(&nodes, 1, None);
+
+        assert_eq!(map.get(&make_node_info(0, 0, 0, 0)), Some(CmTypes::I32(0)));
+        assert!(map.get(&make_node_info(1, 0, 0, 0)).is_none());
+        assert_eq!(map.get(&make_node_info(2, 0, 0, 0)), Some(CmTypes::I32(2)));
+    }
+
+    // -------------------------------------------------------------------------
+    // Concurrent set + get from multiple threads (smoke test)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_concurrent_set_get() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let nodes = make_nodes(&[64]);
+        let map = Arc::new(LockFreeResultMap::new(&nodes, 1));
+
+        let writers: Vec<_> = (0..64)
+            .map(|idx| {
+                let m = Arc::clone(&map);
+                thread::spawn(move || {
+                    let ni = make_node_info(0, 0, idx, 0);
+                    m.set(&ni, CmTypes::I32(idx as i32));
+                })
+            })
+            .collect();
+
+        for w in writers {
+            w.join().unwrap();
+        }
+
+        for idx in 0..64 {
+            let ni = make_node_info(0, 0, idx, 0);
+            assert_eq!(map.get(&ni), Some(CmTypes::I32(idx as i32)));
+        }
+    }
+}
