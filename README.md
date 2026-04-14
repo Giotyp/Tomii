@@ -224,6 +224,29 @@ Top-level keys:
 
 Categories: `graph_topology`, `runtime_flags`, `parallelism`. The suggestions fire based on `overhead_pct` thresholds and guide agents toward graph coarsening, `coalesce_barriers`, `batching_size`, or parallelism adjustments.
 
+### Agent Skills
+
+The [`SKILLS/`](SKILLS/) folder contains structured workflow skills for AI agents — covering
+the full optimization lifecycle from project discovery to graph coarsening:
+
+| Skill | Purpose |
+|-------|---------|
+| `project-discover` | Orient in an unknown project: topology, plugins, knob inventory, baseline |
+| `graph-build` | Translate a computation description into a Python graph + plugin stubs |
+| `run-validate` | Build, verify correctness (single-worker first), establish baseline |
+| `diagnose` | Classify bottleneck from `report.json` (scheduling / compute / imbalance) |
+| `knob-search` | 5-iteration search over scheduler knobs using per-knob search hints |
+| `graph-coarsen` | Reduce task count via tile_size or group_size when overhead_pct > 60% |
+| `plugin-author` | Write correct `#[synstream_export]` Rust/C plugin functions |
+
+Each skill is a self-contained markdown file with Claude Code SKILL.md frontmatter. To
+install them as Claude Code slash commands in your project:
+
+```bash
+./SKILLS/install-skills.sh            # installs to .claude/skills/ in CWD
+./SKILLS/install-skills.sh /your/dir  # installs to a specific project directory
+```
+
 ---
 
 ## JSON + CLI Workflow
