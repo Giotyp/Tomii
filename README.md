@@ -152,6 +152,12 @@ python examples/matrix-compute/run_bench.py --workers 4 --no-clean
 python examples/matrix-compute-C/run_bench.py --workers 4 --no-clean
 ```
 
+`examples/stream-analytics/run_bench.py` — Lightweight self-contained example that exercises conditional nodes, grouped barriers, `$dep` ordering edges, priority levels, variadic fan-in, and post-stream cleanup — without heavy external dependencies:
+
+```bash
+uv run python examples/stream-analytics/run_bench.py --workers 4 --no-clean
+```
+
 C functions are exported by annotating declarations in the header with `// @synstream_export`:
 
 ```c
@@ -301,6 +307,7 @@ Options:
 - `synstream/` — Python API package
 - `examples/matrix-compute` — FFT and matrix computation benchmark (Rust plugin)
 - `examples/matrix-compute-C` — Same DAG using a C plugin (FFTW + OpenBLAS via annotated C header)
+- `examples/stream-analytics` — Lightweight example covering conditional nodes, grouped barriers, `$dep` edges, priority levels, variadic fan-in, and post-stream cleanup
 - `examples/mimolib` — MIMO streaming benchmark
 
 **Core modules in `synstream-core/src`:**
