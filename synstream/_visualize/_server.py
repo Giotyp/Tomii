@@ -1,8 +1,7 @@
-"""Minimal localhost HTTP server for the SynStream graph visualizer."""
+"""Localhost HTTP server for the SynStream graph visualizer/editor."""
 
 from __future__ import annotations
 
-import importlib.resources
 import json
 import socket
 import threading
@@ -15,13 +14,11 @@ from ._parser import VizGraph
 
 
 def _html_template() -> str:
-    """Return the index.html content from the _web package directory."""
     html_path = Path(__file__).parent / "_web" / "index.html"
     return html_path.read_text(encoding="utf-8")
 
 
 def _viz_to_dict(viz: VizGraph) -> dict:
-    """Convert a VizGraph to a plain dict for JSON serialization."""
     return {
         "nodes": [
             {
@@ -34,6 +31,7 @@ def _viz_to_dict(viz: VizGraph) -> dict:
                 "group_size": n.group_size,
                 "has_loop": n.has_loop,
                 "condition_summary": n.condition_summary,
+                "raw": n.raw,
             }
             for n in viz.nodes
         ],
@@ -67,17 +65,41 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def serve(viz: VizGraph, port: Optional[int] = None, open_browser: bool = True) -> None:
-    """Serve the interactive graph visualizer on localhost.
+def serve(
+    viz: VizGraph,
+    port: Optional[int] = None,
+    open_browser: bool = True,
+    editor_mode: str = "view",   # "view" | "edit" | "create"
+    save_path: Optional[str] = None,
+) -> None:
+    """Serve the graph visualizer/editor on localhost.
 
-    Blocks until Ctrl+C is pressed.
+    Parameters
+    ----------
+    viz:
+        The parsed graph to display (empty VizGraph for create mode).
+    port:
+        TCP port to bind to. Auto-selected if None.
+    open_browser:
+        Whether to auto-open the browser.
+    editor_mode:
+        ``"view"`` — read-only (default),
+        ``"edit"`` — load graph and allow modifications,
+        ``"create"`` — empty canvas, build from scratch.
+    save_path:
+        File path to write to when the user clicks Save. Required for edit/create modes.
     """
     if port is None:
         port = _find_free_port()
 
     graph_json = json.dumps(_viz_to_dict(viz))
     template = _html_template()
-    html = template.replace("{{GRAPH_DATA}}", graph_json)
+    html = (
+        template
+        .replace("{{GRAPH_DATA}}", graph_json)
+        .replace("{{EDITOR_MODE}}", editor_mode)
+        .replace("{{SAVE_PATH}}", save_path or "")
+    )
     html_bytes = html.encode("utf-8")
 
     class _Handler(BaseHTTPRequestHandler):
@@ -95,14 +117,72 @@ def serve(viz: VizGraph, port: Optional[int] = None, open_browser: bool = True) 
                 self.send_response(404)
                 self.end_headers()
 
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+
+            if self.path == "/api/save-json":
+                self._handle_save_json(body)
+            elif self.path == "/api/export-python":
+                self._handle_export_python(body)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def _handle_save_json(self, body: bytes) -> None:
+            if not save_path:
+                self._json_error(400, "No save path configured on server.")
+                return
+            try:
+                data = json.loads(body)
+                # Pretty-print with 4-space indent
+                text = json.dumps(data, indent=4)
+                Path(save_path).write_text(text, encoding="utf-8")
+                self._json_ok({"status": "saved", "path": save_path})
+                print(f"  Saved → {save_path}")
+            except Exception as exc:
+                self._json_error(500, str(exc))
+
+        def _handle_export_python(self, body: bytes) -> None:
+            try:
+                from ._codegen import generate_python
+                data = json.loads(body)
+                code = generate_python(data)
+                code_bytes = code.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/x-python; charset=utf-8")
+                self.send_header("Content-Length", str(len(code_bytes)))
+                self.end_headers()
+                self.wfile.write(code_bytes)
+            except Exception as exc:
+                self._json_error(500, str(exc))
+
+        def _json_ok(self, payload: dict) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _json_error(self, code: int, msg: str) -> None:
+            body = json.dumps({"error": msg}).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
     server = HTTPServer(("127.0.0.1", port), _Handler)
     url = f"http://localhost:{port}/"
 
-    print(f"  SynStream Graph Visualizer  →  {url}")
+    mode_label = {"view": "View", "edit": "Edit", "create": "Create"}[editor_mode]
+    print(f"  SynStream Graph Visualizer [{mode_label}]  →  {url}")
+    if save_path:
+        print(f"  Save path: {save_path}")
     print("  Press Ctrl+C to stop.\n")
 
     if open_browser:
-        # Open browser after a short delay so the server is ready
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
 
     try:

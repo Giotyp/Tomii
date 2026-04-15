@@ -19,6 +19,7 @@ class VizNode:
     group_size: Optional[str] = None
     has_loop: bool = False
     condition_summary: Optional[str] = None  # e.g. "check_bool == true"
+    raw: Optional[dict] = None               # original graph JSON dict for round-trip editing
 
 
 @dataclass
@@ -161,6 +162,7 @@ def _parse_dict(data: dict) -> VizGraph:
             group_size=_factor_str(node.get("group_size")),
             has_loop=node.get("loop") is not None,
             condition_summary=_condition_summary(cond) if cond else None,
+            raw=node,
         ))
 
         # Edges from main args
@@ -186,6 +188,7 @@ def _parse_dict(data: dict) -> VizGraph:
             kind="post",
             function=node["function"],
             factor=factor,
+            raw=node,
         ))
         viz.edges.extend(_edges_from_args(node.get("args", []), name))
         viz.has_post_nodes = True
