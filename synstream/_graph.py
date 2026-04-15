@@ -212,20 +212,30 @@ class Graph:
     # Internals
     # ---------------------------------------------------------------------- #
 
-    def visualize(self, mode: str = "web", **kwargs) -> None:
-        """Visualize this graph.
+    def visualize(
+        self,
+        mode: str = "web",
+        *,
+        editable: bool = False,
+        save_path: Optional[str] = None,
+        port: Optional[int] = None,
+    ) -> None:
+        """Visualize (or edit) this graph.
 
         Parameters
         ----------
         mode:
             ``"web"`` (default) — interactive browser visualization,
             ``"ascii"`` — terminal box-drawing art.
-        **kwargs:
-            Forwarded to :func:`synstream._visualize.visualize`.
-            Useful options: ``port=8080``.
+        editable:
+            If True, open in edit mode so the graph can be modified in the browser.
+        save_path:
+            Where to save the graph when the user clicks Save (web edit mode).
+        port:
+            TCP port for the web server.
         """
         from ._visualize import visualize
-        visualize(self, mode=mode, **kwargs)
+        visualize(self, mode=mode, editable=editable, save_path=save_path, port=port)
 
     def _check_name(self, name: str) -> None:
         if name in self._names:

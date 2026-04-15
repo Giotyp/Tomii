@@ -6,7 +6,9 @@ Usage:
     python -m synstream --schema             # JSON schema for graph construction parameters
     python -m synstream --help               # same as --list-knobs
 
-    python -m synstream --visualize graph.json          # interactive web visualization
+    python -m synstream --visualize graph.json          # view mode (read-only)
+    python -m synstream --visualize graph.json --edit   # edit mode (save back to file)
+    python -m synstream --visualize new.json            # create mode (file doesn't exist)
     python -m synstream --visualize graph.json --ascii  # terminal ASCII art
     python -m synstream --visualize graph.json --port 8080  # custom port
 """
@@ -35,29 +37,24 @@ def main() -> None:
 
 
 def _cmd_visualize(args: list) -> None:
-    """Handle the --visualize subcommand."""
     from pathlib import Path
     from ._visualize import visualize
 
     idx = args.index("--visualize")
 
-    # Positional: the JSON file comes right after --visualize
     graph_path = None
     if idx + 1 < len(args) and not args[idx + 1].startswith("--"):
         graph_path = args[idx + 1]
 
     if graph_path is None:
-        print("Usage: python -m synstream --visualize <graph.json> [--ascii] [--port N]")
+        print("Usage: python -m synstream --visualize <graph.json> [--edit] [--ascii] [--port N]")
         sys.exit(1)
 
-    if not Path(graph_path).exists():
-        print(f"Error: file not found: {graph_path}")
-        sys.exit(1)
-
-    # Parse flags
     mode = "web"
     if "--ascii" in args:
         mode = "ascii"
+
+    editable = "--edit" in args
 
     port = None
     if "--port" in args:
@@ -69,7 +66,7 @@ def _cmd_visualize(args: list) -> None:
                 print("Error: --port requires an integer")
                 sys.exit(1)
 
-    visualize(graph_path, mode=mode, port=port)
+    visualize(graph_path, mode=mode, port=port, editable=editable)
 
 
 if __name__ == "__main__":
