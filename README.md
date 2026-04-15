@@ -168,6 +168,32 @@ void* fft_planner(size_t buf_size);
 complex_f32* generate_vector(size_t n);
 ```
 
+### Graph Visualization
+
+Visualize any SynStream graph interactively in the browser or as ASCII art in the terminal — no extra dependencies required.
+
+```bash
+# Interactive web visualization (opens browser with Cytoscape.js DAG viewer)
+python -m synstream --visualize examples/stream-analytics/graph.json
+
+# ASCII art in terminal
+python -m synstream --visualize examples/stream-analytics/graph.json --ascii
+
+# Custom port
+python -m synstream --visualize graph.json --port 8080
+```
+
+From Python:
+
+```python
+app = ss.Graph()
+# ... build graph ...
+app.visualize()          # opens browser
+app.visualize("ascii")   # prints to terminal
+```
+
+The web UI renders a color-coded DAG with Dagre hierarchical layout: green for compute nodes, orange-bordered for conditional nodes, gray for post-nodes. Edges are styled by type (`$res` solid blue, `$dep` dashed, `$barrier` thick orange). Click any node or edge for details, hover to highlight neighbors, and use the `↓ PNG` button to export.
+
 ---
 
 ## Agent-Native
