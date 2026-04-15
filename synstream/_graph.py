@@ -212,6 +212,21 @@ class Graph:
     # Internals
     # ---------------------------------------------------------------------- #
 
+    def visualize(self, mode: str = "web", **kwargs) -> None:
+        """Visualize this graph.
+
+        Parameters
+        ----------
+        mode:
+            ``"web"`` (default) — interactive browser visualization,
+            ``"ascii"`` — terminal box-drawing art.
+        **kwargs:
+            Forwarded to :func:`synstream._visualize.visualize`.
+            Useful options: ``port=8080``.
+        """
+        from ._visualize import visualize
+        visualize(self, mode=mode, **kwargs)
+
     def _check_name(self, name: str) -> None:
         if name in self._names:
             raise ValueError(f"Duplicate name {name!r} in graph.")

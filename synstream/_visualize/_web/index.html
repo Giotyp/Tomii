@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SynStream Graph Visualizer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #0f1117;
+    color: #e2e8f0;
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ── Sidebar ─────────────────────────────────────────── */
+  #sidebar {
+    width: 280px;
+    min-width: 220px;
+    background: #1a1d27;
+    border-right: 1px solid #2d3148;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    flex-shrink: 0;
+  }
+
+  #sidebar-header {
+    padding: 16px;
+    border-bottom: 1px solid #2d3148;
+    background: #13151f;
+  }
+
+  #sidebar-header h1 {
+    font-size: 14px;
+    font-weight: 700;
+    color: #7c83fd;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  #sidebar-header p {
+    font-size: 11px;
+    color: #64748b;
+    margin-top: 3px;
+  }
+
+  #graph-summary {
+    padding: 12px 16px;
+    border-bottom: 1px solid #2d3148;
+  }
+
+  .summary-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 3px 0;
+    color: #94a3b8;
+  }
+
+  .summary-row span:last-child {
+    color: #e2e8f0;
+    font-weight: 600;
+  }
+
+  #detail-panel {
+    padding: 12px 16px;
+    flex: 1;
+  }
+
+  #detail-panel h3 {
+    font-size: 11px;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 10px;
+  }
+
+  #detail-content {
+    font-size: 12px;
+  }
+
+  .detail-empty {
+    color: #475569;
+    font-style: italic;
+  }
+
+  .detail-node-name {
+    font-size: 15px;
+    font-weight: 700;
+    color: #e2e8f0;
+    margin-bottom: 6px;
+  }
+
+  .detail-field {
+    display: flex;
+    gap: 6px;
+    padding: 4px 0;
+    border-bottom: 1px solid #1e2130;
+    font-size: 11.5px;
+  }
+
+  .detail-field-key {
+    color: #64748b;
+    min-width: 72px;
+    flex-shrink: 0;
+  }
+
+  .detail-field-val {
+    color: #e2e8f0;
+    word-break: break-all;
+  }
+
+  .badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 600;
+  }
+
+  .badge-compute     { background: #166534; color: #bbf7d0; }
+  .badge-conditional { background: #92400e; color: #fde68a; }
+  .badge-post        { background: #374151; color: #d1d5db; }
+  .badge-res         { background: #1e3a5f; color: #93c5fd; }
+  .badge-dep         { background: #2d2d2d; color: #a1a1aa; }
+  .badge-barrier     { background: #7c2d12; color: #fed7aa; }
+
+  /* ── Toolbar ─────────────────────────────────────────── */
+  #toolbar {
+    position: absolute;
+    top: 12px;
+    right: 14px;
+    display: flex;
+    gap: 8px;
+    z-index: 10;
+  }
+
+  .btn {
+    background: #1a1d27;
+    border: 1px solid #2d3148;
+    color: #94a3b8;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .btn:hover {
+    background: #252840;
+    color: #e2e8f0;
+    border-color: #7c83fd;
+  }
+
+  /* ── Canvas ──────────────────────────────────────────── */
+  #cy-container {
+    flex: 1;
+    position: relative;
+    background: #0f1117;
+  }
+
+  #cy {
+    width: 100%;
+    height: 100%;
+  }
+
+  /* ── Legend ──────────────────────────────────────────── */
+  #legend {
+    position: absolute;
+    bottom: 14px;
+    left: 14px;
+    background: #1a1d27cc;
+    backdrop-filter: blur(6px);
+    border: 1px solid #2d3148;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 11px;
+    z-index: 10;
+  }
+
+  #legend h4 {
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 6px;
+    font-size: 10px;
+  }
+
+  .legend-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 0;
+    color: #94a3b8;
+  }
+
+  .legend-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+
+  .legend-line {
+    width: 24px;
+    height: 2px;
+    flex-shrink: 0;
+  }
+
+  /* ── Error overlay ───────────────────────────────────── */
+  #error-overlay {
+    display: none;
+    position: absolute;
+    inset: 0;
+    background: #0f1117dd;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    font-size: 14px;
+    color: #f87171;
+    text-align: center;
+    padding: 40px;
+  }
+</style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<div id="sidebar">
+  <div id="sidebar-header">
+    <h1>SynStream</h1>
+    <p>Graph Visualizer</p>
+  </div>
+
+  <div id="graph-summary">
+    <div class="summary-row"><span>Nodes</span><span id="stat-nodes">–</span></div>
+    <div class="summary-row"><span>Edges</span><span id="stat-edges">–</span></div>
+    <div class="summary-row"><span>Init vars</span><span id="stat-inits">–</span></div>
+    <div class="summary-row" id="stat-post-row" style="display:none"><span>Post-nodes</span><span id="stat-posts">–</span></div>
+    <div class="summary-row" id="stat-net-row" style="display:none"><span>Network</span><span id="stat-net">yes</span></div>
+  </div>
+
+  <div id="detail-panel">
+    <h3>Node Details</h3>
+    <div id="detail-content">
+      <p class="detail-empty">Click a node to inspect it.</p>
+    </div>
+  </div>
+</div>
+
+<!-- Main canvas -->
+<div id="cy-container">
+  <div id="toolbar">
+    <button class="btn" id="btn-fit">⊡ Fit</button>
+    <button class="btn" id="btn-png">↓ PNG</button>
+  </div>
+
+  <div id="cy"></div>
+
+  <!-- Legend -->
+  <div id="legend">
+    <h4>Legend</h4>
+    <div class="legend-row"><div class="legend-dot" style="background:#4CAF50"></div>compute node</div>
+    <div class="legend-row"><div class="legend-dot" style="background:#FF9800;border:2px dashed #e65100"></div>conditional node</div>
+    <div class="legend-row"><div class="legend-dot" style="background:#9E9E9E"></div>post-node</div>
+    <div class="legend-row" style="margin-top:6px">
+      <div class="legend-line" style="background:#4a9eff"></div>$res (data)
+    </div>
+    <div class="legend-row">
+      <div class="legend-line" style="background:#666;border-top:2px dashed #666;height:0"></div>$dep (order)
+    </div>
+    <div class="legend-row">
+      <div class="legend-line" style="background:#FF5722;height:3px"></div>$barrier (sync)
+    </div>
+  </div>
+
+  <!-- Error overlay -->
+  <div id="error-overlay">
+    <div>
+      <div style="font-size:32px;margin-bottom:12px">⚠</div>
+      <div id="error-msg">Failed to load graph data.</div>
+      <div style="font-size:12px;color:#94a3b8;margin-top:8px">Check the terminal for details.</div>
+    </div>
+  </div>
+</div>
+
+<!-- Cytoscape + Dagre from CDN -->
+<script src="https://unpkg.com/cytoscape@3.31.0/dist/cytoscape.min.js"></script>
+<script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+<script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+
+<script>
+// ── Graph data injected by Python server ───────────────────────────────
+const GRAPH_DATA = {{GRAPH_DATA}};
+
+// ── Helpers ────────────────────────────────────────────────────────────
+function showError(msg) {
+  const el = document.getElementById('error-overlay');
+  document.getElementById('error-msg').textContent = msg;
+  el.style.display = 'flex';
+}
+
+// ── Register dagre layout ──────────────────────────────────────────────
+try {
+  cytoscape.use(cytoscapeDagre);
+} catch(e) {
+  // dagre may already be registered
+}
+
+// ── Build Cytoscape elements from VizGraph ────────────────────────────
+function buildElements(data) {
+  const elements = [];
+  const nodeIds = new Set();
+
+  // Nodes
+  (data.nodes || []).forEach(node => {
+    nodeIds.add(node.id);
+    elements.push({
+      group: 'nodes',
+      data: {
+        id: node.id,
+        label: node.label || node.id,
+        kind: node.kind || 'compute',
+        function: node.function || '',
+        factor: node.factor || null,
+        priority: node.priority || null,
+        group_size: node.group_size || null,
+        has_loop: node.has_loop || false,
+        condition_summary: node.condition_summary || null,
+      }
+    });
+  });
+
+  // Edges — deduplicate by (source, target, type)
+  const edgeSeen = new Set();
+  (data.edges || []).forEach((edge, i) => {
+    if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) return;
+    const key = `${edge.source}→${edge.target}→${edge.edge_type}`;
+    if (edgeSeen.has(key)) return;
+    edgeSeen.add(key);
+
+    elements.push({
+      group: 'edges',
+      data: {
+        id: `e${i}`,
+        source: edge.source,
+        target: edge.target,
+        edge_type: edge.edge_type || 'res',
+        label: edge.label || edge.edge_type || '',
+        indexes: edge.indexes || '',
+        group_by: edge.group_by || null,
+      }
+    });
+  });
+
+  return elements;
+}
+
+// ── Cytoscape stylesheet ───────────────────────────────────────────────
+const stylesheet = [
+  // Base node
+  {
+    selector: 'node',
+    style: {
+      'shape': 'rectangle',
+      'label': 'data(label)',
+      'text-valign': 'center',
+      'text-halign': 'center',
+      'font-family': '"Segoe UI", system-ui, sans-serif',
+      'font-size': '11px',
+      'font-weight': '600',
+      'color': '#ffffff',
+      'text-wrap': 'wrap',
+      'text-max-width': '140px',
+      'width': 'label',
+      'height': 'label',
+      'padding': '10px',
+      'border-width': '1.5px',
+      'border-color': '#1a1d27',
+      'background-color': '#4CAF50',
+    }
+  },
+  // compute node
+  {
+    selector: 'node[kind="compute"]',
+    style: { 'background-color': '#2e7d32', 'border-color': '#4CAF50' }
+  },
+  // conditional node
+  {
+    selector: 'node[kind="conditional"]',
+    style: {
+      'background-color': '#e65100',
+      'border-color': '#FF9800',
+      'border-width': '2.5px',
+      'border-style': 'dashed',
+    }
+  },
+  // post node
+  {
+    selector: 'node[kind="post"]',
+    style: { 'background-color': '#424242', 'border-color': '#9E9E9E' }
+  },
+  // selected
+  {
+    selector: 'node:selected',
+    style: {
+      'border-width': '3px',
+      'border-color': '#7c83fd',
+      'background-color': '#3730a3',
+    }
+  },
+  // $res edge (data dependency)
+  {
+    selector: 'edge[edge_type="res"]',
+    style: {
+      'line-color': '#4a9eff',
+      'target-arrow-color': '#4a9eff',
+      'target-arrow-shape': 'triangle',
+      'curve-style': 'bezier',
+      'width': 1.8,
+      'label': 'data(indexes)',
+      'font-size': '9px',
+      'text-background-color': '#0f1117',
+      'text-background-opacity': 0.8,
+      'text-background-padding': '2px',
+      'color': '#4a9eff',
+      'edge-text-rotation': 'autorotate',
+    }
+  },
+  // $dep edge (ordering only)
+  {
+    selector: 'edge[edge_type="dep"]',
+    style: {
+      'line-color': '#555566',
+      'target-arrow-color': '#555566',
+      'target-arrow-shape': 'vee',
+      'curve-style': 'bezier',
+      'line-style': 'dashed',
+      'line-dash-pattern': [6, 4],
+      'width': 1.2,
+      'label': 'dep',
+      'font-size': '9px',
+      'color': '#666688',
+      'text-background-color': '#0f1117',
+      'text-background-opacity': 0.8,
+      'text-background-padding': '2px',
+      'edge-text-rotation': 'autorotate',
+    }
+  },
+  // $barrier edge
+  {
+    selector: 'edge[edge_type="barrier"]',
+    style: {
+      'line-color': '#FF5722',
+      'target-arrow-color': '#FF5722',
+      'target-arrow-shape': 'triangle',
+      'curve-style': 'bezier',
+      'width': 2.8,
+      'label': 'data(label)',
+      'font-size': '9px',
+      'color': '#FF5722',
+      'text-background-color': '#0f1117',
+      'text-background-opacity': 0.8,
+      'text-background-padding': '2px',
+      'edge-text-rotation': 'autorotate',
+    }
+  },
+  // edge selected highlight
+  {
+    selector: 'edge:selected',
+    style: { 'line-color': '#7c83fd', 'target-arrow-color': '#7c83fd' }
+  },
+];
+
+// ── Update sidebar stats ───────────────────────────────────────────────
+function updateStats(data) {
+  const nodes = (data.nodes || []);
+  const edges = (data.edges || []);
+  const inits = (data.init_vars || []);
+  const posts = nodes.filter(n => n.kind === 'post').length;
+  const computes = nodes.filter(n => n.kind !== 'post').length;
+
+  document.getElementById('stat-nodes').textContent = computes;
+  document.getElementById('stat-edges').textContent = edges.length;
+  document.getElementById('stat-inits').textContent = inits.length;
+
+  if (posts > 0) {
+    document.getElementById('stat-post-row').style.display = 'flex';
+    document.getElementById('stat-posts').textContent = posts;
+  }
+  if (data.has_network) {
+    document.getElementById('stat-net-row').style.display = 'flex';
+  }
+}
+
+// ── Node detail panel ─────────────────────────────────────────────────
+function renderDetail(nodeData) {
+  const container = document.getElementById('detail-content');
+
+  const kindBadge = {
+    compute: '<span class="badge badge-compute">compute</span>',
+    conditional: '<span class="badge badge-conditional">conditional</span>',
+    post: '<span class="badge badge-post">post</span>',
+  };
+
+  const badge = kindBadge[nodeData.kind] || '';
+  const fields = [];
+
+  fields.push(['Name', `<strong>${nodeData.id}</strong> ${badge}`]);
+  fields.push(['Function', nodeData.function]);
+  if (nodeData.factor)    fields.push(['Factor', nodeData.factor]);
+  if (nodeData.priority)  fields.push(['Priority', nodeData.priority]);
+  if (nodeData.group_size) fields.push(['Group size', nodeData.group_size]);
+  if (nodeData.has_loop)  fields.push(['Loop', 'yes']);
+  if (nodeData.condition_summary) fields.push(['Condition', nodeData.condition_summary]);
+
+  const rows = fields.map(([k, v]) =>
+    `<div class="detail-field">
+       <span class="detail-field-key">${k}</span>
+       <span class="detail-field-val">${v}</span>
+     </div>`
+  ).join('');
+
+  container.innerHTML = rows;
+}
+
+// ── Edge detail panel ─────────────────────────────────────────────────
+function renderEdgeDetail(edgeData) {
+  const container = document.getElementById('detail-content');
+
+  const typeBadge = {
+    res: '<span class="badge badge-res">$res</span>',
+    dep: '<span class="badge badge-dep">$dep</span>',
+    barrier: '<span class="badge badge-barrier">$barrier</span>',
+  };
+
+  const badge = typeBadge[edgeData.edge_type] || '';
+  const fields = [];
+
+  fields.push(['Type', badge]);
+  fields.push(['From', edgeData.source]);
+  fields.push(['To', edgeData.target]);
+  fields.push(['Indexes', edgeData.indexes || '0']);
+  if (edgeData.group_by) fields.push(['Group by', edgeData.group_by]);
+
+  const rows = fields.map(([k, v]) =>
+    `<div class="detail-field">
+       <span class="detail-field-key">${k}</span>
+       <span class="detail-field-val">${v}</span>
+     </div>`
+  ).join('');
+
+  container.innerHTML = rows;
+}
+
+// ── Main ───────────────────────────────────────────────────────────────
+(function main() {
+  if (!GRAPH_DATA || !GRAPH_DATA.nodes) {
+    showError('No graph data available. Check the server.');
+    return;
+  }
+
+  updateStats(GRAPH_DATA);
+
+  const elements = buildElements(GRAPH_DATA);
+
+  const cy = cytoscape({
+    container: document.getElementById('cy'),
+    elements: elements,
+    style: stylesheet,
+    layout: {
+      name: 'dagre',
+      rankDir: 'TB',         // top → bottom
+      rankSep: 80,
+      nodeSep: 50,
+      edgeSep: 20,
+      padding: 40,
+      animate: false,
+    },
+    minZoom: 0.1,
+    maxZoom: 4,
+    wheelSensitivity: 0.3,
+  });
+
+  // Fit on load
+  cy.fit(40);
+
+  // ── Toolbar buttons ──────────────────────────────────────────────
+  document.getElementById('btn-fit').addEventListener('click', () => cy.fit(40));
+
+  document.getElementById('btn-png').addEventListener('click', () => {
+    const png = cy.png({ scale: 2, bg: '#0f1117', full: true });
+    const a = document.createElement('a');
+    a.href = png;
+    a.download = 'synstream-graph.png';
+    a.click();
+  });
+
+  // ── Node/edge click → detail panel ───────────────────────────────
+  cy.on('tap', 'node', evt => {
+    renderDetail(evt.target.data());
+  });
+
+  cy.on('tap', 'edge', evt => {
+    renderEdgeDetail(evt.target.data());
+  });
+
+  cy.on('tap', evt => {
+    if (evt.target === cy) {
+      document.getElementById('detail-content').innerHTML =
+        '<p class="detail-empty">Click a node to inspect it.</p>';
+    }
+  });
+
+  // ── Highlight neighbors on hover ─────────────────────────────────
+  cy.on('mouseover', 'node', evt => {
+    const node = evt.target;
+    cy.elements().not(node.neighborhood().add(node)).style({ 'opacity': 0.3 });
+  });
+
+  cy.on('mouseout', 'node', () => {
+    cy.elements().style({ 'opacity': 1 });
+  });
+
+})();
+</script>
+</body>
+</html>
