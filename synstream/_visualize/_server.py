@@ -51,6 +51,7 @@ def _viz_to_dict(viz: VizGraph) -> dict:
                 "name": iv.name,
                 "value": iv.value,
                 "function": iv.function,
+                "raw": iv.raw,
             }
             for iv in viz.init_vars
         ],

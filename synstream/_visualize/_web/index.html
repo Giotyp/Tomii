@@ -432,7 +432,6 @@
 <script src="https://unpkg.com/cytoscape@3.31.0/dist/cytoscape.min.js"></script>
 <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
 <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
-<script src="https://unpkg.com/cytoscape-edgehandles@4.0.1/cytoscape-edgehandles.js"></script>
 
 <script>
 // ── Injected by Python ─────────────────────────────────────────────────
@@ -441,16 +440,18 @@ const EDITOR_MODE  = "{{EDITOR_MODE}}";  // "view" | "edit" | "create"
 const SAVE_PATH    = "{{SAVE_PATH}}";
 
 // ── State ──────────────────────────────────────────────────────────────
-let initVars = [...(GRAPH_DATA.init_vars || [])];
+let initVars = (GRAPH_DATA.init_vars || []).map(v => {
+  const raw = v.raw || {};
+  return { name: v.name, value: v.value, function: v.function, args: raw.args || [] };
+});
 let pendingEdgeSource = null;
 let pendingEdgeTarget = null;
 let connectModeActive = false;
-let eh = null; // edgehandles instance
+let pendingConnectSource = null; // Cytoscape node selected as source in click-connect mode
 let cy;
 
 // ── Register plugins ───────────────────────────────────────────────────
 try { cytoscape.use(cytoscapeDagre); } catch(e) {}
-try { cytoscape.use(cytoscapeEdgehandles); } catch(e) {}
 
 // ── Toast helper ───────────────────────────────────────────────────────
 function toast(msg, isErr) {
@@ -503,11 +504,8 @@ const stylesheet = [
     'edge-text-rotation': 'autorotate',
   }},
   { selector: 'edge:selected', style: { 'line-color': '#7c83fd', 'target-arrow-color': '#7c83fd' }},
-  // edgehandles ghost edge style
-  { selector: '.eh-handle',        style: { 'background-color': '#7c83fd', 'width': 12, 'height': 12 }},
-  { selector: '.eh-hover',         style: { 'border-color': '#7c83fd', 'border-width': 3 }},
-  { selector: '.eh-ghost-edge',    style: { 'line-color': '#7c83fd', 'target-arrow-color': '#7c83fd', 'target-arrow-shape': 'triangle', 'curve-style': 'bezier' }},
-  { selector: '.eh-preview-active',style: { 'border-color': '#7c83fd' }},
+  // connect-source highlight
+  { selector: '.connect-source', style: { 'border-width': '3px', 'border-color': '#f59e0b', 'background-color': '#78350f' }},
 ];
 
 // ── Build elements from GRAPH_DATA ─────────────────────────────────────
@@ -517,13 +515,17 @@ function buildElements(data) {
 
   (data.nodes || []).forEach(node => {
     nodeIds.add(node.id);
+    // Extract non-edge args from raw (i.e. $ref and typed args — not $res/$dep/$barrier)
+    const rawArgs = node.raw ? (node.raw.args || []) : [];
+    const refArgs = rawArgs.filter(a => !a.predecessor);
     elements.push({ group: 'nodes', data: {
       id: node.id, label: node.label || node.id, kind: node.kind || 'compute',
       function: node.function || '', factor: node.factor || null,
       priority: node.priority || null, group_size: node.group_size || null,
       has_loop: node.has_loop || false, condition_summary: node.condition_summary || null,
       is_post: node.kind === 'post',
-      _raw: node.raw || null,  // original SynStream JSON dict for round-trip
+      _raw: node.raw || null,      // original SynStream JSON dict for round-trip
+      _ref_args: refArgs,          // $ref + typed args (not predecessor-based edges)
     }});
   });
 
@@ -550,6 +552,64 @@ function buildEdgeLabel(type, indexes, groupBy) {
   if (indexes && indexes !== '0') parts.push(`[${indexes}]`);
   if (groupBy) parts.push(`grp=${groupBy}`);
   return parts.join(' ');
+}
+
+// ── Argument row helpers ───────────────────────────────────────────────
+const ARG_TYPES = ['$ref','usize','f64','String','bool','i32','i64','u32','u64','f32','Complex32','Complex64'];
+
+function _argTypeOptions(selected) {
+  return ARG_TYPES.map(t =>
+    `<option value="${t}" ${t === selected ? 'selected' : ''}>${t}</option>`
+  ).join('');
+}
+
+function renderArgRows(containerId, args) {
+  const c = document.getElementById(containerId);
+  if (!c) return;
+  if (!args || args.length === 0) {
+    c.innerHTML = '<p class="detail-empty" style="margin:2px 0 4px">No arguments.</p>';
+    return;
+  }
+  c.innerHTML = args.map((a, i) => `
+    <div class="arg-row" style="display:flex;gap:4px;margin-bottom:4px;align-items:center">
+      <select class="form-select arg-type" style="width:88px;flex-shrink:0">${_argTypeOptions(a.type || '$ref')}</select>
+      <input class="form-input arg-value" style="flex:1;min-width:0" value="${(a.value || '').replace(/"/g,'&quot;')}"
+        placeholder="${(a.type || '') === '$ref' ? 'var name' : 'value'}" />
+      <span style="cursor:pointer;color:#64748b;padding:0 4px;font-size:14px;flex-shrink:0"
+        onclick="this.closest('.arg-row').remove()">✕</span>
+    </div>`
+  ).join('');
+}
+
+function addArgRow(containerId) {
+  const c = document.getElementById(containerId);
+  if (!c) return;
+  const empty = c.querySelector('.detail-empty');
+  if (empty) empty.remove();
+  const row = document.createElement('div');
+  row.className = 'arg-row';
+  row.style.cssText = 'display:flex;gap:4px;margin-bottom:4px;align-items:center';
+  row.innerHTML = `
+    <select class="form-select arg-type" style="width:88px;flex-shrink:0">${_argTypeOptions('$ref')}</select>
+    <input class="form-input arg-value" style="flex:1;min-width:0" placeholder="var name" />
+    <span style="cursor:pointer;color:#64748b;padding:0 4px;font-size:14px;flex-shrink:0"
+      onclick="this.closest('.arg-row').remove()">✕</span>`;
+  c.appendChild(row);
+  // Update placeholder when type changes
+  const sel = row.querySelector('.arg-type');
+  const inp = row.querySelector('.arg-value');
+  sel.addEventListener('change', () => {
+    inp.placeholder = sel.value === '$ref' ? 'var name' : 'value';
+  });
+}
+
+function collectArgs(containerId) {
+  const c = document.getElementById(containerId);
+  if (!c) return [];
+  return Array.from(c.querySelectorAll('.arg-row')).map(row => ({
+    type:  row.querySelector('.arg-type').value,
+    value: row.querySelector('.arg-value').value.trim(),
+  })).filter(a => a.value !== '');
 }
 
 // ── Update sidebar stats ───────────────────────────────────────────────
@@ -782,6 +842,13 @@ function showAddNodeForm() {
         <option value="post">post-node</option>
       </select>
     </div>
+    <div class="form-group">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <label class="form-label" style="margin:0">Arguments <span style="color:#475569;font-size:10px">($ref vars, typed values)</span></label>
+        <span style="cursor:pointer;color:#7c83fd;font-size:11px" onclick="addArgRow('node-args')">+ add</span>
+      </div>
+      <div id="node-args"><p class="detail-empty" style="margin:2px 0 4px">No arguments.</p></div>
+    </div>
     <div style="margin-top:10px;display:flex;gap:6px">
       <button class="btn" style="flex:1" onclick="resetDetail()">Cancel</button>
       <button class="btn btn-primary" style="flex:1" onclick="confirmAddNode()">Add</button>
@@ -811,11 +878,14 @@ function confirmAddNode() {
   const ext = cy.extent();
   const pos = { x: (ext.x1 + ext.x2) / 2, y: (ext.y1 + ext.y2) / 2 };
 
+  const refArgs = collectArgs('node-args');
+
   cy.add({ group: 'nodes', data: {
     id: name, label: parts.join(' | '), kind,
     function: func_, factor, priority: prio,
     group_size: null, has_loop: false, condition_summary: null,
     is_post: kind === 'post',
+    _raw: null, _ref_args: refArgs,
   }, position: pos });
 
   updateStats();
@@ -832,13 +902,21 @@ function showAddVarForm() {
       <label class="form-label">Name <span style="color:#f87171">*</span></label>
       <input class="form-input" id="new-var-name" placeholder="e.g. buf_size" />
     </div>
-    <div class="form-group">
-      <label class="form-label">Value <span style="color:#475569">(or leave blank if using a function)</span></label>
+    <div class="form-group" id="var-value-group">
+      <label class="form-label">Value <span style="color:#475569">(for plain vars)</span></label>
       <input class="form-input" id="new-var-value" placeholder="e.g. 100" />
     </div>
     <div class="form-group">
-      <label class="form-label">Function <span style="color:#475569">(optional)</span></label>
-      <input class="form-input" id="new-var-func" placeholder="e.g. fft_planner" />
+      <label class="form-label">Function <span style="color:#475569">(optional — for computed vars)</span></label>
+      <input class="form-input" id="new-var-func" placeholder="e.g. fft_planner"
+        oninput="_onVarFuncInput(this.value)" />
+    </div>
+    <div class="form-group" id="var-args-group" style="display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <label class="form-label" style="margin:0">Function Arguments</label>
+        <span style="cursor:pointer;color:#7c83fd;font-size:11px" onclick="addArgRow('var-args')">+ add</span>
+      </div>
+      <div id="var-args"><p class="detail-empty" style="margin:2px 0 4px">No arguments.</p></div>
     </div>
     <div style="margin-top:10px;display:flex;gap:6px">
       <button class="btn" style="flex:1" onclick="resetDetail()">Cancel</button>
@@ -849,6 +927,12 @@ function showAddVarForm() {
   if (nameInput) nameInput.focus();
 }
 
+function _onVarFuncInput(val) {
+  const hasFunc = val.trim().length > 0;
+  document.getElementById('var-value-group').style.display = hasFunc ? 'none' : '';
+  document.getElementById('var-args-group').style.display  = hasFunc ? '' : 'none';
+}
+
 function confirmAddVar() {
   const name  = document.getElementById('new-var-name').value.trim();
   const value = document.getElementById('new-var-value').value.trim() || null;
@@ -856,27 +940,63 @@ function confirmAddVar() {
 
   if (!name) { toast('Name is required', true); return; }
   if (initVars.find(v => v.name === name)) { toast(`Variable "${name}" already exists`, true); return; }
-  if (!value && !func_) { toast('Provide a value or function', true); return; }
 
-  initVars.push({ name, value, function: func_ });
+  let args = [];
+  if (func_) {
+    args = collectArgs('var-args');
+  } else if (!value) {
+    toast('Provide a value or a function name', true); return;
+  }
+
+  initVars.push({ name, value: func_ ? null : value, function: func_, args });
   renderVars();
   updateStats();
   toast(`Variable "${name}" added`);
   resetDetail();
 }
 
-// ── Connect / edgehandles ──────────────────────────────────────────────
+// ── Connect mode (click-based) ─────────────────────────────────────────
 function toggleConnect() {
-  if (!eh) { toast('Connect mode unavailable (plugin not loaded)', true); return; }
+  if (!cy) { toast('Graph canvas not ready', true); return; }
   connectModeActive = !connectModeActive;
   const btn = document.getElementById('btn-connect');
   if (connectModeActive) {
     btn.classList.add('btn-active');
-    eh.enableDrawMode();
-    toast('Connect mode ON — drag from a node to create an edge');
+    document.getElementById('cy-container').style.cursor = 'crosshair';
+    toast('Connect mode ON — click source node, then target node');
   } else {
     btn.classList.remove('btn-active');
-    eh.disableDrawMode();
+    document.getElementById('cy-container').style.cursor = '';
+    _clearConnectSource();
+  }
+}
+
+function _clearConnectSource() {
+  if (pendingConnectSource) {
+    pendingConnectSource.removeClass('connect-source');
+    pendingConnectSource = null;
+  }
+}
+
+function _handleConnectTap(node) {
+  if (!pendingConnectSource) {
+    // First click — select source
+    pendingConnectSource = node;
+    node.addClass('connect-source');
+    toast(`Source: ${node.id()} — now click target node`);
+  } else if (pendingConnectSource.id() === node.id()) {
+    // Clicked source again — deselect
+    _clearConnectSource();
+    toast('Source cleared');
+  } else {
+    // Second click — open edge modal
+    pendingEdgeSource = pendingConnectSource;
+    pendingEdgeTarget = node;
+    _clearConnectSource();
+    document.getElementById('edge-indexes').value = '0';
+    document.getElementById('edge-group-by').value = '';
+    document.getElementById('edge-type-sel').value = 'res';
+    document.getElementById('modal-overlay').classList.add('visible');
   }
 }
 
@@ -915,9 +1035,9 @@ function exportToSynStreamJSON() {
     const d = n.data();
     const raw = d._raw || {};  // original SynStream JSON dict (null for new nodes)
 
-    // Build args: keep $ref args from original (var references), then add edge-derived args.
-    // Strip $res/$dep/$barrier from raw — the canvas edges are the authoritative source.
-    const refArgs = (raw.args || []).filter(a => a.type === '$ref');
+    // Build args: non-edge args first ($ref / typed), then edge-derived args.
+    // _ref_args is authoritative (set on load from raw, or from the create-node form).
+    const refArgs = d._ref_args || [];
     const edgeArgs = [];
     n.incomers('edge').forEach(e => {
       const ed = e.data();
@@ -965,17 +1085,21 @@ function exportToSynStreamJSON() {
 
   // Build initializations from sidebar vars
   const initializations = initVars.map(v => {
-    const entry = { name: v.name, args: [] };
+    const entry = { name: v.name };
     if (v.function) {
+      // Function-based var: use stored args (e.g. $ref references)
       entry.function = v.function;
-    } else if (v.value !== null && v.value !== undefined) {
-      // Try to detect type
-      const n = Number(v.value);
-      if (!isNaN(n) && v.value !== '') {
-        const type = Number.isInteger(n) ? 'usize' : 'f64';
-        entry.args = [{ type, value: v.value }];
-      } else {
-        entry.args = [{ type: 'String', value: v.value }];
+      entry.args = v.args || [];
+    } else {
+      // Plain var: auto-type the value field
+      entry.args = [];
+      if (v.value !== null && v.value !== undefined && v.value !== '') {
+        const n = Number(v.value);
+        if (!isNaN(n)) {
+          entry.args = [{ type: Number.isInteger(n) ? 'usize' : 'f64', value: v.value }];
+        } else {
+          entry.args = [{ type: 'String', value: v.value }];
+        }
       }
     }
     return entry;
@@ -1094,7 +1218,9 @@ async function exportPython() {
       if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA') return;
       deleteSelected();
     }
-    if (e.key === 'Escape' && connectModeActive) toggleConnect();
+    if (e.key === 'Escape') {
+      if (connectModeActive) toggleConnect();  // exit connect mode
+    }
   });
 
   document.getElementById('vars-header').addEventListener('click', () => {
@@ -1124,41 +1250,25 @@ async function exportPython() {
     updateStats();
 
     // Cytoscape tap / hover events
-    cy.on('tap', 'node', evt => showNodeDetail(evt.target.data()));
-    cy.on('tap', 'edge', evt => showEdgeDetail(evt.target.data()));
-    cy.on('tap', evt => { if (evt.target === cy) resetDetail(); });
+    cy.on('tap', 'node', evt => {
+      if (connectModeActive) {
+        _handleConnectTap(evt.target);
+      } else {
+        showNodeDetail(evt.target.data());
+      }
+    });
+    cy.on('tap', 'edge', evt => { if (!connectModeActive) showEdgeDetail(evt.target.data()); });
+    cy.on('tap', evt => {
+      if (evt.target === cy) {
+        if (connectModeActive) { _clearConnectSource(); }
+        else { resetDetail(); }
+      }
+    });
     cy.on('mouseover', 'node', evt => {
+      if (connectModeActive) return;
       cy.elements().not(evt.target.neighborhood().add(evt.target)).style({ opacity: 0.3 });
     });
-    cy.on('mouseout', 'node', () => cy.elements().style({ opacity: 1 }));
-
-    // Edgehandles (separate try — if the plugin CDN fails only Connect is disabled)
-    if (isEditable) {
-      try {
-        eh = cy.edgehandles({
-          canConnect(sourceNode, targetNode) { return !sourceNode.same(targetNode); },
-          edgeParams(sourceNode, targetNode) {
-            return { data: { edge_type: 'res', indexes: '0', group_by: null, label: 'res' } };
-          },
-        });
-        eh.disableDrawMode();
-        cy.on('ehcomplete', (event, sourceNode, targetNode, addedEles) => {
-          const edge = addedEles.filter('edge').first();
-          if (!edge.length) return;
-          pendingEdgeSource = sourceNode;
-          pendingEdgeTarget = targetNode;
-          edge.remove();
-          document.getElementById('edge-indexes').value = '0';
-          document.getElementById('edge-group-by').value = '';
-          document.getElementById('edge-type-sel').value = 'res';
-          document.getElementById('modal-overlay').classList.add('visible');
-        });
-      } catch (ehErr) {
-        console.warn('Edge connect mode unavailable:', ehErr);
-        const btn = document.getElementById('btn-connect');
-        if (btn) { btn.disabled = true; btn.title = 'Connect mode unavailable (plugin not loaded)'; }
-      }
-    }
+    cy.on('mouseout', 'node', () => { if (!connectModeActive) cy.elements().style({ opacity: 1 }); });
   } catch (cyErr) {
     console.error('Failed to initialize graph canvas:', cyErr);
     document.getElementById('cy').innerHTML =

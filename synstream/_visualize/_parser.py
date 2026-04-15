@@ -37,6 +37,7 @@ class VizInitVar:
     name: str
     value: Optional[str] = None
     function: Optional[str] = None
+    raw: Optional[dict] = None  # original JSON dict for round-trip editing
 
 
 @dataclass
@@ -134,6 +135,7 @@ def _parse_dict(data: dict) -> VizGraph:
             name=init["name"],
             value=val,
             function=init.get("function"),
+            raw=init,
         ))
 
     # Compute nodes
