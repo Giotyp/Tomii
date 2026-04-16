@@ -170,11 +170,21 @@ complex_f32* generate_vector(size_t n);
 
 ### Graph Visualization
 
-Visualize any SynStream graph interactively in the browser or as ASCII art in the terminal — no extra dependencies required.
+Visualize and edit SynStream graphs interactively in the browser, or render ASCII art in the terminal — no extra dependencies required. Three modes are available:
+
+- **View** (default) — read-only DAG viewer
+- **Edit** — modify an existing graph (add/remove nodes, edges, variables; save back to JSON)
+- **Create** — start from an empty canvas when the target file doesn't exist yet
 
 ```bash
-# Interactive web visualization (opens browser with Cytoscape.js DAG viewer)
+# View mode (read-only)
 python -m synstream --visualize examples/stream-analytics/graph.json
+
+# Edit mode
+python -m synstream --visualize examples/stream-analytics/graph.json --edit
+
+# Create a new graph from scratch (file doesn't exist yet)
+python -m synstream --visualize new_graph.json
 
 # ASCII art in terminal
 python -m synstream --visualize examples/stream-analytics/graph.json --ascii
@@ -188,11 +198,16 @@ From Python:
 ```python
 app = ss.Graph()
 # ... build graph ...
-app.visualize()          # opens browser
-app.visualize("ascii")   # prints to terminal
+app.visualize()                          # view in browser
+app.visualize("ascii")                   # ASCII in terminal
+app.visualize(editable=True)             # edit in browser
+app.visualize(editable=True,
+              save_path="out.json")      # edit + save to custom path
 ```
 
 The web UI renders a color-coded DAG with Dagre hierarchical layout: green for compute nodes, orange-bordered for conditional nodes, gray for post-nodes. Edges are styled by type (`$res` solid blue, `$dep` dashed, `$barrier` thick orange). Click any node or edge for details, hover to highlight neighbors, and use the `↓ PNG` button to export.
+
+In edit/create mode the toolbar adds **+ Node**, **+ Var**, **Connect** (click source → target to draw an edge), and **Delete** (or press `Delete`/`Backspace`). Click any node or edge to inline-edit its properties (function, factor, priority, edge type, indexes). **Save JSON** writes the graph back to disk; **Export Python** downloads a ready-to-run `synstream` script generated from the current graph.
 
 ---
 
