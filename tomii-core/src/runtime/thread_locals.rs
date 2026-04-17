@@ -18,36 +18,6 @@ use tomii_types::CmTypes;
 // Supporting types
 // ---------------------------------------------------------------------------
 
-/// Per-worker execution state shared between arg resolution and task execution.
-/// Consolidated here so cross-file coupling is explicit and grep-able.
-///
-/// Written by: `populate_cached_args_into` (stale_task_detected, executing_slot,
-/// executing_gen), `worker_resolve_successors` (inline_continuation).
-/// Read by: `execute_task`, `send_to_scheduler`.
-pub(super) struct WorkerThreadState {
-    /// Set by `collect_arg_result` when a gen mismatch is detected mid-arg-collection.
-    /// Checked by `execute_task` to drop stale tasks without corrupting new-stream counters.
-    pub stale_task_detected: bool,
-    /// Slot being executed on this worker (`usize::MAX` when idle).
-    pub executing_slot: usize,
-    /// Generation stamp of the executing slot at task dispatch time.
-    pub executing_gen: u32,
-    /// Populated by `worker_resolve_successors` when `inline_continuation` is enabled.
-    /// Consumed by the `send_to_scheduler` trampoline loop after `execute_task` returns.
-    pub inline_continuation: Option<NodeInfo>,
-}
-
-impl WorkerThreadState {
-    pub(super) const fn new() -> Self {
-        Self {
-            stale_task_detected: false,
-            executing_slot: usize::MAX,
-            executing_gen: 0,
-            inline_continuation: None,
-        }
-    }
-}
-
 /// Reusable scratch buffers for worker-side successor resolution.
 ///
 /// Bundled into one struct so a single `thread_local!` entry replaces four,
@@ -86,16 +56,6 @@ thread_local! {
     /// Lifecycle: cleared at the start of each `populate_cached_args_into` call.
     pub(super) static ARG_BUF: RefCell<Vec<CmTypes>> =
         RefCell::new(Vec::with_capacity(16));
-
-    /// Combined worker execution state.
-    ///
-    /// Written by: `populate_cached_args_into` (executing_slot, executing_gen,
-    /// stale_task_detected), `worker_resolve_successors` (inline_continuation).
-    /// Read by: `execute_task` (stale check, inline loop), `send_to_scheduler`
-    /// (inline_continuation take).
-    /// Lifecycle: reset to defaults at the top of each `execute_task` invocation.
-    pub(super) static WORKER_STATE: RefCell<WorkerThreadState> =
-        RefCell::new(WorkerThreadState::new());
 
     /// Worker-side dependency resolution buffers — all four in one allocation.
     ///

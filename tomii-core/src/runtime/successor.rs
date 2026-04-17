@@ -66,6 +66,9 @@ pub(super) fn conditions_met(
             node_info.pred_index,
             None,
             shared,
+            usize::MAX,
+            0,
+            &mut false,
         )
         .unwrap()[0];
 
@@ -89,7 +92,7 @@ pub(super) fn evaluate_node_condition(
 ) -> bool {
     // Build condition args using cached arg data
     let mut cond_args = Vec::with_capacity(cond_cache.arg_cache.args.len());
-    super::arg_resolution::populate_cached_args_into(
+    let _ = super::arg_resolution::populate_cached_args_into(
         &mut cond_args,
         shared,
         &cond_cache.arg_cache,
@@ -97,6 +100,8 @@ pub(super) fn evaluate_node_condition(
         node_info.index,
         node_info.slot,
         node_info.pred_index,
+        usize::MAX,
+        0,
     );
 
     // Execute condition function to get result
