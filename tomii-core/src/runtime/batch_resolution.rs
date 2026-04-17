@@ -53,6 +53,8 @@ pub(super) fn process_batch_inner(
 ) {
     batch_sched.clear();
 
+    let rctx = shared.resolve_ctx();
+
     for (node_info, result_opt) in batch.drain(..) {
         // Mark stream activity for all nodes (including network nodes id=0)
         stream_slot_activity.insert(node_info.slot, true);
@@ -61,7 +63,7 @@ pub(super) fn process_batch_inner(
             // For post_nodes: result pre-stored by execute_task (None here).
             // Network post_nodes (rare) carry Some(result) and store it now.
             if let Some(r) = result_opt {
-                shared.exec.node_results.set(&node_info, r);
+                rctx.exec.node_results.set(&node_info, r);
             }
             continue;
         }
@@ -69,16 +71,16 @@ pub(super) fn process_batch_inner(
         // Phase 1: Store result for network packets (Some).
         // Compute task results are already stored by execute_task (None).
         if let Some(r) = result_opt {
-            shared.exec.node_results.set(&node_info, r);
+            rctx.exec.node_results.set(&node_info, r);
         }
 
         // Phase 2: Decrement task counters
         let node_id_usize = node_info.id as usize;
-        let node_cache_entry = &shared.graph_cache.node_cache[node_id_usize];
+        let node_cache_entry = &rctx.cache.node_cache[node_id_usize];
 
         if node_cache_entry.is_condition {
             let prev_cond =
-                shared.slot_data.pending_cond_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
+                rctx.slots.pending_cond_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
             if prev_cond <= 10 || prev_cond % 100 == 0 {
                 print_debug(|| {
                     format!(
@@ -89,15 +91,15 @@ pub(super) fn process_batch_inner(
                 });
             }
         } else if !node_cache_entry.is_initial {
-            let _ = shared.slot_data.pending_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
+            let _ = rctx.slots.pending_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
         }
 
         // Phase 3: Collect successors and process them (no allocations)
-        collect_successors_for_node_into(shared, &node_info, succ_buf);
+        collect_successors_for_node_into(&shared.graph, rctx.cache, &node_info, succ_buf);
         sched.clear();
 
         // Load slot generation once per node (all successors share same slot)
-        let slot_gen = shared.slot_data.generation[node_info.slot].load(Ordering::SeqCst) as u32;
+        let slot_gen = rctx.slots.generation[node_info.slot].load(Ordering::SeqCst) as u32;
 
         for (_succ_info, has_cond, succ_id, pred_group) in succ_buf.iter() {
             let succ_node_id = *succ_id as usize;
@@ -105,13 +107,13 @@ pub(super) fn process_batch_inner(
             // Skip condition evaluation if all instances already spawned.
             // Use generational lazy check: if stored gen != slot_gen, treat as full factor.
             if *has_cond {
-                let packed = shared.slot_data.cond_instances_to_spawn[node_info.slot][succ_node_id]
+                let packed = rctx.slots.cond_instances_to_spawn[node_info.slot][succ_node_id]
                     .load(Ordering::SeqCst);
                 let stored_gen = gen_unpack_gen(packed);
                 let remaining_spawns = if stored_gen == slot_gen {
                     gen_unpack_val(packed)
                 } else {
-                    shared.graph_cache.node_cache[succ_node_id].factor as u32 // stale gen → full factor
+                    rctx.cache.node_cache[succ_node_id].factor as u32 // stale gen → full factor
                 };
                 if remaining_spawns == 0 {
                     continue;
@@ -122,7 +124,7 @@ pub(super) fn process_batch_inner(
             // For 1:1 non-barrier deps, `decrement_and_collect_ready` computes
             // the specific successor instance so its result is guaranteed available.
             decrement_and_collect_ready(
-                shared,
+                &rctx,
                 node_info.slot,
                 node_info.id,
                 node_info.index,
@@ -173,7 +175,7 @@ pub(super) fn process_batch_inner(
         // as soon as we have enough, rather than waiting for the entire
         // batch to finish. This eliminates the dead zone where workers
         // idle while the system thread processes a large batch.
-        if batch_sched.len() >= shared.config.batch.flush_threshold {
+        if batch_sched.len() >= rctx.cfg.batch.flush_threshold {
             super::scheduling::dispatch_nodes(shared, batch_sched, thread_core, thread_slot);
             batch_sched.clear();
         }

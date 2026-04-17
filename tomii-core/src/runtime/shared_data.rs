@@ -253,3 +253,43 @@ pub struct SharedData {
     pub exec: ExecCtx,
     pub telemetry: Telemetry,
 }
+
+/// Borrowed view of the sub-structs needed by dependency-resolution functions.
+/// Constructed cheaply on the stack via [`SharedData::resolve_ctx`].
+pub(super) struct ResolveCtx<'a> {
+    pub slots: &'a SlotData,
+    pub exec: &'a ExecCtx,
+    pub cache: &'a GraphCache,
+    pub cfg: &'a RuntimeConfig,
+}
+
+/// Borrowed view of the sub-structs needed by task-scheduling functions.
+/// Constructed cheaply on the stack via [`SharedData::sched_ctx`].
+pub(super) struct SchedCtx<'a> {
+    pub exec: &'a ExecCtx,
+    pub telemetry: &'a Telemetry,
+    pub cfg: &'a RuntimeConfig,
+    pub slots: &'a SlotData,
+}
+
+impl SharedData {
+    #[inline]
+    pub(super) fn resolve_ctx(&self) -> ResolveCtx<'_> {
+        ResolveCtx {
+            slots: &self.slot_data,
+            exec: &self.exec,
+            cache: &self.graph_cache,
+            cfg: &self.config,
+        }
+    }
+
+    #[inline]
+    pub(super) fn sched_ctx(&self) -> SchedCtx<'_> {
+        SchedCtx {
+            exec: &self.exec,
+            telemetry: &self.telemetry,
+            cfg: &self.config,
+            slots: &self.slot_data,
+        }
+    }
+}
