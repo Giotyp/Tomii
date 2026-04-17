@@ -1,3 +1,4 @@
+//! Timing statistics, JSON reports, and async-recorder output helpers for `TomiiRt`.
 use super::shared_data::{RuntimeConfig, SlotData};
 use std::sync::atomic::Ordering;
 

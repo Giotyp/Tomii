@@ -1,8 +1,9 @@
-/// Compilation helpers — pure graph analysis, no threading.
-///
-/// `build_node_cache` and `build_predecessor_tables` are `pub(crate)` so that
-/// `graph_gen::GraphSpec::compile()` can call them directly.  `build_slot_counters`
-/// remains `pub(super)` because it depends on the runtime `slots` parameter.
+//! Graph compilation helpers: node cache construction and predecessor routing tables.
+//!
+//! `build_node_cache` and `build_predecessor_tables` are `pub(crate)` so that
+//! `graph_gen::GraphSpec::compile()` can call them directly.  `build_slot_counters`
+//! remains `pub(super)` because it depends on the runtime `slots` parameter.
+//! Pure analysis — no threading, no shared state writes.
 use super::node_cache::{node_cache_entry, NodeCacheEntry, ResPredCache};
 use crate::graph::*;
 use crate::scheduler::SchedulerImpl;

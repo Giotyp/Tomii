@@ -1,3 +1,17 @@
+//! Task dispatch: builds argument vectors, stamps slot generation, and submits to the scheduler.
+//!
+//! [`send_to_scheduler`] is the single choke-point through which every ready `NodeInfo` is
+//! submitted to the Rayon-backed [`crate::scheduler::SchedulerImpl`].  It stamps the current
+//! slot generation onto each task so [`execute_task`] can detect stale tasks that linger in
+//! the Rayon queue across a slot boundary.
+//!
+//! [`dispatch_nodes`] is the higher-level wrapper used by resolution threads: it reuses the
+//! `PREP_ARGS_BUF` thread-local to avoid a `vec![None; N]` heap allocation on every flush
+//! and delegates to `send_to_scheduler` after recording timing.
+//!
+//! This module does **not** implement task execution (that is `task_execution`) or successor
+//! resolution (that is `batch_resolution` / `task_execution::worker_resolve_successors`).
+
 use super::reporting::should_record_slot;
 use super::shared_data::SharedData;
 use super::task_execution::execute_task;
@@ -11,6 +25,16 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tomii_types::*;
 
+/// Submit `nodes_to_schedule` to the scheduler, one Rayon task per node.
+///
+/// Each task is a trampoline loop that runs `execute_task` and, if an inline continuation is
+/// returned, immediately executes the next node on the same worker thread without re-entering
+/// the scheduler.  Post-nodes take a cold path (function and priority looked up from
+/// `graph.post_nodes`) because they are rare end-of-run events and their metadata is not
+/// mirrored in `node_cache`.
+///
+/// `gen` is stamped onto each `NodeInfo` clone here so stale tasks can be detected cheaply
+/// inside `execute_task` without a shared-state read at stamp time.
 #[inline]
 pub(super) fn send_to_scheduler(
     shared: &Arc<SharedData>,
@@ -111,6 +135,12 @@ pub(super) fn send_to_scheduler(
     }
 }
 
+/// High-level dispatch helper used by resolution threads.
+///
+/// Reuses the `PREP_ARGS_BUF` thread-local (`Vec<Option<Vec<CmTypes>>>`) to construct the
+/// `None`-filled args slice passed to [`send_to_scheduler`], avoiding a `vec![None; N]` heap
+/// allocation on every incremental flush (~77 flushes per stream at default batch sizes).
+/// Records timing and an optional async-recorder event around the scheduler submission.
 pub(super) fn dispatch_nodes(
     shared: &Arc<SharedData>,
     nodes_to_schedule: &[NodeInfo],

@@ -1,3 +1,16 @@
+//! Slot allocation primitives: assign, release, activate, and reinitialise concurrent stream slots.
+//!
+//! This module owns the low-level slot state machine transitions (`Inactive → Active`,
+//! `Inactive → Buffering`, `Buffering → Active`, `Active → Inactive`) and the lock-ordering
+//! protocol that prevents deadlocks between concurrent slot transitions.
+//!
+//! **Lock ordering**: all functions that hold both `running_streams` and `slot_states` must
+//! acquire them in the order `running_streams` first, `slot_states` second.  Violating this
+//! order causes deadlock (Bugs #11, #12 in project history).
+//!
+//! This module does **not** own the lifecycle orchestration logic (what to do *after* a slot
+//! completes) — that lives in `slot_lifecycle`.
+
 use super::shared_data::{SharedData, SlotState};
 use crate::buffers::*;
 use crate::debug::print_debug;
@@ -6,6 +19,13 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tomii_types::*;
 
+/// Finalize a completed slot: record timing, increment the global completion counter, reinitialise
+/// result buffers, and release the slot back to `Inactive`.
+///
+/// Returns `true` if the slot should be reused for a new stream (`can_restart`), `false` if
+/// `max_streams` has been reached.  The caller is responsible for spawning new tasks when
+/// `can_restart` is true.  `reinit_slot` is called **before** `release_slot` so that the new
+/// stream cannot observe stale results (Bug #16 fix).
 #[inline]
 pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
     // Complete timing - use unwrap_or to handle errors gracefully
@@ -77,9 +97,18 @@ pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> 
     }
 }
 
+/// Assign `stream` to an available slot and return `(slot_id, newly_activated)`.
+///
+/// Prefers the `last_assigned` slot (sequential assignment keeps slot 0, 1, 2, … in order so
+/// `activate_next_slot` always finds the right slot on completion).  If that slot is busy,
+/// searches round-robin for the next `Inactive` slot, which it marks `Buffering` instead of
+/// `Active` (the slot will be promoted by `activate_next_slot` when its predecessor completes).
+///
+/// **Lock ordering**: acquires `running_streams` (write) first, then `slot_states` (write).
+/// All other functions that hold both locks must follow the same order.
+///
+/// Returns `None` when every slot is occupied; callers must drop the frame gracefully.
 #[inline]
-/// Returns `Some((slot, newly_activated))` on success, or `None` when all slots are occupied.
-/// Callers must handle `None` gracefully (drop the packet) instead of panicking.
 pub(super) fn assign_stream_to_available_slot(
     shared: &Arc<SharedData>,
     stream: usize,

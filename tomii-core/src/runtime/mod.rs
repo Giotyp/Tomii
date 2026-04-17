@@ -1,3 +1,20 @@
+//! Builder, runtime handle, and top-level `run()` loop for the Τομί runtime.
+//!
+//! This module is the **entry point** for callers: [`TomiiRtBuilder`] assembles all
+//! sub-systems from a compiled [`crate::graph_gen::GraphCompiled`] and a scheduler,
+//! then [`TomiiRt::run`] spawns threads and blocks until the work is done.
+//!
+//! The module does **not** own any execution logic — task dispatch, slot lifecycle,
+//! and dependency resolution live in the sibling sub-modules that this file wires
+//! together.  All shared mutable state is encapsulated in [`SharedData`], which is
+//! `Arc`-cloned into every thread at spawn time.
+//!
+//! # Invariant
+//! [`TomiiRtBuilder::build`] is cheap (no threads spawned); threads are created only
+//! inside [`TomiiRt::run`].  Dropping [`TomiiRt`] before `run` completes is safe but
+//! will not stop in-flight threads — callers should rely on `max_runtime` or stream
+//! completion to drive graceful shutdown.
+
 mod arg_resolution;
 mod batch_resolution;
 mod consts;

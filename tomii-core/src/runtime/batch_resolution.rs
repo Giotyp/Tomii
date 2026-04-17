@@ -1,3 +1,15 @@
+//! Inner batch-resolution loop: four-phase dependency propagation and successor scheduling.
+//!
+//! The single public entry point [`process_batch_inner`] implements the four-phase protocol
+//! that prevents completion detection from racing with in-flight successor processing:
+//! **Phase 1** stores results for network packets (compute results are pre-stored by workers),
+//! **Phase 2** decrements the slot task counters, **Phase 3** resolves successor dependencies
+//! and accumulates ready nodes, and **Phase 4** (in the *outer* `process_batch_resolution`)
+//! decrements `processing_count` after all successor processing is finished.
+//!
+//! This module does **not** own the outer `processing_count` bookkeeping; that lives in
+//! `resolution_loop::process_batch_resolution` which wraps this module's function.
+
 /// Batch resolution inner loop: dependency propagation and successor scheduling.
 use super::shared_data::SharedData;
 use super::successor::{
@@ -12,9 +24,19 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tomii_types::*;
 
-/// Inner body of `process_batch_resolution` executed with all four thread-local buffers
-/// already borrowed. Separated from the outer function to eliminate the 4-deep
-/// `thread_local!` `.with()` nesting while keeping the thread-local declarations intact.
+/// Inner body of `process_batch_resolution`, invoked with all four thread-local buffers
+/// already borrowed to eliminate the 4-deep `thread_local!` `.with()` nesting.
+///
+/// Implements Phases 1–3 of the completion protocol for every node in `batch`:
+/// - **Phase 1**: store the result for network-injected packets (`Some(result_opt)`); compute
+///   results are pre-stored by `execute_task` and arrive here as `None`.
+/// - **Phase 2**: decrement `pending_cond_tasks` or `pending_tasks` depending on node kind.
+/// - **Phase 3**: resolve successor dependencies via [`decrement_and_collect_ready`] and
+///   accumulate ready nodes into `batch_sched`, flushing to workers at `flush_threshold`.
+///
+/// Phase 4 (decrement `processing_count`) is performed by the *caller*
+/// (`process_batch_resolution`) after this function returns, ensuring completion detection
+/// cannot fire until all successor scheduling for the batch is complete.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn process_batch_inner(
     shared: &Arc<SharedData>,

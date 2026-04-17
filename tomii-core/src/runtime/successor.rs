@@ -1,3 +1,14 @@
+//! Successor enumeration and dependency resolution helpers shared by the batch and worker paths.
+//!
+//! The three main helpers (`collect_successors_for_node_into`, `decrement_and_collect_ready`,
+//! `push_ready_chunked`) are called from both `batch_resolution::process_batch_inner` (system
+//! thread) and `task_execution::worker_resolve_successors` (worker thread).  Keeping them here
+//! avoids duplicating the logic and ensures both paths share identical dispatch semantics.
+//!
+//! This module does **not** update any per-slot counters directly; that is `batch_resolution`
+//! and `task_execution`.  It only reads `GraphCache` and delegates counter decrements to
+//! `resolution_state::decrease_and_get_ready_into`.
+
 use super::shared_data::SharedData;
 use crate::{buffers::*, IdType};
 use std::sync::Arc;

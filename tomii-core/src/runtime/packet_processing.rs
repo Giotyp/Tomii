@@ -1,4 +1,5 @@
-/// Per-packet network processing: slot assignment, indexing, and completion tracking.
+//! Per-packet network processing: decoding, slot assignment, index computation, and receive
+//! completion tracking. Active only when the `network` feature is enabled.
 use super::network_init::process_id_function;
 use super::reporting::should_record_slot;
 use super::shared_data::SharedData;
