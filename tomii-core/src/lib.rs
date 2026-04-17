@@ -113,6 +113,7 @@ pub mod wrappers {}
 
 // Re-exports
 pub use crate::async_recorder::AsyncRecorder;
+pub use crate::runtime::RuntimeConfig;
 #[cfg(build_rs_ran)]
 pub mod func_reg {
     include!(concat!(env!("OUT_DIR"), "/func_reg.rs"));

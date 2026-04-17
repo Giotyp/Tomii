@@ -195,7 +195,7 @@ fn activate_buffered_slot(
         )
     });
     if !initial.is_empty() {
-        super::scheduling::preparation(shared, &initial, thread_core, thread_slot);
+        super::scheduling::dispatch_nodes(shared, &initial, thread_core, thread_slot);
     }
 
     // Process buffered network packets that arrived while the slot was buffering
@@ -280,6 +280,6 @@ fn restart_slot_nonnetwork(
         )
     });
     if !compute_nodes.is_empty() {
-        super::scheduling::preparation(shared, &compute_nodes, thread_core, thread_slot);
+        super::scheduling::dispatch_nodes(shared, &compute_nodes, thread_core, thread_slot);
     }
 }
