@@ -7,8 +7,9 @@ members = [
     "examples/*",
 ]
 exclude = [
-    # Pure-C example: no Rust source; built with Make, not Cargo.
+    # Pure-C examples: no Rust source; built with Make, not Cargo.
     "examples/matrix-compute-C",
+    "examples/mapreduce",
 ]
 resolver = "3"
 
