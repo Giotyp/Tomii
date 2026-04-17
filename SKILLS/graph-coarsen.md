@@ -52,7 +52,7 @@ for step in range(num_steps):
 The Rust kernel must process a tile internally:
 
 ```rust
-#[synstream_export]
+#[tomii_export]
 pub fn your_tile_fn(data: &Vec<f64>, step: usize, tile_size: usize, tile_idx: usize) -> Vec<f64> {
     let start = tile_idx * tile_size;
     let end = (start + tile_size).min(data.len());

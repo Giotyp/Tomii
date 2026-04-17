@@ -1,9 +1,9 @@
 [workspace]
 members = [
-    "synstream-core",
-    "synstream-types",
-    "synstream-macro",
-    "synstream-converter",
+    "tomii-core",
+    "tomii-types",
+    "tomii-macro",
+    "tomii-converter",
     "examples/*",
 ]
 exclude = [

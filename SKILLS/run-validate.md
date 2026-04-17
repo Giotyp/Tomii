@@ -1,11 +1,11 @@
 ---
 name: run-validate
-description: Build and execute a SynStream graph, verify correctness at single-thread before scaling up, and establish a performance baseline from report.json
+description: Build and execute a Τομί graph, verify correctness at single-thread before scaling up, and establish a performance baseline from report.json
 ---
 
 # Skill: run-validate
 
-Execute a SynStream graph safely: build the plugin, verify correctness with a single worker,
+Execute a Τομί graph safely: build the plugin, verify correctness with a single worker,
 then scale up to establish a stable performance baseline. Produces a baseline record used by
 [diagnose](diagnose.md) and [knob-search](knob-search.md).
 
@@ -33,7 +33,7 @@ build_result = app.build(
 
 If the build fails, read the compiler output carefully:
 - Type mismatch errors → check that return types match `CmTypes` variants
-- `#[synstream_export]` not found → verify `synstream-macro` is in `Cargo.toml` dependencies
+- `#[tomii_export]` not found → verify `tomii-macro` is in `Cargo.toml` dependencies
 - Linker errors → check `crate-type = ["dylib", "rlib"]` in `[lib]` section
 
 ### 2. Correctness run (single worker)

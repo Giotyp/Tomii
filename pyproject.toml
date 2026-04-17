@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "synstream"
+name = "tomii"
 version = "0.1.0"
-description = "Python API for the SynStream task-graph framework"
+description = "Python API for the Τομί task-graph framework"
 requires-python = ">=3.9"
 dependencies = ["pydantic>=2.0", "matplotlib>=3.0"]
 
@@ -18,11 +18,11 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["synstream*"]
+include = ["tomii*"]
 
 [tool.pytest.ini_options]
-testpaths = ["synstream/tests"]
+testpaths = ["tomii/tests"]
 
 [tool.mypy]
-packages = ["synstream"]
+packages = ["tomii"]
 strict = true

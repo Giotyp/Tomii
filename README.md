@@ -1,18 +1,18 @@
-# SynStream
+# Τομί (tomii)
 
 ### Task-Graph Framework for Streaming Applications
 
-SynStream automates the process of describing a computational graph and executing it in a specified environment. It focuses on streaming applications, which require low-latency and data-reuse between computation stages in a consumer-producer MIMO pattern.
+Τομί automates the process of describing a computational graph and executing it in a specified environment. It focuses on streaming applications, which require low-latency and data-reuse between computation stages in a consumer-producer MIMO pattern.
 
 ## How to Use
 
-There are two ways to define and run a SynStream application: the **Python API** (recommended) and the **JSON + CLI** workflow.
+There are two ways to define and run a Τομί application: the **Python API** (recommended) and the **JSON + CLI** workflow.
 
 ---
 
 ## Python API (Recommended)
 
-The `synstream` Python package lets you define graphs in code, build the plugin library, and launch the runtime — all from a single Python script.
+The `tomii` Python package lets you define graphs in code, build the plugin library, and launch the runtime — all from a single Python script.
 
 ### Install
 
@@ -26,9 +26,9 @@ pip install -e ".[dev]"
 ### Quick Start
 
 ```python
-import synstream as ss
+import tomii as tm
 
-app = ss.Graph()
+app = tm.Graph()
 
 # Initializations (pre-computed objects shared across the graph)
 buf_size    = app.var("buf_size", 100)
@@ -76,20 +76,20 @@ app.build_and_run(wrap_path="wrappers.rs", reg_path="reg.rs",
 Python literals are auto-inferred (`int` → `usize`, `float` → `f64`). Use explicit wrappers for other types:
 
 ```python
-import synstream as ss
+import tomii as tm
 
-ss.i32(-5)
-ss.f32(3.14)
-ss.String("hello")
-ss.bool_(True)
-ss.Complex64(1.0, -0.5)
-ss.Vec("f32", [1.0, 2.0, 3.0])
+tm.i32(-5)
+tm.f32(3.14)
+tm.String("hello")
+tm.bool_(True)
+tm.Complex64(1.0, -0.5)
+tm.Vec("f32", [1.0, 2.0, 3.0])
 ```
 
 ### Loops and Conditions
 
 ```python
-from synstream import Loop, Condition
+from tomii import Loop, Condition
 
 # Loop node: iterates `loop_factor` times
 loop_node = app.node("proc", func="process", factor=num_nodes,
@@ -158,19 +158,19 @@ python examples/matrix-compute-C/run_bench.py --workers 4 --no-clean
 uv run python examples/stream-analytics/run_bench.py --workers 4 --no-clean
 ```
 
-C functions are exported by annotating declarations in the header with `// @synstream_export`:
+C functions are exported by annotating declarations in the header with `// @tomii_export`:
 
 ```c
-// @synstream_export
+// @tomii_export
 void* fft_planner(size_t buf_size);
 
-// @synstream_export(out_len=n, free=free_matrix)
+// @tomii_export(out_len=n, free=free_matrix)
 complex_f32* generate_vector(size_t n);
 ```
 
 ### Graph Visualization
 
-Visualize and edit SynStream graphs interactively in the browser, or render ASCII art in the terminal — no extra dependencies required. Three modes are available:
+Visualize and edit Τομί graphs interactively in the browser, or render ASCII art in the terminal — no extra dependencies required. Three modes are available:
 
 - **View** (default) — read-only DAG viewer
 - **Edit** — modify an existing graph (add/remove nodes, edges, variables; save back to JSON)
@@ -178,25 +178,25 @@ Visualize and edit SynStream graphs interactively in the browser, or render ASCI
 
 ```bash
 # View mode (read-only)
-python -m synstream --visualize examples/stream-analytics/graph.json
+python -m tomii --visualize examples/stream-analytics/graph.json
 
 # Edit mode
-python -m synstream --visualize examples/stream-analytics/graph.json --edit
+python -m tomii --visualize examples/stream-analytics/graph.json --edit
 
 # Create a new graph from scratch (file doesn't exist yet)
-python -m synstream --visualize new_graph.json
+python -m tomii --visualize new_graph.json
 
 # ASCII art in terminal
-python -m synstream --visualize examples/stream-analytics/graph.json --ascii
+python -m tomii --visualize examples/stream-analytics/graph.json --ascii
 
 # Custom port
-python -m synstream --visualize graph.json --port 8080
+python -m tomii --visualize graph.json --port 8080
 ```
 
 From Python:
 
 ```python
-app = ss.Graph()
+app = tm.Graph()
 # ... build graph ...
 app.visualize()                          # view in browser
 app.visualize("ascii")                   # ASCII in terminal
@@ -207,27 +207,27 @@ app.visualize(editable=True,
 
 The web UI renders a color-coded DAG with Dagre hierarchical layout: green for compute nodes, orange-bordered for conditional nodes, gray for post-nodes. Edges are styled by type (`$res` solid blue, `$dep` dashed, `$barrier` thick orange). Click any node or edge for details, hover to highlight neighbors, and use the `↓ PNG` button to export.
 
-In edit/create mode the toolbar adds **+ Node**, **+ Var**, **Connect** (click source → target to draw an edge), and **Delete** (or press `Delete`/`Backspace`). Click any node or edge to inline-edit its properties (function, factor, priority, edge type, indexes). **Save JSON** writes the graph back to disk; **Export Python** downloads a ready-to-run `synstream` script generated from the current graph.
+In edit/create mode the toolbar adds **+ Node**, **+ Var**, **Connect** (click source → target to draw an edge), and **Delete** (or press `Delete`/`Backspace`). Click any node or edge to inline-edit its properties (function, factor, priority, edge type, indexes). **Save JSON** writes the graph back to disk; **Export Python** downloads a ready-to-run `tomii` script generated from the current graph.
 
 ---
 
 ## Agent-Native
 
-SynStream exposes structured discovery and diagnostic interfaces designed for LLM agents and automated optimization loops.
+Τομί exposes structured discovery and diagnostic interfaces designed for LLM agents and automated optimization loops.
 
 ### Discovery commands
 
 ```bash
-python -m synstream --list-knobs          # human-readable list of all graph.run() options
-python -m synstream --list-knobs-json     # machine-readable JSON with search hints per knob
-python -m synstream --schema              # JSON schema for the full graph construction API
+python -m tomii --list-knobs          # human-readable list of all graph.run() options
+python -m tomii --list-knobs-json     # machine-readable JSON with search hints per knob
+python -m tomii --schema              # JSON schema for the full graph construction API
 ```
 
 `list_knobs()` and `list_knobs_json()` are also available as Python functions:
 
 ```python
-import synstream as ss
-print(ss.list_knobs())
+import tomii as tm
+print(tm.list_knobs())
 ```
 
 ### Structured report
@@ -284,7 +284,7 @@ the full optimization lifecycle from project discovery to graph coarsening:
 | `diagnose` | Classify bottleneck from `report.json` (scheduling / compute / imbalance) |
 | `knob-search` | 5-iteration search over scheduler knobs using per-knob search hints |
 | `graph-coarsen` | Reduce task count via tile_size or group_size when overhead_pct > 60% |
-| `plugin-author` | Write correct `#[synstream_export]` Rust/C plugin functions |
+| `plugin-author` | Write correct `#[tomii_export]` Rust/C plugin functions |
 
 Each skill is a self-contained markdown file with Claude Code SKILL.md frontmatter. To
 install them as Claude Code slash commands in your project:
@@ -302,11 +302,11 @@ For environments without Python, or when exporting a graph for external tools:
 
 1. Describe the application using a JSON file (or export one via `app.save_json()`).
 
-2. Obtain (or create) a plugin library compatible with SynStream (dynamic `.so` file and header file or Rust source file).
+2. Obtain (or create) a plugin library compatible with Τομί (dynamic `.so` file and header file or Rust source file).
 
 3. Set the **FUNC_PATH** environment variable to the header or Rust source path.
 
-4. Execute SynStream:
+4. Execute Τομί:
 
 ```
 Usage: main [OPTIONS] --json <FILE> --dylib <FILE>
@@ -341,17 +341,17 @@ Options:
 ## Architecture
 
 **Workspace crates:**
-- `synstream-core` — Runtime, scheduler, graph engine, and network receiver infrastructure
-- `synstream-types` — `CmTypes` enum for type-erased value passing across plugin boundaries
-- `synstream-converter` — Code-generation library; produces `wrappers.rs`/`reg.rs` from annotated Rust source or C headers (`.h`/`.hpp`)
-- `synstream-macro` — Procedural macros for plugin wrapping (WIP)
-- `synstream/` — Python API package
+- `tomii-core` — Runtime, scheduler, graph engine, and network receiver infrastructure
+- `tomii-types` — `CmTypes` enum for type-erased value passing across plugin boundaries
+- `tomii-converter` — Code-generation library; produces `wrappers.rs`/`reg.rs` from annotated Rust source or C headers (`.h`/`.hpp`)
+- `tomii-macro` — Procedural macros for plugin wrapping (WIP)
+- `tomii/` — Python API package
 - `examples/matrix-compute` — FFT and matrix computation benchmark (Rust plugin)
 - `examples/matrix-compute-C` — Same DAG using a C plugin (FFTW + OpenBLAS via annotated C header)
 - `examples/stream-analytics` — Lightweight example covering conditional nodes, grouped barriers, `$dep` edges, priority levels, variadic fan-in, and post-stream cleanup
 - `examples/mimolib` — MIMO streaming benchmark
 
-**Core modules in `synstream-core/src`:**
+**Core modules in `tomii-core/src`:**
 - `runtime/` — Main execution orchestration split into focused submodules: `mod.rs`, `init.rs`, `threading.rs`, `scheduling.rs`, `task_execution.rs`, `batch_resolution.rs`, `packet_processing.rs`, `slot_lifecycle.rs`, `slot_management.rs`, `successor.rs`, `arg_resolution.rs`, `node_cache.rs`, `shared_data.rs`, `thread_locals.rs`, `resolution_loop.rs`, `reporting.rs`, `network_init.rs`
 - `scheduler.rs` — Unified `RayonScheduler` (work-stealing + FIFO modes); `custom_scheduler/` for the lock-free priority scheduler
 - `graph.rs` / `graph_gen.rs` — DAG representation, JSON parsing, dependency resolution

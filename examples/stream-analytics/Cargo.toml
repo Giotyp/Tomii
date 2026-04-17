@@ -8,5 +8,5 @@ name = "stream_analytics"
 crate-type = ["dylib", "rlib"]
 
 [dependencies]
-synstream-types = { path = "../../synstream-types" }
-synstream-macro = { path = "../../synstream-macro" }
+tomii-types = { path = "../../tomii-types" }
+tomii-macro = { path = "../../tomii-macro" }

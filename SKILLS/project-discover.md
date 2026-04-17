@@ -1,17 +1,17 @@
 ---
 name: project-discover
-description: Orient in an unknown SynStream project — map graph topology, plugin functions, knob inventory, and performance baseline before any other task
+description: Orient in an unknown Τομί project — map graph topology, plugin functions, knob inventory, and performance baseline before any other task
 ---
 
 # Skill: project-discover
 
-Orient an agent in an unknown SynStream project. Produces a structured project summary
+Orient an agent in an unknown Τομί project. Produces a structured project summary
 containing the graph topology, plugin catalog, tunable knob inventory, and performance
 baseline (if a prior run exists). Run this skill first before any other skill.
 
 ## Trigger
 
-- Dropped into an unknown SynStream project directory
+- Dropped into an unknown Τομί project directory
 - Asked "what does this project do?"
 - Starting a new optimization or development session
 
@@ -34,7 +34,7 @@ Read both files. From them, extract:
 ### 2. Load the knob inventory
 
 ```bash
-python -m synstream --list-knobs-json
+python -m tomii --list-knobs-json
 ```
 
 Parse the JSON output. For each knob, record `name`, `type`, `description`, and
@@ -45,7 +45,7 @@ Parse the JSON output. For each knob, record `name`, `type`, `description`, and
 ### 3. Load the graph construction schema
 
 ```bash
-python -m synstream --schema
+python -m tomii --schema
 ```
 
 This returns the machine-readable graph API including available node parameters
@@ -57,18 +57,18 @@ This returns the machine-readable graph API including available node parameters
 Find the plugin source. It is referenced by `func_path=` in `graph.build(...)` calls —
 typically `src/lib.rs` (Rust) or a `.h` file (C).
 
-For **Rust plugins**: search for `#[synstream_export]` annotations:
+For **Rust plugins**: search for `#[tomii_export]` annotations:
 ```bash
-grep -n "synstream_export" src/lib.rs
+grep -n "tomii_export" src/lib.rs
 ```
 
 For each exported function, record: function name, parameter types, return type.
-Pay attention to `#[synstream_export(variadic)]` — these accept `Vec<T>` for
+Pay attention to `#[tomii_export(variadic)]` — these accept `Vec<T>` for
 fan-in from multiple predecessor instances.
 
-For **C plugins**: search for `// @synstream_export` annotations:
+For **C plugins**: search for `// @tomii_export` annotations:
 ```bash
-grep -n "@synstream_export" include/*.h
+grep -n "@tomii_export" include/*.h
 ```
 
 ### 5. Check for existing performance baseline

@@ -1,6 +1,6 @@
 ---
 name: knob-search
-description: Systematically search SynStream scheduler knobs using per-knob search hints from --list-knobs-json, converging on a locally optimal configuration within 5 iterations
+description: Systematically search Τομί scheduler knobs using per-knob search hints from --list-knobs-json, converging on a locally optimal configuration within 5 iterations
 ---
 
 # Skill: knob-search
@@ -20,7 +20,7 @@ each dimension. Converges in at most 5 iterations.
 ### Load per-knob search hints
 
 ```bash
-python -m synstream --list-knobs-json
+python -m tomii --list-knobs-json
 ```
 
 Each knob entry has a `search_hint` field specifying how to search it, for example:

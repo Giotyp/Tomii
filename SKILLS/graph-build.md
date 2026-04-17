@@ -1,18 +1,18 @@
 ---
 name: graph-build
-description: Translate a natural-language or pseudocode computation description into a correct SynStream Python graph definition with appropriate dependency types, factors, and node structure
+description: Translate a natural-language or pseudocode computation description into a correct Τομί Python graph definition with appropriate dependency types, factors, and node structure
 ---
 
 # Skill: graph-build
 
-Translate a computation description into a correct SynStream Python graph. Produces a
+Translate a computation description into a correct Τομί Python graph. Produces a
 complete `run_bench.py` and a `src/lib.rs` plugin skeleton with all required
-`#[synstream_export]` stubs.
+`#[tomii_export]` stubs.
 
 ## Trigger
 
-- User describes a pipeline or computation to express as a SynStream graph
-- Migrating an existing streaming pipeline into SynStream
+- User describes a pipeline or computation to express as a Τομί graph
+- Migrating an existing streaming pipeline into Τομί
 - Adding a new stage to an existing graph
 
 ## Steps
@@ -20,7 +20,7 @@ complete `run_bench.py` and a `src/lib.rs` plugin skeleton with all required
 ### 1. Load the graph construction schema
 
 ```bash
-python -m synstream --schema
+python -m tomii --schema
 ```
 
 Read the full output. Pay attention to:
@@ -39,7 +39,7 @@ For each computation stage in the user's description, determine:
 | Does it need ALL instances of a predecessor to complete first? | Use `node.wait()` (`$barrier`) |
 | Does it just need ordering (no data)? | Use `node.dep()` (`$dep`) |
 | Does it consume a pre-computed initialization? | Use `$ref` referencing the var name |
-| Is it conditional on a runtime predicate? | Use `ss.Condition(...)` |
+| Is it conditional on a runtime predicate? | Use `tm.Condition(...)` |
 
 ### 3. Choose the fan-in strategy
 
@@ -47,7 +47,7 @@ When a downstream stage needs results from all N instances of an upstream parall
 
 | Pattern | Use | When |
 |---------|-----|------|
-| Synchronize then pass data | `node.out(0, N)` (variadic `$res`) + `#[synstream_export(variadic)]` | Need all N outputs as a `Vec<T>` |
+| Synchronize then pass data | `node.out(0, N)` (variadic `$res`) + `#[tomii_export(variadic)]` | Need all N outputs as a `Vec<T>` |
 | Synchronize without data | `node.wait(predecessor)` (`$barrier`) | Only need to know all finished |
 | Partial synchronization | `node.wait(predecessor, group_by=K)` | Upstream N instances, downstream N/K instances each waiting for K |
 
@@ -57,16 +57,16 @@ For each node, determine the Rust function signature:
 - Parameters from `$res` predecessors arrive as `&T` (reference to the predecessor's return value)
 - Parameters from `$ref` inits arrive as `&T`
 - Plain arguments (constants) arrive as owned values (`usize`, `f64`, `String`, etc.)
-- For `#[synstream_export(variadic)]` functions, the collected arg arrives as `Vec<&T>` or `Vec<T>`
-- The return type must be a concrete owned type that maps to a `CmTypes` variant (see `synstream-types/`)
+- For `#[tomii_export(variadic)]` functions, the collected arg arrives as `Vec<&T>` or `Vec<T>`
+- The return type must be a concrete owned type that maps to a `CmTypes` variant (see `tomii-types/`)
 
 ### 5. Construct the Python graph
 
 Follow this template (see also [AGENT.md](../AGENT.md) Python skeleton):
 
 ```python
-import synstream as ss
-from synstream._builder import find_workspace_root
+import tomii as tm
+from tomii._builder import find_workspace_root
 from pathlib import Path
 import argparse
 
@@ -78,7 +78,7 @@ parser.add_argument("--workers", type=int, default=4)
 parser.add_argument("--max-streams", type=int, default=20)
 args = parser.parse_args()
 
-app = ss.Graph()
+app = tm.Graph()
 
 # --- Initializations (pre-computed objects, shared across all streams) ---
 n = app.var("n", 1024)                              # constant
@@ -87,7 +87,7 @@ data = app.var("data", func="init_data", args=[n])  # function-computed
 # --- Nodes (streaming computation) ---
 stage_a = app.node("stage_a", func="compute_a",
                    factor=n,
-                   args=[ss.f64(0.0), data])
+                   args=[tm.f64(0.0), data])
 
 stage_b = app.node("stage_b", func="compute_b",
                    factor=n,
@@ -123,20 +123,20 @@ For a richer example with conditions, priorities, and grouped barriers, see:
 Create `src/lib.rs` with stubs for all required functions:
 
 ```rust
-use synstream_macro::synstream_export;
+use tomii_macro::tomii_export;
 
-#[synstream_export]
+#[tomii_export]
 pub fn init_data(n: usize) -> Vec<f64> {
     vec![0.0; n]
 }
 
-#[synstream_export]
+#[tomii_export]
 pub fn compute_a(init: f64, data: &Vec<f64>, idx: usize) -> f64 {
     // TODO: implement
     data[idx] + init
 }
 
-#[synstream_export(variadic)]
+#[tomii_export(variadic)]
 pub fn aggregate(results: Vec<f64>) -> f64 {
     results.iter().sum()
 }
@@ -153,8 +153,8 @@ edition = "2021"
 crate-type = ["dylib", "rlib"]
 
 [dependencies]
-synstream-types = { path = "../../synstream-types" }
-synstream-macro = { path = "../../synstream-macro" }
+tomii-types = { path = "../../tomii-types" }
+tomii-macro = { path = "../../tomii-macro" }
 ```
 
 ### 7. Validate graph structure
@@ -182,7 +182,7 @@ Start conservative for the first run:
 ## Output
 
 - `run_bench.py` — complete Python graph definition
-- `src/lib.rs` — plugin skeleton with all `#[synstream_export]` stubs
+- `src/lib.rs` — plugin skeleton with all `#[tomii_export]` stubs
 - `Cargo.toml` — plugin crate manifest
 
 ## Common mistakes
@@ -191,7 +191,7 @@ Start conservative for the first run:
 |---------|-----|
 | Returning `&str` from a plugin function | Return `String` (owned) |
 | Forgetting `pub` on exported functions | Add `pub fn` |
-| Using `$res` to collect all N outputs but forgetting `(variadic)` | Add `#[synstream_export(variadic)]` |
+| Using `$res` to collect all N outputs but forgetting `(variadic)` | Add `#[tomii_export(variadic)]` |
 | Factor > 1000 causing high scheduling overhead | Read `optimization_hint` in `--schema`; try `group_size` |
 | Predecessor name typo in `args` | Graph will fail at parse time with a diagnostic |
 

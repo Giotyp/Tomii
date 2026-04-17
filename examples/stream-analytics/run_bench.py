@@ -1,6 +1,6 @@
 """Stream-analytics benchmark — Python API equivalent of graph.json.
 
-This file builds and runs the same graph as graph.json using the synstream
+This file builds and runs the same graph as graph.json using the tomii
 Python API, demonstrating conditional nodes, grouped barriers, $dep ordering
 edges, priority levels, and post-stream cleanup — all without the heavy
 dependencies of a real MIMO pipeline.
@@ -27,7 +27,7 @@ HERE = Path(__file__).resolve().parent        # examples/stream-analytics/
 REPO_ROOT = HERE.parents[1]                   # workspace root
 sys.path.insert(0, str(REPO_ROOT))
 
-import synstream as ss  # noqa: E402
+import tomii as tm
 
 # ---------------------------------------------------------------------------
 # CLI arguments
@@ -35,7 +35,7 @@ import synstream as ss  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="stream-analytics SynStream benchmark")
+    p = argparse.ArgumentParser(description="stream-analytics Τομί benchmark")
     p.add_argument("--workers",        type=int, default=2)
     p.add_argument("--system-threads", type=int, default=3)
     p.add_argument("--slots",          type=int, default=2)
@@ -57,18 +57,18 @@ def _parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 
-def build_graph() -> ss.Graph:
-    app = ss.Graph()
+def build_graph() -> tm.Graph:
+    app = tm.Graph()
 
     # --- Initializations ---
     num_sensors         = app.var("num_sensors",         4)
     readings_per_sensor = app.var("readings_per_sensor", 8)
     total_readings      = app.var("total_readings",      32)
-    anomaly_threshold   = app.var("anomaly_threshold",   ss.f64(5.0))
+    anomaly_threshold   = app.var("anomaly_threshold",   tm.f64(5.0))
     result_file         = app.var(
         "result_file",
         func="get_out_file",
-        args=[ss.String("SCRIPT_DIR"), ss.String("result.txt")],
+        args=[tm.String("SCRIPT_DIR"), tm.String("result.txt")],
     )
 
     # --- Stage 1: generate one reading per slot (factor = total_readings = 32) ---
@@ -88,7 +88,7 @@ def build_graph() -> ss.Graph:
     )
 
     # --- Stage 3a: anomaly branch (high priority, conditional on classify == True) ---
-    cond_anomaly = ss.Condition(
+    cond_anomaly = tm.Condition(
         operation="Eq",
         value=True,
         value_type="bool",
@@ -108,7 +108,7 @@ def build_graph() -> ss.Graph:
     )
 
     # --- Stage 3b: normal branch (low priority, conditional on classify != True) ---
-    cond_normal = ss.Condition(
+    cond_normal = tm.Condition(
         operation="Neq",
         value=True,
         value_type="bool",

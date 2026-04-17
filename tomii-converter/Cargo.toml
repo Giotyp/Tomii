@@ -1,0 +1,16 @@
+[package]
+name = "tomii-converter"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "tomii_converter"
+
+[[bin]]
+name = "tomii-converter"
+path = "src/bin/main.rs"
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+regex = "1"

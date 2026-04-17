@@ -1,7 +1,7 @@
 """Matrix-compute benchmark — Python equivalent of run_bench.sh.
 
 Replaces the shell script + graph.json pair with a single Python file using
-the synstream API. All runtime parameters match run_bench.sh defaults.
+the tomii API. All runtime parameters match run_bench.sh defaults.
 
 Usage:
     # From repo root (activate venv first: source .venv/bin/activate)
@@ -25,7 +25,7 @@ HERE = Path(__file__).resolve().parent  # examples/matrix-compute/
 REPO_ROOT = HERE.parents[1]  # workspace root
 sys.path.insert(0, str(REPO_ROOT))
 
-import synstream as ss  # noqa: E402  (import after path setup)
+import tomii as tm
 
 # ---------------------------------------------------------------------------
 # CLI arguments (mirrors the config block at the top of run_bench.sh)
@@ -33,7 +33,7 @@ import synstream as ss  # noqa: E402  (import after path setup)
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="matrix-compute SynStream benchmark")
+    p = argparse.ArgumentParser(description="matrix-compute Τομί benchmark")
     p.add_argument("--workers", type=int, default=2, help="worker threads (default: 2)")
     p.add_argument(
         "--system-threads", type=int, default=3, help="system threads (default: 3)"
@@ -100,8 +100,8 @@ def _parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 
-def build_graph() -> ss.Graph:
-    app = ss.Graph()
+def build_graph() -> tm.Graph:
+    app = tm.Graph()
 
     # --- Initializations ---
     buf_size = app.var("buf_size", 100)
@@ -111,7 +111,7 @@ def build_graph() -> ss.Graph:
         "result_file",
         func="get_out_file",
         # SCRIPT_DIR is resolved at runtime from the env var passed to run()
-        args=[ss.String("SCRIPT_DIR"), ss.String("result.txt")],
+        args=[tm.String("SCRIPT_DIR"), tm.String("result.txt")],
     )
 
     # --- Pipeline ---
@@ -170,7 +170,7 @@ def main() -> None:
     # SCRIPT_DIR is read by get_out_file() to locate the result file
     env = {"SCRIPT_DIR": str(HERE)}
 
-    # Step 1: build SynStream + plugin library (mirrors: cargo build + cargo build --manifest-path)
+    # Step 1: build Τομί + plugin library (mirrors: cargo build + cargo build --manifest-path)
     app.build(
         func_path=str(HERE / "src" / "lib.rs"),
         plugin_manifest=str(HERE / "Cargo.toml"),
