@@ -198,11 +198,14 @@ fn main() {
     let args = Args::parse();
 
     // Initialize tracing subscriber. RUST_LOG overrides the --debug flag.
+    // Disable ANSI colour codes when stdout is redirected to a file so that
+    // the output file contains plain text rather than escape sequences.
     let default_level = if args.debug { "debug" } else { "info" };
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level)),
         )
+        .with_ansi(args.output == "stdout")
         .init();
 
     // init_debug is now a no-op; kept for source compatibility.

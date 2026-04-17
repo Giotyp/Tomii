@@ -642,7 +642,10 @@ mod tests {
 
         let mut ready2 = Vec::new();
         entry.decrease_and_get_ready_into(gen, None, 1, Some(1), &mut ready2);
-        assert!(ready2.is_empty(), "instance already sent — must not fire again");
+        assert!(
+            ready2.is_empty(),
+            "instance already sent — must not fire again"
+        );
     }
 
     #[test]
@@ -702,7 +705,11 @@ mod tests {
 
         let mut result = all_ready.lock().unwrap().clone();
         result.sort();
-        assert_eq!(result, (0..8).collect::<Vec<_>>(), "every instance must fire exactly once");
+        assert_eq!(
+            result,
+            (0..8).collect::<Vec<_>>(),
+            "every instance must fire exactly once"
+        );
     }
 
     #[test]
@@ -734,7 +741,11 @@ mod tests {
 
         let mut result = all_ready.lock().unwrap().clone();
         result.sort();
-        assert_eq!(result, vec![0, 1, 2, 3], "barrier: all instances fire exactly once");
+        assert_eq!(
+            result,
+            vec![0, 1, 2, 3],
+            "barrier: all instances fire exactly once"
+        );
     }
 
     #[test]

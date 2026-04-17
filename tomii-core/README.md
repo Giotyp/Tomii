@@ -53,23 +53,4 @@ a minimal embedded deployment.
 
 For a deep dive into the execution model — thread roles, the four-phase batch
 protocol, slot lifecycle, lock-ordering rules, and memory ordering rationale —
-see [`src/runtime/ARCHITECTURE.md`](src/runtime/ARCHITECTURE.md).
-
-## JSON graph format
-
-Graphs are defined in JSON with three top-level sections:
-
-- `initializations` — pre-computed objects (matrices, buffers, configs) loaded
-  once and shared read-only across all tasks.
-- `nodes` — task definitions with `func_name`, `args`, and optional `factor`
-  (parallelism), `condition`, and `priority` fields.
-- `post_nodes` (optional) — tasks that run once after all streams complete.
-
-Argument types within `nodes`:
-- `$ref` — reference to an initialized object
-- `$res` — result from a predecessor node (data dependency edge)
-- `$dep` — ordering-only dependency (no result consumed)
-- `$barrier` — wait for all predecessor instances before firing
-
-The full specification including `factor`, `indexes`, `group_by`, and network
-node syntax is documented in [`.github/copilot-instructions.md`](../.github/copilot-instructions.md).
+see [`src/runtime/ARCHITECTURE.md`](src/runtime/ARCHITECTURE.md)

@@ -12,8 +12,7 @@ use tomii_types::*;
 fn resolve_func(name: &str) -> CmPtr {
     #[cfg(not(any(test, feature = "test-utils")))]
     {
-        get_func(name)
-            .unwrap_or_else(|| panic!("Function '{}' not found in registry", name))
+        get_func(name).unwrap_or_else(|| panic!("Function '{}' not found in registry", name))
     }
     #[cfg(any(test, feature = "test-utils"))]
     {

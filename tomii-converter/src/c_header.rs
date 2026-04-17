@@ -93,10 +93,7 @@ struct RawParam {
 /// Removes extra whitespace and collapses `const T *` → `const T*`.
 fn normalise_c_type(raw: &str) -> String {
     // Collapse whitespace
-    let s: String = raw
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let s: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
 
     // Move trailing `*` adjacent to token before it
     // e.g. "const char *" → "const char*", "void * *" → "void**"
@@ -165,8 +162,7 @@ fn parse_c_declaration(decl: &str) -> Option<(String, String, Vec<RawParam>)> {
     let params_str = decl[open + 1..close].trim();
 
     // Split `return_type func_name` — last whitespace-separated token is func_name
-    let last_space_or_star = before_paren
-        .rfind(|c: char| c == ' ' || c == '*')?;
+    let last_space_or_star = before_paren.rfind(|c: char| c == ' ' || c == '*')?;
     let (ret_part, fn_name) = before_paren.split_at(last_space_or_star + 1);
     let fn_name = fn_name.trim().to_string();
     let ret_type = normalise_c_type(ret_part);
@@ -262,10 +258,7 @@ fn normalise_element_type(c_type: &str) -> String {
 }
 
 /// Classify a C return type.
-fn classify_c_return(
-    ret_type: &str,
-    ann: &Annotation,
-) -> CmRet {
+fn classify_c_return(ret_type: &str, ann: &Annotation) -> CmRet {
     match ret_type {
         "void" => CmRet::Void,
         "size_t" | "usize" => CmRet::Primitive(PrimKind::Usize),
@@ -390,13 +383,13 @@ fn build_entry(decl: &str, ann: &Annotation) -> Option<ExportedFn> {
 
         // Check if this is a companion size_t for an ArrayPtr/MutArrayPtr param
         // i.e. its name matches `{prev_array_param}_len`
-        let is_companion_len = cm_params.last().map_or(false, |prev: &CmParam| {
-            match &prev.kind {
+        let is_companion_len = cm_params
+            .last()
+            .map_or(false, |prev: &CmParam| match &prev.kind {
                 CmParamKind::ArrayPtr { len_param, .. }
                 | CmParamKind::MutArrayPtr { len_param, .. } => len_param == &raw.name,
                 _ => false,
-            }
-        });
+            });
 
         if is_companion_len {
             // Mark as auto-derived; don't add to cm_params
@@ -454,7 +447,10 @@ void* fft_planner(size_t buf_size);
         assert_eq!(entries[0].registry_key, "fft_planner");
         assert_eq!(entries[0].cm_params.len(), 1);
         assert!(
-            matches!(entries[0].cm_params[0].kind, CmParamKind::Primitive(PrimKind::Usize)),
+            matches!(
+                entries[0].cm_params[0].kind,
+                CmParamKind::Primitive(PrimKind::Usize)
+            ),
             "expected Primitive(Usize), got {:?}",
             entries[0].cm_params[0].kind
         );
@@ -496,7 +492,11 @@ void write_to_file(const char* file_path, void** buffers, size_t num_buffers);
         let entries = collect_c_entries(src);
         assert_eq!(entries.len(), 1);
         let e = &entries[0];
-        assert_eq!(e.cm_params.len(), 2, "expected 2 CmTypes params (file_path + buffers)");
+        assert_eq!(
+            e.cm_params.len(),
+            2,
+            "expected 2 CmTypes params (file_path + buffers)"
+        );
         assert!(
             matches!(e.cm_params[0].kind, CmParamKind::StrRef),
             "expected StrRef for file_path, got {:?}",
