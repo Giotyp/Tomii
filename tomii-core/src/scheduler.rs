@@ -471,24 +471,133 @@ impl RayonScheduler {
     }
 }
 
+// ---------------------------------------------------------------------------
+// TaskScheduler trait — extension point for external scheduler plugins
+// ---------------------------------------------------------------------------
+
+/// Object-safe trait for external scheduler implementations.
+///
+/// Enabled by the `plugin-scheduler` feature flag.  Allows third-party crates
+/// to implement custom scheduling strategies (e.g. NUMA-aware, priority-ageing,
+/// deadline-driven) and pass them to [`TomiiRtBuilder::new_with_plugin`] without
+/// forking `tomii-core`.
+///
+/// # Object safety
+/// Spawn methods accept `Box<dyn FnOnce() + Send + 'static>` rather than a
+/// generic `F` so the trait is object-safe.  This incurs **one heap allocation
+/// per task spawn** in the plugin path.  The built-in `Rayon` and `Custom`
+/// variants of [`SchedulerImpl`] are unaffected — they use the zero-cost
+/// generic path and only box when explicitly routed through a `Plugin` variant.
+///
+/// # Implementing
+/// ```ignore
+/// struct MyScheduler { pool: rayon::ThreadPool }
+///
+/// impl TaskScheduler for MyScheduler {
+///     fn spawn_task_with_meta_priority(
+///         &self, _p: Priority, _meta: Option<TaskMeta>,
+///         task: Box<dyn FnOnce() + Send + 'static>,
+///     ) { self.pool.spawn(task); }
+///
+///     fn spawn_to_group_with_meta(
+///         &self, _group: usize, priority: Priority,
+///         meta: Option<TaskMeta>, task: Box<dyn FnOnce() + Send + 'static>,
+///     ) { self.spawn_task_with_meta_priority(priority, meta, task); }
+///
+///     fn workers(&self) -> usize { self.pool.current_num_threads() }
+///     // ... remaining methods with sensible defaults below
+/// }
+/// ```
+#[cfg(feature = "plugin-scheduler")]
+pub trait TaskScheduler: Send + Sync + 'static {
+    /// Spawn a task with scheduling priority.  Hot path — called once per completed node.
+    fn spawn_task_with_meta_priority(
+        &self,
+        priority: crate::custom_scheduler::Priority,
+        meta: Option<crate::TaskMeta>,
+        task: Box<dyn FnOnce() + Send + 'static>,
+    );
+
+    /// Spawn a task to a specific worker affinity group.
+    /// Falls back to `spawn_task_with_meta_priority` if the scheduler does not
+    /// support worker groups.
+    fn spawn_to_group_with_meta(
+        &self,
+        group_id: usize,
+        priority: crate::custom_scheduler::Priority,
+        meta: Option<crate::TaskMeta>,
+        task: Box<dyn FnOnce() + Send + 'static>,
+    );
+
+    /// Return the affinity group id for a given [`crate::WorkerRangeSpec`].
+    /// Return `0` (global pool) if worker groups are not supported.
+    fn get_affinity_group(&self, use_workers: Option<&crate::WorkerRangeSpec>) -> usize {
+        let _ = use_workers;
+        0
+    }
+
+    fn workers(&self) -> usize;
+    fn core_offset(&self) -> usize;
+    fn system_threads(&self) -> usize;
+    fn receiver_core_offset(&self) -> usize;
+    fn receiver_threads(&self) -> usize;
+
+    /// Write a recorded schedule to CSV.  No-op by default.
+    fn write_record(&self, _path: &str) {}
+
+    /// Return the core to pin the main thread to, if any.
+    fn main_core(&self) -> Option<core_affinity::CoreId> {
+        None
+    }
+
+    /// Return a shared [`AsyncRecorder`] if the scheduler uses one.
+    fn get_async_recorder(&self) -> Option<Arc<AsyncRecorder>> {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 /// The active scheduler instance.
 ///
 /// `Rayon` covers both FIFO and work-stealing modes on a shared thread pool.
 /// `Custom` is a hand-wired scheduler with per-group worker queues and
 /// explicit CPU affinity, suitable for latency-sensitive MIMO pipelines.
+/// `Plugin` (requires `plugin-scheduler` feature) wraps any `Arc<dyn TaskScheduler>`.
 pub enum SchedulerImpl {
     Rayon(RayonScheduler),
     Custom(crate::custom_scheduler::CustomScheduler),
+    #[cfg(feature = "plugin-scheduler")]
+    /// External scheduler plugin.  Spawn methods are routed through
+    /// `Box<dyn FnOnce()>` erasure; all other paths pay no extra cost.
+    Plugin(Arc<dyn TaskScheduler>),
 }
 
-/// Dispatch a method call to the inner Rayon or Custom scheduler variant.
+/// Dispatch a method call to the inner scheduler variant.
 ///
-/// Usage: `dispatch!(self, rayon_var => rayon_expr, custom_var => custom_expr)`
+/// Two-arm form (no Plugin handling):
+/// `dispatch!(self, r => rayon_expr, c => custom_expr)`
+///
+/// Three-arm form (with Plugin fallback under `plugin-scheduler` feature):
+/// `dispatch!(self, r => rayon_expr, c => custom_expr, p => plugin_expr)`
 macro_rules! dispatch {
     ($self:expr, $rv:ident => $re:expr, $cv:ident => $ce:expr) => {
         match $self {
             SchedulerImpl::Rayon($rv) => $re,
             SchedulerImpl::Custom($cv) => $ce,
+            #[cfg(feature = "plugin-scheduler")]
+            SchedulerImpl::Plugin(_) => unreachable!(
+                "plugin-scheduler variant reached two-arm dispatch; \
+                 use three-arm dispatch for this method"
+            ),
+        }
+    };
+    ($self:expr, $rv:ident => $re:expr, $cv:ident => $ce:expr, $pv:ident => $pe:expr) => {
+        match $self {
+            SchedulerImpl::Rayon($rv) => $re,
+            SchedulerImpl::Custom($cv) => $ce,
+            #[cfg(feature = "plugin-scheduler")]
+            SchedulerImpl::Plugin($pv) => $pe,
         }
     };
 }
@@ -498,17 +607,26 @@ impl SchedulerImpl {
     where
         F: FnOnce() + Send + 'static,
     {
-        dispatch!(self, s => s.spawn_task(task), s => s.spawn(task))
+        dispatch!(self,
+            s => s.spawn_task(task),
+            s => s.spawn(task),
+            p => p.spawn_task_with_meta_priority(
+                crate::custom_scheduler::Priority::Normal, None, Box::new(task)))
     }
 
     pub fn spawn_task_with_meta<F>(&self, meta: Option<crate::TaskMeta>, task: F)
     where
         F: FnOnce() + Send + 'static,
     {
-        dispatch!(self, s => s.spawn_task_with_meta(meta, task), s => s.spawn_with_meta(meta, task))
+        dispatch!(self,
+            s => s.spawn_task_with_meta(meta, task),
+            s => s.spawn_with_meta(meta, task),
+            p => p.spawn_task_with_meta_priority(
+                crate::custom_scheduler::Priority::Normal, meta, Box::new(task)))
     }
 
-    /// Spawn task with metadata and priority (Custom scheduler respects priority, others ignore it)
+    /// Spawn a task with metadata and priority.
+    /// Custom scheduler respects priority; Rayon ignores it; Plugin boxes the task.
     pub fn spawn_task_with_meta_priority<F>(
         &self,
         priority: crate::custom_scheduler::Priority,
@@ -519,10 +637,12 @@ impl SchedulerImpl {
     {
         dispatch!(self,
             s => s.spawn_task_with_meta(meta, task),
-            s => s.spawn_with_meta_priority(priority, meta, task))
+            s => s.spawn_with_meta_priority(priority, meta, task),
+            p => p.spawn_task_with_meta_priority(priority, meta, Box::new(task)))
     }
 
-    /// Spawn task to specific worker group (Custom scheduler only, others fallback to normal spawn)
+    /// Spawn a task to a specific worker affinity group.
+    /// Custom scheduler only; Rayon and Plugin fall back to normal spawn.
     pub fn spawn_to_group_with_meta<F>(
         &self,
         group_id: usize,
@@ -534,58 +654,62 @@ impl SchedulerImpl {
     {
         dispatch!(self,
             s => s.spawn_task_with_meta(meta, task),
-            s => s.spawn_to_group_with_meta(group_id, priority, meta, task))
+            s => s.spawn_to_group_with_meta(group_id, priority, meta, task),
+            p => p.spawn_to_group_with_meta(group_id, priority, meta, Box::new(task)))
     }
 
-    /// Get the affinity group for a given use_workers spec.
-    /// Returns 0 (global pool) for Rayon; delegates to CustomScheduler for Custom.
+    /// Return the affinity group for a given worker spec.
+    /// Returns 0 (global pool) for Rayon and Plugin; delegates to CustomScheduler.
     pub fn get_affinity_group(&self, use_workers: Option<&crate::WorkerRangeSpec>) -> usize {
-        dispatch!(self, _s => 0, s => s.get_affinity_group(use_workers))
+        dispatch!(self,
+            _s => 0,
+            s => s.get_affinity_group(use_workers),
+            p => p.get_affinity_group(use_workers))
     }
 
     pub fn workers(&self) -> usize {
-        dispatch!(self, s => s.base.workers(), s => s.workers())
+        dispatch!(self, s => s.base.workers(), s => s.workers(), p => p.workers())
     }
 
     pub fn pending_jobs(&self) -> usize {
-        dispatch!(self, s => s.base.pending_jobs(), s => s.pending_tasks())
+        dispatch!(self, s => s.base.pending_jobs(), s => s.pending_tasks(), _p => 0)
     }
 
     pub fn total_jobs_spawned(&self) -> usize {
-        dispatch!(self, s => s.base.total_jobs_spawned(), s => s.total_spawned())
+        dispatch!(self, s => s.base.total_jobs_spawned(), s => s.total_spawned(), _p => 0)
     }
 
     pub fn total_jobs_completed(&self) -> usize {
-        dispatch!(self, s => s.base.total_jobs_completed(), s => s.total_completed())
+        dispatch!(self, s => s.base.total_jobs_completed(), s => s.total_completed(), _p => 0)
     }
 
     pub fn core_offset(&self) -> usize {
-        dispatch!(self, s => s.base.core_offset(), s => s.core_offset())
+        dispatch!(self, s => s.base.core_offset(), s => s.core_offset(), p => p.core_offset())
     }
 
     pub fn system_threads(&self) -> usize {
-        dispatch!(self, s => s.base.system_threads(), s => s.system_threads())
+        dispatch!(self, s => s.base.system_threads(), s => s.system_threads(), p => p.system_threads())
     }
 
     pub fn receiver_core_offset(&self) -> usize {
-        dispatch!(self, s => s.base.receiver_core_offset(), s => s.receiver_core_offset())
+        dispatch!(self, s => s.base.receiver_core_offset(), s => s.receiver_core_offset(), p => p.receiver_core_offset())
     }
 
     pub fn receiver_threads(&self) -> usize {
-        dispatch!(self, s => s.base.receiver_threads(), s => s.receiver_threads())
+        dispatch!(self, s => s.base.receiver_threads(), s => s.receiver_threads(), p => p.receiver_threads())
     }
 
-    /// Dump recorded schedule to CSV at `path` (slot,job_id,start_ns,end_ns,worker,task_name)
+    /// Dump recorded schedule to CSV at `path`.
     pub fn write_record(&self, path: &str) {
-        dispatch!(self, s => s.base.write_records_to_csv(path), s => s.write_record(path))
+        dispatch!(self, s => s.base.write_records_to_csv(path), s => s.write_record(path), p => p.write_record(path))
     }
 
     pub fn get_async_recorder(&self) -> Option<Arc<AsyncRecorder>> {
-        dispatch!(self, s => s.base.get_async_recorder(), s => s.get_async_recorder())
+        dispatch!(self, s => s.base.get_async_recorder(), s => s.get_async_recorder(), p => p.get_async_recorder())
     }
 
     pub fn main_core(&self) -> Option<core_affinity::CoreId> {
-        dispatch!(self, s => s.base.get_main_core(), s => s.main_core())
+        dispatch!(self, s => s.base.get_main_core(), s => s.main_core(), p => p.main_core())
     }
 }
 
