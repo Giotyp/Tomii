@@ -28,6 +28,9 @@ default = ["network", "recording", "cli"]
 cli = ["dep:clap", "dep:gag", "dep:tracing-subscriber"]
 network = []
 recording = []
+# Enables no-op function fallback when get_func() returns None.
+# Used by integration tests which run without a plugin dylib.
+test-utils = []
 rdtsc = []
 
 [dependencies]

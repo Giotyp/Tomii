@@ -97,13 +97,15 @@ fn parse_predecessor(
         let start = match range[0].parse::<isize>() {
             Ok(val) => val,
             Err(_) => {
-                let obj_id = obj_id_map.get(range[0]).ok_or_else(|| -> crate::TomiiError {
-                    format!(
-                        "Invalid range start '{}' in predecessor '{}'",
-                        range[0], pred_name
-                    )
-                    .into()
-                })?;
+                let obj_id = obj_id_map
+                    .get(range[0])
+                    .ok_or_else(|| -> crate::TomiiError {
+                        format!(
+                            "Invalid range start '{}' in predecessor '{}'",
+                            range[0], pred_name
+                        )
+                        .into()
+                    })?;
                 let ref_val = &init_objects[*obj_id];
                 ref_val[0]
                     .valid_number_to_usize()
@@ -119,13 +121,15 @@ fn parse_predecessor(
         let end = match range[1].parse::<isize>() {
             Ok(end) => end + 1,
             Err(_) => {
-                let obj_id = obj_id_map.get(range[1]).ok_or_else(|| -> crate::TomiiError {
-                    format!(
-                        "Invalid range end '{}' in predecessor '{}'",
-                        range[1], pred_name
-                    )
-                    .into()
-                })?;
+                let obj_id = obj_id_map
+                    .get(range[1])
+                    .ok_or_else(|| -> crate::TomiiError {
+                        format!(
+                            "Invalid range end '{}' in predecessor '{}'",
+                            range[1], pred_name
+                        )
+                        .into()
+                    })?;
                 let ref_val = &init_objects[*obj_id];
                 ref_val[0]
                     .valid_number_to_usize()
@@ -154,15 +158,16 @@ fn parse_predecessor(
                                 .into()
                         })?;
                 let ref_val = &init_objects[*obj_id];
-                let val = ref_val[0]
-                    .valid_number_to_usize()
-                    .ok_or_else(|| -> crate::TomiiError {
-                        format!(
-                            "Index ref '{}' is not a valid non-negative integer",
-                            indexes
-                        )
-                        .into()
-                    })? as isize;
+                let val =
+                    ref_val[0]
+                        .valid_number_to_usize()
+                        .ok_or_else(|| -> crate::TomiiError {
+                            format!(
+                                "Index ref '{}' is not a valid non-negative integer",
+                                indexes
+                            )
+                            .into()
+                        })? as isize;
                 index_vec.push(val);
             }
         }
@@ -296,8 +301,14 @@ pub fn from_json(graph_json: &str, workers: usize) -> Result<GraphSpec, crate::T
     })?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
+    from_json_str(&contents, workers)
+}
 
-    let graph_parsed: GraphFile = serde_json::from_str(&contents)?;
+/// Parse a graph directly from a JSON string (no file I/O).
+///
+/// Useful for testing and for embedders that supply graph definitions at runtime.
+pub fn from_json_str(contents: &str, workers: usize) -> Result<GraphSpec, crate::TomiiError> {
+    let graph_parsed: GraphFile = serde_json::from_str(contents)?;
 
     let (init_vec, obj_id_map) = init_objects(&graph_parsed.initializations, workers)?;
 
