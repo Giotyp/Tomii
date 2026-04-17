@@ -8,6 +8,7 @@ use tomii_core::graph_gen::{from_json, GraphSpec}; // GraphCompiled produced via
 use tomii_core::runtime::{BatchConfig, SpinWaitConfig, TomiiRt, TomiiRtBuilder};
 use tomii_core::scheduler::{create_scheduler, SchedulerConfig, SchedulerType};
 use tomii_core::utils_rdtsc;
+use tomii_core::RuntimeConfig;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -264,39 +265,46 @@ fn main() {
 
     let timing_enabled = args.timing.is_some();
 
+    let cfg = RuntimeConfig {
+        slots: args.slots,
+        max_streams: args.max_streams,
+        max_runtime: runtime,
+        // system_threads, receiver_threads, workers, core_offset, receiver_core_offset,
+        // and single_slot_mode are resolved at build time from the scheduler; these
+        // initial values are overwritten by TomiiRtBuilder::build().
+        system_threads: args.system_threads,
+        receiver_threads: args.receiver_threads,
+        workers: args.workers,
+        core_offset: args.core_offset,
+        receiver_core_offset: 0,
+        slot_priority_enabled: args.slot_priority,
+        coalesce_barriers: args.coalesce_barriers,
+        inline_continuation: args.inline_continuation,
+        single_slot_mode: args.slots == 1,
+        record_stream: args.record_stream,
+        recv_pool_size: args.recv_pool_size,
+        spin_wait: SpinWaitConfig {
+            spin_iters: args.spin_wait_spin_iters,
+            yield_iters: args.spin_wait_yield_iters,
+            park_ns: args.spin_wait_park_ns,
+        },
+        batch: BatchConfig {
+            target_size: args.batching_size,
+            timeout_us: args.batching_limit,
+            poll_spin_iters: args.spin_iterations,
+            flush_threshold: args.sched_flush_threshold,
+        },
+    };
+
     let synrt = run_graph(
         spec,
-        RunGraphConfig {
-            scheduler_type,
-            workers: args.workers,
-            core_offset: args.core_offset,
-            system_threads: args.system_threads,
-            receiver_threads: args.receiver_threads,
-            slots: args.slots,
-            max_streams: args.max_streams,
-            max_runtime: runtime,
-            record: args.record,
-            record_stream: args.record_stream,
-            use_rdtsc: args.use_rdtsc,
-            timing_enabled,
-            slot_priority_enabled: args.slot_priority,
-            coalesce_barriers: args.coalesce_barriers,
-            inline_continuation: args.inline_continuation,
-            batch_queue_capacity: args.batch_queue_capacity,
-            socket_recv_buf_bytes: args.socket_recv_buf_bytes,
-            recv_pool_size: args.recv_pool_size,
-            spin_wait: SpinWaitConfig {
-                spin_iters: args.spin_wait_spin_iters,
-                yield_iters: args.spin_wait_yield_iters,
-                park_ns: args.spin_wait_park_ns,
-            },
-            batch: BatchConfig {
-                target_size: args.batching_size,
-                timeout_us: args.batching_limit,
-                poll_spin_iters: args.spin_iterations,
-                flush_threshold: args.sched_flush_threshold,
-            },
-        },
+        cfg,
+        scheduler_type,
+        args.use_rdtsc,
+        args.record,
+        timing_enabled,
+        args.batch_queue_capacity,
+        args.socket_recv_buf_bytes,
     );
 
     let time_file = args.timing;
@@ -323,57 +331,24 @@ fn main() {
     }
 }
 
-pub struct RunGraphConfig {
-    pub scheduler_type: SchedulerType,
-    pub workers: usize,
-    pub core_offset: usize,
-    pub system_threads: usize,
-    pub receiver_threads: usize,
-    pub slots: usize,
-    pub max_streams: usize,
-    pub max_runtime: Option<u64>,
-    pub record: bool,
-    pub record_stream: Option<usize>,
-    pub use_rdtsc: bool,
-    pub timing_enabled: bool,
-    pub slot_priority_enabled: bool,
-    pub coalesce_barriers: bool,
-    pub inline_continuation: bool,
-    pub batch_queue_capacity: usize,
-    pub socket_recv_buf_bytes: usize,
-    pub recv_pool_size: usize,
-    pub spin_wait: SpinWaitConfig,
-    pub batch: BatchConfig,
-}
+pub fn run_graph(
+    spec: GraphSpec,
+    mut cfg: RuntimeConfig,
+    scheduler_type: SchedulerType,
+    use_rdtsc: bool,
+    record: bool,
+    timing_enabled: bool,
+    batch_queue_capacity: usize,
+    socket_recv_buf_bytes: usize,
+) -> TomiiRt {
+    // Guard: network receiver threads only apply when a network config is present.
+    if spec.graph.network_config().is_none() {
+        cfg.receiver_threads = 0;
+    }
 
-pub fn run_graph(spec: GraphSpec, cfg: RunGraphConfig) -> TomiiRt {
-    let RunGraphConfig {
-        scheduler_type,
-        workers,
-        core_offset,
-        system_threads,
-        receiver_threads,
-        slots,
-        max_streams,
-        max_runtime,
-        record,
-        record_stream,
-        use_rdtsc,
-        timing_enabled,
-        slot_priority_enabled,
-        coalesce_barriers,
-        inline_continuation,
-        batch_queue_capacity,
-        socket_recv_buf_bytes,
-        recv_pool_size,
-        spin_wait,
-        batch,
-    } = cfg;
-    let receiver_threads = if spec.graph.network_config().is_some() {
-        receiver_threads
-    } else {
-        0
-    };
+    let workers = cfg.workers;
+    let system_threads = cfg.system_threads;
+    let receiver_threads = cfg.receiver_threads;
 
     // Create a single AsyncRecorder sized for all threads: workers + network + system
     let total_recorders = workers + system_threads + receiver_threads;
@@ -426,15 +401,15 @@ pub fn run_graph(spec: GraphSpec, cfg: RunGraphConfig) -> TomiiRt {
 
     let scheduler = create_scheduler(SchedulerConfig {
         scheduler_type,
-        core_offset,
+        core_offset: cfg.core_offset,
         num_workers: workers,
         record,
         external_recorder: shared_recorder.clone(),
         base_instant,
         system_threads,
         receiver_threads,
-        target_batch_size: batch.target_size,
-        batch_timeout_us: batch.timeout_us,
+        target_batch_size: cfg.batch.target_size,
+        batch_timeout_us: cfg.batch.timeout_us,
         worker_affinity,
     });
 
@@ -448,24 +423,16 @@ pub fn run_graph(spec: GraphSpec, cfg: RunGraphConfig) -> TomiiRt {
     // inserted on `spec.graph` before this point.
     let compiled = spec.compile(&scheduler);
 
-    let mut synrt = TomiiRtBuilder::new(compiled, scheduler)
+    let record_stream = cfg.record_stream;
+    let mut synrt = TomiiRtBuilder::with_config(compiled, scheduler, cfg)
         .base_instant(base_instant)
-        .slots(slots)
-        .max_streams(max_streams)
-        .max_runtime(max_runtime)
         .use_rdtsc(use_rdtsc)
         .record(record)
         .record_stream(record_stream)
         .timing_enabled(timing_enabled)
-        .slot_priority_enabled(slot_priority_enabled)
         .async_recorder(shared_recorder)
-        .coalesce_barriers(coalesce_barriers)
-        .inline_continuation(inline_continuation)
         .batch_queue_capacity(batch_queue_capacity)
         .socket_recv_buf_bytes(socket_recv_buf_bytes)
-        .recv_pool_size(recv_pool_size)
-        .spin_wait(spin_wait)
-        .batch(batch)
         .build()
         .unwrap_or_else(|e| {
             eprintln!("Config error: {e}");

@@ -152,14 +152,14 @@ pub(super) fn process_batch_inner(
         // batch to finish. This eliminates the dead zone where workers
         // idle while the system thread processes a large batch.
         if batch_sched.len() >= shared.config.batch.flush_threshold {
-            super::scheduling::preparation(shared, batch_sched, thread_core, thread_slot);
+            super::scheduling::dispatch_nodes(shared, batch_sched, thread_core, thread_slot);
             batch_sched.clear();
         }
     }
 
     // Final flush for any remaining successors after the batch loop.
     if !batch_sched.is_empty() {
-        super::scheduling::preparation(shared, batch_sched, thread_core, thread_slot);
+        super::scheduling::dispatch_nodes(shared, batch_sched, thread_core, thread_slot);
     }
 }
 

@@ -111,7 +111,7 @@ pub(super) fn send_to_scheduler(
     }
 }
 
-pub(super) fn preparation(
+pub(super) fn dispatch_nodes(
     shared: &Arc<SharedData>,
     nodes_to_schedule: &[NodeInfo],
     thread_core: usize,

@@ -2,7 +2,7 @@ use super::batch_resolution::process_batch_inner;
 #[cfg(feature = "network")]
 use super::packet_processing::poll_and_process_network_packets;
 use super::reporting::should_record_slot;
-use super::scheduling::preparation;
+use super::scheduling::dispatch_nodes;
 use super::shared_data::SharedData;
 use super::slot_lifecycle::check_slots;
 use super::slot_management::{assign_stream_to_available_slot, initial_nodes};
@@ -311,7 +311,7 @@ pub(super) fn perform_initial_preparation(
 
         let compute_nodes = initial_nodes(&shared.graph, assigned_slots);
         if !compute_nodes.is_empty() {
-            preparation(shared, &compute_nodes, thread_core, thread_slot);
+            dispatch_nodes(shared, &compute_nodes, thread_core, thread_slot);
         }
     }
 }
@@ -373,7 +373,7 @@ fn drain_and_process_batch_queue(
         // batch_queue with the old gen. Processing these would corrupt the new
         // stream's pending counters and dependency state (Bug #31).
         // Cache per-slot generation locally — reduces ~256 SeqCst loads to ~1-2 per unique slot.
-        let mut gen_cache: [u32; 64] = [0; 64];
+        let mut gen_cache: [u32; super::consts::MAX_SLOTS] = [0; super::consts::MAX_SLOTS];
         let mut gen_loaded: u64 = 0;
         comp_batch.extend(
             batch_buf

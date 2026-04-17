@@ -230,7 +230,7 @@ fn assign_packet_to_slot(
                     init_nodes.len()
                 )
             });
-            super::scheduling::preparation(shared, &init_nodes, thread_core, thread_slot);
+            super::scheduling::dispatch_nodes(shared, &init_nodes, thread_core, thread_slot);
         }
     }
 

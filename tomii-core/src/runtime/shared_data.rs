@@ -88,6 +88,7 @@ impl Default for BatchConfig {
 }
 
 /// All immutable configuration and tuning knobs.
+#[derive(Clone)]
 pub struct RuntimeConfig {
     pub slots: usize,
     pub max_streams: usize,
@@ -105,6 +106,29 @@ pub struct RuntimeConfig {
     pub recv_pool_size: usize,
     pub spin_wait: SpinWaitConfig,
     pub batch: BatchConfig,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            slots: 1,
+            max_streams: 1,
+            max_runtime: None,
+            system_threads: 1,
+            receiver_threads: 0,
+            workers: 1,
+            core_offset: 0,
+            receiver_core_offset: 0,
+            slot_priority_enabled: false,
+            coalesce_barriers: false,
+            inline_continuation: false,
+            single_slot_mode: true,
+            record_stream: None,
+            recv_pool_size: 1024,
+            spin_wait: SpinWaitConfig::default(),
+            batch: BatchConfig::default(),
+        }
+    }
 }
 
 /// All per-slot atomics and lock-protected slot state.

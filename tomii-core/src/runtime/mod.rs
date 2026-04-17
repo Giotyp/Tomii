@@ -1,5 +1,6 @@
 mod arg_resolution;
 mod batch_resolution;
+mod consts;
 mod init;
 #[cfg(feature = "network")]
 mod network_init;
@@ -28,11 +29,11 @@ pub(crate) use node_cache::NodeCacheEntry;
 use parking_lot::RwLock;
 #[cfg(feature = "network")]
 pub(crate) use shared_data::NetworkInfra;
-// SharedData is crate-internal; only BatchConfig and SpinWaitConfig are part of the public API.
+// SharedData is crate-internal; only BatchConfig, SpinWaitConfig, and RuntimeConfig are public.
 pub(crate) use shared_data::SharedData;
-pub use shared_data::{BatchConfig, SpinWaitConfig};
+pub use shared_data::{BatchConfig, RuntimeConfig, SpinWaitConfig};
 pub(crate) use shared_data::{
-    BatchQueueRx, BatchQueueTx, ExecCtx, GraphCache, RuntimeConfig, SlotData, SlotState, Telemetry,
+    BatchQueueRx, BatchQueueTx, ExecCtx, GraphCache, SlotData, SlotState, Telemetry,
 };
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -61,30 +62,22 @@ pub const RUN_SLEEP: Duration = Duration::from_secs(10);
 /// let synrt = TomiiRtBuilder::new(compiled, scheduler)
 ///     .slots(4)
 ///     .max_streams(100)
-///     .max_runtime(60)
+///     .max_runtime(Some(60))
 ///     .timing_enabled(true)
 ///     .build();
 /// ```
 pub struct TomiiRtBuilder {
     compiled: GraphCompiled,
     scheduler: SchedulerImpl,
-    slots: usize,
-    max_streams: usize,
-    max_runtime: Option<u64>,
-    use_rdtsc: bool,
-    record: bool,
-    record_stream: Option<usize>,
-    timing_enabled: bool,
-    base_instant: Instant,
-    slot_priority_enabled: bool,
-    async_recorder: Option<Arc<AsyncRecorder>>,
-    coalesce_barriers: bool,
-    inline_continuation: bool,
+    config: RuntimeConfig,
+    // Build-only fields — not part of RuntimeConfig:
     batch_queue_capacity: usize,
     socket_recv_buf_bytes: usize,
-    recv_pool_size: usize,
-    spin_wait: SpinWaitConfig,
-    batch: BatchConfig,
+    timing_enabled: bool,
+    base_instant: Instant,
+    async_recorder: Option<Arc<AsyncRecorder>>,
+    use_rdtsc: bool,
+    record: bool,
 }
 
 impl TomiiRtBuilder {
@@ -95,36 +88,48 @@ impl TomiiRtBuilder {
         Self {
             compiled,
             scheduler,
-            slots: 1,
-            max_streams: 1,
-            max_runtime: None,
-            use_rdtsc: false,
-            record: false,
-            record_stream: None,
-            timing_enabled: false,
-            base_instant: Instant::now(),
-            slot_priority_enabled: false,
-            async_recorder: None,
-            coalesce_barriers: false,
-            inline_continuation: false,
+            config: RuntimeConfig::default(),
             batch_queue_capacity: 65536,
             socket_recv_buf_bytes: 16_777_216,
-            recv_pool_size: 1024,
-            spin_wait: SpinWaitConfig::default(),
-            batch: BatchConfig::default(),
+            timing_enabled: false,
+            base_instant: Instant::now(),
+            async_recorder: None,
+            use_rdtsc: false,
+            record: false,
+        }
+    }
+
+    /// Construct a builder from a pre-built [`RuntimeConfig`].
+    /// Useful for embedders loading config from TOML/JSON.
+    pub fn with_config(
+        compiled: GraphCompiled,
+        scheduler: SchedulerImpl,
+        config: RuntimeConfig,
+    ) -> Self {
+        Self {
+            compiled,
+            scheduler,
+            config,
+            batch_queue_capacity: 65536,
+            socket_recv_buf_bytes: 16_777_216,
+            timing_enabled: false,
+            base_instant: Instant::now(),
+            async_recorder: None,
+            use_rdtsc: false,
+            record: false,
         }
     }
 
     pub fn slots(mut self, n: usize) -> Self {
-        self.slots = n;
+        self.config.slots = n;
         self
     }
     pub fn max_streams(mut self, n: usize) -> Self {
-        self.max_streams = n;
+        self.config.max_streams = n;
         self
     }
     pub fn max_runtime(mut self, secs: Option<u64>) -> Self {
-        self.max_runtime = secs;
+        self.config.max_runtime = secs;
         self
     }
     pub fn use_rdtsc(mut self, v: bool) -> Self {
@@ -136,7 +141,7 @@ impl TomiiRtBuilder {
         self
     }
     pub fn record_stream(mut self, v: Option<usize>) -> Self {
-        self.record_stream = v;
+        self.config.record_stream = v;
         self
     }
     pub fn timing_enabled(mut self, v: bool) -> Self {
@@ -149,7 +154,7 @@ impl TomiiRtBuilder {
         self
     }
     pub fn slot_priority_enabled(mut self, v: bool) -> Self {
-        self.slot_priority_enabled = v;
+        self.config.slot_priority_enabled = v;
         self
     }
     /// Attach a pre-created [`AsyncRecorder`] shared with the scheduler.
@@ -158,11 +163,11 @@ impl TomiiRtBuilder {
         self
     }
     pub fn coalesce_barriers(mut self, v: bool) -> Self {
-        self.coalesce_barriers = v;
+        self.config.coalesce_barriers = v;
         self
     }
     pub fn inline_continuation(mut self, v: bool) -> Self {
-        self.inline_continuation = v;
+        self.config.inline_continuation = v;
         self
     }
     pub fn batch_queue_capacity(mut self, n: usize) -> Self {
@@ -174,17 +179,17 @@ impl TomiiRtBuilder {
         self
     }
     pub fn recv_pool_size(mut self, n: usize) -> Self {
-        self.recv_pool_size = n;
+        self.config.recv_pool_size = n;
         self
     }
     /// Set all worker spin-wait parameters at once.
     pub fn spin_wait(mut self, cfg: SpinWaitConfig) -> Self {
-        self.spin_wait = cfg;
+        self.config.spin_wait = cfg;
         self
     }
     /// Set all batch-processing parameters at once.
     pub fn batch(mut self, cfg: BatchConfig) -> Self {
-        self.batch = cfg;
+        self.config.batch = cfg;
         self
     }
 
@@ -196,21 +201,25 @@ impl TomiiRtBuilder {
     /// - `slots` (clamped to `max_streams`) must be in the range `[1, 64]`
     /// - `max_streams` must be `>= 1`
     /// - `batch_queue_capacity` must be `> 0`
-    pub fn build(self) -> Result<TomiiRt, crate::BuildError> {
-        let slots = std::cmp::min(self.slots, self.max_streams);
+    pub fn build(mut self) -> Result<TomiiRt, crate::BuildError> {
+        // Clamp slots to max_streams and write back into config so the
+        // assembled RuntimeConfig carries the resolved value.
+        self.config.slots = std::cmp::min(self.config.slots, self.config.max_streams);
+        let slots = self.config.slots;
 
         if slots < 1 {
             return Err(crate::BuildError::InvalidConfig(
                 "slots must be >= 1 (got 0)".to_string(),
             ));
         }
-        if slots > 64 {
+        if slots > consts::MAX_SLOTS {
             return Err(crate::BuildError::InvalidConfig(format!(
-                "Τομί supports at most 64 concurrent slots (got {slots}); \
-                 this limit is enforced by the u64 completion bitmaps"
+                "Τομί supports at most {} concurrent slots (got {slots}); \
+                 this limit is enforced by the u64 completion bitmaps",
+                consts::MAX_SLOTS
             )));
         }
-        if self.max_streams < 1 {
+        if self.config.max_streams < 1 {
             return Err(crate::BuildError::InvalidConfig(
                 "max_streams must be >= 1 (got 0)".to_string(),
             ));
@@ -241,11 +250,16 @@ impl TomiiRtBuilder {
             build_slot_counters(slots, &node_cache);
 
         // --- Thread pool parameters from scheduler ---
-        let system_threads = self.scheduler.system_threads();
-        let core_offset = self.scheduler.core_offset();
-        let receiver_threads = self.scheduler.receiver_threads();
-        let receiver_core_offset = self.scheduler.receiver_core_offset();
-        let workers = self.scheduler.workers();
+        self.config.system_threads = self.scheduler.system_threads();
+        self.config.core_offset = self.scheduler.core_offset();
+        self.config.receiver_threads = self.scheduler.receiver_threads();
+        self.config.receiver_core_offset = self.scheduler.receiver_core_offset();
+        self.config.workers = self.scheduler.workers();
+        // single_slot_mode is derived at build time
+        self.config.single_slot_mode = slots == 1;
+
+        let system_threads = self.config.system_threads;
+        let receiver_threads = self.config.receiver_threads;
 
         // --- Telemetry ---
         let time_buffer = if self.timing_enabled {
@@ -295,11 +309,18 @@ impl TomiiRtBuilder {
             packet_drop_counters,
             buffer_return_senders,
             buffer_return_receivers,
-        ) = prepare_network_infrastructure(&graph, self.socket_recv_buf_bytes, self.recv_pool_size);
+        ) = prepare_network_infrastructure(
+            &graph,
+            self.socket_recv_buf_bytes,
+            self.config.recv_pool_size,
+        );
 
         // --- Assemble SharedData ---
         let node_results = Arc::new(crate::buffers::LockFreeResultMap::new(&graph.nodes, slots));
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
+
+        #[cfg(feature = "network")]
+        let max_streams_for_frame_drop = self.config.max_streams;
 
         let shared = Arc::new(SharedData {
             graph,
@@ -312,24 +333,7 @@ impl TomiiRtBuilder {
                 total_cond_tasks,
                 init_objects,
             },
-            config: RuntimeConfig {
-                slots,
-                max_streams: self.max_streams,
-                max_runtime: self.max_runtime,
-                system_threads,
-                receiver_threads,
-                workers,
-                core_offset,
-                receiver_core_offset,
-                slot_priority_enabled: self.slot_priority_enabled,
-                coalesce_barriers: self.coalesce_barriers,
-                inline_continuation: self.inline_continuation,
-                single_slot_mode: slots == 1,
-                record_stream: self.record_stream,
-                recv_pool_size: self.recv_pool_size,
-                spin_wait: self.spin_wait,
-                batch: self.batch,
-            },
+            config: self.config,
             slot_data: SlotData {
                 generation: Arc::new((0..slots).map(|_| AtomicU64::new(0)).collect()),
                 pending_tasks: Arc::new(slot_pending_tasks),
@@ -359,7 +363,7 @@ impl TomiiRtBuilder {
                 streams_receive_counter: Arc::new(AtomicUsize::new(0)),
                 dropped_streams: Arc::new(AtomicUsize::new(0)),
                 frame_dropped: Arc::new(
-                    (0..self.max_streams + slots)
+                    (0..max_streams_for_frame_drop + slots)
                         .map(|_| AtomicBool::new(false))
                         .collect(),
                 ),
