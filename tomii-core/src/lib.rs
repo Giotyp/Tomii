@@ -22,6 +22,46 @@ pub type IdType = u16;
 /// Boxed error type returned by public API boundaries (`from_json`, `init_objects`, etc.).
 pub type TomiiError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
+/// Errors that can occur while building the Τομί runtime.
+#[derive(Debug)]
+pub enum BuildError {
+    /// A configuration invariant was violated (slots, capacity, etc.).
+    InvalidConfig(String),
+}
+
+impl std::fmt::Display for BuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BuildError::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for BuildError {}
+
+/// Errors that can occur while running the Τομί runtime.
+#[derive(Debug)]
+pub enum RuntimeError {
+    /// A worker or receiver thread failed to spawn.
+    SpawnFailed(std::io::Error),
+}
+
+impl std::fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RuntimeError::SpawnFailed(e) => write!(f, "thread spawn failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            RuntimeError::SpawnFailed(e) => Some(e),
+        }
+    }
+}
+
 /// Metadata attached to a spawned task for timing and recording.
 ///
 /// Passed from the resolution loop to the scheduler so the recording layer can

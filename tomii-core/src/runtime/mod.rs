@@ -189,21 +189,37 @@ impl TomiiRtBuilder {
     }
 
     /// Construct the runtime. This is cheap — no threads are spawned until [`TomiiRt::run`].
-    pub fn build(self) -> TomiiRt {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::BuildError::InvalidConfig`] if any configuration constraint is violated:
+    /// - `slots` (clamped to `max_streams`) must be in the range `[1, 64]`
+    /// - `max_streams` must be `>= 1`
+    /// - `batch_queue_capacity` must be `> 0`
+    pub fn build(self) -> Result<TomiiRt, crate::BuildError> {
         let slots = std::cmp::min(self.slots, self.max_streams);
 
-        assert!(slots >= 1, "slots must be >= 1 (got 0)");
-        assert!(
-            slots <= 64,
-            "Τομί supports at most 64 concurrent slots (got {}); \
-             this limit is enforced by the u64 completion bitmaps",
-            slots
-        );
-        assert!(self.max_streams >= 1, "max_streams must be >= 1 (got 0)");
-        assert!(
-            self.batch_queue_capacity > 0,
-            "batch_queue_capacity must be > 0 (got 0)"
-        );
+        if slots < 1 {
+            return Err(crate::BuildError::InvalidConfig(
+                "slots must be >= 1 (got 0)".to_string(),
+            ));
+        }
+        if slots > 64 {
+            return Err(crate::BuildError::InvalidConfig(format!(
+                "Τομί supports at most 64 concurrent slots (got {slots}); \
+                 this limit is enforced by the u64 completion bitmaps"
+            )));
+        }
+        if self.max_streams < 1 {
+            return Err(crate::BuildError::InvalidConfig(
+                "max_streams must be >= 1 (got 0)".to_string(),
+            ));
+        }
+        if self.batch_queue_capacity == 0 {
+            return Err(crate::BuildError::InvalidConfig(
+                "batch_queue_capacity must be > 0 (got 0)".to_string(),
+            ));
+        }
 
         // --- Destructure compiled graph IR ---
         let GraphCompiled {
@@ -365,7 +381,7 @@ impl TomiiRtBuilder {
             },
         });
 
-        TomiiRt { shared }
+        Ok(TomiiRt { shared })
     }
 }
 
@@ -384,7 +400,14 @@ impl TomiiRt {
     }
 
     /// Spawn all threads and run the graph to completion (or until max_runtime).
-    pub fn run(&mut self) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::RuntimeError::SpawnFailed`] if any worker or receiver thread fails to
+    /// spawn. A panicking child thread propagates via the [`std::thread::JoinHandle::join`]
+    /// unwrap and is not converted to an error — that indicates a bug in the runtime, not a
+    /// recoverable user error.
+    pub fn run(&mut self) -> Result<(), crate::RuntimeError> {
         // Start timing for system thread slots
         for thread_id in 0..self.shared.config.system_threads {
             let system_slot = self.shared.config.slots + thread_id;
@@ -394,8 +417,8 @@ impl TomiiRt {
         }
 
         #[cfg(feature = "network")]
-        let receiver_handles = self.spawn_receiver_threads();
-        let resolution_handles = self.spawn_resolution_threads();
+        let receiver_handles = self.spawn_receiver_threads()?;
+        let resolution_handles = self.spawn_resolution_threads()?;
 
         // Wait loop: sleep until max_runtime exceeded or all streams complete
         let start_time = Instant::now();
@@ -444,5 +467,7 @@ impl TomiiRt {
                 let _ = tb.finish_slot_processing(system_slot);
             });
         }
+
+        Ok(())
     }
 }
