@@ -2,7 +2,9 @@ use super::batch_resolution::process_batch_inner;
 #[cfg(feature = "network")]
 use super::packet_processing::poll_and_process_network_packets;
 use super::reporting::should_record_slot;
+use super::scheduling::preparation;
 use super::shared_data::SharedData;
+use super::slot_lifecycle::check_slots;
 use super::slot_management::{assign_stream_to_available_slot, initial_nodes};
 use super::thread_locals::{BatchInnerBuffers, BATCH_INNER_BUFS, TASK_COMP_BUF};
 use crate::async_recorder::{set_worker_recorder, submit_record};
@@ -18,302 +20,298 @@ use std::sync::Arc;
 use std::time::Duration;
 use tomii_types::*;
 
-impl super::TomiiRt {
-    /// Resolution Thread: Processes completed compute tasks and manages stream lifecycle
-    pub(super) fn resolution(
-        shared: Arc<SharedData>,
-        thread_core: usize,
-        thread_id: usize,
-        thread_slot: usize,
-    ) {
-        // Initialize async recorder for system thread using universal indexing
-        if let Some(ref recorder) = shared.telemetry.async_recorder {
-            let channel_index = thread_core - shared.config.core_offset;
-            if let Some(tx) = recorder.get_worker_sender(channel_index) {
-                set_worker_recorder(tx);
+/// Resolution Thread: Processes completed compute tasks and manages stream lifecycle
+pub(super) fn resolution(
+    shared: Arc<SharedData>,
+    thread_core: usize,
+    thread_id: usize,
+    thread_slot: usize,
+) {
+    // Initialize async recorder for system thread using universal indexing
+    if let Some(ref recorder) = shared.telemetry.async_recorder {
+        let channel_index = thread_core - shared.config.core_offset;
+        if let Some(tx) = recorder.get_worker_sender(channel_index) {
+            set_worker_recorder(tx);
+        }
+    }
+
+    perform_initial_preparation(&shared, thread_id, thread_core, thread_slot);
+
+    // prefetch cond indexes for efficiency
+    let cond_indexes = shared.graph.get_condition_indexes();
+
+    // Persistent completion tracking across all batches for this stream
+    let mut stream_slot_activity: HashMap<usize, bool> = HashMap::new();
+
+    // Cached slot list for check_slots — avoids running_streams.read() every iteration.
+    // Refreshed only when a stream is assigned or released (slots_dirty = true).
+    let mut cached_slots: Vec<usize> = Vec::new();
+    let mut slots_dirty = true; // force refresh on first check_slots call
+
+    #[cfg(feature = "network")]
+    let network_config_opt = shared.graph.network_config();
+
+    let _receive_timeout = Duration::from_micros(shared.config.batch.timeout_us);
+
+    // Reusable drain buffer — allocated once, keeps capacity across loop iterations.
+    #[cfg(feature = "network")]
+    let mut packet_buf: Vec<PacketMessage> = Vec::new();
+
+    // Reusable batch buffer — keeps capacity warm in L1 cache across iterations.
+    let mut batch_buf: Vec<NodeInfo> = Vec::with_capacity(shared.config.batch.target_size);
+
+    // Process completed nodes with dynamic batching from scheduler
+    loop {
+        // Check shutdown flag first to exit immediately when signaled
+        if shared.shutdown_flag.load(Ordering::Acquire) {
+            tracing::debug!(
+                thread_id,
+                "detected shutdown signal, exiting resolution loop"
+            );
+            break;
+        }
+
+        // Poll packet channels if there is a network config AND receivers are still active
+        #[cfg(feature = "network")]
+        {
+            let should_poll_packets = network_config_opt.is_some()
+                && !shared.net.receive_finished.load(Ordering::Acquire);
+
+            if should_poll_packets {
+                if let Some(network_config) = network_config_opt.as_ref() {
+                    poll_and_process_network_packets(
+                        &shared,
+                        network_config,
+                        &mut packet_buf,
+                        &mut slots_dirty,
+                        &cond_indexes,
+                        &mut stream_slot_activity,
+                        thread_core,
+                        thread_id,
+                        thread_slot,
+                    );
+                }
             }
         }
 
-        Self::perform_initial_preparation(&shared, thread_id, thread_core, thread_slot);
+        drain_and_process_batch_queue(
+            &shared,
+            &mut batch_buf,
+            &cond_indexes,
+            &mut stream_slot_activity,
+            thread_core,
+            thread_id,
+            thread_slot,
+        );
 
-        // prefetch cond indexes for efficiency
-        let cond_indexes = shared.graph.get_condition_indexes();
+        // Check shutdown immediately after blocking call returns
+        if shared.shutdown_flag.load(Ordering::Acquire) {
+            tracing::debug!(thread_id, "detected shutdown after receive, exiting");
+            break;
+        }
 
-        // Persistent completion tracking across all batches for this stream
-        let mut stream_slot_activity: HashMap<usize, bool> = HashMap::new();
-
-        // Cached slot list for check_slots — avoids running_streams.read() every iteration.
-        // Refreshed only when a stream is assigned or released (slots_dirty = true).
-        let mut cached_slots: Vec<usize> = Vec::new();
-        let mut slots_dirty = true; // force refresh on first check_slots call
-
-        #[cfg(feature = "network")]
-        let network_config_opt = shared.graph.network_config();
-
-        let _receive_timeout = Duration::from_micros(shared.config.batch.timeout_us);
-
-        // Reusable drain buffer — allocated once, keeps capacity across loop iterations.
-        #[cfg(feature = "network")]
-        let mut packet_buf: Vec<PacketMessage> = Vec::new();
-
-        // Reusable batch buffer — keeps capacity warm in L1 cache across iterations.
-        let mut batch_buf: Vec<NodeInfo> = Vec::with_capacity(shared.config.batch.target_size);
-
-        // Process completed nodes with dynamic batching from scheduler
-        loop {
-            // Check shutdown flag first to exit immediately when signaled
-            if shared.shutdown_flag.load(Ordering::Acquire) {
-                tracing::debug!(
-                    thread_id,
-                    "detected shutdown signal, exiting resolution loop"
-                );
-                break;
-            }
-
-            // Poll packet channels if there is a network config AND receivers are still active
-            #[cfg(feature = "network")]
-            {
-                let should_poll_packets = network_config_opt.is_some()
-                    && !shared.net.receive_finished.load(Ordering::Acquire);
-
-                if should_poll_packets {
-                    if let Some(network_config) = network_config_opt.as_ref() {
-                        poll_and_process_network_packets(
-                            &shared,
-                            network_config,
-                            &mut packet_buf,
-                            &mut slots_dirty,
-                            &cond_indexes,
-                            &mut stream_slot_activity,
-                            thread_core,
-                            thread_id,
-                            thread_slot,
-                        );
-                    }
-                }
-            }
-
-            drain_and_process_batch_queue(
-                &shared,
-                &mut batch_buf,
-                &cond_indexes,
-                &mut stream_slot_activity,
-                thread_core,
-                thread_id,
-                thread_slot,
-            );
-
-            // Check shutdown immediately after blocking call returns
-            if shared.shutdown_flag.load(Ordering::Acquire) {
-                tracing::debug!(thread_id, "detected shutdown after receive, exiting");
-                break;
-            }
-
-            // Also check stream completion here (before processing batch)
-            // This ensures threads exit promptly even if shutdown_flag hasn't been set yet
-            {
-                let completed_streams = shared
-                    .telemetry
-                    .stream_complete_counter
-                    .load(Ordering::Acquire);
-                if completed_streams >= shared.config.max_streams {
-                    tracing::debug!(thread_id, "all streams completed (after recv), exiting");
-                    break;
-                }
-            }
-
-            let start_proc = shared.telemetry.measure_start();
-            // Check slots for completion
-            Self::check_slots(
-                &shared,
-                &mut stream_slot_activity,
-                thread_id,
-                thread_core,
-                thread_slot,
-                &cond_indexes,
-                &mut cached_slots,
-                &mut slots_dirty,
-            );
-            shared
-                .telemetry
-                .record_timing(start_proc, thread_slot, "Slot Check", usize::MAX);
-
-            // Check for completion of all streams
+        // Also check stream completion here (before processing batch)
+        // This ensures threads exit promptly even if shutdown_flag hasn't been set yet
+        {
             let completed_streams = shared
                 .telemetry
                 .stream_complete_counter
                 .load(Ordering::Acquire);
-
             if completed_streams >= shared.config.max_streams {
-                tracing::debug!(thread_id, "all streams completed, exiting resolution loop");
+                tracing::debug!(thread_id, "all streams completed (after recv), exiting");
                 break;
             }
         }
+
+        let start_proc = shared.telemetry.measure_start();
+        // Check slots for completion
+        check_slots(
+            &shared,
+            &mut stream_slot_activity,
+            thread_id,
+            thread_core,
+            thread_slot,
+            &cond_indexes,
+            &mut cached_slots,
+            &mut slots_dirty,
+        );
+        shared
+            .telemetry
+            .record_timing(start_proc, thread_slot, "Slot Check", usize::MAX);
+
+        // Check for completion of all streams
+        let completed_streams = shared
+            .telemetry
+            .stream_complete_counter
+            .load(Ordering::Acquire);
+
+        if completed_streams >= shared.config.max_streams {
+            tracing::debug!(thread_id, "all streams completed, exiting resolution loop");
+            break;
+        }
+    }
+}
+
+/// Process a batch of completed nodes: store results, update dependencies, schedule successors.
+///
+/// `batch` is passed as `&mut Vec` and drained in-place so the caller retains
+/// Vec capacity for reuse, eliminating per-batch heap allocation on the hot path.
+///
+/// `result` in each tuple:
+/// - `Some(cm)` for network packets — result stored in node_results (Phase 1).
+/// - `None` for compute tasks — result already pre-stored by the worker in execute_task.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn process_batch_resolution(
+    shared: &Arc<SharedData>,
+    batch: &mut Vec<(NodeInfo, Option<CmTypes>)>,
+    thread_core: usize,
+    thread_id: usize,
+    thread_slot: usize,
+    cond_indexes: &[Vec<usize>],
+    stream_slot_activity: &mut HashMap<usize, bool>,
+    start_ns: u128,
+) {
+    if batch.is_empty() {
+        return;
     }
 
-    /// Process a batch of completed nodes: store results, update dependencies, schedule successors
-    /// Returns true if work was performed (for timing/recording purposes)
-    /// Process a batch of completed nodes (both network packets and compute tasks).
-    ///
-    /// `batch` is passed as `&mut Vec` and drained in-place so the caller retains
-    /// Vec capacity for reuse, eliminating per-batch heap allocation on the hot path.
-    ///
-    /// `result` in each tuple:
-    /// - `Some(cm)` for network packets — result stored in node_results (Phase 1).
-    /// - `None` for compute tasks — result already pre-stored by the worker in execute_task.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn process_batch_resolution(
-        shared: &Arc<SharedData>,
-        batch: &mut Vec<(NodeInfo, Option<CmTypes>)>,
-        thread_core: usize,
-        thread_id: usize,
-        thread_slot: usize,
-        cond_indexes: &[Vec<usize>],
-        stream_slot_activity: &mut HashMap<usize, bool>,
-        start_ns: u128,
-    ) {
-        if batch.is_empty() {
-            return;
-        }
+    // 6A: Track which slots are in this batch using a bitset (no heap allocation).
+    let mut slots_in_batch: u64 = 0;
+    for (node_info, _) in batch.iter() {
+        slots_in_batch |= 1u64 << node_info.slot;
+    }
 
-        // 6A: Track which slots are in this batch using a bitset (no heap allocation).
-        let mut slots_in_batch: u64 = 0;
-        for (node_info, _) in batch.iter() {
-            slots_in_batch |= 1u64 << node_info.slot;
-        }
-
-        // Increment processing_count for all slots in this batch
-        {
-            let mut bits = slots_in_batch;
-            while bits != 0 {
-                let slot = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                shared.slot_data.processing_count[slot].fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        // Phases 1+2+3: For each node — store result, decrement counters, process successors.
-        // All three phases run together per node while processing_count > 0, so completion
-        // detection cannot fire until Phase 4 decrements processing_count after this loop.
-        //
-        // Opt: Successor nodes are accumulated into BATCH_SCHED_BUF across all nodes in the
-        // batch; a single preparation() call is made after the loop instead of one per node.
-        // This reduces scheduler submissions from O(batch_size) to O(1) per batch.
-        BATCH_INNER_BUFS.with(|bufs| {
-            let mut bufs = bufs.borrow_mut();
-            let BatchInnerBuffers {
-                succ_updates,
-                schedule,
-                ready,
-                batch_sched,
-            } = &mut *bufs;
-            process_batch_inner(
-                shared,
-                batch,
-                thread_core,
-                thread_id,
-                thread_slot,
-                cond_indexes,
-                stream_slot_activity,
-                succ_updates,
-                schedule,
-                ready,
-                batch_sched,
-            );
-        });
-
-        // Lock-free recording via per-worker channel
-        let should_record = shared.telemetry.async_recorder.is_some() && {
-            let mut any = false;
-            let mut bits = slots_in_batch;
-            while bits != 0 {
-                let slot = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                if should_record_slot(&shared.config, &shared.slot_data, slot) {
-                    any = true;
-                    break;
-                }
-            }
-            any
-        };
-        if should_record {
-            let job_id = shared.telemetry.job_counter.fetch_add(1, Ordering::SeqCst);
-            let end_ns = shared.telemetry.base_instant.elapsed().as_nanos();
-            submit_record(Record {
-                slot: thread_slot,
-                job_id,
-                start_ns,
-                end_ns,
-                worker: thread_core,
-                task_id: IdType::MAX,
-                index: 0,
-            });
-        }
-
-        // Phase 4: Decrement processing_count AFTER all successor processing
-        {
-            let mut bits = slots_in_batch;
-            while bits != 0 {
-                let slot = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                shared.slot_data.processing_count[slot].fetch_sub(1, Ordering::SeqCst);
-                shared.slot_data.needs_check[slot].store(true, Ordering::Release);
-            }
+    // Increment processing_count for all slots in this batch
+    {
+        let mut bits = slots_in_batch;
+        while bits != 0 {
+            let slot = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            shared.slot_data.processing_count[slot].fetch_add(1, Ordering::SeqCst);
         }
     }
 
-    /// CAS-guarded initial stream setup: only the first thread (thread_id == 0) that wins
-    /// the compare_exchange activates the initial set of streams and spawns their compute
-    /// nodes. All other threads skip this section.
-    pub(super) fn perform_initial_preparation(
-        shared: &Arc<SharedData>,
-        thread_id: usize,
-        thread_core: usize,
-        thread_slot: usize,
-    ) {
-        if thread_id != 0 {
-            return;
-        }
-        // Ensure only one thread does initial preparation
-        if shared
-            .exec
-            .initial_prep_done
-            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return;
-        }
+    // Phases 1+2+3: For each node — store result, decrement counters, process successors.
+    // All three phases run together per node while processing_count > 0, so completion
+    // detection cannot fire until Phase 4 decrements processing_count after this loop.
+    //
+    // Opt: Successor nodes are accumulated into BATCH_SCHED_BUF across all nodes in the
+    // batch; a single preparation() call is made after the loop instead of one per node.
+    // This reduces scheduler submissions from O(batch_size) to O(1) per batch.
+    BATCH_INNER_BUFS.with(|bufs| {
+        let mut bufs = bufs.borrow_mut();
+        let BatchInnerBuffers {
+            succ_updates,
+            schedule,
+            ready,
+            batch_sched,
+        } = &mut *bufs;
+        process_batch_inner(
+            shared,
+            batch,
+            thread_core,
+            thread_id,
+            thread_slot,
+            cond_indexes,
+            stream_slot_activity,
+            succ_updates,
+            schedule,
+            ready,
+            batch_sched,
+        );
+    });
 
-        print_debug(|| {
-            format!(
-                "Thread {} in Core {} performing initial preparation",
-                thread_id, thread_core
-            )
-        });
-
-        let activate_streams: Vec<usize> = if shared.config.slot_priority_enabled {
-            // activate first stream
-            vec![0]
-        } else {
-            // activate all streams
-            (0..shared.config.slots).collect()
-        };
-
-        if !shared.graph.initial_nodes.is_empty() {
-            // run assign_stream_to_available_slot for each stream to set slot state to Active
-            let assigned_slots: Vec<usize> = activate_streams
-                .iter()
-                .map(|&stream_id| {
-                    assign_stream_to_available_slot(shared, stream_id)
-                        .expect("initial slot assignment must succeed")
-                        .0
-                })
-                .collect();
-
-            let compute_nodes = initial_nodes(&shared.graph, assigned_slots);
-            if !compute_nodes.is_empty() {
-                Self::preparation(shared, &compute_nodes, thread_core, thread_slot);
+    // Lock-free recording via per-worker channel
+    let should_record = shared.telemetry.async_recorder.is_some() && {
+        let mut any = false;
+        let mut bits = slots_in_batch;
+        while bits != 0 {
+            let slot = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            if should_record_slot(&shared.config, &shared.slot_data, slot) {
+                any = true;
+                break;
             }
+        }
+        any
+    };
+    if should_record {
+        let job_id = shared.telemetry.job_counter.fetch_add(1, Ordering::SeqCst);
+        let end_ns = shared.telemetry.base_instant.elapsed().as_nanos();
+        submit_record(Record {
+            slot: thread_slot,
+            job_id,
+            start_ns,
+            end_ns,
+            worker: thread_core,
+            task_id: IdType::MAX,
+            index: 0,
+        });
+    }
+
+    // Phase 4: Decrement processing_count AFTER all successor processing
+    {
+        let mut bits = slots_in_batch;
+        while bits != 0 {
+            let slot = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            shared.slot_data.processing_count[slot].fetch_sub(1, Ordering::SeqCst);
+            shared.slot_data.needs_check[slot].store(true, Ordering::Release);
+        }
+    }
+}
+
+/// CAS-guarded initial stream setup: only the first thread (thread_id == 0) that wins
+/// the compare_exchange activates the initial set of streams and spawns their compute
+/// nodes. All other threads skip this section.
+pub(super) fn perform_initial_preparation(
+    shared: &Arc<SharedData>,
+    thread_id: usize,
+    thread_core: usize,
+    thread_slot: usize,
+) {
+    if thread_id != 0 {
+        return;
+    }
+    // Ensure only one thread does initial preparation
+    if shared
+        .exec
+        .initial_prep_done
+        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    print_debug(|| {
+        format!(
+            "Thread {} in Core {} performing initial preparation",
+            thread_id, thread_core
+        )
+    });
+
+    let activate_streams: Vec<usize> = if shared.config.slot_priority_enabled {
+        // activate first stream
+        vec![0]
+    } else {
+        // activate all streams
+        (0..shared.config.slots).collect()
+    };
+
+    if !shared.graph.initial_nodes.is_empty() {
+        // run assign_stream_to_available_slot for each stream to set slot state to Active
+        let assigned_slots: Vec<usize> = activate_streams
+            .iter()
+            .map(|&stream_id| {
+                assign_stream_to_available_slot(shared, stream_id)
+                    .expect("initial slot assignment must succeed")
+                    .0
+            })
+            .collect();
+
+        let compute_nodes = initial_nodes(&shared.graph, assigned_slots);
+        if !compute_nodes.is_empty() {
+            preparation(shared, &compute_nodes, thread_core, thread_slot);
         }
     }
 }
@@ -399,7 +397,7 @@ fn drain_and_process_batch_queue(
                 })
                 .map(|n| (n, None)),
         );
-        super::TomiiRt::process_batch_resolution(
+        process_batch_resolution(
             shared,
             &mut *comp_batch,
             thread_core,

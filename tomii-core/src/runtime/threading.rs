@@ -194,7 +194,12 @@ impl TomiiRt {
                     );
                 }
 
-                Self::resolution(shared_clone, thread_core, thread_id, thread_slot);
+                super::resolution_loop::resolution(
+                    shared_clone,
+                    thread_core,
+                    thread_id,
+                    thread_slot,
+                );
             });
             handles.push(handle);
         }

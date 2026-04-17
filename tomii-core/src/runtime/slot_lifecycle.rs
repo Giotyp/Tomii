@@ -5,85 +5,83 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-impl super::TomiiRt {
-    /// Iterate all active slots and process any that have completed their stream.
-    ///
-    /// Called unconditionally every resolution-loop iteration to ensure completions are
-    /// never missed (Bug #21 fix: conditional calling caused hangs when all threads went idle).
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn check_slots(
-        shared: &Arc<SharedData>,
-        stream_slot_activity: &mut HashMap<usize, bool>,
-        thread_id: usize,
-        thread_core: usize,
-        thread_slot: usize,
-        cond_indexes: &[Vec<usize>],
-        cached_slots: &mut Vec<usize>,
-        slots_dirty: &mut bool,
-    ) {
-        // Refresh cached slot list only when dirty (stream assigned or completed).
-        // Avoids acquiring running_streams.read() on every iteration in the hot path.
-        if *slots_dirty || cached_slots.is_empty() {
-            let running_streams = shared.slot_data.running_streams.read();
-            cached_slots.clear();
-            cached_slots.extend(running_streams.iter().map(|(_, slot)| *slot));
-            *slots_dirty = false;
+/// Iterate all active slots and process any that have completed their stream.
+///
+/// Called unconditionally every resolution-loop iteration to ensure completions are
+/// never missed (Bug #21 fix: conditional calling caused hangs when all threads went idle).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn check_slots(
+    shared: &Arc<SharedData>,
+    stream_slot_activity: &mut HashMap<usize, bool>,
+    thread_id: usize,
+    thread_core: usize,
+    thread_slot: usize,
+    cond_indexes: &[Vec<usize>],
+    cached_slots: &mut Vec<usize>,
+    slots_dirty: &mut bool,
+) {
+    // Refresh cached slot list only when dirty (stream assigned or completed).
+    // Avoids acquiring running_streams.read() on every iteration in the hot path.
+    if *slots_dirty || cached_slots.is_empty() {
+        let running_streams = shared.slot_data.running_streams.read();
+        cached_slots.clear();
+        cached_slots.extend(running_streams.iter().map(|(_, slot)| *slot));
+        *slots_dirty = false;
+    }
+
+    // Clear activity map AFTER getting slots to check (not before).
+    // This prevents redundant checking while ensuring we don't miss completions.
+    stream_slot_activity.clear();
+
+    // Load active bitmap once — avoids per-slot RwLock read.
+    let active_bitmap = if shared.config.slot_priority_enabled {
+        shared.slot_data.active_bitmap.load(Ordering::Acquire)
+    } else {
+        u64::MAX // all bits set — no filtering when slot_priority is off
+    };
+
+    for proc_slot in cached_slots.iter().copied() {
+        // Skip buffering slots — they cannot complete until activated.
+        if active_bitmap & (1u64 << proc_slot) == 0 {
+            continue;
         }
 
-        // Clear activity map AFTER getting slots to check (not before).
-        // This prevents redundant checking while ensuring we don't miss completions.
-        stream_slot_activity.clear();
+        // Skip if no task activity since last check.
+        // Preserves Bug #21 fix: check_slots is still called unconditionally every
+        // iteration; we only skip the expensive SeqCst loads for idle slots.
+        if !shared.slot_data.needs_check[proc_slot].swap(false, Ordering::AcqRel) {
+            continue;
+        }
 
-        // Load active bitmap once — avoids per-slot RwLock read.
-        let active_bitmap = if shared.config.slot_priority_enabled {
-            shared.slot_data.active_bitmap.load(Ordering::Acquire)
-        } else {
-            u64::MAX // all bits set — no filtering when slot_priority is off
-        };
+        if !detect_and_claim_slot_completion(&shared.slot_data, &shared.exec, proc_slot) {
+            continue;
+        }
 
-        for proc_slot in cached_slots.iter().copied() {
-            // Skip buffering slots — they cannot complete until activated.
-            if active_bitmap & (1u64 << proc_slot) == 0 {
-                continue;
-            }
+        print_debug(|| {
+            format!(
+                "Thread {:?} -- Completed iteration at slot {}",
+                thread_id, proc_slot
+            )
+        });
 
-            // Skip if no task activity since last check.
-            // Preserves Bug #21 fix: check_slots is still called unconditionally every
-            // iteration; we only skip the expensive SeqCst loads for idle slots.
-            if !shared.slot_data.needs_check[proc_slot].swap(false, Ordering::AcqRel) {
-                continue;
-            }
+        reset_slot_state(shared, proc_slot);
 
-            if !detect_and_claim_slot_completion(&shared.slot_data, &shared.exec, proc_slot) {
-                continue;
-            }
+        let can_restart = process_slot_completion(shared, proc_slot);
+        stream_slot_activity.remove(&proc_slot);
+        *slots_dirty = true; // release_slot modified running_streams
 
-            print_debug(|| {
-                format!(
-                    "Thread {:?} -- Completed iteration at slot {}",
-                    thread_id, proc_slot
-                )
-            });
+        activate_buffered_slot(
+            shared,
+            proc_slot,
+            cond_indexes,
+            stream_slot_activity,
+            thread_core,
+            thread_id,
+            thread_slot,
+        );
 
-            reset_slot_state(shared, proc_slot);
-
-            let can_restart = process_slot_completion(shared, proc_slot);
-            stream_slot_activity.remove(&proc_slot);
-            *slots_dirty = true; // release_slot modified running_streams
-
-            activate_buffered_slot(
-                shared,
-                proc_slot,
-                cond_indexes,
-                stream_slot_activity,
-                thread_core,
-                thread_id,
-                thread_slot,
-            );
-
-            if can_restart && !shared.config.slot_priority_enabled {
-                restart_slot_nonnetwork(shared, proc_slot, thread_core, thread_slot);
-            }
+        if can_restart && !shared.config.slot_priority_enabled {
+            restart_slot_nonnetwork(shared, proc_slot, thread_core, thread_slot);
         }
     }
 }
@@ -197,7 +195,7 @@ fn activate_buffered_slot(
         )
     });
     if !initial.is_empty() {
-        super::TomiiRt::preparation(shared, &initial, thread_core, thread_slot);
+        super::scheduling::preparation(shared, &initial, thread_core, thread_slot);
     }
 
     // Process buffered network packets that arrived while the slot was buffering
@@ -210,7 +208,7 @@ fn activate_buffered_slot(
             )
         });
         let start_ns = shared.telemetry.base_instant.elapsed().as_nanos();
-        super::TomiiRt::process_batch_resolution(
+        super::resolution_loop::process_batch_resolution(
             shared,
             &mut buffered_batch,
             thread_core,
@@ -282,6 +280,6 @@ fn restart_slot_nonnetwork(
         )
     });
     if !compute_nodes.is_empty() {
-        super::TomiiRt::preparation(shared, &compute_nodes, thread_core, thread_slot);
+        super::scheduling::preparation(shared, &compute_nodes, thread_core, thread_slot);
     }
 }

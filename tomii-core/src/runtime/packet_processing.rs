@@ -35,11 +35,10 @@ pub(super) fn poll_and_process_network_packets(
 
     // Cache index_function pointer outside packet loop to avoid
     // redundant network_config lookups per packet.
-    let idx_func_ptr: Option<(tomii_types::CmPtr, &Vec<crate::graph_struct::Arg>)> =
-        network_config
-            .index_function
-            .as_ref()
-            .and_then(|idx_func| idx_func.func_ptr.map(|fp| (fp, &idx_func.args)));
+    let idx_func_ptr: Option<(tomii_types::CmPtr, &Vec<crate::graph_struct::Arg>)> = network_config
+        .index_function
+        .as_ref()
+        .and_then(|idx_func| idx_func.func_ptr.map(|fp| (fp, &idx_func.args)));
 
     // Drain all available packets into reusable buffer (no Vec alloc per call).
     packet_buf.clear();
@@ -122,7 +121,7 @@ pub(super) fn poll_and_process_network_packets(
     if !active_packet_batch.is_empty() {
         let start_ns_batch = shared.telemetry.base_instant.elapsed().as_nanos();
         let start_proc = shared.telemetry.measure_start();
-        super::TomiiRt::process_batch_resolution(
+        super::resolution_loop::process_batch_resolution(
             shared,
             &mut active_packet_batch,
             thread_core,
@@ -231,7 +230,7 @@ fn assign_packet_to_slot(
                     init_nodes.len()
                 )
             });
-            super::TomiiRt::preparation(shared, &init_nodes, thread_core, thread_slot);
+            super::scheduling::preparation(shared, &init_nodes, thread_core, thread_slot);
         }
     }
 
