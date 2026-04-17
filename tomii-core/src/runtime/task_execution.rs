@@ -1,3 +1,16 @@
+//! Worker-side task execution: runs plugin functions, manages the stale-task guard, and
+//! resolves successor dependencies inline when the node is `worker_resolvable`.
+//!
+//! The primary entry point is [`execute_task`], called from the Rayon task closure built in
+//! `scheduling::send_to_scheduler`.  After running the plugin function it either calls
+//! [`worker_resolve_successors`] (fast path: all successors are non-condition) or sends a
+//! completion token to `batch_queue` for the resolution thread (slow path: condition
+//! successors require evaluation on a system thread).
+//!
+//! This module does **not** own scheduling (that is `scheduling`) or dependency-counter
+//! bookkeeping (that is `batch_resolution`/`buffers`).  Its only shared-state writes are
+//! `node_results.set()` and `pending_tasks`/`pending_cond_tasks` decrements.
+
 use super::arg_resolution::populate_cached_args_into;
 use super::ordering::{slot_gen_load, slot_gen_rmw};
 use super::scheduling::send_to_scheduler;
@@ -116,6 +129,18 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) -> 
     inline_result
 }
 
+/// Execute a single scheduled task, returning an optional inline continuation.
+///
+/// **Stale-task guard**: before running the plugin function, the slot generation stored in
+/// `node_info.gen` is compared against the current `slot_data.generation[slot]`.  If they
+/// differ, the slot was recycled while this task waited in the Rayon queue; the task is
+/// silently dropped to prevent reading cleared predecessor results or corrupting the new
+/// stream's counters.  Post-nodes are exempt (they carry `gen = 0` and always run after all
+/// streams finish).
+///
+/// Returns `Some(NodeInfo)` when an inline continuation was produced by
+/// `worker_resolve_successors` (i.e. the completing worker will immediately execute the
+/// returned successor); `None` otherwise.
 #[inline(always)]
 pub(super) fn execute_task(
     shared: &Arc<SharedData>,

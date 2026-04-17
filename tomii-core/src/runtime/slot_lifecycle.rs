@@ -1,3 +1,17 @@
+//! Slot lifecycle orchestration: completion detection, state reset, and post-completion routing.
+//!
+//! [`check_slots`] is the top-level function called unconditionally on every resolution-loop
+//! iteration.  It iterates all slots that have an assigned stream, skips buffering or idle
+//! slots, and delegates to four private helpers:
+//! - `detect_and_claim_slot_completion` — SeqCst counter check + CAS ownership claim.
+//! - `reset_slot_state` — bumps generation and resets all per-slot counters/flags.
+//! - `activate_buffered_slot` — in slot-priority mode, activates the next queued slot.
+//! - `restart_slot_nonnetwork` — in non-network mode, re-registers the slot for a new stream.
+//!
+//! This module does **not** own the slot allocation primitives (`assign_stream_to_available_slot`,
+//! `release_slot`, `activate_next_slot`) — those live in `slot_management`.  The split keeps
+//! "what happens when a slot completes" separate from "how slots are allocated and released".
+
 use super::shared_data::{ExecCtx, SharedData, SlotData, SlotState};
 use super::slot_management::{activate_next_slot, initial_nodes, process_slot_completion};
 use crate::debug::print_debug;

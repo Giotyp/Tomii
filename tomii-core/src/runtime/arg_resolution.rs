@@ -1,3 +1,15 @@
+//! Argument materialisation: resolves `$ref`, `$res`, `$dep`, and runtime-injected args
+//! for a task just before it is handed to the plugin function.
+//!
+//! The hot path is [`populate_cached_args_into`], which reads pre-built [`ArgCacheEntry`]
+//! metadata to avoid per-task graph lookups.  For `$res` arguments it calls
+//! [`spin_wait_for_result`] when the predecessor result is not yet visible — this handles the
+//! race where threshold-based dispatch fires a successor before its specific predecessor has
+//! stored its result.
+//!
+//! This module does **not** own scheduling or dependency-counter logic.  Its only shared-state
+//! read is `node_results.get()`; it never writes shared state.
+
 use super::shared_data::SharedData;
 use crate::{buffers::*, graph_struct::*, IdType};
 use std::sync::Arc;

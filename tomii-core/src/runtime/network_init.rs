@@ -1,3 +1,5 @@
+//! Network infrastructure setup: socket binding, packet channels, and buffer-return channels.
+//! Called once at `TomiiRtBuilder::build` time; not invoked on the hot path.
 use super::shared_data::SharedData;
 use crate::graph::Graph;
 use crate::network::{bind_udp_socket_range, NetworkSocket};

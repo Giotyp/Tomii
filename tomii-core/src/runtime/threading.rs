@@ -1,4 +1,6 @@
-/// Thread spawning and shutdown for receiver and resolution threads.
+//! Thread spawning and shutdown helpers for receiver and resolution threads.
+//! Holds the `TomiiRt::spawn_receiver_threads`, `spawn_resolution_threads`, and
+//! `shutdown_receiver_threads` impl blocks; no runtime logic lives here.
 use super::TomiiRt;
 use crate::async_recorder::set_worker_recorder;
 use crate::debug::print_debug;

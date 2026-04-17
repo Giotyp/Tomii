@@ -1,3 +1,16 @@
+//! All shared-state structs passed between runtime threads.
+//!
+//! [`SharedData`] is an intentional "god-object": every sub-system that runs concurrently
+//! needs access to overlapping sets of fields, and threading individual sub-structs
+//! through every function signature would be unwieldy.  The design compromise is that
+//! hot-path functions receive narrow borrows (`&SlotData`, `&ExecCtx`, etc.) rather than
+//! `&SharedData` directly, keeping coupling at the type level even when the root
+//! allocation is shared.
+//!
+//! This module owns **only** struct definitions and their small inherent helpers
+//! (`Telemetry::record_timing` etc.).  No threading, scheduling, or slot logic lives
+//! here — those belong to `threading`, `scheduling`, and `slot_lifecycle` respectively.
+
 #[cfg(feature = "network")]
 use crate::network::{NetworkSocket, PacketMessage};
 use crate::resolution_state::ResolutionState;

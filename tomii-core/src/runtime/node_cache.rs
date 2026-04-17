@@ -1,3 +1,6 @@
+//! Per-node cache entries built once at startup to eliminate per-task graph lookups.
+//! [`NodeCacheEntry`] mirrors the hot fields of a `Node` with pre-computed flags such as
+//! `worker_resolvable` and `needs_result_store` that drive fast-path decisions in the runtime.
 use crate::debug::print_debug;
 use crate::func_reg::get_func;
 use crate::{graph_struct::*, IdType};

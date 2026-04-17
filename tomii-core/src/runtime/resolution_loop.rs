@@ -1,3 +1,19 @@
+//! Resolution-thread main loop: batch-queue drain, network polling, and slot-completion checks.
+//!
+//! Each resolution thread runs [`resolution`], which loops until either the shutdown flag is
+//! set or all streams complete.  On every iteration it (1) polls network packets (network
+//! feature only), (2) drains the `batch_queue` non-blockingly, and (3) calls [`check_slots`]
+//! unconditionally — the unconditional call is load-bearing for Bug #21 correctness.
+//!
+//! This module does **not** contain task-execution logic (that is `task_execution`) or slot
+//! lifecycle management (that is `slot_lifecycle`/`slot_management`).  It owns the outer
+//! loop structure and the stale-task filter applied to items drained from `batch_queue`.
+//!
+//! # Key invariant
+//! [`drain_and_process_batch_queue`] must remain non-blocking (`try_iter` + brief spin).
+//! Blocking here would prevent [`check_slots`] from running promptly, causing completion
+//! misses when all threads stall simultaneously (Bug #21).
+
 use super::batch_resolution::process_batch_inner;
 #[cfg(feature = "network")]
 use super::packet_processing::poll_and_process_network_packets;
@@ -316,6 +332,15 @@ pub(super) fn perform_initial_preparation(
     }
 }
 
+/// Non-blocking drain of the `batch_queue` followed by stale-task filtering and batch resolution.
+///
+/// Uses `try_iter` (never blocks) plus a short spin-loop to catch burst completions that land
+/// just after the first `try_iter` returns empty.  Items whose slot generation does not match
+/// the current generation are silently dropped to avoid corrupting a newly-started stream's
+/// dependency counters (stale tasks from a completed stream).
+///
+/// The caller retains `batch_buf` capacity across calls so no heap allocation occurs on the hot
+/// path; the Vec is cleared in-place at the start of each call.
 fn drain_and_process_batch_queue(
     shared: &Arc<SharedData>,
     batch_buf: &mut Vec<NodeInfo>,
