@@ -29,8 +29,7 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    if let Err(e) =
-        tomii_converter::generate_from_file(&args.input, &args.wrappers, &args.registry)
+    if let Err(e) = tomii_converter::generate_from_file(&args.input, &args.wrappers, &args.registry)
     {
         eprintln!("tomii-converter error: {e}");
         std::process::exit(1);

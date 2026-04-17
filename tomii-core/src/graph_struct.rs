@@ -229,35 +229,55 @@ mod tests {
 
     #[test]
     fn test_index_filter_empty_indexes() {
-        let pred = Predecessor { id: 0, indexes: vec![], group_by: None };
+        let pred = Predecessor {
+            id: 0,
+            indexes: vec![],
+            group_by: None,
+        };
         assert_eq!(pred.index_filter(4, 4), None);
     }
 
     #[test]
     fn test_index_filter_no_filter_full_range() {
         // All pred_factor instances → range_len == pred_factor → no filter
-        let pred = Predecessor { id: 0, indexes: vec![0, 1, 2, 3], group_by: None };
+        let pred = Predecessor {
+            id: 0,
+            indexes: vec![0, 1, 2, 3],
+            group_by: None,
+        };
         assert_eq!(pred.index_filter(4, 4), None);
     }
 
     #[test]
     fn test_index_filter_partial_range_applies() {
         // 2 contiguous indexes out of pred_factor=4, succ_factor=2 → filter
-        let pred = Predecessor { id: 0, indexes: vec![1, 2], group_by: None };
+        let pred = Predecessor {
+            id: 0,
+            indexes: vec![1, 2],
+            group_by: None,
+        };
         assert_eq!(pred.index_filter(4, 2), Some((1, 3)));
     }
 
     #[test]
     fn test_index_filter_succ_factor_mismatch_no_filter() {
         // range_len=2 < pred_factor=4, but range_len != succ_factor (4) → no filter
-        let pred = Predecessor { id: 0, indexes: vec![1, 2], group_by: None };
+        let pred = Predecessor {
+            id: 0,
+            indexes: vec![1, 2],
+            group_by: None,
+        };
         assert_eq!(pred.index_filter(4, 4), None);
     }
 
     #[test]
     fn test_index_filter_group_by_always_filters() {
         // group_by present → always filter, even if full range
-        let pred = Predecessor { id: 0, indexes: vec![0, 1, 2, 3], group_by: Some(4) };
+        let pred = Predecessor {
+            id: 0,
+            indexes: vec![0, 1, 2, 3],
+            group_by: Some(4),
+        };
         assert_eq!(pred.index_filter(4, 4), Some((0, 4)));
     }
 
@@ -268,21 +288,33 @@ mod tests {
     #[test]
     fn test_contributing_instances_no_filter_returns_pred_factor() {
         // No filter → all pred_factor instances contribute
-        let pred = Predecessor { id: 0, indexes: vec![0, 1, 2, 3], group_by: None };
+        let pred = Predecessor {
+            id: 0,
+            indexes: vec![0, 1, 2, 3],
+            group_by: None,
+        };
         assert_eq!(pred.contributing_instances(4, 4), 4);
     }
 
     #[test]
     fn test_contributing_instances_filtered_returns_indexes_len() {
         // Filter applies → only indexes.len() instances contribute
-        let pred = Predecessor { id: 0, indexes: vec![1, 2], group_by: None };
+        let pred = Predecessor {
+            id: 0,
+            indexes: vec![1, 2],
+            group_by: None,
+        };
         assert_eq!(pred.contributing_instances(4, 2), 2);
     }
 
     #[test]
     fn test_contributing_instances_single_predecessor() {
         // pred_factor=1 → no filter possible (range_len can't be < 1), contributing=1
-        let pred = Predecessor { id: 0, indexes: vec![0], group_by: None };
+        let pred = Predecessor {
+            id: 0,
+            indexes: vec![0],
+            group_by: None,
+        };
         assert_eq!(pred.contributing_instances(1, 1), 1);
     }
 
@@ -292,14 +324,20 @@ mod tests {
 
     #[test]
     fn test_init_condition_eq() {
-        let cond = InitCondition { operation: CondOp::Eq, eval_value: CmTypes::U32(42) };
+        let cond = InitCondition {
+            operation: CondOp::Eq,
+            eval_value: CmTypes::U32(42),
+        };
         assert!(cond.evaluate(&CmTypes::U32(42)));
         assert!(!cond.evaluate(&CmTypes::U32(43)));
     }
 
     #[test]
     fn test_init_condition_neq() {
-        let cond = InitCondition { operation: CondOp::Neq, eval_value: CmTypes::U32(42) };
+        let cond = InitCondition {
+            operation: CondOp::Neq,
+            eval_value: CmTypes::U32(42),
+        };
         assert!(!cond.evaluate(&CmTypes::U32(42)));
         assert!(cond.evaluate(&CmTypes::U32(43)));
     }
@@ -307,8 +345,14 @@ mod tests {
     #[test]
     fn test_init_condition_gt_lt_unimplemented() {
         // Gt and Lt are documented stubs — always return false regardless of values.
-        let cond_gt = InitCondition { operation: CondOp::Gt, eval_value: CmTypes::U32(0) };
-        let cond_lt = InitCondition { operation: CondOp::Lt, eval_value: CmTypes::U32(100) };
+        let cond_gt = InitCondition {
+            operation: CondOp::Gt,
+            eval_value: CmTypes::U32(0),
+        };
+        let cond_lt = InitCondition {
+            operation: CondOp::Lt,
+            eval_value: CmTypes::U32(100),
+        };
         assert!(!cond_gt.evaluate(&CmTypes::U32(99)));
         assert!(!cond_lt.evaluate(&CmTypes::U32(1)));
     }
@@ -349,8 +393,14 @@ mod tests {
     fn test_node_priority_from_str() {
         assert!(matches!(NodePriority::from_str("high"), NodePriority::High));
         assert!(matches!(NodePriority::from_str("low"), NodePriority::Low));
-        assert!(matches!(NodePriority::from_str("normal"), NodePriority::Normal));
-        assert!(matches!(NodePriority::from_str("anything"), NodePriority::Normal));
+        assert!(matches!(
+            NodePriority::from_str("normal"),
+            NodePriority::Normal
+        ));
+        assert!(matches!(
+            NodePriority::from_str("anything"),
+            NodePriority::Normal
+        ));
         assert!(matches!(NodePriority::from_str(""), NodePriority::Normal));
     }
 }

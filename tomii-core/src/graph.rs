@@ -5,7 +5,6 @@ use std::sync::Arc;
 use crate::graph_struct::*;
 use crate::{debug::print_debug, IdType};
 
-
 /// Pure topological description of a task graph.
 ///
 /// Contains nodes, edges, and metadata derived purely from the graph structure.
@@ -333,7 +332,11 @@ mod tests {
     fn res_arg(pred_id: IdType, indexes: Vec<isize>) -> Arg {
         Arg {
             type_: CmTypes::Res(0),
-            predecessor: Some(Predecessor { id: pred_id, indexes, group_by: None }),
+            predecessor: Some(Predecessor {
+                id: pred_id,
+                indexes,
+                group_by: None,
+            }),
             init_condition: None,
         }
     }
@@ -341,7 +344,11 @@ mod tests {
     fn barrier_arg(pred_id: IdType, indexes: Vec<isize>) -> Arg {
         Arg {
             type_: CmTypes::Barrier(Arc::from("$barrier")),
-            predecessor: Some(Predecessor { id: pred_id, indexes, group_by: None }),
+            predecessor: Some(Predecessor {
+                id: pred_id,
+                indexes,
+                group_by: None,
+            }),
             init_condition: None,
         }
     }
@@ -349,7 +356,11 @@ mod tests {
     fn barrier_arg_group_by(pred_id: IdType, indexes: Vec<isize>, group_by: usize) -> Arg {
         Arg {
             type_: CmTypes::Barrier(Arc::from("$barrier")),
-            predecessor: Some(Predecessor { id: pred_id, indexes, group_by: Some(group_by) }),
+            predecessor: Some(Predecessor {
+                id: pred_id,
+                indexes,
+                group_by: Some(group_by),
+            }),
             init_condition: None,
         }
     }
@@ -405,7 +416,11 @@ mod tests {
     fn test_add_node_condition_detected() {
         let cond_arg = Arg {
             type_: CmTypes::Res(0),
-            predecessor: Some(Predecessor { id: 0, indexes: vec![0], group_by: None }),
+            predecessor: Some(Predecessor {
+                id: 0,
+                indexes: vec![0],
+                group_by: None,
+            }),
             init_condition: Some(InitCondition {
                 operation: CondOp::Eq,
                 eval_value: CmTypes::Bool(true),
@@ -471,7 +486,10 @@ mod tests {
         g.add_node(make_node(0, 200, vec![]));
         g.add_node(make_node(1, 200, vec![res_arg(0, vec![0])]));
         let counts = g.dependency_count_vec();
-        assert_eq!(counts[1], 200, "dep_count must equal pred_factor for equal-factor non-filtered edge");
+        assert_eq!(
+            counts[1], 200,
+            "dep_count must equal pred_factor for equal-factor non-filtered edge"
+        );
     }
 
     #[test]
@@ -509,7 +527,11 @@ mod tests {
         g.add_node(make_node(
             1,
             8,
-            vec![barrier_arg_group_by(0, (0..8).map(|i| i as isize).collect(), 4)],
+            vec![barrier_arg_group_by(
+                0,
+                (0..8).map(|i| i as isize).collect(),
+                4,
+            )],
         ));
         let counts = g.dependency_count_vec();
         assert_eq!(counts[1], 8);
@@ -521,7 +543,11 @@ mod tests {
         let mut g = Graph::new();
         g.add_node(make_node(0, 1, vec![])); // A
         g.add_node(make_node(1, 1, vec![])); // B
-        g.add_node(make_node(2, 1, vec![res_arg(0, vec![0]), res_arg(1, vec![0])]));
+        g.add_node(make_node(
+            2,
+            1,
+            vec![res_arg(0, vec![0]), res_arg(1, vec![0])],
+        ));
         let counts = g.dependency_count_vec();
         assert_eq!(counts[2], 2);
     }
@@ -531,8 +557,15 @@ mod tests {
         // Same predecessor referenced from two args — preds_seen deduplicates it
         let mut g = Graph::new();
         g.add_node(make_node(0, 1, vec![]));
-        g.add_node(make_node(1, 1, vec![res_arg(0, vec![0]), res_arg(0, vec![0])]));
+        g.add_node(make_node(
+            1,
+            1,
+            vec![res_arg(0, vec![0]), res_arg(0, vec![0])],
+        ));
         let counts = g.dependency_count_vec();
-        assert_eq!(counts[1], 1, "same pred counted twice would give 2; preds_seen should prevent that");
+        assert_eq!(
+            counts[1], 1,
+            "same pred counted twice would give 2; preds_seen should prevent that"
+        );
     }
 }

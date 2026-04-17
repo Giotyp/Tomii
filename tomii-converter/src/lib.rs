@@ -231,9 +231,7 @@ enum CmRet {
         free_fn: Option<String>,
     },
     /// C returns a malloc'd `char*` — copy to `String`, optionally free.
-    AllocatedString {
-        free_fn: Option<String>,
-    },
+    AllocatedString { free_fn: Option<String> },
 }
 
 // ---------------------------------------------------------------------------
@@ -677,9 +675,7 @@ fn build_c_sym_type(entry: &ExportedFn) -> String {
                 param_types.push("*const *mut c_void".to_string());
                 param_types.push("usize".to_string());
             }
-            CmParamKind::CmTypesRef
-            | CmParamKind::OwnedString
-            | CmParamKind::VecCmTypes => {
+            CmParamKind::CmTypesRef | CmParamKind::OwnedString | CmParamKind::VecCmTypes => {
                 unreachable!("Rust-only kinds in C entry");
             }
         }
@@ -700,7 +696,11 @@ fn build_c_sym_type(entry: &ExportedFn) -> String {
         }
     };
 
-    format!("unsafe extern \"C\" fn({}){}", param_types.join(", "), ret_ty)
+    format!(
+        "unsafe extern \"C\" fn({}){}",
+        param_types.join(", "),
+        ret_ty
+    )
 }
 
 /// Build the static symbol name: upper-snake of `cm_name`.
@@ -1047,10 +1047,7 @@ fn render_c_entry_wrapper(entry: &ExportedFn) -> String {
                 );
                 extractions.push(ParamExtraction {
                     pre_lines: vec![pre],
-                    call_args: vec![
-                        "v.as_mut_ptr() as *mut c_void".to_string(),
-                        len,
-                    ],
+                    call_args: vec!["v.as_mut_ptr() as *mut c_void".to_string(), len],
                     is_mut_array: true,
                 });
                 mut_array_param = Some((cur_arg_idx, param));
@@ -1075,9 +1072,7 @@ fn render_c_entry_wrapper(entry: &ExportedFn) -> String {
                 // variadic consumes remaining args — don't increment further
                 arg_idx = usize::MAX; // sentinel: no more params after this
             }
-            CmParamKind::CmTypesRef
-            | CmParamKind::OwnedString
-            | CmParamKind::VecCmTypes => {
+            CmParamKind::CmTypesRef | CmParamKind::OwnedString | CmParamKind::VecCmTypes => {
                 unreachable!("Rust-only kinds in C entry");
             }
         }
@@ -1124,10 +1119,7 @@ fn render_c_entry_wrapper(entry: &ExportedFn) -> String {
             }
         }
 
-        let call_expr = format!(
-            "(*{sym_name})({})",
-            call_args_for_closure.join(", ")
-        );
+        let call_expr = format!("(*{sym_name})({})", call_args_for_closure.join(", "));
 
         out.push_str(&format!(
             "    args[{mut_arg_idx}].with_any_mut(|v: &mut Vec<[f32; 2]>| {{\n"
@@ -1152,15 +1144,11 @@ fn render_c_entry_wrapper(entry: &ExportedFn) -> String {
             }
             CmRet::Primitive(pk) => {
                 let variant = pk.variant_name();
-                out.push_str(&format!(
-                    "    let __result = unsafe {{ {call_expr} }};\n"
-                ));
+                out.push_str(&format!("    let __result = unsafe {{ {call_expr} }};\n"));
                 out.push_str(&format!("    CmTypes::{variant}(__result)\n"));
             }
             CmRet::OpaquePtr => {
-                out.push_str(&format!(
-                    "    let __raw = unsafe {{ {call_expr} }};\n"
-                ));
+                out.push_str(&format!("    let __raw = unsafe {{ {call_expr} }};\n"));
                 out.push_str("    CmTypes::from_any(OpaqueHandle(__raw))\n");
             }
             CmRet::AllocatedArray {
@@ -1195,9 +1183,7 @@ fn render_c_entry_wrapper(entry: &ExportedFn) -> String {
                         "    unsafe {{ (*{free_sym})(__raw as *mut c_void) }};\n"
                     ));
                 }
-                out.push_str(
-                    "    CmTypes::String(std::sync::Arc::from(__s.as_str()))\n",
-                );
+                out.push_str("    CmTypes::String(std::sync::Arc::from(__s.as_str()))\n");
             }
             CmRet::CmTypes | CmRet::OwnedString => {
                 unreachable!("Rust-only return kinds in C entry")
