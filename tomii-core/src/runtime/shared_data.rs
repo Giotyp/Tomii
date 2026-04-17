@@ -8,7 +8,7 @@ use flume::{Receiver, Sender};
 #[cfg(feature = "network")]
 use parking_lot::Mutex;
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use std::time::Instant;
 use tomii_types::*;
@@ -215,28 +215,4 @@ pub struct SharedData {
     pub net: NetworkInfra,
     pub exec: ExecCtx,
     pub telemetry: Telemetry,
-}
-
-/// Returns the appropriate load ordering for slot completion counters.
-///
-/// With `single_slot_mode` (slots == 1) only one stream runs at a time, so AcqRel
-/// pairwise synchronisation is sufficient.  Multi-slot mode requires SeqCst for total
-/// ordering across concurrent slot reinitialisation.
-#[inline(always)]
-pub(super) fn slot_load_ordering(shared: &SharedData) -> Ordering {
-    if shared.config.single_slot_mode {
-        Ordering::Acquire
-    } else {
-        Ordering::SeqCst
-    }
-}
-
-/// Returns the appropriate read-modify-write ordering for slot completion counters.
-#[inline(always)]
-pub(super) fn slot_rmw_ordering(shared: &SharedData) -> Ordering {
-    if shared.config.single_slot_mode {
-        Ordering::AcqRel
-    } else {
-        Ordering::SeqCst
-    }
 }

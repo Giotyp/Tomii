@@ -186,6 +186,67 @@ mod tests {
     }
 }
 
+/// Compute the specific successor-instance index for 1:1 non-barrier predecessor→successor
+/// dependencies.
+///
+/// When a predecessor and its successor have the same factor and the dependency is not a
+/// barrier, each predecessor instance `i` should fire exactly one specific successor instance
+/// `j` (where `j = (i - offset).rem_euclid(factor)`).  This guarantees the successor's result
+/// is already stored when the successor runs its `$res` argument fetch, removing the need for
+/// a `spin_wait`.
+///
+/// Returns `Some(j)` when the 1:1 mapping applies; `None` for fanout / barrier dependencies.
+#[inline]
+pub(super) fn compute_1to1_succ_idx(
+    shared: &SharedData,
+    pred_node_id: IdType,
+    pred_index: usize,
+    succ_node_id: usize,
+) -> Option<usize> {
+    shared
+        .graph_cache
+        .pred_succ_1to1_offset
+        .get(succ_node_id)
+        .and_then(|v| v.get(pred_node_id as usize))
+        .and_then(|o| *o)
+        .map(|k| {
+            let f = shared.graph_cache.node_cache[succ_node_id].factor;
+            ((pred_index as isize - k).rem_euclid(f as isize)) as usize
+        })
+}
+
+/// Decrement the dependency counter of `succ_node_id` and collect any now-ready instance
+/// indices into `ready`.
+///
+/// Combines `compute_1to1_succ_idx` with `decrease_and_get_ready_into` so both the
+/// batch-resolution path and the worker-resolution path share the same decrement semantics.
+/// The `bulk_count` parameter distinguishes the two callers:
+/// - Batch path: always `1` (one completion per node in the batch).
+/// - Worker path: `node_info.bulk_count` (bulk tasks complete N instances in one call).
+#[inline]
+pub(super) fn decrement_and_collect_ready(
+    shared: &Arc<SharedData>,
+    slot: usize,
+    pred_node_id: IdType,
+    pred_index: usize,
+    succ_node_id: usize,
+    pred_group: Option<usize>,
+    bulk_count: usize,
+    slot_gen: u32,
+    ready: &mut Vec<usize>,
+) {
+    let specific_succ_idx = compute_1to1_succ_idx(shared, pred_node_id, pred_index, succ_node_id);
+    shared.exec.resolution_state.decrease_and_get_ready_into(
+        slot,
+        succ_node_id,
+        slot_gen,
+        pred_group,
+        bulk_count,
+        specific_succ_idx,
+        ready,
+    );
+}
+
 /// Collect successor descriptors for `node_info`, appending into `out` (cleared first).
 /// Avoids a heap allocation on the hot path when the caller supplies a reusable buffer.
 #[inline]

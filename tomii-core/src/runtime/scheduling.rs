@@ -112,50 +112,50 @@ pub(super) fn send_to_scheduler(
     }
 }
 
-impl super::TomiiRt {
-    pub(super) fn preparation(
-        shared: &Arc<SharedData>,
-        nodes_to_schedule: &[NodeInfo],
-        thread_core: usize,
-        thread_slot: usize,
-    ) {
-        let start_time = shared.telemetry.measure_start();
-        let start_ns = shared.telemetry.base_instant.elapsed().as_nanos();
+pub(super) fn preparation(
+    shared: &Arc<SharedData>,
+    nodes_to_schedule: &[NodeInfo],
+    thread_core: usize,
+    thread_slot: usize,
+) {
+    let start_time = shared.telemetry.measure_start();
+    let start_ns = shared.telemetry.base_instant.elapsed().as_nanos();
 
-        // Schedule Task - args will be built in the worker thread.
-        // Reuse thread-local buffer to avoid vec![None; N] heap allocation per flush.
-        PREP_ARGS_BUF.with(|abuf| {
-            let mut args_buf = abuf.borrow_mut();
-            let n = nodes_to_schedule.len();
-            args_buf.clear();
-            args_buf.resize(n, None);
-            send_to_scheduler(shared, nodes_to_schedule, &*args_buf, None);
+    // Schedule Task - args will be built in the worker thread.
+    // Reuse thread-local buffer to avoid vec![None; N] heap allocation per flush.
+    PREP_ARGS_BUF.with(|abuf| {
+        let mut args_buf = abuf.borrow_mut();
+        let n = nodes_to_schedule.len();
+        args_buf.clear();
+        args_buf.resize(n, None);
+        send_to_scheduler(shared, nodes_to_schedule, &*args_buf, None);
+    });
+
+    shared
+        .telemetry
+        .record_timing(start_time, thread_slot, "Preparation", usize::MAX);
+
+    // Lock-free recording via per-worker channel
+    let should_record = shared.telemetry.async_recorder.is_some()
+        && nodes_to_schedule
+            .iter()
+            .any(|n| should_record_slot(&shared.config, &shared.slot_data, n.slot));
+    if should_record {
+        let end_ns = shared.telemetry.base_instant.elapsed().as_nanos();
+        let job_id = shared.telemetry.job_counter.fetch_add(1, Ordering::SeqCst);
+        submit_record(Record {
+            slot: thread_slot,
+            job_id,
+            start_ns,
+            end_ns,
+            worker: thread_core,
+            task_id: IdType::MAX - 1,
+            index: 0,
         });
-
-        shared
-            .telemetry
-            .record_timing(start_time, thread_slot, "Preparation", usize::MAX);
-
-        // Lock-free recording via per-worker channel
-        let should_record = shared.telemetry.async_recorder.is_some()
-            && nodes_to_schedule
-                .iter()
-                .any(|n| should_record_slot(&shared.config, &shared.slot_data, n.slot));
-        if should_record {
-            let end_ns = shared.telemetry.base_instant.elapsed().as_nanos();
-            let job_id = shared.telemetry.job_counter.fetch_add(1, Ordering::SeqCst);
-            submit_record(Record {
-                slot: thread_slot,
-                job_id,
-                start_ns,
-                end_ns,
-                worker: thread_core,
-                task_id: IdType::MAX - 1,
-                index: 0,
-            });
-        }
     }
+}
 
+impl super::TomiiRt {
     pub(super) fn schedule_post_nodes(&mut self) {
         use std::thread::sleep;
         use std::time::Duration;

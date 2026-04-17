@@ -1,6 +1,9 @@
 /// Batch resolution inner loop: dependency propagation and successor scheduling.
 use super::shared_data::SharedData;
-use super::successor::{collect_successors_for_node_into, conditions_met, evaluate_node_condition};
+use super::successor::{
+    collect_successors_for_node_into, conditions_met, decrement_and_collect_ready,
+    evaluate_node_condition,
+};
 use crate::buffers::*;
 use crate::debug::print_debug;
 use crate::IdType;
@@ -94,26 +97,17 @@ pub(super) fn process_batch_inner(
             }
 
             // Decrement dependency counter; ready indices written into `ready`.
-            // For 1:1 non-barrier deps, pass specific_succ_idx so the
-            // exact successor instance that reads this predecessor fires,
-            // guaranteeing its result is available (no spin_wait needed).
-            let specific_succ_idx = shared
-                .graph_cache
-                .pred_succ_1to1_offset
-                .get(succ_node_id)
-                .and_then(|v| v.get(node_info.id as usize))
-                .and_then(|o| *o)
-                .map(|k| {
-                    let f = shared.graph_cache.node_cache[succ_node_id].factor;
-                    ((node_info.index as isize - k).rem_euclid(f as isize)) as usize
-                });
-            shared.exec.resolution_state.decrease_and_get_ready_into(
+            // For 1:1 non-barrier deps, `decrement_and_collect_ready` computes
+            // the specific successor instance so its result is guaranteed available.
+            decrement_and_collect_ready(
+                shared,
                 node_info.slot,
+                node_info.id,
+                node_info.index,
                 succ_node_id,
-                slot_gen,
                 *pred_group,
                 1,
-                specific_succ_idx,
+                slot_gen,
                 ready,
             );
 
@@ -158,14 +152,14 @@ pub(super) fn process_batch_inner(
         // batch to finish. This eliminates the dead zone where workers
         // idle while the system thread processes a large batch.
         if batch_sched.len() >= shared.config.batch.flush_threshold {
-            super::TomiiRt::preparation(shared, batch_sched, thread_core, thread_slot);
+            super::scheduling::preparation(shared, batch_sched, thread_core, thread_slot);
             batch_sched.clear();
         }
     }
 
     // Final flush for any remaining successors after the batch loop.
     if !batch_sched.is_empty() {
-        super::TomiiRt::preparation(shared, batch_sched, thread_core, thread_slot);
+        super::scheduling::preparation(shared, batch_sched, thread_core, thread_slot);
     }
 }
 

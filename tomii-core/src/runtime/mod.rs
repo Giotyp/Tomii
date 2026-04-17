@@ -4,6 +4,7 @@ mod init;
 #[cfg(feature = "network")]
 mod network_init;
 mod node_cache;
+mod ordering;
 #[cfg(feature = "network")]
 mod packet_processing;
 mod reporting;
