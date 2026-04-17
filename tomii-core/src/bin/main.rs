@@ -466,8 +466,15 @@ pub fn run_graph(spec: GraphSpec, cfg: RunGraphConfig) -> TomiiRt {
         .recv_pool_size(recv_pool_size)
         .spin_wait(spin_wait)
         .batch(batch)
-        .build();
+        .build()
+        .unwrap_or_else(|e| {
+            eprintln!("Config error: {e}");
+            std::process::exit(1);
+        });
 
-    synrt.run();
+    synrt.run().unwrap_or_else(|e| {
+        eprintln!("Runtime error: {e}");
+        std::process::exit(1);
+    });
     synrt
 }

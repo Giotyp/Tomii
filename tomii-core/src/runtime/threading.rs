@@ -10,13 +10,60 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+/// Spawn one network-receiver thread and return its handle.
+///
+/// Encapsulates the `thread::Builder` boilerplate shared by both the 1:1
+/// (one thread per socket) and round-robin (one thread per socket range) paths.
+#[cfg(feature = "network")]
+fn spawn_receiver_thread(
+    thread_name: String,
+    packet_length: usize,
+    recv_pool_size: usize,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+    tx: flume::Sender<crate::network::PacketMessage>,
+    sockets: Arc<Vec<crate::network::NetworkSocket>>,
+    drop_counters: Arc<Vec<std::sync::atomic::AtomicUsize>>,
+    thread_id: usize,
+    socket_range: std::ops::Range<usize>,
+    core_id: usize,
+    return_rxs: Vec<flume::Receiver<Vec<u8>>>,
+) -> Result<JoinHandle<()>, crate::RuntimeError> {
+    thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            multi_socket_receiver_loop(
+                packet_length,
+                recv_pool_size,
+                shutdown,
+                tx,
+                sockets,
+                drop_counters,
+                thread_id,
+                socket_range,
+                core_id,
+                return_rxs,
+            );
+        })
+        .map_err(crate::RuntimeError::SpawnFailed)
+}
+
+// ---------------------------------------------------------------------------
+// impl TomiiRt
+// ---------------------------------------------------------------------------
+
 impl TomiiRt {
     /// Spawn dedicated network receiver threads (one per socket, or round-robin if fewer threads).
     #[cfg(feature = "network")]
-    pub(super) fn spawn_receiver_threads(&self) -> Vec<JoinHandle<()>> {
+    pub(super) fn spawn_receiver_threads(
+        &self,
+    ) -> Result<Vec<JoinHandle<()>>, crate::RuntimeError> {
         let Some(ref network_config) = self.shared.graph.network_config() else {
             tracing::debug!("No network_config present - skipping network receiver setup");
-            return Vec::new();
+            return Ok(Vec::new());
         };
 
         let num_sockets = network_config.num_sockets;
@@ -48,9 +95,6 @@ impl TomiiRt {
             "spawning receiver threads"
         );
 
-        let mut handles = Vec::with_capacity(receiver_threads);
-
-        // Extract shared receiver context once — avoid passing all of SharedData into network.rs.
         let packet_length = self
             .shared
             .graph
@@ -63,6 +107,8 @@ impl TomiiRt {
         let sockets = Arc::clone(&self.shared.net.receiver_sockets);
         let drop_counters = Arc::clone(&self.shared.net.packet_drop_counters);
 
+        let mut handles = Vec::with_capacity(receiver_threads);
+
         if receiver_threads >= num_sockets {
             tracing::debug!("using 1:1 thread-to-socket mapping");
             for socket_id in 0..num_sockets {
@@ -71,31 +117,19 @@ impl TomiiRt {
                     .lock()
                     .take()
                     .expect("buffer_return_receivers already taken");
-                let (pl, rps) = (packet_length, recv_pool_size);
-                let (sd, tx2, socks, drops) = (
+                let handle = spawn_receiver_thread(
+                    format!("rx-{socket_id}"),
+                    packet_length,
+                    recv_pool_size,
                     Arc::clone(&shutdown),
                     tx.clone(),
                     Arc::clone(&sockets),
                     Arc::clone(&drop_counters),
-                );
-
-                let handle = thread::Builder::new()
-                    .name(format!("rx-{}", socket_id))
-                    .spawn(move || {
-                        multi_socket_receiver_loop(
-                            pl,
-                            rps,
-                            sd,
-                            tx2,
-                            socks,
-                            drops,
-                            socket_id,
-                            socket_id..socket_id + 1,
-                            core_id,
-                            vec![return_rx],
-                        );
-                    })
-                    .expect("Failed to spawn receiver thread");
+                    socket_id,
+                    socket_id..socket_id + 1,
+                    core_id,
+                    vec![return_rx],
+                )?;
                 handles.push(handle);
                 tracing::debug!(socket_id, core_id, "receiver thread spawned");
             }
@@ -106,13 +140,11 @@ impl TomiiRt {
                 "receiver_threads < num_sockets, using round-robin polling"
             );
             let sockets_per_thread = (num_sockets + receiver_threads - 1) / receiver_threads;
-
             for thread_id in 0..receiver_threads {
                 let start_socket = thread_id * sockets_per_thread;
                 let end_socket = std::cmp::min(start_socket + sockets_per_thread, num_sockets);
                 let socket_range = start_socket..end_socket;
                 let socket_range_display = socket_range.clone();
-
                 let return_rxs: Vec<flume::Receiver<Vec<u8>>> = (start_socket..end_socket)
                     .map(|sid| {
                         self.shared.net.buffer_return_receivers[sid]
@@ -121,33 +153,20 @@ impl TomiiRt {
                             .expect("buffer_return_receivers already taken")
                     })
                     .collect();
-
                 let core_id = receiver_offset + thread_id;
-                let (pl, rps) = (packet_length, recv_pool_size);
-                let (sd, tx2, socks, drops) = (
+                let handle = spawn_receiver_thread(
+                    format!("rx-multi-{thread_id}"),
+                    packet_length,
+                    recv_pool_size,
                     Arc::clone(&shutdown),
                     tx.clone(),
                     Arc::clone(&sockets),
                     Arc::clone(&drop_counters),
-                );
-
-                let handle = thread::Builder::new()
-                    .name(format!("rx-multi-{}", thread_id))
-                    .spawn(move || {
-                        multi_socket_receiver_loop(
-                            pl,
-                            rps,
-                            sd,
-                            tx2,
-                            socks,
-                            drops,
-                            thread_id,
-                            socket_range,
-                            core_id,
-                            return_rxs,
-                        );
-                    })
-                    .expect("Failed to spawn receiver thread");
+                    thread_id,
+                    socket_range,
+                    core_id,
+                    return_rxs,
+                )?;
                 handles.push(handle);
                 tracing::debug!(
                     thread_id,
@@ -159,48 +178,53 @@ impl TomiiRt {
         }
 
         tracing::info!("network receiver infrastructure ready");
-        handles
+        Ok(handles)
     }
 
     /// Spawn resolution threads (one per `system_threads` config value).
-    pub(super) fn spawn_resolution_threads(&self) -> Vec<JoinHandle<()>> {
+    pub(super) fn spawn_resolution_threads(
+        &self,
+    ) -> Result<Vec<JoinHandle<()>>, crate::RuntimeError> {
         let mut handles = Vec::new();
         for thread_id in 0..self.shared.config.system_threads {
             let shared_clone = Arc::clone(&self.shared);
             let thread_core = self.shared.config.core_offset + thread_id;
             let thread_slot = self.shared.config.slots + thread_id;
 
-            let handle = std::thread::spawn(move || {
-                crate::scheduler::set_current_worker_id(thread_slot);
+            let handle = thread::Builder::new()
+                .name(format!("resolution-{thread_id}"))
+                .spawn(move || {
+                    crate::scheduler::set_current_worker_id(thread_slot);
 
-                if let Some(ref recorder) = shared_clone.telemetry.async_recorder {
-                    if let Some(tx) = recorder.get_worker_sender(thread_slot) {
-                        set_worker_recorder(tx);
+                    if let Some(ref recorder) = shared_clone.telemetry.async_recorder {
+                        if let Some(tx) = recorder.get_worker_sender(thread_slot) {
+                            set_worker_recorder(tx);
+                        }
                     }
-                }
 
-                if core_affinity::set_for_current(core_affinity::CoreId { id: thread_core }) {
-                    tracing::debug!(
-                        thread_id,
-                        core = thread_core,
-                        slot = thread_slot,
-                        "resolution thread pinned"
-                    );
-                } else {
-                    tracing::warn!(
-                        thread_id,
-                        core = thread_core,
-                        "failed to pin resolution thread"
-                    );
-                }
+                    if core_affinity::set_for_current(core_affinity::CoreId { id: thread_core }) {
+                        tracing::debug!(
+                            thread_id,
+                            core = thread_core,
+                            slot = thread_slot,
+                            "resolution thread pinned"
+                        );
+                    } else {
+                        tracing::warn!(
+                            thread_id,
+                            core = thread_core,
+                            "failed to pin resolution thread"
+                        );
+                    }
 
-                super::resolution_loop::resolution(
-                    shared_clone,
-                    thread_core,
-                    thread_id,
-                    thread_slot,
-                );
-            });
+                    super::resolution_loop::resolution(
+                        shared_clone,
+                        thread_core,
+                        thread_id,
+                        thread_slot,
+                    );
+                })
+                .map_err(crate::RuntimeError::SpawnFailed)?;
             handles.push(handle);
         }
         print_debug(|| {
@@ -209,7 +233,7 @@ impl TomiiRt {
                 self.shared.config.system_threads
             )
         });
-        handles
+        Ok(handles)
     }
 
     /// Signal receiver threads to stop and join them, then report drop statistics.
