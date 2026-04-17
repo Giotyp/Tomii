@@ -6,6 +6,24 @@ use crate::func_reg::get_func;
 use crate::{graph_struct::*, IdType};
 use tomii_types::*;
 
+/// Resolve a function pointer by name, panicking in production if not found.
+/// In test mode, falls back to a no-op so integration tests can run without a plugin.
+#[inline]
+fn resolve_func(name: &str) -> CmPtr {
+    #[cfg(not(any(test, feature = "test-utils")))]
+    {
+        get_func(name)
+            .unwrap_or_else(|| panic!("Function '{}' not found in registry", name))
+    }
+    #[cfg(any(test, feature = "test-utils"))]
+    {
+        fn test_noop(_: &[CmTypes]) -> CmTypes {
+            CmTypes::None
+        }
+        get_func(name).unwrap_or(test_noop)
+    }
+}
+
 // Cache entry for quick node access - stores commonly accessed node fields
 #[derive(Clone)]
 pub struct NodeCacheEntry {
@@ -157,8 +175,7 @@ pub(super) fn node_cache_entry(
         factor: node.factor,
         pred_vec,
         name: node.name.clone(),
-        func_ptr: get_func(&node.func_name)
-            .unwrap_or_else(|| panic!("Function '{}' not found in registry", node.func_name)),
+        func_ptr: resolve_func(&node.func_name),
         arg_cache,
         is_initial: initial_nodes.contains(&node.id),
         is_condition: condition_nodes.contains(&node.id),
@@ -265,12 +282,7 @@ fn build_condition_cache(node: &Node, init_objects: &[Vec<CmTypes>]) -> Option<N
     Some(NodeConditionCache {
         operation: cond.operation.clone(),
         eval_value: cond.eval_value.clone(),
-        func_ptr: get_func(&cond.func_name).unwrap_or_else(|| {
-            panic!(
-                "Condition function '{}' not found in registry",
-                cond.func_name
-            )
-        }),
+        func_ptr: resolve_func(&cond.func_name),
         arg_cache,
     })
 }

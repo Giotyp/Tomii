@@ -6,6 +6,7 @@ use tomii_types::*;
 // Graph File Structure
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GraphFile {
+    #[serde(default)]
     pub initializations: Vec<InitJson>,
     pub nodes: Vec<NodeJson>,
     pub post_nodes: Option<Vec<NodeJson>>,
