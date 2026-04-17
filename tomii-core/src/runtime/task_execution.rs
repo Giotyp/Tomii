@@ -57,15 +57,16 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) -> 
     }
 
     // Steps 4-6: Collect successors, resolve dependencies, schedule ready nodes.
+    let rctx = shared.resolve_ctx();
     let inline_result = WORKER_BUFS.with(|bufs| {
         let mut bufs = bufs.borrow_mut();
         bufs.sched.clear();
 
         // Step 4: Collect successors.
-        collect_successors_for_node_into(shared, node_info, &mut bufs.succ);
+        collect_successors_for_node_into(&shared.graph, rctx.cache, node_info, &mut bufs.succ);
 
         // Load slot generation once for all successors.
-        let slot_gen = shared.slot_data.generation[slot].load(slot_gen_load(shared)) as u32;
+        let slot_gen = rctx.slots.generation[slot].load(slot_gen_load(shared)) as u32;
 
         // Step 5: Resolve dependencies for each successor (all non-condition).
         // Destructure into separate field borrows so the borrow checker allows
@@ -77,7 +78,7 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) -> 
             let succ_node_id = *succ_id as usize;
 
             decrement_and_collect_ready(
-                shared,
+                &rctx,
                 slot,
                 node_info.id,
                 node_info.index,

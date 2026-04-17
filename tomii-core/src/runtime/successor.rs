@@ -214,19 +214,18 @@ mod tests {
 /// Returns `Some(j)` when the 1:1 mapping applies; `None` for fanout / barrier dependencies.
 #[inline]
 pub(super) fn compute_1to1_succ_idx(
-    shared: &SharedData,
+    cache: &super::shared_data::GraphCache,
     pred_node_id: IdType,
     pred_index: usize,
     succ_node_id: usize,
 ) -> Option<usize> {
-    shared
-        .graph_cache
+    cache
         .pred_succ_1to1_offset
         .get(succ_node_id)
         .and_then(|v| v.get(pred_node_id as usize))
         .and_then(|o| *o)
         .map(|k| {
-            let f = shared.graph_cache.node_cache[succ_node_id].factor;
+            let f = cache.node_cache[succ_node_id].factor;
             ((pred_index as isize - k).rem_euclid(f as isize)) as usize
         })
 }
@@ -241,7 +240,7 @@ pub(super) fn compute_1to1_succ_idx(
 /// - Worker path: `node_info.bulk_count` (bulk tasks complete N instances in one call).
 #[inline]
 pub(super) fn decrement_and_collect_ready(
-    shared: &Arc<SharedData>,
+    ctx: &super::shared_data::ResolveCtx<'_>,
     slot: usize,
     pred_node_id: IdType,
     pred_index: usize,
@@ -251,8 +250,9 @@ pub(super) fn decrement_and_collect_ready(
     slot_gen: u32,
     ready: &mut Vec<usize>,
 ) {
-    let specific_succ_idx = compute_1to1_succ_idx(shared, pred_node_id, pred_index, succ_node_id);
-    shared.exec.resolution_state.decrease_and_get_ready_into(
+    let specific_succ_idx =
+        compute_1to1_succ_idx(ctx.cache, pred_node_id, pred_index, succ_node_id);
+    ctx.exec.resolution_state.decrease_and_get_ready_into(
         slot,
         succ_node_id,
         slot_gen,
@@ -267,7 +267,8 @@ pub(super) fn decrement_and_collect_ready(
 /// Avoids a heap allocation on the hot path when the caller supplies a reusable buffer.
 #[inline]
 pub(super) fn collect_successors_for_node_into(
-    shared: &Arc<SharedData>,
+    graph: &crate::graph::Graph,
+    cache: &super::shared_data::GraphCache,
     node_info: &NodeInfo,
     out: &mut Vec<(NodeInfo, bool, IdType, Option<usize>)>,
 ) {
@@ -277,10 +278,10 @@ pub(super) fn collect_successors_for_node_into(
 
     // Get successor list for this node (immutable, pre-computed)
     let successors: &Vec<IdType> = {
-        if node_id_usize >= shared.graph.successors.len() {
+        if node_id_usize >= graph.successors.len() {
             &Vec::new()
         } else {
-            &shared.graph.successors[node_id_usize]
+            &graph.successors[node_id_usize]
         }
     };
 
@@ -291,8 +292,7 @@ pub(super) fn collect_successors_for_node_into(
 
         // Predecessor index range filter: skip if this predecessor instance is outside
         // the declared index range for this successor
-        if let Some(Some((start, end))) = shared
-            .graph_cache
+        if let Some(Some((start, end))) = cache
             .pred_index_filter
             .get(succ_id_usize)
             .and_then(|v| v.get(node_id_usize))
@@ -302,22 +302,20 @@ pub(super) fn collect_successors_for_node_into(
             }
         }
 
-        let succ_cache = &shared.graph_cache.node_cache[succ_id_usize];
+        let succ_cache = &cache.node_cache[succ_id_usize];
 
         // Use pre-computed flag for lock-free check
         let has_condition = succ_cache.is_condition;
 
         // Compute predecessor group for group_by barriers
         let pred_group: Option<usize> = {
-            if let Some(Some(gb)) = shared
-                .graph_cache
+            if let Some(Some(gb)) = cache
                 .pred_group_by
                 .get(succ_id_usize)
                 .and_then(|v| v.get(node_id_usize))
             {
                 // Compute relative index within the declared range
-                let range_start = shared
-                    .graph_cache
+                let range_start = cache
                     .pred_index_filter
                     .get(succ_id_usize)
                     .and_then(|v| v.get(node_id_usize))
