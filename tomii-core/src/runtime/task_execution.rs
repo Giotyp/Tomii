@@ -5,36 +5,21 @@ use super::shared_data::SharedData;
 use super::successor::{
     collect_successors_for_node_into, decrement_and_collect_ready, push_ready_chunked,
 };
-use super::thread_locals::{WorkerResolutionBuffers, ARG_BUF, WORKER_BUFS, WORKER_STATE};
+use super::thread_locals::{WorkerResolutionBuffers, ARG_BUF, WORKER_BUFS};
 use crate::buffers::*;
 use crate::debug::print_debug;
 use std::sync::Arc;
 use tomii_types::*;
 
-/// Stamp the thread-local `WORKER_STATE` with the slot/gen of the currently executing task.
-///
-/// Called at the top of every task execution path so that `populate_cached_args_into`
-/// and `worker_resolve_successors` can detect stale spin-waits and generation mismatches
-/// without needing the `SharedData` reference. No-op in `single_slot_mode` (only one
-/// stream runs at a time, so there is no stale-task risk).
-#[inline]
-fn stamp_executing_slot(shared: &SharedData, node_info: &NodeInfo) {
-    if !shared.config.single_slot_mode {
-        WORKER_STATE.with(|ws| {
-            let mut ws = ws.borrow_mut();
-            ws.stale_task_detected = false;
-            ws.executing_slot = node_info.slot;
-            ws.executing_gen = node_info.gen;
-        });
-    }
-}
-
 /// Worker-side dependency resolution: resolves successors directly on the worker
 /// thread that completed the task, bypassing the batch_queue → resolution thread
 /// round-trip. Only called for nodes where all successors are non-condition
 /// (worker_resolvable == true), ensuring correctness without condition evaluation.
+///
+/// Returns `Some(NodeInfo)` when `inline_continuation` is enabled and a ready
+/// successor was reserved for this worker thread to execute immediately.
 #[inline]
-fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
+fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) -> Option<NodeInfo> {
     let slot = node_info.slot;
 
     // Step 1: Increment processing_count to prevent premature completion detection.
@@ -45,7 +30,7 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
     if current_gen != node_info.gen {
         shared.slot_data.processing_count[slot].fetch_sub(1, slot_gen_rmw(shared));
         shared.slot_data.needs_check[slot].store(true, std::sync::atomic::Ordering::Release);
-        return;
+        return None;
     }
 
     // Step 3: Decrement task counters (Phase 2 equivalent).
@@ -59,7 +44,7 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
     }
 
     // Steps 4-6: Collect successors, resolve dependencies, schedule ready nodes.
-    WORKER_BUFS.with(|bufs| {
+    let inline_result = WORKER_BUFS.with(|bufs| {
         let mut bufs = bufs.borrow_mut();
         bufs.sched.clear();
 
@@ -121,14 +106,14 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) {
             send_to_scheduler(shared, &bufs.sched, &bufs.args, None);
         }
 
-        if let Some(ni) = inline {
-            WORKER_STATE.with(|ws| ws.borrow_mut().inline_continuation = Some(ni));
-        }
+        inline
     });
 
     // Step 7: Decrement processing_count AFTER all successor processing.
     shared.slot_data.processing_count[slot].fetch_sub(1, slot_gen_rmw(shared));
     shared.slot_data.needs_check[slot].store(true, std::sync::atomic::Ordering::Release);
+
+    inline_result
 }
 
 #[inline(always)]
@@ -138,7 +123,7 @@ pub(super) fn execute_task(
     node_info: &NodeInfo,
     pre_built_args: Option<Vec<CmTypes>>,
     spawn_ns: u128,
-) {
+) -> Option<NodeInfo> {
     // Stale-task guard: if the slot's generation has advanced since this task was
     // scheduled, the slot was recycled (stream completed + reassigned) while the
     // task sat in the Rayon queue.  Executing it would read cleared predecessor
@@ -154,15 +139,14 @@ pub(super) fn execute_task(
                     node_info.id, node_info.slot, node_info.index, node_info.gen, current_gen
                 )
             });
-            return;
+            return None;
         }
     }
 
     if node_info.bulk_count > 1 {
-        execute_bulk_task(shared, func, node_info);
-        return;
+        return execute_bulk_task(shared, func, node_info);
     }
-    execute_single_task(shared, func, node_info, pre_built_args, spawn_ns);
+    execute_single_task(shared, func, node_info, pre_built_args, spawn_ns)
 }
 
 /// Bulk execution path: run `bulk_count` consecutive instances in a tight loop.
@@ -170,15 +154,21 @@ pub(super) fn execute_task(
 /// Spawned by `push_ready_chunked` when a barrier fan-out produces N > num_workers
 /// ready instances simultaneously (e.g. wavefront diagonal). Eliminates O(N) individual
 /// Rayon spawns by covering a contiguous range `index..index+bulk_count` in one task.
-fn execute_bulk_task(shared: &Arc<SharedData>, func: CmPtr, node_info: &NodeInfo) {
-    stamp_executing_slot(shared, node_info);
-
+fn execute_bulk_task(
+    shared: &Arc<SharedData>,
+    func: CmPtr,
+    node_info: &NodeInfo,
+) -> Option<NodeInfo> {
     let node_cache = &shared.graph_cache.node_cache[node_info.id as usize];
+    let exec_slot = node_info.slot;
+    let exec_gen = node_info.gen;
+    let mut bulk_stale = false;
+
     ARG_BUF.with(|buf_cell| {
         let mut buf = buf_cell.borrow_mut();
         for inst_idx in node_info.index..node_info.index + node_info.bulk_count {
             buf.clear();
-            populate_cached_args_into(
+            let stale = populate_cached_args_into(
                 &mut buf,
                 shared,
                 &node_cache.arg_cache,
@@ -186,11 +176,12 @@ fn execute_bulk_task(shared: &Arc<SharedData>, func: CmPtr, node_info: &NodeInfo
                 inst_idx,
                 node_info.slot,
                 node_info.pred_index,
+                exec_slot,
+                exec_gen,
             );
-            if !shared.config.single_slot_mode
-                && WORKER_STATE.with(|ws| ws.borrow().stale_task_detected)
-            {
+            if stale {
                 buf.clear();
+                bulk_stale = true;
                 return; // Slot recycled mid-bulk — drop remaining instances
             }
             let result = func(&buf);
@@ -204,10 +195,10 @@ fn execute_bulk_task(shared: &Arc<SharedData>, func: CmPtr, node_info: &NodeInfo
         }
     });
 
-    if !shared.config.single_slot_mode && WORKER_STATE.with(|ws| ws.borrow().stale_task_detected) {
-        return;
+    if bulk_stale {
+        return None;
     }
-    worker_resolve_successors(shared, node_info);
+    worker_resolve_successors(shared, node_info)
 }
 
 /// Single-instance execution path for regular and post-nodes.
@@ -215,15 +206,15 @@ fn execute_bulk_task(shared: &Arc<SharedData>, func: CmPtr, node_info: &NodeInfo
 /// Builds args from the cache (or uses pre-built args for post-nodes), runs the
 /// plugin function, stores the result, and either resolves successors worker-side
 /// (if `worker_resolvable`) or sends a completion token to the batch queue.
+/// Returns `Some(NodeInfo)` when an inline continuation was produced by
+/// `worker_resolve_successors`; `None` otherwise.
 fn execute_single_task(
     shared: &Arc<SharedData>,
     func: CmPtr,
     node_info: &NodeInfo,
     pre_built_args: Option<Vec<CmTypes>>,
     spawn_ns: u128,
-) {
-    stamp_executing_slot(shared, node_info);
-
+) -> Option<NodeInfo> {
     let exec_start_ns = shared.telemetry.base_instant.elapsed().as_nanos();
     let worker_id = crate::scheduler::get_current_worker_id().unwrap_or(usize::MAX);
 
@@ -251,6 +242,9 @@ fn execute_single_task(
         None
     };
 
+    let exec_slot = node_info.slot;
+    let exec_gen = node_info.gen;
+
     let result = if let Some(ref args) = pre_built_args {
         func(args)
     } else {
@@ -258,7 +252,7 @@ fn execute_single_task(
         let result_opt = ARG_BUF.with(|buf_cell| {
             let mut buf = buf_cell.borrow_mut();
             buf.clear();
-            populate_cached_args_into(
+            let stale = populate_cached_args_into(
                 &mut buf,
                 shared,
                 &node_cache.arg_cache,
@@ -266,10 +260,10 @@ fn execute_single_task(
                 node_info.index,
                 node_info.slot,
                 node_info.pred_index,
+                exec_slot,
+                exec_gen,
             );
-            if !shared.config.single_slot_mode
-                && WORKER_STATE.with(|ws| ws.borrow().stale_task_detected)
-            {
+            if stale {
                 buf.clear();
                 return None::<CmTypes>;
             }
@@ -286,7 +280,7 @@ fn execute_single_task(
                         node_info.id, node_info.slot, node_info.index, node_info.gen
                     )
                 });
-                return;
+                return None;
             }
         }
     };
@@ -303,8 +297,9 @@ fn execute_single_task(
     if !node_info.post_node
         && shared.graph_cache.node_cache[node_info.id as usize].worker_resolvable
     {
-        worker_resolve_successors(shared, node_info);
+        worker_resolve_successors(shared, node_info)
     } else {
         let _ = shared.exec.batch_queue_tx.send(node_info.clone());
+        None
     }
 }

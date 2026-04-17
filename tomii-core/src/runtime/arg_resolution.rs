@@ -1,5 +1,4 @@
 use super::shared_data::SharedData;
-use super::thread_locals::WORKER_STATE;
 use crate::{buffers::*, graph_struct::*, IdType};
 use std::sync::Arc;
 use tomii_types::*;
@@ -42,6 +41,9 @@ fn process_runtime_refs(
 }
 
 /// Populate args directly into a provided buffer, avoiding heap allocation.
+///
+/// Returns `true` if a stale-task was detected (slot generation changed mid-resolution).
+/// The caller must drop the task without processing it or decrementing dependency counters.
 #[inline(always)]
 pub(super) fn populate_cached_args_into(
     buf: &mut Vec<CmTypes>,
@@ -51,7 +53,9 @@ pub(super) fn populate_cached_args_into(
     node_index: usize,
     slot: usize,
     pred_index: usize,
-) {
+    exec_slot: usize,
+    exec_gen: u32,
+) -> bool {
     buf.extend(args_cache.args.iter().cloned());
 
     if args_cache.buffer_ref_indexes.is_empty()
@@ -59,7 +63,7 @@ pub(super) fn populate_cached_args_into(
         && args_cache.rt_workers_indexes.is_empty()
         && args_cache.res_indexes.is_empty()
     {
-        return;
+        return false;
     }
 
     let workers = if !args_cache.rt_workers_indexes.is_empty() {
@@ -71,12 +75,18 @@ pub(super) fn populate_cached_args_into(
     process_buffer_refs(buf, args_cache, node_index);
     process_runtime_refs(buf, args_cache, node_index, workers);
 
+    let mut stale = false;
     for (res_idx, rp) in args_cache
         .res_indexes
         .iter()
         .zip(args_cache.res_predecessors.iter())
     {
-        let result_opt = collect_res_from_cache(rp, node_index, slot, pred_index, None, shared);
+        if stale {
+            break;
+        }
+        let result_opt = collect_res_from_cache(
+            rp, node_index, slot, pred_index, None, shared, exec_slot, exec_gen, &mut stale,
+        );
         if let Some(mut result) = result_opt {
             if result.len() == 1 {
                 buf[*res_idx] = result.remove(0);
@@ -85,6 +95,7 @@ pub(super) fn populate_cached_args_into(
             }
         }
     }
+    stale
 }
 
 #[inline]
@@ -104,8 +115,19 @@ pub(super) fn parse_args(
             continue;
         }
 
-        let result_opt =
-            collect_arg_result(arg, 0, node_index, 0, slot, pred_index, custom_res, shared);
+        let result_opt = collect_arg_result(
+            arg,
+            0,
+            node_index,
+            0,
+            slot,
+            pred_index,
+            custom_res,
+            shared,
+            usize::MAX,
+            0,
+            &mut false,
+        );
         if let Some(result) = result_opt {
             arg_vec.extend(result);
         }
@@ -142,11 +164,16 @@ fn get_object_value(obj_vec: &[CmTypes], node_index: usize) -> CmTypes {
 ///
 /// Returns `Some(result)` once the result is visible, or `None` if the slot
 /// generation changes (slot recycled → task is stale and should be dropped).
+/// When returning `None`, `*stale` is set to `true` to short-circuit remaining
+/// arg collection in the caller.
 #[cold]
 #[inline(never)]
 fn spin_wait_for_result(
     shared: &Arc<SharedData>,
     node_info: &NodeInfo,
+    exec_slot: usize,
+    exec_gen: u32,
+    stale: &mut bool,
 ) -> Option<tomii_types::CmTypes> {
     use std::sync::atomic::Ordering;
     let mut spin_count: u32 = 0;
@@ -154,15 +181,11 @@ fn spin_wait_for_result(
         if let Some(result) = shared.exec.node_results.get(node_info) {
             return Some(result);
         }
-        let (exec_slot, exec_gen) = WORKER_STATE.with(|ws| {
-            let ws = ws.borrow();
-            (ws.executing_slot, ws.executing_gen)
-        });
         if exec_slot != usize::MAX {
             let current_gen = shared.slot_data.generation[exec_slot].load(Ordering::Acquire) as u32;
             if exec_gen != current_gen {
                 if !shared.config.single_slot_mode {
-                    WORKER_STATE.with(|ws| ws.borrow_mut().stale_task_detected = true);
+                    *stale = true;
                 }
                 return None;
             }
@@ -206,6 +229,9 @@ fn fetch_res_results(
     pred_eff_group_size: Option<usize>,
     slot: usize,
     shared: &Arc<SharedData>,
+    exec_slot: usize,
+    exec_gen: u32,
+    stale: &mut bool,
 ) -> Option<Vec<CmTypes>> {
     if indexes.is_empty() {
         return None;
@@ -224,7 +250,8 @@ fn fetch_res_results(
         if let Some(result) = shared.exec.node_results.get(&node_info) {
             return Some(vec![result]);
         }
-        return spin_wait_for_result(shared, &node_info).map(|r| vec![r]);
+        return spin_wait_for_result(shared, &node_info, exec_slot, exec_gen, stale)
+            .map(|r| vec![r]);
     }
 
     // 1:1 mapping: each successor instance reads one predecessor result via pred_index.
@@ -233,7 +260,8 @@ fn fetch_res_results(
         if let Some(result) = shared.exec.node_results.get(&node_info) {
             return Some(vec![result]);
         }
-        return spin_wait_for_result(shared, &node_info).map(|r| vec![r]);
+        return spin_wait_for_result(shared, &node_info, exec_slot, exec_gen, stale)
+            .map(|r| vec![r]);
     }
 
     // Collect-all path: gather every explicitly listed predecessor index.
@@ -244,7 +272,7 @@ fn fetch_res_results(
         if let Some(result) = shared.exec.node_results.get(&node_info) {
             result_vec.push(result);
         } else {
-            match spin_wait_for_result(shared, &node_info) {
+            match spin_wait_for_result(shared, &node_info, exec_slot, exec_gen, stale) {
                 Some(result) => result_vec.push(result),
                 None => return None,
             }
@@ -269,13 +297,16 @@ fn collect_res_from_cache(
     pred_index: usize,
     custom_res: Option<&CmTypes>,
     shared: &Arc<SharedData>,
+    exec_slot: usize,
+    exec_gen: u32,
+    stale: &mut bool,
 ) -> Option<Vec<CmTypes>> {
     if rp.is_dep {
         return Some(vec![CmTypes::None]);
     }
 
     // Short-circuit: if a previous arg already detected stale, skip remaining
-    if !shared.config.single_slot_mode && WORKER_STATE.with(|ws| ws.borrow().stale_task_detected) {
+    if *stale {
         return None;
     }
 
@@ -298,6 +329,9 @@ fn collect_res_from_cache(
         pred_eff_gs,
         slot,
         shared,
+        exec_slot,
+        exec_gen,
+        stale,
     )
 }
 
@@ -312,6 +346,9 @@ pub(super) fn collect_arg_result(
     pred_index: usize,
     custom_res: Option<&CmTypes>,
     shared: &Arc<SharedData>,
+    exec_slot: usize,
+    exec_gen: u32,
+    stale: &mut bool,
 ) -> Option<Vec<CmTypes>> {
     match &arg.type_ {
         CmTypes::Ref(obj_id) => {
@@ -331,9 +368,7 @@ pub(super) fn collect_arg_result(
         }
         CmTypes::Res(res_node_id) => {
             // Short-circuit: if a previous arg already detected stale, skip remaining
-            if !shared.config.single_slot_mode
-                && WORKER_STATE.with(|ws| ws.borrow().stale_task_detected)
-            {
+            if *stale {
                 return None;
             }
 
@@ -366,6 +401,9 @@ pub(super) fn collect_arg_result(
                 pred_eff_gs,
                 slot,
                 shared,
+                exec_slot,
+                exec_gen,
+                stale,
             )
         }
         CmTypes::Barrier(_) => None,
