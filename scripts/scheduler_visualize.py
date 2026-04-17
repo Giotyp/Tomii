@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Visualize scheduler CSV produced by SynStream.
+Visualize scheduler CSV produced by Τομί.
 
 Usage:
     python3 scripts/scheduler_visualize.py schedule_log.csv -o out.png --units us

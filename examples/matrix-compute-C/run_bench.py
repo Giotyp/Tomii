@@ -1,9 +1,9 @@
-"""matrix-compute-C benchmark — Python runner using the SynStream API.
+"""matrix-compute-C benchmark — Python runner using the Τομί API.
 
 Implements the same FFT + matrix-multiply DAG as examples/matrix-compute/
 but calls C functions (FFTW + OpenBLAS) via a compiled libmatcomp_c.so.
 
-The C library is compiled with Make, then synstream-core is rebuilt with
+The C library is compiled with Make, then tomii-core is rebuilt with
 FUNC_PATH pointing at the C header so the converter generates the C wrappers.
 
 Usage (from repo root, with venv active):
@@ -26,7 +26,7 @@ HERE = Path(__file__).resolve().parent        # examples/matrix-compute-C/
 REPO_ROOT = HERE.parents[1]                   # workspace root
 sys.path.insert(0, str(REPO_ROOT))
 
-import synstream as ss                        # noqa: E402
+import tomii as tm
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -34,7 +34,7 @@ import synstream as ss                        # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="matrix-compute-C SynStream benchmark")
+    p = argparse.ArgumentParser(description="matrix-compute-C Τομί benchmark")
     p.add_argument("--workers", type=int, default=2)
     p.add_argument("--system-threads", type=int, default=3)
     p.add_argument("--slots", type=int, default=2)
@@ -56,8 +56,8 @@ def _parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 
-def build_graph() -> ss.Graph:
-    app = ss.Graph()
+def build_graph() -> tm.Graph:
+    app = tm.Graph()
 
     # Initializations
     buf_size   = app.var("buf_size",   100)
@@ -70,7 +70,7 @@ def build_graph() -> ss.Graph:
     result_file = app.var(
         "result_file",
         func="get_out_file",
-        args=[ss.String("SCRIPT_DIR"), ss.String("result.txt")],
+        args=[tm.String("SCRIPT_DIR"), tm.String("result.txt")],
     )
 
     # Pipeline nodes
@@ -125,7 +125,7 @@ def main() -> None:
     if result.returncode != 0:
         sys.exit(f"make failed (exit {result.returncode})")
 
-    # ── Step 2: build synstream-core with C header wrappers ─────────────────
+    # ── Step 2: build tomii-core with C header wrappers ─────────────────
     # FUNC_PATH → matcomp.h  →  converter generates wrappers.rs for C
     app = build_graph()
     app.build(

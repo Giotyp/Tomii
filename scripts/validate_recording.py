@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Validate SynStream scheduler recordings for core allocation correctness.
+Validate Τομί scheduler recordings for core allocation correctness.
 Checks for worker ID conflicts and system/worker core overlaps.
 
 Usage:
@@ -201,7 +201,7 @@ def analyze_core_allocation(records, system_threads, workers, network_workers):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Validate SynStream scheduler recordings"
+        description="Validate Τομί scheduler recordings"
     )
     parser.add_argument("--csv", required=True, help="Path to timing CSV file")
     parser.add_argument("--system-threads", type=int, required=True)

@@ -6,7 +6,7 @@ unset FUNC_PATH WRAP_PATH REG_PATH
 # Get current script directory (absolute path)
 SCRIPT_PATH=$(readlink -f "$0")
 SCRIPT_DIR=$(dirname "$SCRIPT_PATH")
-BIN_DIR="$SCRIPT_DIR/../../synstream-core"
+BIN_DIR="$SCRIPT_DIR/../../tomii-core"
 
 # source wrappers and functions
 FUNC_PATH=$(readlink -f "$SCRIPT_DIR/src/functions.rs")
@@ -49,10 +49,10 @@ export REG_PATH=$REG_PATH
 export SCRIPT_DIR=$SCRIPT_DIR
 
 if [ $CLEANUP -eq 1 ]; then
-    # Clean and compile SynStream
-    cargo clean -p synstream-core
-    cargo build -r -p synstream-core
-    cargo build -r -p synstream-types
+    # Clean and compile Τομί
+    cargo clean -p tomii-core
+    cargo build -r -p tomii-core
+    cargo build -r -p tomii-types
 
     # Compile library with the specific paths
     cargo clean --manifest-path "$SCRIPT_DIR/Cargo.toml"
@@ -63,7 +63,7 @@ fi
 rm -f $OUTPUT
 rm -f $TIMING_FILE
 
-# Run the main binary from synstream-core
+# Run the main binary from tomii-core
 cargo run --manifest-path "$BIN_DIR/Cargo.toml" -r --bin main -- \
     --json $APP_GRAPH \
     --dylib $DYN_LIB \

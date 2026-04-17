@@ -1,11 +1,11 @@
 ---
 name: plugin-author
-description: Write correct #[synstream_export]-annotated Rust functions (or @synstream_export C functions) that conform to SynStream's type system and FFI requirements
+description: Write correct #[tomii_export]-annotated Rust functions (or @tomii_export C functions) that conform to Τομί's type system and FFI requirements
 ---
 
 # Skill: plugin-author
 
-Write SynStream plugin functions that conform to the `#[synstream_export]` macro convention
+Write Τομί plugin functions that conform to the `#[tomii_export]` macro convention
 and the `CmTypes` type system. Covers Rust plugins, C plugins (via the converter), and
 special patterns for mutations, tile kernels, and variadic fan-in.
 
@@ -21,9 +21,9 @@ special patterns for mutations, tile kernels, and variadic fan-in.
 ### Basic pattern
 
 ```rust
-use synstream_macro::synstream_export;
+use tomii_macro::tomii_export;
 
-#[synstream_export]
+#[tomii_export]
 pub fn function_name(param1: Type1, param2: &Type2) -> ReturnType {
     // ...
 }
@@ -38,7 +38,7 @@ pub fn function_name(param1: Type1, param2: &Type2) -> ReturnType {
 
 ### Supported argument and return types
 
-| SynStream type | Rust type |
+| Τομί type | Rust type |
 |---------------|-----------|
 | `usize` | `usize` |
 | `i32`, `i64`, `i128` | `i32`, `i64`, `i128` |
@@ -50,7 +50,7 @@ pub fn function_name(param1: Type1, param2: &Type2) -> ReturnType {
 | `Complex64` | `num_complex::Complex64` |
 | Custom structs | Must impl `Into<CmTypes>` + `From<CmTypes>` |
 
-See `synstream-types/src/lib.rs` for the full `CmTypes` enum.
+See `tomii-types/src/lib.rs` for the full `CmTypes` enum.
 
 ### Variadic fan-in (collecting all predecessor instances)
 
@@ -58,7 +58,7 @@ When a node uses a range `$res` dependency to collect all N outputs from a paral
 predecessor, the receiving function must be marked `variadic`:
 
 ```rust
-#[synstream_export(variadic)]
+#[tomii_export(variadic)]
 pub fn aggregate(results: Vec<f64>) -> f64 {
     results.iter().sum()
 }
@@ -73,7 +73,7 @@ Tile kernels receive the tile index as an ordinary `usize` parameter. The index 
 task's instance number (0-based), passed as the last `usize` arg matching position in `args`:
 
 ```rust
-#[synstream_export]
+#[tomii_export]
 pub fn compute_tile(data: &Vec<f64>, step: usize, tile_size: usize, tile_idx: usize) -> Vec<f64> {
     let start = tile_idx * tile_size;
     let end = (start + tile_size).min(data.len());
@@ -91,11 +91,11 @@ node = app.node("compute", func="compute_tile",
 
 ### Mutation via raw pointers (advanced)
 
-The `#[synstream_export]` macro does NOT support functions that mutate shared state via
+The `#[tomii_export]` macro does NOT support functions that mutate shared state via
 raw pointers. For those, bypass the macro and write the raw FFI function directly:
 
 ```rust
-use synstream_types::CmTypes;
+use tomii_types::CmTypes;
 
 #[no_mangle]
 pub fn my_mutating_fn_cm(args: &[CmTypes]) -> CmTypes {
@@ -123,8 +123,8 @@ edition = "2021"
 crate-type = ["dylib", "rlib"]   # REQUIRED: dylib for runtime loading, rlib for macro
 
 [dependencies]
-synstream-types = { path = "../../synstream-types" }
-synstream-macro = { path = "../../synstream-macro" }
+tomii-types = { path = "../../tomii-types" }
+tomii-macro = { path = "../../tomii-macro" }
 # optional: nalgebra, num-complex, etc.
 ```
 
@@ -132,10 +132,10 @@ synstream-macro = { path = "../../synstream-macro" }
 
 ### Basic pattern
 
-Annotate C function declarations in a header file with `// @synstream_export`:
+Annotate C function declarations in a header file with `// @tomii_export`:
 
 ```c
-// @synstream_export
+// @tomii_export
 float* compute_fft(const float* input, size_t n, size_t* out_len);
 ```
 
@@ -145,13 +145,13 @@ Rust FFI wrappers automatically.
 ### Annotations for arrays
 
 ```c
-// @synstream_export (out_len=result_len, free=free_result)
+// @tomii_export (out_len=result_len, free=free_result)
 double* process_batch(const double* data, size_t n, size_t tile, size_t* result_len);
 
-// @synstream_export (param: array)      ← input array (read-only)
+// @tomii_export (param: array)      ← input array (read-only)
 void analyze(const float* data, size_t n);
 
-// @synstream_export (param: mut_array)  ← input array (mutable)
+// @tomii_export (param: mut_array)  ← input array (mutable)
 void normalize_inplace(float* data, size_t n);
 ```
 
@@ -215,6 +215,6 @@ body to trace the argument values.
 - [graph-coarsen](graph-coarsen.md) — for tile kernel patterns
 - [run-validate](run-validate.md) — after fixing plugin issues
 - [AGENT.md](../AGENT.md) — plugin quick-reference with Cargo.toml template
-- `synstream-types/src/lib.rs` — CmTypes enum (complete list of supported types)
+- `tomii-types/src/lib.rs` — CmTypes enum (complete list of supported types)
 - `examples/stream-analytics/src/lib.rs` — example with conditions and variadic fan-in
 - `examples/matrix-compute-C/include/matcomp.h` — example C plugin with array annotations

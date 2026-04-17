@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install-skills.sh — install SynStream skills as Claude Code slash commands
+# install-skills.sh — install Τομί skills as Claude Code slash commands
 #
 # Usage:
 #   ./SKILLS/install-skills.sh            # installs to .claude/skills/ in CWD
@@ -19,7 +19,7 @@ for f in "$SKILLS_DIR"/*.md; do
     skills+=("$name")
 done
 
-echo "SynStream skill installer"
+echo "Τομί skill installer"
 echo "========================="
 echo "Install location: $TARGET_DIR"
 echo ""

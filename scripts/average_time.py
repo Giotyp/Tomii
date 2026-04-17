@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Average timing metrics from multiple timing files produced by SynStream.
+Average timing metrics from multiple timing files produced by Τομί.
 
 Usage:
     python3 scripts/average_time.py timing_1s_1b_1.txt timing_1s_1b_2.txt -o timing_1s_1b_avg.txt

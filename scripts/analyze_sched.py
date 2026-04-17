@@ -2,7 +2,7 @@
 """
 Scheduler CSV analyzer with validation and correctness checks.
 
-Records produced by SynStream fall into four categories:
+Records produced by Τομί fall into four categories:
   - Worker records:             slot in [0, slots), task_id is a small node ID
   - System records:             slot in [slots, slots+system_threads)
       * resolution  task_id = IDTYPE_MAX
@@ -504,7 +504,7 @@ def analyze_schedule(csv_path, system_threads=0, worker_slots_count=0,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="SynStream scheduler CSV analyzer with per-type breakdown."
+        description="Τομί scheduler CSV analyzer with per-type breakdown."
     )
     parser.add_argument("csv", help="Path to CSV file with schedule data")
     parser.add_argument(

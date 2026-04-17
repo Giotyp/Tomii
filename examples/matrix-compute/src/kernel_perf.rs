@@ -2,7 +2,7 @@ use crate::functions::*;
 use crate::wrap_perf;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use synstream_types::CmTypes;
+use tomii_types::CmTypes;
 
 pub fn measure_performance(buf_size: usize, repeat: usize, warmup: usize) {
     println!(
