@@ -260,3 +260,102 @@ fn test_multi_stream_single_slot() {
 
     rt.run().expect("run failed");
 }
+
+// ---------------------------------------------------------------------------
+// Plugin scheduler test (requires `plugin-scheduler` feature)
+// ---------------------------------------------------------------------------
+
+/// Minimal TaskScheduler that wraps a Rayon thread pool.
+/// Verifies that an external plugin scheduler runs a complete graph.
+#[cfg(feature = "plugin-scheduler")]
+mod plugin_tests {
+    use std::sync::Arc;
+    use tomii_core::{
+        graph_gen::from_json_str,
+        runtime::TomiiRtBuilder,
+        scheduler::{create_scheduler, SchedulerConfig, SchedulerType, TaskScheduler},
+        Priority, TaskMeta,
+    };
+
+    struct PassthroughScheduler {
+        pool: rayon::ThreadPool,
+        workers: usize,
+    }
+
+    impl PassthroughScheduler {
+        fn new(workers: usize) -> Self {
+            Self {
+                pool: rayon::ThreadPoolBuilder::new()
+                    .num_threads(workers)
+                    .build()
+                    .unwrap(),
+                workers,
+            }
+        }
+    }
+
+    impl TaskScheduler for PassthroughScheduler {
+        fn spawn_task_with_meta_priority(
+            &self,
+            _p: Priority,
+            _m: Option<TaskMeta>,
+            task: Box<dyn FnOnce() + Send + 'static>,
+        ) {
+            self.pool.spawn(task);
+        }
+        fn spawn_to_group_with_meta(
+            &self,
+            _g: usize,
+            p: Priority,
+            m: Option<TaskMeta>,
+            task: Box<dyn FnOnce() + Send + 'static>,
+        ) {
+            self.spawn_task_with_meta_priority(p, m, task);
+        }
+        fn workers(&self) -> usize {
+            self.workers
+        }
+        fn core_offset(&self) -> usize {
+            0
+        }
+        fn system_threads(&self) -> usize {
+            1
+        }
+        fn receiver_core_offset(&self) -> usize {
+            0
+        }
+        fn receiver_threads(&self) -> usize {
+            0
+        }
+    }
+
+    #[test]
+    fn test_plugin_scheduler_completes_graph() {
+        let json = r#"{"nodes":[{"name":"a","function":"noop","args":[]},{"name":"b","function":"noop","args":[{"type":"$res","predecessor":{"name":"a","indexes":"0"}}]}]}"#;
+
+        // Use a plain scheduler to compile (provides core metadata).
+        let sched = create_scheduler(SchedulerConfig {
+            scheduler_type: SchedulerType::WorkStealing,
+            core_offset: 0,
+            num_workers: 2,
+            record: false,
+            external_recorder: None,
+            base_instant: std::time::Instant::now(),
+            system_threads: 1,
+            receiver_threads: 0,
+            target_batch_size: 1,
+            batch_timeout_us: 10,
+            worker_affinity: None,
+        });
+        let compiled = from_json_str(json, 2).unwrap().compile(&sched);
+
+        let mut rt =
+            TomiiRtBuilder::new_with_plugin(compiled, Arc::new(PassthroughScheduler::new(2)))
+                .max_runtime(Some(5))
+                .max_streams(1)
+                .build()
+                .expect("build failed");
+
+        rt.run().expect("plugin scheduler run failed");
+    }
+}

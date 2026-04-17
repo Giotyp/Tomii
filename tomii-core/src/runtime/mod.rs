@@ -116,6 +116,33 @@ impl TomiiRtBuilder {
         }
     }
 
+    /// Construct a builder with an external scheduler plugin.
+    ///
+    /// Requires the `plugin-scheduler` feature.  The plugin is wrapped in
+    /// [`SchedulerImpl::Plugin`]; all spawn calls are routed through it at the
+    /// cost of one `Box` allocation per task.  The `compiled` graph must have
+    /// been obtained from a `GraphSpec::compile` call using a compatible
+    /// `SchedulerImpl` for core-count metadata — pass a placeholder `Rayon`
+    /// scheduler to `compile`, then replace it here.
+    #[cfg(feature = "plugin-scheduler")]
+    pub fn new_with_plugin(
+        compiled: GraphCompiled,
+        plugin: std::sync::Arc<dyn crate::scheduler::TaskScheduler>,
+    ) -> Self {
+        Self {
+            compiled,
+            scheduler: SchedulerImpl::Plugin(plugin),
+            config: RuntimeConfig::default(),
+            batch_queue_capacity: 65536,
+            socket_recv_buf_bytes: 16_777_216,
+            timing_enabled: false,
+            base_instant: Instant::now(),
+            async_recorder: None,
+            use_rdtsc: false,
+            record: false,
+        }
+    }
+
     /// Construct a builder from a pre-built [`RuntimeConfig`].
     /// Useful for embedders loading config from TOML/JSON.
     pub fn with_config(
