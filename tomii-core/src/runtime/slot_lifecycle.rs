@@ -209,7 +209,8 @@ fn activate_buffered_slot(
         )
     });
     if !initial.is_empty() {
-        super::scheduling::dispatch_nodes(shared, &initial, thread_core, thread_slot);
+        let sctx = shared.sched_ctx();
+        super::scheduling::dispatch_nodes(shared, &sctx, &initial, thread_core, thread_slot);
     }
 
     // Process buffered network packets that arrived while the slot was buffering
@@ -294,6 +295,7 @@ fn restart_slot_nonnetwork(
         )
     });
     if !compute_nodes.is_empty() {
-        super::scheduling::dispatch_nodes(shared, &compute_nodes, thread_core, thread_slot);
+        let sctx = shared.sched_ctx();
+        super::scheduling::dispatch_nodes(shared, &sctx, &compute_nodes, thread_core, thread_slot);
     }
 }

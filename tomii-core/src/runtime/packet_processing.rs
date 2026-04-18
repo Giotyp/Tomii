@@ -231,7 +231,8 @@ fn assign_packet_to_slot(
                     init_nodes.len()
                 )
             });
-            super::scheduling::dispatch_nodes(shared, &init_nodes, thread_core, thread_slot);
+            let sctx = shared.sched_ctx();
+            super::scheduling::dispatch_nodes(shared, &sctx, &init_nodes, thread_core, thread_slot);
         }
     }
 

@@ -270,6 +270,7 @@ pub(super) struct SchedCtx<'a> {
     pub telemetry: &'a Telemetry,
     pub cfg: &'a RuntimeConfig,
     pub slots: &'a SlotData,
+    pub cache: &'a GraphCache,
 }
 
 impl SharedData {
@@ -290,6 +291,7 @@ impl SharedData {
             telemetry: &self.telemetry,
             cfg: &self.config,
             slots: &self.slot_data,
+            cache: &self.graph_cache,
         }
     }
 }
