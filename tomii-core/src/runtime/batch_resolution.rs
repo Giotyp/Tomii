@@ -54,6 +54,7 @@ pub(super) fn process_batch_inner(
     batch_sched.clear();
 
     let rctx = shared.resolve_ctx();
+    let sctx = shared.sched_ctx();
 
     for (node_info, result_opt) in batch.drain(..) {
         // Mark stream activity for all nodes (including network nodes id=0)
@@ -176,14 +177,14 @@ pub(super) fn process_batch_inner(
         // batch to finish. This eliminates the dead zone where workers
         // idle while the system thread processes a large batch.
         if batch_sched.len() >= rctx.cfg.batch.flush_threshold {
-            super::scheduling::dispatch_nodes(shared, batch_sched, thread_core, thread_slot);
+            super::scheduling::dispatch_nodes(shared, &sctx, batch_sched, thread_core, thread_slot);
             batch_sched.clear();
         }
     }
 
     // Final flush for any remaining successors after the batch loop.
     if !batch_sched.is_empty() {
-        super::scheduling::dispatch_nodes(shared, batch_sched, thread_core, thread_slot);
+        super::scheduling::dispatch_nodes(shared, &sctx, batch_sched, thread_core, thread_slot);
     }
 }
 

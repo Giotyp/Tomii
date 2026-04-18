@@ -13,7 +13,7 @@
 //! resolution (that is `batch_resolution` / `task_execution::worker_resolve_successors`).
 
 use super::reporting::should_record_slot;
-use super::shared_data::SharedData;
+use super::shared_data::{SchedCtx, SharedData};
 use super::task_execution::execute_task;
 use super::thread_locals::PREP_ARGS_BUF;
 use crate::async_recorder::submit_record;
@@ -38,6 +38,7 @@ use tomii_types::*;
 #[inline]
 pub(super) fn send_to_scheduler(
     shared: &Arc<SharedData>,
+    sctx: &SchedCtx<'_>,
     nodes_to_schedule: &[NodeInfo],
     pre_built_args_vec: &[Option<Vec<CmTypes>>],
     custom_func_vec: Option<&[Option<CmPtr>]>,
@@ -70,19 +71,16 @@ pub(super) fn send_to_scheduler(
                 NodePriority::Normal => Priority::Normal,
                 NodePriority::Low => Priority::Low,
             };
-            let group = shared
-                .exec
-                .scheduler
-                .get_affinity_group(node.use_workers.as_ref());
+            let group = sctx.exec.scheduler.get_affinity_group(node.use_workers.as_ref());
             (func, priority, group)
         } else {
-            let cache = &shared.graph_cache.node_cache[node_info.id as usize];
+            let cache = &sctx.cache.node_cache[node_info.id as usize];
             let func = custom_func.unwrap_or(cache.func_ptr);
             (func, cache.priority, cache.affinity_group)
         };
 
         let shared_clone = Arc::clone(shared);
-        let should_record = should_record_slot(&shared.config, &shared.slot_data, node_info.slot);
+        let should_record = should_record_slot(sctx.cfg, sctx.slots, node_info.slot);
         let meta_data = crate::TaskMeta {
             task_id: node_info.id,
             slot: node_info.slot,
@@ -94,23 +92,24 @@ pub(super) fn send_to_scheduler(
         // Post-nodes are exempt: they run after all streams complete and have no generation risk.
         if !node_info.post_node {
             node_info.gen =
-                shared.slot_data.generation[node_info.slot].load(Ordering::Acquire) as u32;
+                sctx.slots.generation[node_info.slot].load(Ordering::Acquire) as u32;
         }
         let pre_built_args = pre_built_args_vec[i].clone();
 
         // Per-task spawn timestamp for accurate scheduling latency measurement.
-        let spawn_ns = shared.telemetry.base_instant.elapsed().as_nanos();
+        let spawn_ns = sctx.telemetry.base_instant.elapsed().as_nanos();
         let task = move || {
+            // Build sctx once per task — it's just field borrows from the Arc.
+            let sctx = shared_clone.sched_ctx();
             let mut current = node_info;
             let mut current_func = func_ptr;
             let mut first = true;
             loop {
                 let args = if first { pre_built_args.clone() } else { None };
                 first = false;
-                match execute_task(&shared_clone, current_func, &current, args, spawn_ns) {
+                match execute_task(&shared_clone, &sctx, current_func, &current, args, spawn_ns) {
                     Some(next) => {
-                        current_func =
-                            shared_clone.graph_cache.node_cache[next.id as usize].func_ptr;
+                        current_func = sctx.cache.node_cache[next.id as usize].func_ptr;
                         current = next;
                     }
                     None => break,
@@ -119,14 +118,14 @@ pub(super) fn send_to_scheduler(
         };
 
         if affinity_group > 0 {
-            shared.exec.scheduler.spawn_to_group_with_meta(
+            sctx.exec.scheduler.spawn_to_group_with_meta(
                 affinity_group,
                 task_priority,
                 Some(meta_data),
                 task,
             );
         } else {
-            shared.exec.scheduler.spawn_task_with_meta_priority(
+            sctx.exec.scheduler.spawn_task_with_meta_priority(
                 task_priority,
                 Some(meta_data),
                 task,
@@ -143,12 +142,13 @@ pub(super) fn send_to_scheduler(
 /// Records timing and an optional async-recorder event around the scheduler submission.
 pub(super) fn dispatch_nodes(
     shared: &Arc<SharedData>,
+    sctx: &SchedCtx<'_>,
     nodes_to_schedule: &[NodeInfo],
     thread_core: usize,
     thread_slot: usize,
 ) {
-    let start_time = shared.telemetry.measure_start();
-    let start_ns = shared.telemetry.base_instant.elapsed().as_nanos();
+    let start_time = sctx.telemetry.measure_start();
+    let start_ns = sctx.telemetry.base_instant.elapsed().as_nanos();
 
     // Schedule Task - args will be built in the worker thread.
     // Reuse thread-local buffer to avoid vec![None; N] heap allocation per flush.
@@ -157,21 +157,20 @@ pub(super) fn dispatch_nodes(
         let n = nodes_to_schedule.len();
         args_buf.clear();
         args_buf.resize(n, None);
-        send_to_scheduler(shared, nodes_to_schedule, &*args_buf, None);
+        send_to_scheduler(shared, sctx, nodes_to_schedule, &*args_buf, None);
     });
 
-    shared
-        .telemetry
+    sctx.telemetry
         .record_timing(start_time, thread_slot, "Preparation", usize::MAX);
 
     // Lock-free recording via per-worker channel
-    let should_record = shared.telemetry.async_recorder.is_some()
+    let should_record = sctx.telemetry.async_recorder.is_some()
         && nodes_to_schedule
             .iter()
-            .any(|n| should_record_slot(&shared.config, &shared.slot_data, n.slot));
+            .any(|n| should_record_slot(sctx.cfg, sctx.slots, n.slot));
     if should_record {
-        let end_ns = shared.telemetry.base_instant.elapsed().as_nanos();
-        let job_id = shared.telemetry.job_counter.fetch_add(1, Ordering::SeqCst);
+        let end_ns = sctx.telemetry.base_instant.elapsed().as_nanos();
+        let job_id = sctx.telemetry.job_counter.fetch_add(1, Ordering::SeqCst);
         submit_record(Record {
             slot: thread_slot,
             job_id,
@@ -213,8 +212,10 @@ impl super::TomiiRt {
                     functions.push(func);
                     post_schedule.push(node_info);
                 }
+                let sctx = self.shared.sched_ctx();
                 send_to_scheduler(
                     &self.shared,
+                    &sctx,
                     &post_schedule,
                     &pre_build_args,
                     Some(&functions),

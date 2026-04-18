@@ -14,7 +14,7 @@
 use super::arg_resolution::populate_cached_args_into;
 use super::ordering::{slot_gen_load, slot_gen_rmw};
 use super::scheduling::send_to_scheduler;
-use super::shared_data::SharedData;
+use super::shared_data::{SchedCtx, SharedData};
 use super::successor::{
     collect_successors_for_node_into, decrement_and_collect_ready, push_ready_chunked,
 };
@@ -32,28 +32,32 @@ use tomii_types::*;
 /// Returns `Some(NodeInfo)` when `inline_continuation` is enabled and a ready
 /// successor was reserved for this worker thread to execute immediately.
 #[inline]
-fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) -> Option<NodeInfo> {
+fn worker_resolve_successors(
+    shared: &Arc<SharedData>,
+    sctx: &SchedCtx<'_>,
+    node_info: &NodeInfo,
+) -> Option<NodeInfo> {
     let slot = node_info.slot;
+    let ssm = sctx.cfg.single_slot_mode;
 
     // Step 1: Increment processing_count to prevent premature completion detection.
-    shared.slot_data.processing_count[slot].fetch_add(1, slot_gen_rmw(shared));
+    sctx.slots.processing_count[slot].fetch_add(1, slot_gen_rmw(ssm));
 
     // Step 2: Verify generation — if slot was recycled, bail out.
-    let current_gen = shared.slot_data.generation[slot].load(slot_gen_load(shared)) as u32;
+    let current_gen = sctx.slots.generation[slot].load(slot_gen_load(ssm)) as u32;
     if current_gen != node_info.gen {
-        shared.slot_data.processing_count[slot].fetch_sub(1, slot_gen_rmw(shared));
-        shared.slot_data.needs_check[slot].store(true, std::sync::atomic::Ordering::Release);
+        sctx.slots.processing_count[slot].fetch_sub(1, slot_gen_rmw(ssm));
+        sctx.slots.needs_check[slot].store(true, std::sync::atomic::Ordering::Release);
         return None;
     }
 
     // Step 3: Decrement task counters (Phase 2 equivalent).
     // For bulk tasks, decrement by bulk_count to account for all instances handled.
-    let node_cache_entry = &shared.graph_cache.node_cache[node_info.id as usize];
+    let node_cache_entry = &sctx.cache.node_cache[node_info.id as usize];
     if node_cache_entry.is_condition {
-        shared.slot_data.pending_cond_tasks[slot]
-            .fetch_sub(node_info.bulk_count, slot_gen_rmw(shared));
+        sctx.slots.pending_cond_tasks[slot].fetch_sub(node_info.bulk_count, slot_gen_rmw(ssm));
     } else if !node_cache_entry.is_initial {
-        shared.slot_data.pending_tasks[slot].fetch_sub(node_info.bulk_count, slot_gen_rmw(shared));
+        sctx.slots.pending_tasks[slot].fetch_sub(node_info.bulk_count, slot_gen_rmw(ssm));
     }
 
     // Steps 4-6: Collect successors, resolve dependencies, schedule ready nodes.
@@ -66,7 +70,7 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) -> 
         collect_successors_for_node_into(&shared.graph, rctx.cache, node_info, &mut bufs.succ);
 
         // Load slot generation once for all successors.
-        let slot_gen = rctx.slots.generation[slot].load(slot_gen_load(shared)) as u32;
+        let slot_gen = rctx.slots.generation[slot].load(slot_gen_load(ssm)) as u32;
 
         // Step 5: Resolve dependencies for each successor (all non-condition).
         // Destructure into separate field borrows so the borrow checker allows
@@ -94,8 +98,8 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) -> 
                 succ_node_id as crate::IdType,
                 slot,
                 node_info.index,
-                shared.config.workers,
-                shared.config.coalesce_barriers,
+                sctx.cfg.workers,
+                sctx.cfg.coalesce_barriers,
                 sched,
             );
         }
@@ -103,7 +107,7 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) -> 
         // Inline continuation: reserve one ready successor for this worker
         // thread instead of spawning it through the scheduler.
         // Stamp slot_gen so the trampoline's stale check passes on streams > 0.
-        let inline = if shared.config.inline_continuation && !bufs.sched.is_empty() {
+        let inline = if sctx.cfg.inline_continuation && !bufs.sched.is_empty() {
             bufs.sched.pop().map(|mut ni| {
                 ni.gen = slot_gen;
                 ni
@@ -117,15 +121,15 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) -> 
             let n = bufs.sched.len();
             bufs.args.clear();
             bufs.args.resize(n, None);
-            send_to_scheduler(shared, &bufs.sched, &bufs.args, None);
+            send_to_scheduler(shared, sctx, &bufs.sched, &bufs.args, None);
         }
 
         inline
     });
 
     // Step 7: Decrement processing_count AFTER all successor processing.
-    shared.slot_data.processing_count[slot].fetch_sub(1, slot_gen_rmw(shared));
-    shared.slot_data.needs_check[slot].store(true, std::sync::atomic::Ordering::Release);
+    sctx.slots.processing_count[slot].fetch_sub(1, slot_gen_rmw(ssm));
+    sctx.slots.needs_check[slot].store(true, std::sync::atomic::Ordering::Release);
 
     inline_result
 }
@@ -145,6 +149,7 @@ fn worker_resolve_successors(shared: &Arc<SharedData>, node_info: &NodeInfo) -> 
 #[inline(always)]
 pub(super) fn execute_task(
     shared: &Arc<SharedData>,
+    sctx: &SchedCtx<'_>,
     func: CmPtr,
     node_info: &NodeInfo,
     pre_built_args: Option<Vec<CmTypes>>,
@@ -156,7 +161,7 @@ pub(super) fn execute_task(
     // results → panic, or corrupt the new stream's dependency counters.
     // Post-nodes are exempt (gen is always 0 and they run after all streams finish).
     if !node_info.post_node {
-        let current_gen = shared.slot_data.generation[node_info.slot]
+        let current_gen = sctx.slots.generation[node_info.slot]
             .load(std::sync::atomic::Ordering::Acquire) as u32;
         if current_gen != node_info.gen {
             print_debug(|| {
@@ -170,9 +175,9 @@ pub(super) fn execute_task(
     }
 
     if node_info.bulk_count > 1 {
-        return execute_bulk_task(shared, func, node_info);
+        return execute_bulk_task(shared, sctx, func, node_info);
     }
-    execute_single_task(shared, func, node_info, pre_built_args, spawn_ns)
+    execute_single_task(shared, sctx, func, node_info, pre_built_args, spawn_ns)
 }
 
 /// Bulk execution path: run `bulk_count` consecutive instances in a tight loop.
@@ -182,10 +187,11 @@ pub(super) fn execute_task(
 /// Rayon spawns by covering a contiguous range `index..index+bulk_count` in one task.
 fn execute_bulk_task(
     shared: &Arc<SharedData>,
+    sctx: &SchedCtx<'_>,
     func: CmPtr,
     node_info: &NodeInfo,
 ) -> Option<NodeInfo> {
-    let node_cache = &shared.graph_cache.node_cache[node_info.id as usize];
+    let node_cache = &sctx.cache.node_cache[node_info.id as usize];
     let exec_slot = node_info.slot;
     let exec_gen = node_info.gen;
     let mut bulk_stale = false;
@@ -216,7 +222,7 @@ fn execute_bulk_task(
                 let mut inst_info = node_info.clone();
                 inst_info.index = inst_idx;
                 inst_info.bulk_count = 1;
-                shared.exec.node_results.set(&inst_info, result);
+                sctx.exec.node_results.set(&inst_info, result);
             }
         }
     });
@@ -224,7 +230,7 @@ fn execute_bulk_task(
     if bulk_stale {
         return None;
     }
-    worker_resolve_successors(shared, node_info)
+    worker_resolve_successors(shared, sctx, node_info)
 }
 
 /// Single-instance execution path for regular and post-nodes.
@@ -236,18 +242,19 @@ fn execute_bulk_task(
 /// `worker_resolve_successors`; `None` otherwise.
 fn execute_single_task(
     shared: &Arc<SharedData>,
+    sctx: &SchedCtx<'_>,
     func: CmPtr,
     node_info: &NodeInfo,
     pre_built_args: Option<Vec<CmTypes>>,
     spawn_ns: u128,
 ) -> Option<NodeInfo> {
-    let exec_start_ns = shared.telemetry.base_instant.elapsed().as_nanos();
+    let exec_start_ns = sctx.telemetry.base_instant.elapsed().as_nanos();
     let worker_id = crate::scheduler::get_current_worker_id().unwrap_or(usize::MAX);
 
-    if shared.telemetry.async_recorder.is_some()
-        && super::reporting::should_record_slot(&shared.config, &shared.slot_data, node_info.slot)
+    if sctx.telemetry.async_recorder.is_some()
+        && super::reporting::should_record_slot(sctx.cfg, sctx.slots, node_info.slot)
     {
-        let job_id = shared
+        let job_id = sctx
             .telemetry
             .job_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -263,7 +270,7 @@ fn execute_single_task(
     }
 
     let start_time = if !node_info.post_node {
-        shared.telemetry.measure_start()
+        sctx.telemetry.measure_start()
     } else {
         None
     };
@@ -274,7 +281,7 @@ fn execute_single_task(
     let result = if let Some(ref args) = pre_built_args {
         func(args)
     } else {
-        let node_cache = &shared.graph_cache.node_cache[node_info.id as usize];
+        let node_cache = &sctx.cache.node_cache[node_info.id as usize];
         let result_opt = ARG_BUF.with(|buf_cell| {
             let mut buf = buf_cell.borrow_mut();
             buf.clear();
@@ -311,21 +318,18 @@ fn execute_single_task(
         }
     };
 
-    let node_name = &shared.graph_cache.node_cache[node_info.id as usize].name;
-    shared
-        .telemetry
+    let node_name = &sctx.cache.node_cache[node_info.id as usize].name;
+    sctx.telemetry
         .record_timing(start_time, node_info.slot, node_name, worker_id);
 
-    if shared.graph_cache.node_cache[node_info.id as usize].needs_result_store {
-        shared.exec.node_results.set(node_info, result);
+    if sctx.cache.node_cache[node_info.id as usize].needs_result_store {
+        sctx.exec.node_results.set(node_info, result);
     }
 
-    if !node_info.post_node
-        && shared.graph_cache.node_cache[node_info.id as usize].worker_resolvable
-    {
-        worker_resolve_successors(shared, node_info)
+    if !node_info.post_node && sctx.cache.node_cache[node_info.id as usize].worker_resolvable {
+        worker_resolve_successors(shared, sctx, node_info)
     } else {
-        let _ = shared.exec.batch_queue_tx.send(node_info.clone());
+        let _ = sctx.exec.batch_queue_tx.send(node_info.clone());
         None
     }
 }

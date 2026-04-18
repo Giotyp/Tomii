@@ -327,7 +327,8 @@ pub(super) fn perform_initial_preparation(
 
         let compute_nodes = initial_nodes(&shared.graph, assigned_slots);
         if !compute_nodes.is_empty() {
-            dispatch_nodes(shared, &compute_nodes, thread_core, thread_slot);
+            let sctx = shared.sched_ctx();
+        dispatch_nodes(shared, &sctx, &compute_nodes, thread_core, thread_slot);
         }
     }
 }

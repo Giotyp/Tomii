@@ -26,13 +26,12 @@
 //! `SeqCst` requirement was confirmed after a series of correctness bugs (see
 //! memory notes Bugs #14, #18, #19 in the project history).
 
-use super::shared_data::SharedData;
 use std::sync::atomic::Ordering;
 
 /// Appropriate load ordering for slot generation counters.
 #[inline(always)]
-pub(super) fn slot_gen_load(shared: &SharedData) -> Ordering {
-    if shared.config.single_slot_mode {
+pub(super) fn slot_gen_load(single_slot_mode: bool) -> Ordering {
+    if single_slot_mode {
         Ordering::Acquire
     } else {
         Ordering::SeqCst
@@ -41,8 +40,8 @@ pub(super) fn slot_gen_load(shared: &SharedData) -> Ordering {
 
 /// Appropriate read-modify-write ordering for slot generation counters.
 #[inline(always)]
-pub(super) fn slot_gen_rmw(shared: &SharedData) -> Ordering {
-    if shared.config.single_slot_mode {
+pub(super) fn slot_gen_rmw(single_slot_mode: bool) -> Ordering {
+    if single_slot_mode {
         Ordering::AcqRel
     } else {
         Ordering::SeqCst
