@@ -12,9 +12,9 @@ use crate::{IdType, Record};
 
 thread_local! {
     // Physical core ID where this thread is pinned. usize::MAX means unassigned.
-    static WORKER_ID: Cell<usize> = Cell::new(usize::MAX);
+    static WORKER_ID: Cell<usize> = const { Cell::new(usize::MAX) };
     // Worker thread index (0-based) for metrics. usize::MAX means not a worker thread.
-    static WORKER_INDEX: Cell<usize> = Cell::new(usize::MAX);
+    static WORKER_INDEX: Cell<usize> = const { Cell::new(usize::MAX) };
 }
 
 /// Get the current thread's physical core ID
@@ -86,7 +86,7 @@ pub fn create_threadpool(
     let actual_workers = alloc.worker_count;
     let actual_receivers = alloc.receiver_threads;
     let actual_system_threads = alloc.system_threads;
-    let main_core_opt = alloc.main_core.clone();
+    let main_core_opt = alloc.main_core;
 
     let worker_cores_to_use: Vec<core_affinity::CoreId> =
         alloc.all_core_ids[worker_offset..worker_offset + actual_workers].to_vec();
@@ -403,7 +403,7 @@ impl SchedulerBase {
     }
 
     fn get_main_core(&self) -> Option<core_affinity::CoreId> {
-        self.main_core.clone()
+        self.main_core
     }
 }
 

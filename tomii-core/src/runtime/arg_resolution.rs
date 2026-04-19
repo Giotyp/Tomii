@@ -57,6 +57,7 @@ fn process_runtime_refs(
 /// Returns `true` if a stale-task was detected (slot generation changed mid-resolution).
 /// The caller must drop the task without processing it or decrementing dependency counters.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn populate_cached_args_into(
     buf: &mut Vec<CmTypes>,
     shared: &Arc<SharedData>,
@@ -302,6 +303,7 @@ fn fetch_res_results(
 /// Uses pre-resolved [`ResPredCache`] metadata (built once at startup) instead of
 /// reading `shared.graph.nodes[...]` on every task dispatch.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn collect_res_from_cache(
     rp: &ResPredCache,
     node_index: usize,
@@ -369,14 +371,14 @@ pub(super) fn collect_arg_result(
                 return Some(result);
             }
 
-            let obj_vec = &shared.graph_cache.init_objects[obj_id as usize];
+            let obj_vec = &shared.graph_cache.init_objects[obj_id];
             Some(vec![get_object_value(obj_vec, node_index)])
         }
         CmTypes::Dep(_) => {
             // Ordering-only dep: no result fetch needed, provide None directly.
             // The predecessor edge is tracked for scheduling purposes but the
             // result value is not consumed by this successor.
-            return Some(vec![CmTypes::None]);
+            Some(vec![CmTypes::None])
         }
         CmTypes::Res(res_node_id) => {
             // Short-circuit: if a previous arg already detected stale, skip remaining
@@ -388,19 +390,16 @@ pub(super) fn collect_arg_result(
                 return Some(vec![(*custom_res).clone()]);
             }
 
-            let predecessor = match arg.predecessor.as_ref() {
-                Some(p) => p,
-                None => return None,
-            };
+            let predecessor = arg.predecessor.as_ref()?;
 
-            let res_node = &shared.graph.nodes[*res_node_id as usize];
+            let res_node = &shared.graph.nodes[*res_node_id];
             let pred_factor = res_node.factor;
             let current_node = &shared.graph.nodes[node_id as usize];
 
             // Pre-resolve effective group size for grouped barrier edges.
-            let pred_eff_gs = res_node.group_size.or_else(|| {
-                shared.graph_cache.pred_group_by[node_id as usize][*res_node_id as usize]
-            });
+            let pred_eff_gs = res_node
+                .group_size
+                .or_else(|| shared.graph_cache.pred_group_by[node_id as usize][*res_node_id]);
 
             fetch_res_results(
                 *res_node_id as IdType,

@@ -67,7 +67,7 @@ fn measure_rdtsc_freq() -> f64 {
         let freq_ghz = rdtsc_cycles as f64 * 1.0 / clock_ns as f64;
 
         // RDTSC frequencies outside these ranges are rare
-        if freq_ghz < 1.0 || freq_ghz > 4.0 {
+        if !(1.0..=4.0).contains(&freq_ghz) {
             panic!("Invalid RDTSC frequency {:.2}", freq_ghz);
         }
         freq_ghz

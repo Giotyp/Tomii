@@ -130,7 +130,7 @@ fn split_c_param(raw: &str) -> Option<(String, String)> {
 
     // Find the last token (name), the rest is type.
     // This works because C names can't contain spaces or `*`.
-    let last_space = raw.rfind(|c: char| c == ' ' || c == '*');
+    let last_space = raw.rfind([' ', '*']);
 
     if let Some(pos) = last_space {
         let (type_part, name_part) = raw.split_at(pos + 1);
@@ -162,7 +162,7 @@ fn parse_c_declaration(decl: &str) -> Option<(String, String, Vec<RawParam>)> {
     let params_str = decl[open + 1..close].trim();
 
     // Split `return_type func_name` — last whitespace-separated token is func_name
-    let last_space_or_star = before_paren.rfind(|c: char| c == ' ' || c == '*')?;
+    let last_space_or_star = before_paren.rfind([' ', '*'])?;
     let (ret_part, fn_name) = before_paren.split_at(last_space_or_star + 1);
     let fn_name = fn_name.trim().to_string();
     let ret_type = normalise_c_type(ret_part);
@@ -385,7 +385,7 @@ fn build_entry(decl: &str, ann: &Annotation) -> Option<ExportedFn> {
         // i.e. its name matches `{prev_array_param}_len`
         let is_companion_len = cm_params
             .last()
-            .map_or(false, |prev: &CmParam| match &prev.kind {
+            .is_some_and(|prev: &CmParam| match &prev.kind {
                 CmParamKind::ArrayPtr { len_param, .. }
                 | CmParamKind::MutArrayPtr { len_param, .. } => len_param == &raw.name,
                 _ => false,

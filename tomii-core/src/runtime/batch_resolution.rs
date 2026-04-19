@@ -82,7 +82,7 @@ pub(super) fn process_batch_inner(
         if node_cache_entry.is_condition {
             let prev_cond =
                 rctx.slots.pending_cond_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
-            if prev_cond <= 10 || prev_cond % 100 == 0 {
+            if prev_cond <= 10 || prev_cond.is_multiple_of(100) {
                 print_debug(|| {
                     format!(
                         "COND task completed: slot={}, node_id={} ({}), prev_pending_cond={}, new={}",

@@ -49,11 +49,7 @@ impl WorkerRange {
 
     /// Get number of workers in this range
     pub fn len(&self) -> usize {
-        if self.end > self.start {
-            self.end - self.start
-        } else {
-            0
-        }
+        self.end.saturating_sub(self.start)
     }
 
     /// Check if this range is empty

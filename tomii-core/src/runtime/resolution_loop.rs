@@ -425,7 +425,7 @@ fn drain_and_process_batch_queue(
         );
         process_batch_resolution(
             shared,
-            &mut *comp_batch,
+            &mut comp_batch,
             thread_core,
             thread_id,
             thread_slot,

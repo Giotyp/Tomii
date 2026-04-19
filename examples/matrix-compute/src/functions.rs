@@ -24,7 +24,7 @@ pub fn compute_fft(fft: Arc<dyn Fft<f32>>, buffer: &mut [Complex32]) {
 }
 
 /// Converts vector to matrix (size must be a perfect square)
-pub fn vec_to_mat(vector: &Vec<Complex32>) -> DMatrix<Complex32> {
+pub fn vec_to_mat(vector: &[Complex32]) -> DMatrix<Complex32> {
     let len = vector.len();
     let n = (len as f64).sqrt() as usize;
 

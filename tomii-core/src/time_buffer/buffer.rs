@@ -150,7 +150,7 @@ impl AsyncTimeBuffer {
             duration,
         };
         // Send is non-blocking if the channel has capacity
-        if let Err(_) = self.request_tx.send(request) {
+        if self.request_tx.send(request).is_err() {
             tracing::warn!("failed to send timing request - controller may have shut down");
         }
     }
@@ -169,7 +169,7 @@ impl AsyncTimeBuffer {
             worker_id,
             cycles,
         };
-        if let Err(_) = self.request_tx.send(request) {
+        if self.request_tx.send(request).is_err() {
             tracing::warn!("failed to send timing request - controller may have shut down");
         }
     }
@@ -190,7 +190,7 @@ impl AsyncTimeBuffer {
             start,
             end,
         };
-        if let Err(_) = self.request_tx.send(request) {
+        if self.request_tx.send(request).is_err() {
             tracing::warn!("failed to send timing request - controller may have shut down");
         }
     }
@@ -211,7 +211,7 @@ impl AsyncTimeBuffer {
             start_cycles,
             end_cycles,
         };
-        if let Err(_) = self.request_tx.send(request) {
+        if self.request_tx.send(request).is_err() {
             tracing::warn!("failed to send timing request - controller may have shut down");
         }
     }
@@ -229,7 +229,7 @@ impl AsyncTimeBuffer {
             slot_id,
             start_time,
         };
-        if let Err(_) = self.request_tx.send(request) {
+        if self.request_tx.send(request).is_err() {
             tracing::warn!("failed to send timing request - controller may have shut down");
         }
     }
@@ -254,7 +254,7 @@ impl AsyncTimeBuffer {
             response_tx,
         };
 
-        if let Err(_) = self.request_tx.send(request) {
+        if self.request_tx.send(request).is_err() {
             return Err("Failed to send request - controller may have shut down");
         }
 
@@ -271,7 +271,7 @@ impl AsyncTimeBuffer {
             response_tx,
         };
 
-        if let Err(_) = self.request_tx.send(request) {
+        if self.request_tx.send(request).is_err() {
             return Err("Failed to send request - controller may have shut down");
         }
 
@@ -313,12 +313,12 @@ impl AsyncTimeBuffer {
 
     /// Shutdown the controller and wait for it to finish
     pub fn shutdown(mut self) {
-        if let Err(_) = self.request_tx.send(TimingRequest::Shutdown) {
+        if self.request_tx.send(TimingRequest::Shutdown).is_err() {
             tracing::warn!("failed to send shutdown request");
         }
 
         if let Some(handle) = self.controller_handle.take() {
-            if let Err(_) = handle.join() {
+            if handle.join().is_err() {
                 tracing::warn!("controller thread panicked during shutdown");
             }
         }
@@ -405,7 +405,7 @@ impl TimeBuffer {
 
         self.current_slot_tasks[slot_id]
             .entry(task_name.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((worker_id, duration));
     }
 

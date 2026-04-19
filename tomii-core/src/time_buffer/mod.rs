@@ -38,7 +38,7 @@ impl SlotStats {
     pub fn add_task_time(&mut self, task_name: &str, worker_id: usize, duration: Duration) {
         self.task_times
             .entry(task_name.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((worker_id, duration));
     }
 
@@ -191,16 +191,14 @@ impl TimeBufferManager {
             } else {
                 Err("Async buffer not initialized")
             }
-        } else {
-            if let Some(ref sync_buf) = self.sync_buffer {
-                if let Ok(mut buf) = sync_buf.lock() {
-                    Ok(buf.finish_slot_processing(slot_id))
-                } else {
-                    Err("Failed to acquire sync buffer lock")
-                }
+        } else if let Some(ref sync_buf) = self.sync_buffer {
+            if let Ok(mut buf) = sync_buf.lock() {
+                Ok(buf.finish_slot_processing(slot_id))
             } else {
-                Err("Sync buffer not initialized")
+                Err("Failed to acquire sync buffer lock")
             }
+        } else {
+            Err("Sync buffer not initialized")
         }
     }
 
@@ -233,11 +231,9 @@ impl TimeBufferManager {
                     tracing::warn!(error = %e, "failed to print stats");
                 }
             }
-        } else {
-            if let Some(ref sync_buf) = self.sync_buffer {
-                if let Ok(buf) = sync_buf.lock() {
-                    buf.print_stats(bench_name, out_file, exclude_streams);
-                }
+        } else if let Some(ref sync_buf) = self.sync_buffer {
+            if let Ok(buf) = sync_buf.lock() {
+                buf.print_stats(bench_name, out_file, exclude_streams);
             }
         }
     }
