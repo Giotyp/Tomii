@@ -220,15 +220,16 @@ impl CustomSchedulerBuilder {
     /// Build the scheduler
     pub fn build(self) -> super::CustomScheduler {
         // Calculate total workers needed
-        let total_workers: usize = self.groups.iter().map(|g| g.num_workers).sum();
+        let requested_workers: usize = self.groups.iter().map(|g| g.num_workers).sum();
 
-        // Use core allocation algorithm
+        // Use core allocation algorithm; may scale down on over-subscribed machines
         let alloc = crate::core_alloc::allocate_cores(
             self.core_offset,
             self.system_threads,
             self.receiver_threads,
-            total_workers,
+            requested_workers,
         );
+        let total_workers = alloc.worker_count;
 
         let system_core_offset = alloc.system_core_offset;
         let receiver_core_offset = alloc.receiver_offset;
