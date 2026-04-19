@@ -161,8 +161,8 @@ pub(super) fn execute_task(
     // results → panic, or corrupt the new stream's dependency counters.
     // Post-nodes are exempt (gen is always 0 and they run after all streams finish).
     if !node_info.post_node {
-        let current_gen = sctx.slots.generation[node_info.slot]
-            .load(std::sync::atomic::Ordering::Acquire) as u32;
+        let current_gen =
+            sctx.slots.generation[node_info.slot].load(std::sync::atomic::Ordering::Acquire) as u32;
         if current_gen != node_info.gen {
             print_debug(|| {
                 format!(

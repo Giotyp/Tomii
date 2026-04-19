@@ -71,7 +71,10 @@ pub(super) fn send_to_scheduler(
                 NodePriority::Normal => Priority::Normal,
                 NodePriority::Low => Priority::Low,
             };
-            let group = sctx.exec.scheduler.get_affinity_group(node.use_workers.as_ref());
+            let group = sctx
+                .exec
+                .scheduler
+                .get_affinity_group(node.use_workers.as_ref());
             (func, priority, group)
         } else {
             let cache = &sctx.cache.node_cache[node_info.id as usize];
@@ -91,8 +94,7 @@ pub(super) fn send_to_scheduler(
         // Stamp the current slot generation so execute_task can detect stale tasks.
         // Post-nodes are exempt: they run after all streams complete and have no generation risk.
         if !node_info.post_node {
-            node_info.gen =
-                sctx.slots.generation[node_info.slot].load(Ordering::Acquire) as u32;
+            node_info.gen = sctx.slots.generation[node_info.slot].load(Ordering::Acquire) as u32;
         }
         let pre_built_args = pre_built_args_vec[i].clone();
 
@@ -125,11 +127,9 @@ pub(super) fn send_to_scheduler(
                 task,
             );
         } else {
-            sctx.exec.scheduler.spawn_task_with_meta_priority(
-                task_priority,
-                Some(meta_data),
-                task,
-            );
+            sctx.exec
+                .scheduler
+                .spawn_task_with_meta_priority(task_priority, Some(meta_data), task);
         }
     }
 }
