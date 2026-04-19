@@ -210,9 +210,10 @@ class TimingFile:
                 break
             
             if task_line.startswith("Task '"):
-                # Parse system task line - flexible unit matching
+                # Parse system task line - flexible unit matching, optional Std: field
                 task_match = re.search(
                     r"Task '([^']+)' - Executions: (\d+), Avg: ([\d.]+)(µs|ns|ms|s), "
+                    r"(?:Std: [\d.]+(?:µs|ns|ms|s), )?"
                     r"Min: ([\d.]+)(µs|ns|ms|s), Max: ([\d.]+)(µs|ns|ms|s), Total: ([\d.]+)(µs|ns|ms|s)",
                     task_line
                 )

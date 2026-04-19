@@ -71,34 +71,39 @@ def analyze_csv_file(csv_path: str, system_threads: int = 0) -> Dict[str, Any]:
     # Group by slot
     slots = group_by_slot(records)
     
-    # Separate worker and system slots
-    worker_slots, system_slots = separate_worker_system_slots(slots, system_threads)
-    
+    # Separate worker, system, and receiver slots
+    worker_slots, system_slots, receiver_slots = separate_worker_system_slots(slots, system_threads)
+
     # Combine all worker records
     all_worker_records = []
     for slot_records in worker_slots.values():
         all_worker_records.extend(slot_records)
-    
+
     # Group by worker
     workers = group_by_worker(all_worker_records)
-    
+
+    # Compute global span from all records for idle-time baseline
+    all_records = [r for recs in slots.values() for r in recs]
+    global_start_ns = min(r[2] for r in all_records)
+    global_end_ns = max(r[3] for r in all_records)
+
     # Calculate statistics for each worker
     worker_metrics = {}
     total_span = 0
-    
+
     for worker_id in sorted(workers.keys()):
         worker_records = workers[worker_id]
-        idle_time, busy_time, span, large_gaps, small_gaps_time = calculate_idle_time(worker_records)
-        
+        m = calculate_idle_time(worker_records, global_start_ns, global_end_ns)
+
         worker_metrics[worker_id] = {
-            'idle_time': idle_time,
-            'busy_time': busy_time,
-            'span': span,
-            'num_tasks': len(worker_records),
-            'large_gaps': large_gaps,
-            'small_gaps_time': small_gaps_time
+            'idle_time': m['idle_time_ns'],
+            'busy_time': m['busy_time_ns'],
+            'span': m['worker_span_ns'],
+            'num_tasks': m['num_tasks'],
+            'large_gaps': m['large_gaps'],
+            'small_gaps_time': m['scheduling_overhead_ns'],
         }
-        total_span = max(total_span, span)
+        total_span = max(total_span, m['worker_span_ns'])
     
     return {
         'workers': worker_metrics,
