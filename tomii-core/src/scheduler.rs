@@ -791,13 +791,11 @@ impl WorkerAffinityConfig {
             worker_to_groups.insert(worker_idx, Vec::new());
         }
 
-        let mut group_id = 1;
-
         // Sort ranges for deterministic assignment
         let mut sorted_ranges: Vec<&crate::WorkerRange> = ranges.iter().collect();
         sorted_ranges.sort();
 
-        for range in sorted_ranges {
+        for (group_id, range) in (1usize..).zip(sorted_ranges) {
             // Validate range bounds
             if range.end > total_workers {
                 panic!(
@@ -817,8 +815,6 @@ impl WorkerAffinityConfig {
                     .unwrap()
                     .push(group_id);
             }
-
-            group_id += 1;
         }
 
         Self {

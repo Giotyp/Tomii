@@ -753,26 +753,14 @@ impl TimeBuffer {
         // Total tasks spawned per stream (sum of all node factors).
         let total_tasks_per_stream: usize = node_stats_map
             .values()
-            .map(|s| {
-                if num_included > 0 {
-                    s.invocations / num_included
-                } else {
-                    0
-                }
-            })
+            .map(|s| s.invocations.checked_div(num_included).unwrap_or(0))
             .sum();
 
         // Max factor among critical-path nodes (key input for tile-size suggestion).
         let max_cp_factor: usize = critical_path_node_set
             .iter()
             .filter_map(|name| node_stats_map.get(*name))
-            .map(|s| {
-                if num_included > 0 {
-                    s.invocations / num_included
-                } else {
-                    0
-                }
-            })
+            .map(|s| s.invocations.checked_div(num_included).unwrap_or(0))
             .max()
             .unwrap_or(0);
 

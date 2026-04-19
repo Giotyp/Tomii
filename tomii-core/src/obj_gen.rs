@@ -30,34 +30,8 @@ pub fn init_objects(
         };
         let args_json: &Vec<ArgInit> = &init.args;
 
-        if init.function.is_none() {
-            // direct variable initialization
-            let type_str = &args_json[0].type_;
-            let value_str = &args_json[0].value;
-
-            // Check if type_str is in PARSERS
-            let value_cmt_res = string_to_cmtype(type_str.to_string(), value_str.to_string());
-            let value_cmt = match value_cmt_res {
-                Ok(cmt) => cmt,
-                Err(e) => {
-                    return Err(format!(
-                        "No init function for type '{}' with value '{}': {}. Create an init function to handle this type.",
-                        type_str, value_str, e
-                    ).into());
-                }
-            };
-
-            let mut value_vec: Vec<CmTypes> = Vec::new();
-            for _ in 0..factor {
-                value_vec.push(value_cmt.clone());
-            }
-            let obj_id = obj_counter;
-            obj_counter += 1;
-            obj_id_map.insert(name.clone(), obj_id as usize);
-            init_objects.push(value_vec);
-        } else {
+        if let Some(func_name) = init.function.as_ref() {
             // function call needed
-            let func_name = init.function.as_ref().unwrap();
             let func_ptr = get_func(func_name).ok_or_else(|| -> crate::TomiiError {
                 format!("Function '{}' not found in registry", func_name).into()
             })?;
@@ -102,6 +76,30 @@ pub fn init_objects(
                 }
 
                 let value_cmt = func_ptr(&args);
+                value_vec.push(value_cmt.clone());
+            }
+            let obj_id = obj_counter;
+            obj_counter += 1;
+            obj_id_map.insert(name.clone(), obj_id as usize);
+            init_objects.push(value_vec);
+        } else {
+            // direct variable initialization
+            let type_str = &args_json[0].type_;
+            let value_str = &args_json[0].value;
+
+            let value_cmt_res = string_to_cmtype(type_str.to_string(), value_str.to_string());
+            let value_cmt = match value_cmt_res {
+                Ok(cmt) => cmt,
+                Err(e) => {
+                    return Err(format!(
+                        "No init function for type '{}' with value '{}': {}. Create an init function to handle this type.",
+                        type_str, value_str, e
+                    ).into());
+                }
+            };
+
+            let mut value_vec: Vec<CmTypes> = Vec::new();
+            for _ in 0..factor {
                 value_vec.push(value_cmt.clone());
             }
             let obj_id = obj_counter;
