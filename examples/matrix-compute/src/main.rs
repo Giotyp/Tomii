@@ -1,21 +1,7 @@
-use clap::Parser;
-use matcomp::{kernel_perf, validation};
+use matcomp::validation;
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
-
-#[derive(Parser, Debug)]
-#[command(name = "perf_test")]
-#[command(about = "Matrix computation performance and validation tool", long_about = None)]
-struct Args {
-    /// Run performance measurements
-    #[arg(long)]
-    perf: bool,
-
-    /// Run validation tests
-    #[arg(long)]
-    valid: bool,
-}
 
 #[derive(Debug, Deserialize)]
 pub struct GraphFile {
@@ -36,9 +22,7 @@ pub struct ArgInit {
 
 fn parse_graph(script_dir: &str) -> (usize, usize) {
     let graph_path = PathBuf::from(script_dir).join("graph.json");
-
     let graph_content = fs::read_to_string(&graph_path).expect("Failed to read graph.json");
-
     let graph: GraphFile =
         serde_json::from_str(&graph_content).expect("Failed to parse graph.json");
 
@@ -64,22 +48,7 @@ fn parse_graph(script_dir: &str) -> (usize, usize) {
 }
 
 pub fn main() {
-    let args = Args::parse();
-
-    if !args.perf && !args.valid {
-        eprintln!("Error: Please specify either --perf or --valid");
-        std::process::exit(1);
-    }
-
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let (buf_size, num_nodes) = parse_graph(manifest_dir);
-
-    if args.perf {
-        let warmup = 10;
-        kernel_perf::measure_performance(buf_size, num_nodes, warmup);
-    }
-
-    if args.valid {
-        validation::validate(buf_size, num_nodes, manifest_dir);
-    }
+    validation::validate(buf_size, num_nodes, manifest_dir);
 }

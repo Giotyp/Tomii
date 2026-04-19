@@ -53,7 +53,7 @@ jobs:
 
       - name: Produce validation file
         working-directory: ./examples/${{ matrix.example }}
-        run: cargo run --release -- --valid
+        run: cargo run --release
 
       - name: Compare files
         working-directory: ./examples/${{ matrix.example }}
