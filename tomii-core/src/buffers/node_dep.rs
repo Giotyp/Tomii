@@ -60,12 +60,8 @@ impl NodeDependencyEntry {
             _ => (factor, 1), // No grouping or full-factor group
         };
 
-        let dpg = if num_groups > 0 {
-            total_deps / num_groups
-        } else {
-            0
-        };
-        let deps_per_instance = if group_size > 0 { dpg / group_size } else { 0 };
+        let dpg = total_deps.checked_div(num_groups).unwrap_or(0);
+        let deps_per_instance = dpg.checked_div(group_size).unwrap_or(0);
         let deps_per_group = dpg as u32;
 
         // Initialise with generation=0, value=initial_deps_per_group
@@ -356,11 +352,10 @@ impl NodeDepMap {
                             1
                         };
 
-                        let instances_per_barrier_group = if num_barrier_groups > 0 {
-                            node.factor / num_barrier_groups
-                        } else {
-                            node.factor
-                        };
+                        let instances_per_barrier_group = node
+                            .factor
+                            .checked_div(num_barrier_groups)
+                            .unwrap_or(node.factor);
 
                         print_debug(|| {
                             format!("DB: BARRIER GROUPING: node={}, factor={}, total_deps={}, group_by={}, num_pred_packets={}, num_barrier_groups={}, instances_per_group={}",

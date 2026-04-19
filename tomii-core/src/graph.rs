@@ -131,11 +131,8 @@ impl Graph {
                                 // num_barrier_groups = how many packet groups exist (indexes / group_by)
                                 // Example CSI: 64 packets / 64 group_by = 1 barrier group needing 64 deps
                                 // Example FFT: 832 packets / 64 group_by = 13 barrier groups, each needing 64 deps
-                                let num_barrier_groups = if group_by_size > 0 {
-                                    pred.indexes.len() / group_by_size
-                                } else {
-                                    1
-                                };
+                                let num_barrier_groups =
+                                    pred.indexes.len().checked_div(group_by_size).unwrap_or(1);
 
                                 let barrier_deps = num_barrier_groups * group_by_size;
                                 print_debug(|| {
@@ -183,7 +180,7 @@ impl Graph {
 
             // Final summary for this node
             let threshold = if node.factor > 0 {
-                dep_count / node.factor
+                dep_count.checked_div(node.factor).unwrap_or(0)
             } else {
                 0
             };

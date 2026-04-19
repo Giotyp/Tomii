@@ -127,7 +127,7 @@ pub fn allocate_cores(
         // Branch 5: Over-subscription - scale down proportionally
         let max_system = 1; // at least one system thread
         let remaining = available_cores.saturating_sub(max_system);
-        let max_receivers = receiver_threads.min(remaining / 2).max(0);
+        let max_receivers = receiver_threads.min(remaining / 2);
         let max_workers = remaining.saturating_sub(max_receivers).max(1);
         tracing::warn!(
             requested = total_needed,

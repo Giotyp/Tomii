@@ -825,7 +825,7 @@ pub(super) fn build_json_report_value(
         .iter()
         .map(|(name, stats)| {
             let factor = if num_included > 0 {
-                stats.invocations / num_included
+                stats.invocations.checked_div(num_included).unwrap_or(0)
             } else {
                 0
             };
