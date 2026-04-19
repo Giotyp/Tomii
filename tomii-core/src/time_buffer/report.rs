@@ -48,23 +48,18 @@ pub(super) fn collect_print_stats_data(
     > = std::collections::HashMap::new();
     let mut total_streams = 0;
 
-    for slot_id in 0..slots {
-        let slot_stats = &slot_statistics[slot_id];
+    for (slot_id, slot_stats) in slot_statistics.iter().enumerate().take(slots) {
         if slot_stats.is_empty() {
             continue;
         }
 
         if slot_id >= system_slots_start {
             // Collect system thread task data by slot
-            let slot_task_data = system_task_data_by_slot
-                .entry(slot_id)
-                .or_insert_with(std::collections::HashMap::new);
+            let slot_task_data = system_task_data_by_slot.entry(slot_id).or_default();
 
             for stats in slot_stats {
                 for (task_name, times) in &stats.task_times {
-                    let task_durations = slot_task_data
-                        .entry(task_name.clone())
-                        .or_insert_with(Vec::new);
+                    let task_durations = slot_task_data.entry(task_name.clone()).or_default();
                     for (_, duration) in times {
                         task_durations.push(*duration);
                     }
@@ -128,21 +123,19 @@ pub(super) fn aggregate_task_data(
 
     for stream_tasks in streams_to_analyze {
         for (task_name, times) in stream_tasks {
-            let task_durations = global_task_data
-                .entry(task_name.clone())
-                .or_insert_with(Vec::new);
+            let task_durations = global_task_data.entry(task_name.clone()).or_default();
 
             for (worker_id, duration) in times {
                 task_durations.push(*duration);
 
                 let worker_counts = global_per_worker_counts
                     .entry(task_name.clone())
-                    .or_insert_with(std::collections::HashMap::new);
+                    .or_default();
                 *worker_counts.entry(*worker_id).or_insert(0) += 1;
 
                 let worker_totals = global_per_worker_totals
                     .entry(task_name.clone())
-                    .or_insert_with(std::collections::HashMap::new);
+                    .or_default();
                 *worker_totals.entry(*worker_id).or_insert(Duration::ZERO) += *duration;
             }
         }
@@ -171,9 +164,8 @@ pub(super) fn format_timing_summary(
     // Per-slot stream breakdown (worker slots only)
     out.push_str("  Streams per Slot: ");
     let mut slot_stream_items: Vec<String> = Vec::new();
-    for slot_id in 0..worker_slots_end {
-        let stream_count = slot_statistics[slot_id].len();
-        slot_stream_items.push(format!("Slot {}: {}", slot_id, stream_count));
+    for (slot_id, slot_stats) in slot_statistics.iter().enumerate().take(worker_slots_end) {
+        slot_stream_items.push(format!("Slot {}: {}", slot_id, slot_stats.len()));
     }
     out.push_str(&format!("{}\n", slot_stream_items.join(", ")));
 
@@ -440,8 +432,8 @@ pub(super) fn collect_report_stream_data(
     let mut per_stream_tasks: Vec<std::collections::HashMap<String, Vec<(usize, Duration)>>> =
         Vec::new();
 
-    for slot_id in 0..worker_slots_end {
-        for stats in &slot_statistics[slot_id] {
+    for stats_list in slot_statistics.iter().take(worker_slots_end) {
+        for stats in stats_list {
             stream_total_times.push(stats.total_time);
             let mut m: std::collections::HashMap<String, Vec<(usize, Duration)>> =
                 std::collections::HashMap::new();

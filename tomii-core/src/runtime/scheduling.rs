@@ -157,7 +157,7 @@ pub(super) fn dispatch_nodes(
         let n = nodes_to_schedule.len();
         args_buf.clear();
         args_buf.resize(n, None);
-        send_to_scheduler(shared, sctx, nodes_to_schedule, &*args_buf, None);
+        send_to_scheduler(shared, sctx, nodes_to_schedule, &args_buf, None);
     });
 
     sctx.telemetry

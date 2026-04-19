@@ -36,6 +36,7 @@ pub fn compute_fft(fft_planner: &Arc<dyn Fft<f32>>, buffer: &mut Vec<Complex32>)
 
 /// Convert a flat complex vector into a square matrix.
 #[tomii_export]
+#[allow(clippy::ptr_arg)]
 pub fn vec_to_mat(vector: &Vec<Complex32>) -> DMatrix<Complex32> {
     functions::vec_to_mat(vector)
 }

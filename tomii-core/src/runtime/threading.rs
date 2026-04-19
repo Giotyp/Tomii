@@ -21,6 +21,7 @@ use std::thread::{self, JoinHandle};
 /// Encapsulates the `thread::Builder` boilerplate shared by both the 1:1
 /// (one thread per socket) and round-robin (one thread per socket range) paths.
 #[cfg(feature = "network")]
+#[allow(clippy::too_many_arguments)]
 fn spawn_receiver_thread(
     thread_name: String,
     packet_length: usize,
@@ -141,7 +142,7 @@ impl TomiiRt {
                 num_sockets,
                 "receiver_threads < num_sockets, using round-robin polling"
             );
-            let sockets_per_thread = (num_sockets + receiver_threads - 1) / receiver_threads;
+            let sockets_per_thread = num_sockets.div_ceil(receiver_threads);
             for thread_id in 0..receiver_threads {
                 let start_socket = thread_id * sockets_per_thread;
                 let end_socket = std::cmp::min(start_socket + sockets_per_thread, num_sockets);

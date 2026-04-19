@@ -89,7 +89,7 @@ pub fn allocate_cores(
             worker_count,
             receiver_threads,
             system_threads,
-            Some(core_ids[main_idx].clone()),
+            Some(core_ids[main_idx]),
         )
     } else if core_offset + total_needed <= available_cores {
         // Branch 3: Can honor requested offset but no spare core for main

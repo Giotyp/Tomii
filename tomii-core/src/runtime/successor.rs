@@ -65,7 +65,7 @@ pub(super) fn conditions_met(
     for arg_idx in arg_indexes {
         let arg = &node.args[*arg_idx];
         let init_condition: &crate::graph_struct::InitCondition =
-            &arg.init_condition.as_ref().unwrap();
+            arg.init_condition.as_ref().unwrap();
         // We assume condition has a single predecessor
         let node_factor = shared.graph.nodes[node_info.id as usize].factor;
         let result = &super::arg_resolution::collect_arg_result(
@@ -83,7 +83,7 @@ pub(super) fn conditions_met(
         )
         .unwrap()[0];
 
-        let eval = init_condition.evaluate(&result);
+        let eval = init_condition.evaluate(result);
         if !eval {
             is_ready = false;
             break;
@@ -239,6 +239,7 @@ pub(super) fn compute_1to1_succ_idx(
 /// - Batch path: always `1` (one completion per node in the batch).
 /// - Worker path: `node_info.bulk_count` (bulk tasks complete N instances in one call).
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn decrement_and_collect_ready(
     ctx: &super::shared_data::ResolveCtx<'_>,
     slot: usize,

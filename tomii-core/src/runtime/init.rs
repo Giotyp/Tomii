@@ -55,7 +55,7 @@ pub(crate) fn build_node_cache(
 
     // needs_result_store — false when no successor reads this node via $res.
     // When false, node_results.set() can be elided on the hot path.
-    for node_id in 0..cache.len() {
+    for (node_id, cache_entry) in cache.iter_mut().enumerate() {
         let has_res_consumer = node_id < app_graph.successors.len()
             && app_graph.successors[node_id].iter().any(|&succ_id| {
                 app_graph.nodes[succ_id as usize].args.iter().any(|arg| {
@@ -63,10 +63,10 @@ pub(crate) fn build_node_cache(
                         && arg
                             .predecessor
                             .as_ref()
-                            .map_or(false, |p| p.id == node_id as IdType)
+                            .is_some_and(|p| p.id == node_id as IdType)
                 })
             });
-        cache[node_id].needs_result_store = has_res_consumer;
+        cache_entry.needs_result_store = has_res_consumer;
     }
 
     // priority and affinity_group — pre-computed to avoid per-task lookups on the hot path
@@ -88,7 +88,7 @@ pub(crate) fn build_node_cache(
     // hot path.  Eliminates `shared.graph.nodes[pred_id]` lookups during task execution.
     // Both main arg_cache and condition arg_cache are populated here so the fast path is
     // always available regardless of which cache path is taken.
-    for node_id in 0..app_graph.nodes.len() {
+    for (node_id, cache_entry) in cache.iter_mut().enumerate() {
         let node = &app_graph.nodes[node_id];
 
         // Helper closure: build ResPredCache entries from an arg slice.
@@ -102,7 +102,7 @@ pub(crate) fn build_node_cache(
                     }
                     match &arg.type_ {
                         CmTypes::Res(res_nid) => {
-                            let pred_node = &app_graph.nodes[*res_nid as usize];
+                            let pred_node = &app_graph.nodes[*res_nid];
                             v.push(ResPredCache {
                                 node_id: node_id as IdType,
                                 res_node_id: *res_nid as IdType,
@@ -141,8 +141,8 @@ pub(crate) fn build_node_cache(
             .as_ref()
             .map(|cond| build_res_preds(&cond.args, false));
 
-        cache[node_id].arg_cache.res_predecessors = main_res_preds;
-        if let (Some(nc), Some(cp)) = (cache[node_id].node_condition.as_mut(), cond_res_preds) {
+        cache_entry.arg_cache.res_predecessors = main_res_preds;
+        if let (Some(nc), Some(cp)) = (cache_entry.node_condition.as_mut(), cond_res_preds) {
             nc.arg_cache.res_predecessors = cp;
         }
     }

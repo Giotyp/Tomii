@@ -233,7 +233,7 @@ impl CustomSchedulerBuilder {
         let system_core_offset = alloc.system_core_offset;
         let receiver_core_offset = alloc.receiver_offset;
         let worker_core_offset = alloc.worker_offset;
-        let main_core = alloc.main_core.clone();
+        let main_core = alloc.main_core;
 
         tracing::info!(
             available_cores = alloc.all_core_ids.len(),
@@ -348,10 +348,10 @@ pub(super) fn spawn_worker_threads(
     // Build worker_id -> group_idx mapping
     let mut worker_to_group_idx: Vec<usize> = vec![0; total_workers];
     if let Some(affinity) = worker_affinity {
-        for worker_id in 0..total_workers {
+        for (worker_id, slot) in worker_to_group_idx.iter_mut().enumerate() {
             let group_ids = affinity.get_worker_groups(worker_id);
             if !group_ids.is_empty() {
-                worker_to_group_idx[worker_id] = group_ids[0];
+                *slot = group_ids[0];
             }
         }
     }

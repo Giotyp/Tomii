@@ -151,8 +151,7 @@ fn decode_packet(
     // Keep received_bytes_cm alive (not moved) so we can reclaim its Vec<u8> below.
     let received_bytes_cm = CmTypes::from_bytes(packet_msg.packet_bytes);
     let start_proc = shared.telemetry.measure_start();
-    // Pass a clone (cheap Arc increment) so received_bytes_cm stays alive for reclaim.
-    let packet_cm = packet_process_func(&[received_bytes_cm.clone()]);
+    let packet_cm = packet_process_func(std::slice::from_ref(&received_bytes_cm));
     shared
         .telemetry
         .record_timing(start_proc, thread_slot, "Packet Processing", usize::MAX);

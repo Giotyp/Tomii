@@ -315,7 +315,7 @@ impl CustomScheduler {
 
     /// Get main/orchestrator core if reserved
     pub fn main_core(&self) -> Option<CoreId> {
-        self.main_core.clone()
+        self.main_core
     }
 
     /// Get worker affinity configuration

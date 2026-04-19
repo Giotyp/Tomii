@@ -31,7 +31,7 @@ pub enum NodePriority {
 }
 
 impl NodePriority {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "high" => NodePriority::High,
             "low" => NodePriority::Low,
@@ -41,7 +41,7 @@ impl NodePriority {
 }
 
 impl CondOp {
-    pub fn from_str(op: &str) -> Option<CondOp> {
+    pub fn parse(op: &str) -> Option<CondOp> {
         match op {
             "Eq" => Some(CondOp::Eq),
             "Neq" => Some(CondOp::Neq),
@@ -386,22 +386,22 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // NodePriority::from_str
+    // NodePriority::parse
     // -----------------------------------------------------------------------
 
     #[test]
     fn test_node_priority_from_str() {
-        assert!(matches!(NodePriority::from_str("high"), NodePriority::High));
-        assert!(matches!(NodePriority::from_str("low"), NodePriority::Low));
+        assert!(matches!(NodePriority::parse("high"), NodePriority::High));
+        assert!(matches!(NodePriority::parse("low"), NodePriority::Low));
         assert!(matches!(
-            NodePriority::from_str("normal"),
+            NodePriority::parse("normal"),
             NodePriority::Normal
         ));
         assert!(matches!(
-            NodePriority::from_str("anything"),
+            NodePriority::parse("anything"),
             NodePriority::Normal
         ));
-        assert!(matches!(NodePriority::from_str(""), NodePriority::Normal));
+        assert!(matches!(NodePriority::parse(""), NodePriority::Normal));
     }
 }
 

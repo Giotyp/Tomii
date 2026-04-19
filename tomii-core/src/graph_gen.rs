@@ -188,7 +188,7 @@ fn parse_predecessor(
 
 fn parse_condition(condition_json: &ConditionJson) -> Result<InitCondition, crate::TomiiError> {
     let operation =
-        CondOp::from_str(&condition_json.operation).ok_or_else(|| -> crate::TomiiError {
+        CondOp::parse(&condition_json.operation).ok_or_else(|| -> crate::TomiiError {
             format!("Invalid condition operation '{}'", condition_json.operation).into()
         })?;
 
@@ -495,7 +495,7 @@ fn parse_single_node(
         .as_ref()
         .map(|cond_json| -> Result<NodeCondition, crate::TomiiError> {
             let cond_operation =
-                CondOp::from_str(&cond_json.operation).ok_or_else(|| -> crate::TomiiError {
+                CondOp::parse(&cond_json.operation).ok_or_else(|| -> crate::TomiiError {
                     format!("Invalid condition operation '{}'", cond_json.operation).into()
                 })?;
             let cond_value =
@@ -525,7 +525,7 @@ fn parse_single_node(
     let priority = node_json
         .priority
         .as_deref()
-        .map(NodePriority::from_str)
+        .map(NodePriority::parse)
         .unwrap_or_default();
     let use_workers = node_json
         .use_workers

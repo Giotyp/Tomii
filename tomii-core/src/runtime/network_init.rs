@@ -16,7 +16,7 @@ pub(super) fn process_id_function(shared: &Arc<SharedData>, result: &CmTypes) ->
     if let Some(network_config) = network_config_opt {
         let id_function = network_config.id_function.unwrap();
         // Call the id function - wrap single result in Vec as expected by signature
-        let id_result = id_function(&[result.clone()]);
+        let id_result = id_function(std::slice::from_ref(result));
 
         // Extract stream from the result
         if let Some(new_stream) = id_result.valid_number_to_usize() {
@@ -37,7 +37,7 @@ pub(super) fn process_id_function(shared: &Arc<SharedData>, result: &CmTypes) ->
                 );
                 return None;
             }
-            return Some(new_stream);
+            Some(new_stream)
         } else {
             panic!("ID function did not return a valid number for stream");
         }
