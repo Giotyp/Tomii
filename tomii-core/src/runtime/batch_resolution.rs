@@ -147,7 +147,9 @@ pub(super) fn process_batch_inner(
             print_debug(|| {
                 format!(
                     "DECREMENT: pred={} index={} succ={} ({}) ready_count={}",
-                    node_info.id, node_info.index, succ_node_id,
+                    node_info.id,
+                    node_info.index,
+                    succ_node_id,
                     rctx.cache.node_cache[succ_node_id].name,
                     ready.len()
                 )
