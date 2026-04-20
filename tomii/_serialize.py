@@ -60,7 +60,7 @@ def _arg(a: Any) -> ArgJson:
         pred = PredJson(
             name=a.node.name,
             indexes=_indexes(a.start, a.end),
-            group_by=a.group_by,
+            group_by=_factor(a.group_by),
         )
         return ArgJson(type_="$dep", predecessor=pred)
 
@@ -68,7 +68,7 @@ def _arg(a: Any) -> ArgJson:
         pred = PredJson(
             name=a.node.name,
             indexes=_indexes(a.start, a.end),
-            group_by=a.group_by,
+            group_by=_factor(a.group_by),
         )
         return ArgJson(type_="$res", predecessor=pred)
 
@@ -76,7 +76,7 @@ def _arg(a: Any) -> ArgJson:
         pred = PredJson(
             name=a.node.name,
             indexes=_indexes(a.start, a.end),
-            group_by=a.group_by,
+            group_by=_factor(a.group_by),
         )
         return ArgJson(type_="$barrier", predecessor=pred)
 

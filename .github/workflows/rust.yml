@@ -38,23 +38,41 @@ jobs:
     needs: check
     strategy:
       matrix:
-        example: [matrix-compute]
+        example: [matrix-compute, matrix-compute-C, mapreduce, stream-analytics]
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Rust repository
+      - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install C library dependencies
+        run: sudo apt-get install -y libfftw3-dev libopenblas-dev pkg-config
 
       - name: Run Example
         working-directory: ./examples/${{ matrix.example }}
         run: ./run_bench.sh
 
-      - name: Produce validation file
+      - name: Produce validation file (matrix-compute)
+        if: matrix.example == 'matrix-compute'
         working-directory: ./examples/${{ matrix.example }}
         run: cargo run --release
 
-      - name: Compare files
+      - name: Compare files (matrix-compute)
+        if: matrix.example == 'matrix-compute'
         working-directory: ./examples/${{ matrix.example }}
         run: diff -u result.txt validation.txt
+
+      - name: Compare files (golden)
+        if: matrix.example != 'matrix-compute'
+        working-directory: ./examples/${{ matrix.example }}
+        run: diff -u result.txt result.golden.txt

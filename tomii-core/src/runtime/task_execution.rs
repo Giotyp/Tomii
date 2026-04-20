@@ -322,7 +322,9 @@ fn execute_single_task(
     sctx.telemetry
         .record_timing(start_time, node_info.slot, node_name, worker_id);
 
-    if sctx.cache.node_cache[node_info.id as usize].needs_result_store {
+    // Post-nodes always store their result so schedule_post_nodes can poll result_exists.
+    // Regular nodes store only when a $res successor reads the result.
+    if node_info.post_node || sctx.cache.node_cache[node_info.id as usize].needs_result_store {
         sctx.exec.node_results.set(node_info, result);
     }
 

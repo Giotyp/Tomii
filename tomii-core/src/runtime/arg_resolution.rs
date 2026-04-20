@@ -194,6 +194,10 @@ fn spin_wait_for_result(
         if let Some(result) = shared.exec.node_results.get(node_info) {
             return Some(result);
         }
+        if shared.shutdown_flag.load(Ordering::Acquire) {
+            *stale = true;
+            return None;
+        }
         if exec_slot != usize::MAX {
             let current_gen = shared.slot_data.generation[exec_slot].load(Ordering::Acquire) as u32;
             if exec_gen != current_gen {

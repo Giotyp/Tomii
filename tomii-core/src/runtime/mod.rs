@@ -360,7 +360,12 @@ impl TomiiRtBuilder {
         );
 
         // --- Assemble SharedData ---
-        let node_results = Arc::new(crate::buffers::LockFreeResultMap::new(&graph.nodes, slots));
+        // Allocate one extra slot beyond the stream slots to cover post-node writes, which
+        // use slot index `slots + system_threads` (see scheduling.rs `stream_use`).
+        let node_results = Arc::new(crate::buffers::LockFreeResultMap::new(
+            &graph.nodes,
+            slots + self.config.system_threads + 1,
+        ));
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
         #[cfg(feature = "network")]

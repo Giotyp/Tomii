@@ -103,7 +103,7 @@ pub(super) fn evaluate_node_condition(
 ) -> bool {
     // Build condition args using cached arg data
     let mut cond_args = Vec::with_capacity(cond_cache.arg_cache.args.len());
-    let _ = super::arg_resolution::populate_cached_args_into(
+    let stale = super::arg_resolution::populate_cached_args_into(
         &mut cond_args,
         shared,
         &cond_cache.arg_cache,
@@ -114,12 +114,28 @@ pub(super) fn evaluate_node_condition(
         usize::MAX,
         0,
     );
+    if stale {
+        crate::debug::print_debug(|| {
+            format!(
+                "EVAL_COND stale: node={} index={} slot={}",
+                node_info.id, node_info.index, node_info.slot
+            )
+        });
+        return false;
+    }
 
     // Execute condition function to get result
     let cond_result = (cond_cache.func_ptr)(&cond_args);
 
+    let passed = node_cond.evaluate(&cond_result);
+    crate::debug::print_debug(|| {
+        format!(
+            "EVAL_COND: node={} index={} slot={} args={:?} result={:?} passed={}",
+            node_info.id, node_info.index, node_info.slot, cond_args, cond_result, passed
+        )
+    });
     // Evaluate result against expected value using operation
-    node_cond.evaluate(&cond_result)
+    passed
 }
 
 #[cfg(test)]
@@ -299,6 +315,12 @@ pub(super) fn collect_successors_for_node_into(
             .and_then(|v| v.get(node_id_usize))
         {
             if node_info.index < *start || node_info.index >= *end {
+                crate::debug::print_debug(|| {
+                    format!(
+                        "SUCC_FILTER: pred={} index={} succ={} FILTERED (range {}-{})",
+                        node_info.id, node_info.index, succ_id, start, end
+                    )
+                });
                 continue; // Predecessor instance outside declared range
             }
         }

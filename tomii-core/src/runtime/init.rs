@@ -55,16 +55,30 @@ pub(crate) fn build_node_cache(
 
     // needs_result_store — false when no successor reads this node via $res.
     // When false, node_results.set() can be elided on the hot path.
+    // Must check both main args AND condition args: a node used only in a
+    // successor's condition expression (e.g. classify read by smooth/handle_anomaly)
+    // still requires its result to be stored.
     for (node_id, cache_entry) in cache.iter_mut().enumerate() {
         let has_res_consumer = node_id < app_graph.successors.len()
             && app_graph.successors[node_id].iter().any(|&succ_id| {
-                app_graph.nodes[succ_id as usize].args.iter().any(|arg| {
+                let succ_node = &app_graph.nodes[succ_id as usize];
+                let main_reads = succ_node.args.iter().any(|arg| {
                     arg.type_.is_result()
                         && arg
                             .predecessor
                             .as_ref()
                             .is_some_and(|p| p.id == node_id as IdType)
-                })
+                });
+                let cond_reads = succ_node.condition.as_ref().is_some_and(|cond| {
+                    cond.args.iter().any(|arg| {
+                        arg.type_.is_result()
+                            && arg
+                                .predecessor
+                                .as_ref()
+                                .is_some_and(|p| p.id == node_id as IdType)
+                    })
+                });
+                main_reads || cond_reads
             });
         cache_entry.needs_result_store = has_res_consumer;
     }
