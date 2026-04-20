@@ -116,6 +116,14 @@ pub(super) fn process_batch_inner(
                 } else {
                     rctx.cache.node_cache[succ_node_id].factor as u32 // stale gen → full factor
                 };
+                print_debug(|| {
+                    format!(
+                        "COND_CHECK: pred={} index={} succ={} ({}) remaining_spawns={} slot_gen={} stored_gen={}",
+                        node_info.id, node_info.index, succ_node_id,
+                        rctx.cache.node_cache[succ_node_id].name,
+                        remaining_spawns, slot_gen, stored_gen
+                    )
+                });
                 if remaining_spawns == 0 {
                     continue;
                 }
@@ -135,6 +143,15 @@ pub(super) fn process_batch_inner(
                 slot_gen,
                 ready,
             );
+
+            print_debug(|| {
+                format!(
+                    "DECREMENT: pred={} index={} succ={} ({}) ready_count={}",
+                    node_info.id, node_info.index, succ_node_id,
+                    rctx.cache.node_cache[succ_node_id].name,
+                    ready.len()
+                )
+            });
 
             for &ready_index in ready.iter() {
                 let scheduled_succ_info = NodeInfo::new(
@@ -244,6 +261,11 @@ fn dispatch_condition_successor(
             )
         });
     } else {
+        // Condition failed: this instance will not execute. All predecessors have
+        // completed (dep counter hit 0), so in a non-loop DAG no future trigger
+        // can fire it. Discharge it from pending_cond_tasks so the slot can complete.
+        shared.slot_data.pending_cond_tasks[scheduled_succ_info.slot]
+            .fetch_sub(1, Ordering::SeqCst);
         shared
             .exec
             .resolution_state

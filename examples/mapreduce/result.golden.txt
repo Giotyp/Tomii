@@ -1,0 +1,8 @@
+apple 537
+banana 505
+cherry 547
+date 482
+elderberry 518
+fig 473
+grape 496
+honeydew 538
