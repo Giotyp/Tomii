@@ -72,7 +72,17 @@ jobs:
         working-directory: ./examples/${{ matrix.example }}
         run: diff -u result.txt validation.txt
 
+      - name: Produce validation file (matrix-compute-C)
+        if: matrix.example == 'matrix-compute-C'
+        working-directory: ./examples/${{ matrix.example }}
+        run: make validation && ./validation
+
+      - name: Compare files (matrix-compute-C)
+        if: matrix.example == 'matrix-compute-C'
+        working-directory: ./examples/${{ matrix.example }}
+        run: diff -u result.txt validation.txt
+
       - name: Compare files (golden)
-        if: matrix.example != 'matrix-compute'
+        if: matrix.example == 'mapreduce' || matrix.example == 'stream-analytics'
         working-directory: ./examples/${{ matrix.example }}
         run: diff -u result.txt result.golden.txt
