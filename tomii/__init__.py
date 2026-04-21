@@ -20,7 +20,9 @@ Typical usage::
     app.run(workers=4, slots=2, timing="timing.txt")
 """
 
+from ._export import export
 from ._graph import Graph
+from ._procs import procs
 from ._runner import list_knobs
 from ._loop import Condition, IndexFunc, Loop
 from ._node import NodeDep, NodeOutput
@@ -50,8 +52,10 @@ from ._types import (
 
 __all__ = [
     # Core
+    "export",
     "Graph",
     "list_knobs",
+    "procs",
     # Node dependency helpers
     "NodeOutput",
     "NodeDep",

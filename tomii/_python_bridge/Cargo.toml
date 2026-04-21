@@ -1,0 +1,18 @@
+[package]
+name = "tomii-python-bridge"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone package — not a workspace member. Built independently via
+# `cargo build --manifest-path` with `--target-dir <workspace>/target`
+# to share the workspace build cache.
+[workspace]
+
+[lib]
+name = "tomii_python_bridge"
+crate-type = ["dylib"]
+
+[dependencies]
+tomii-types = { path = "../../tomii-types" }
+pyo3 = { version = "0.22", features = ["auto-initialize"] }
+parking_lot = "0.12"
