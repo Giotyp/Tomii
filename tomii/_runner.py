@@ -166,23 +166,9 @@ def build_command(
 
 
 def _find_binary(release: bool = True) -> str:
-    """Auto-detect the tomii binary from the workspace."""
-    from ._builder import find_workspace_root, BuildError
-    try:
-        workspace = find_workspace_root()
-    except BuildError:
-        raise RuntimeError(
-            "Cannot auto-detect tomii binary: not inside a Cargo workspace. "
-            "Pass binary= explicitly."
-        )
-    profile = "release" if release else "debug"
-    binary = workspace / "target" / profile / "main"
-    if binary.exists():
-        return str(binary.resolve())
-    raise RuntimeError(
-        f"tomii binary not found at {binary}. "
-        "Build the project first (app.build() or cargo build)."
-    )
+    """Auto-detect the tomii binary (bundled wheel binary or workspace build)."""
+    from ._builder import _find_binary as _builder_find_binary
+    return _builder_find_binary(release=release)
 
 
 def run(
