@@ -1,6 +1,6 @@
 ---
 name: graph-build
-description: Translate a natural-language or pseudocode computation description into a correct Τομί Python graph definition with appropriate dependency types, factors, and node structure
+description: Use when translating a natural-language or pseudocode pipeline into a Tomii graph. Produces a complete run_bench.py and src/lib.rs plugin skeleton with all required #[tomii_export] stubs and correct dependency types.
 ---
 
 # Skill: graph-build

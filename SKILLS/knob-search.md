@@ -1,6 +1,6 @@
 ---
 name: knob-search
-description: Systematically search Τομί scheduler knobs using per-knob search hints from --list-knobs-json, converging on a locally optimal configuration within 5 iterations
+description: Use when overhead_pct is 20-60% (mixed profile) or you want to tune runtime knobs (workers, batching_size, coalesce_barriers, etc.). Runs a bounded 5-iteration sweep using per-knob search hints from --list-knobs-json.
 ---
 
 # Skill: knob-search

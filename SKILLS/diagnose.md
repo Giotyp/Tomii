@@ -1,6 +1,6 @@
 ---
 name: diagnose
-description: Interpret report.json to classify the dominant performance bottleneck (scheduling overhead, compute, load imbalance) and produce a prioritized action list with specific remediations
+description: Use when report.json was just written and you need to know which axis to optimize. Returns the dominant bottleneck (scheduling / compute / imbalance) plus a ranked remediation list with specific next steps.
 ---
 
 # Skill: diagnose

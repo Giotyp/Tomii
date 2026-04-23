@@ -1,6 +1,6 @@
 ---
 name: plugin-author
-description: Write correct #[tomii_export]-annotated Rust functions (or @tomii_export C functions) that conform to Τομί's type system and FFI requirements
+description: Use when authoring or modifying a #[tomii_export] Rust function (or C function via the bridge). Produces a type-correct plugin body that conforms to Tomii's CmTypes system and FFI requirements.
 ---
 
 # Skill: plugin-author

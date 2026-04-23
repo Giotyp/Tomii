@@ -1,6 +1,6 @@
 ---
 name: project-discover
-description: Orient in an unknown Τομί project — map graph topology, plugin functions, knob inventory, and performance baseline before any other task
+description: Use when first dropped into an unknown Tomii project directory. Maps graph topology, plugin functions, tunable knob inventory, and prior performance baseline — run this before any other skill.
 ---
 
 # Skill: project-discover

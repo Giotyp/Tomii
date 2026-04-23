@@ -1,6 +1,6 @@
 ---
 name: run-validate
-description: Build and execute a Τομί graph, verify correctness at single-thread before scaling up, and establish a performance baseline from report.json
+description: Use after editing the graph or plugin to re-measure performance. Builds the plugin, verifies correctness with a single worker, then scales up to establish a baseline and writes report.json.
 ---
 
 # Skill: run-validate

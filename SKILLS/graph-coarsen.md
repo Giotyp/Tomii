@@ -1,6 +1,6 @@
 ---
 name: graph-coarsen
-description: Reduce scheduling overhead by restructuring the graph for fewer, larger tasks — via tile_size parameter, group_size, or graph loop restructuring — when overhead_pct > 60%
+description: Use when report.json shows overhead_pct > 60% (scheduling dominates compute). Restructures the graph for fewer, larger tasks via tile_size, group_size, or loop coarsening — the primary remedy for scheduling-bound pipelines.
 ---
 
 # Skill: graph-coarsen
