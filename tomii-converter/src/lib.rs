@@ -128,18 +128,14 @@ enum CmParamKind {
     SliceCmTypes,
     /// C `void*` opaque handle — stored in `CmTypes::Any(OpaqueHandle)`.
     OpaquePtr,
-    /// C const array pointer (e.g. `complex_f32*`) — stored in `CmTypes::Any(Vec<[f32;2]>)`.
+    /// C const array pointer (e.g. `complex_f32*`, `float*`) — stored in `CmTypes::Any(Vec<T>)`.
     /// `len_param` is the companion `size_t` parameter name that is auto-derived.
-    /// `c_element_type` is stored for future per-type specialisation.
     ArrayPtr {
-        #[allow(dead_code)]
         c_element_type: String,
         len_param: String,
     },
     /// C mutable array pointer — buffer passed to C for in-place modification.
-    /// `c_element_type` is stored for future per-type specialisation.
     MutArrayPtr {
-        #[allow(dead_code)]
         c_element_type: String,
         len_param: String,
     },
@@ -222,10 +218,8 @@ enum CmRet {
     OwnedString,
     /// C returns `void*` — wrap in `CmTypes::from_any(OpaqueHandle(ptr))`.
     OpaquePtr,
-    /// C returns a heap-allocated array — copy to `Vec`, optionally free, wrap in `CmTypes::from_any`.
-    /// `c_element_type` is retained for future per-type specialisation.
+    /// C returns a heap-allocated array — copy to `Vec<T>`, optionally free, wrap in `CmTypes::from_any`.
     AllocatedArray {
-        #[allow(dead_code)]
         c_element_type: String,
         len_from_param: String,
         free_fn: Option<String>,
@@ -703,6 +697,23 @@ fn build_c_sym_type(entry: &ExportedFn) -> String {
     )
 }
 
+/// Map a C element type string to its Rust equivalent for `Vec<T>` wrappers.
+/// Strips leading `const` before matching.
+fn c_elem_rust_type(c_type: &str) -> &'static str {
+    let base = c_type.trim_start_matches("const").trim();
+    match base {
+        "float" => "f32",
+        "double" => "f64",
+        "int" | "int32_t" => "i32",
+        "uint32_t" | "unsigned int" => "u32",
+        "int64_t" => "i64",
+        "uint64_t" => "u64",
+        "size_t" | "usize" => "usize",
+        "void" => "[f32; 2]", // void* array treated as complex_f32 (legacy)
+        _ => "[f32; 2]",      // custom struct (e.g. complex_f32) has same layout
+    }
+}
+
 /// Build the static symbol name: upper-snake of `cm_name`.
 fn sym_static_name(cm_name: &str) -> String {
     format!("{}_SYM", cm_name.to_uppercase())
@@ -1025,11 +1036,15 @@ fn render_c_entry_wrapper(entry: &ExportedFn) -> String {
                 });
                 arg_idx += 1;
             }
-            CmParamKind::ArrayPtr { len_param, .. } => {
+            CmParamKind::ArrayPtr {
+                len_param,
+                c_element_type,
+            } => {
                 let name = &param.name;
                 let len = len_param.clone();
+                let rt = c_elem_rust_type(c_element_type);
                 let pre = format!(
-                    "    let ({name}_ptr, {len}) = args[{cur_arg_idx}].with_any(|v: &Vec<[f32; 2]>| (v.as_ptr() as *const c_void, v.len())).unwrap_or_else(|| panic!(\"{fn_name_str}: expected Vec<[f32;2]> for {name}\"));"
+                    "    let ({name}_ptr, {len}) = args[{cur_arg_idx}].with_any(|v: &Vec<{rt}>| (v.as_ptr() as *const c_void, v.len())).unwrap_or_else(|| panic!(\"{fn_name_str}: expected Vec<{rt}> for {name}\"));"
                 );
                 extractions.push(ParamExtraction {
                     pre_lines: vec![pre],
@@ -1038,12 +1053,16 @@ fn render_c_entry_wrapper(entry: &ExportedFn) -> String {
                 });
                 arg_idx += 1;
             }
-            CmParamKind::MutArrayPtr { len_param, .. } => {
+            CmParamKind::MutArrayPtr {
+                len_param,
+                c_element_type,
+            } => {
                 let name = &param.name;
                 let len = len_param.clone();
+                let rt = c_elem_rust_type(c_element_type);
                 // Emit a len extraction first; the actual call is embedded in with_any_mut.
                 let pre = format!(
-                    "    let {len} = args[{cur_arg_idx}].with_any(|v: &Vec<[f32; 2]>| v.len()).unwrap_or_else(|| panic!(\"{fn_name_str}: expected Vec<[f32;2]> for {name}\"));"
+                    "    let {len} = args[{cur_arg_idx}].with_any(|v: &Vec<{rt}>| v.len()).unwrap_or_else(|| panic!(\"{fn_name_str}: expected Vec<{rt}> for {name}\"));"
                 );
                 extractions.push(ParamExtraction {
                     pre_lines: vec![pre],
@@ -1099,8 +1118,11 @@ fn render_c_entry_wrapper(entry: &ExportedFn) -> String {
         // Find the MutArrayPtr param index
         let (mut_arg_idx, mut_param) = mut_array_param.unwrap();
         let mut_name = &mut_param.name;
-        let len_param_name = match &mut_param.kind {
-            CmParamKind::MutArrayPtr { len_param, .. } => len_param.clone(),
+        let (len_param_name, mut_rt) = match &mut_param.kind {
+            CmParamKind::MutArrayPtr {
+                len_param,
+                c_element_type,
+            } => (len_param.clone(), c_elem_rust_type(c_element_type)),
             _ => unreachable!(),
         };
 
@@ -1122,7 +1144,7 @@ fn render_c_entry_wrapper(entry: &ExportedFn) -> String {
         let call_expr = format!("(*{sym_name})({})", call_args_for_closure.join(", "));
 
         out.push_str(&format!(
-            "    args[{mut_arg_idx}].with_any_mut(|v: &mut Vec<[f32; 2]>| {{\n"
+            "    args[{mut_arg_idx}].with_any_mut(|v: &mut Vec<{mut_rt}>| {{\n"
         ));
         out.push_str(&format!("        unsafe {{ {call_expr}; }}\n"));
         out.push_str("    }).unwrap_or_else(|| panic!(\"");
@@ -1152,15 +1174,16 @@ fn render_c_entry_wrapper(entry: &ExportedFn) -> String {
                 out.push_str("    CmTypes::from_any(OpaqueHandle(__raw))\n");
             }
             CmRet::AllocatedArray {
-                c_element_type: _,
+                c_element_type,
                 len_from_param,
                 free_fn,
             } => {
+                let rt = c_elem_rust_type(c_element_type);
                 out.push_str(&format!(
-                    "    let __raw = unsafe {{ {call_expr} }} as *const [f32; 2];\n"
+                    "    let __raw = unsafe {{ {call_expr} }} as *const {rt};\n"
                 ));
                 out.push_str(&format!(
-                    "    let __vec: Vec<[f32; 2]> = unsafe {{ std::slice::from_raw_parts(__raw, {len_from_param}) }}.to_vec();\n"
+                    "    let __vec: Vec<{rt}> = unsafe {{ std::slice::from_raw_parts(__raw, {len_from_param}) }}.to_vec();\n"
                 ));
                 if let Some(ref ff) = free_fn {
                     let free_sym = format!("{}_SYM", ff.to_uppercase());
