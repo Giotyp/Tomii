@@ -284,46 +284,80 @@ class Graph:
         """
         import os as _os
         from ._runner import run as _run
+        from ._builder import check_interpreter_match as _check_interp
         if dylib is None:
             if self._build_result is None:
                 raise RuntimeError(
                     "No dylib specified and build() has not been called. "
                     "Provide dylib= or call build() first."
                 )
+            _check_interp(self._build_result)
             dylib = self._build_result.dylib
 
         # Build environment for the bridge subprocess.
         # The Rust binary embeds Python via PyO3 without activating the running venv,
         # so we explicitly propagate the packages the current interpreter sees.
         import sys as _sys
+        import warnings as _warnings
         merged_env: Dict[str, str] = dict(env or {})
 
-        # PYTHONPATH: prepend (1) dirs containing @tomii.export modules (e.g. matcomp.py)
-        # and (2) the active venv's site-packages so the bridge finds the same packages
-        # (numpy, etc.) as this process.  Without (2) the bridge falls back to system
-        # dist-packages which may have incompatible versions.
+        # TOMII_PARENT_PYTHON: pass the real Python executable to the bridge so
+        # @tomii.procs() can spawn worker processes correctly even when
+        # sys.executable inside the Rust binary is not a Python interpreter.
+        merged_env["TOMII_PARENT_PYTHON"] = _sys.executable
+
+        # PYTHONPATH: prepend (1) dirs containing @tomii.export modules and
+        # (2) the full sys.path so the bridge sees the same packages as this
+        # process, regardless of venv layout (works with conda, Nix, pyenv, etc.).
+        # Callers can append extra dirs via TOMII_EXTRA_PYTHONPATH.
         existing = merged_env.get("PYTHONPATH") or _os.environ.get("PYTHONPATH", "")
+        script_dir = _os.path.dirname(_os.path.abspath(_sys.argv[0])) if _sys.argv else ""
         extra_parts: list = list(self._py_module_dirs)
-        extra_parts += [p for p in _sys.path if p and "site-packages" in p]
+        extra_parts += [
+            p for p in _sys.path
+            if p and p != script_dir
+        ]
+        extra_parts += [
+            p for p in _os.environ.get("TOMII_EXTRA_PYTHONPATH", "").split(_os.pathsep)
+            if p
+        ]
         if extra_parts:
-            extra = _os.pathsep.join(extra_parts)
+            extra = _os.pathsep.join(dict.fromkeys(extra_parts))  # dedup, preserve order
             merged_env["PYTHONPATH"] = f"{extra}{_os.pathsep}{existing}" if existing else extra
 
-        # LD_PRELOAD libpython with RTLD_GLOBAL so Python API symbols (e.g. PyObject_SelfIter)
-        # are globally visible when numpy's C extension (_multiarray_umath.so) is dlopen'd by
-        # the embedded interpreter.  Without this, the bridge dylib loads libpython RTLD_LOCAL
-        # and numpy's extension can't resolve Python symbols at import time.
-        import ctypes.util as _cu
-        _libpython = _cu.find_library(
-            f"python{_sys.version_info.major}.{_sys.version_info.minor}"
-        )
-        if _libpython:
-            _existing_preload = merged_env.get("LD_PRELOAD") or _os.environ.get("LD_PRELOAD", "")
-            merged_env["LD_PRELOAD"] = (
-                f"{_libpython}{_os.pathsep}{_existing_preload}"
-                if _existing_preload
-                else _libpython
+        # PYTHONHOME: ensure the embedded interpreter finds the correct stdlib and
+        # venv activation when running inside the Rust binary.
+        if _sys.prefix != _sys.exec_prefix:
+            merged_env["PYTHONHOME"] = f"{_sys.prefix}{_os.pathsep}{_sys.exec_prefix}"
+        else:
+            merged_env["PYTHONHOME"] = _sys.prefix
+
+        # LD_PRELOAD libpython (Linux only) — fallback for binaries built without
+        # --features embed-python.  Makes libpython symbols globally visible so
+        # numpy's C extension resolves them at dlopen time.
+        # Binaries built with embed-python link libpython directly and do not need this.
+        if _sys.platform == "linux":
+            import ctypes.util as _cu
+            _libpython = _cu.find_library(
+                f"python{_sys.version_info.major}.{_sys.version_info.minor}"
             )
+            if _libpython:
+                _existing_preload = merged_env.get("LD_PRELOAD") or _os.environ.get("LD_PRELOAD", "")
+                merged_env["LD_PRELOAD"] = (
+                    f"{_libpython}{_os.pathsep}{_existing_preload}"
+                    if _existing_preload
+                    else _libpython
+                )
+            else:
+                _warnings.warn(
+                    f"Could not locate libpython{_sys.version_info.major}.{_sys.version_info.minor} "
+                    "via ctypes.util.find_library — LD_PRELOAD fallback unavailable. "
+                    "NumPy symbol resolution may fail inside the bridge. "
+                    "Build Python with --enable-shared, or rebuild tomii-core with "
+                    "--features embed-python.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
 
         return _run(self, dylib=dylib, env=merged_env, **kwargs)
 

@@ -45,11 +45,18 @@ When to use tomii.procs()
 from __future__ import annotations
 
 import atexit
+import multiprocessing
 import os
+import sys
 from concurrent.futures import ProcessPoolExecutor
 from functools import wraps
 from typing import Any, Callable, Optional
 
+# Capture the real Python executable at import time.
+# When running inside the Tomii bridge the Rust binary replaces sys.executable;
+# TOMII_PARENT_PYTHON is set by Graph.run() to the original interpreter path so
+# spawned worker processes start as real Python, not the Rust binary.
+_PARENT_PYTHON: str = os.environ.get("TOMII_PARENT_PYTHON") or sys.executable
 
 # Single shared executor for the process — created lazily on first use.
 _executor: Optional[ProcessPoolExecutor] = None
@@ -62,7 +69,13 @@ def _get_executor(workers: Optional[int] = None) -> ProcessPoolExecutor:
     if _executor is None or _executor_workers != n:
         if _executor is not None:
             _executor.shutdown(wait=False)
-        _executor = ProcessPoolExecutor(max_workers=n)
+        # Always use the spawn start method so that:
+        # (1) behaviour is consistent across Linux (fork default) and macOS/Windows
+        # (2) _PARENT_PYTHON overrides sys.executable when running inside the bridge
+        #     (where sys.executable is the Rust binary, not a Python interpreter).
+        multiprocessing.set_executable(_PARENT_PYTHON)
+        ctx = multiprocessing.get_context("spawn")
+        _executor = ProcessPoolExecutor(max_workers=n, mp_context=ctx)
         _executor_workers = n
     return _executor
 

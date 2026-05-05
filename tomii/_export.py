@@ -10,18 +10,25 @@ so calling it directly from Python is completely unaffected.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
+
+
+class TomiiExportError(ValueError):
+    """Raised when @tomii.export is applied to a function that cannot be
+    re-imported by the embedded Python interpreter at runtime."""
 
 
 @dataclass
 class ExportMeta:
     fn: Callable
-    qualname: str   # e.g. "matcomp.generate_vector"
-    module: str     # e.g. "matcomp"
-    fn_name: str    # e.g. "generate_vector"
-    variadic: bool  # True → bridge uses py_call_void (list-of-results sink)
-    bridge: str     # bridge function name: "py_call_any" or "py_call_void"
+    qualname: str     # registry key, e.g. "matcomp.generate_vector"
+    module: str       # e.g. "matcomp"
+    fn_name: str      # e.g. "generate_vector"
+    py_qualname: str  # Python's __qualname__, e.g. "MyClass.method"
+    variadic: bool    # True → bridge uses py_call_void (list-of-results sink)
+    bridge: str       # bridge function name: "py_call_any" or "py_call_void"
 
 
 _TOMII_REGISTRY: dict[str, ExportMeta] = {}
@@ -52,9 +59,34 @@ def export(fn: Optional[Callable] = None, *, variadic: bool = False, name: Optio
         ``#[tomii_export(variadic)]`` on the Rust side.
     name:
         Override the registry key. Defaults to ``f"{module}.{fn.__name__}"``.
+
+    Raises
+    ------
+    TomiiExportError
+        If the function is defined in ``__main__``. The embedded interpreter
+        launched by the Tomii binary cannot import ``__main__`` to look up the
+        function; move it to an importable ``.py`` module instead.
     """
     def _wrap(f: Callable) -> Callable:
         mod = f.__module__
+
+        if mod == "__main__":
+            src = getattr(sys.modules.get("__main__"), "__file__", None)
+            location = f" (defined in {src!r})" if src else ""
+            raise TomiiExportError(
+                f"@tomii.export cannot be used on '{f.__qualname__}'{location} "
+                f"because it is defined in __main__, which the embedded interpreter "
+                f"cannot import by name.\n"
+                f"Move the function to a separate .py module and import it in your script:\n"
+                f"  # mymodule.py\n"
+                f"  import tomii\n"
+                f"  @tomii.export\n"
+                f"  def {f.__name__}(...):\n"
+                f"      ...\n"
+                f"  # your_script.py\n"
+                f"  from mymodule import {f.__name__}"
+            )
+
         fn_nm = f.__name__
         qualname = name or f"{mod}.{fn_nm}"
         bridge = "py_call_void" if variadic else "py_call_any"
@@ -63,6 +95,7 @@ def export(fn: Optional[Callable] = None, *, variadic: bool = False, name: Optio
             qualname=qualname,
             module=mod,
             fn_name=fn_nm,
+            py_qualname=f.__qualname__,
             variadic=variadic,
             bridge=bridge,
         )

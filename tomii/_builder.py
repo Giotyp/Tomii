@@ -28,10 +28,16 @@ class BuildConfig:
     python_interpreter: Optional[str] = None  # path to python executable; defaults to sys.executable
 
 
+class TomiiInterpreterMismatch(RuntimeError):
+    """Raised when the Python interpreter used to build the bridge differs
+    (in major.minor) from the interpreter running Graph.run()."""
+
+
 @dataclass
 class BuildResult:
     dylib: str   # Absolute path to compiled .so
     binary: str  # Absolute path to tomii binary
+    python_interpreter: Optional[str] = None  # interpreter used to build the bridge
 
 
 def find_workspace_root() -> Path:
@@ -294,7 +300,43 @@ def _build_python_plugin(config: BuildConfig) -> BuildResult:
             )
         binary = bundled
 
-    return BuildResult(dylib=dylib, binary=binary)
+    return BuildResult(dylib=dylib, binary=binary, python_interpreter=python_interp)
+
+
+def check_interpreter_match(build_result: BuildResult) -> None:
+    """Raise TomiiInterpreterMismatch if the build interpreter's major.minor
+    differs from the current sys.executable.
+
+    Only checks when build_result.python_interpreter is set (i.e. built via
+    app.build(python_plugin=True)) and differs from sys.executable.
+    """
+    build_interp = build_result.python_interpreter
+    if not build_interp or build_interp == sys.executable:
+        return
+
+    try:
+        result = subprocess.run(
+            [build_interp, "-c",
+             "import sys; vi=sys.version_info; print(vi.major, vi.minor)"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return  # can't probe — skip check
+        parts = result.stdout.strip().split()
+        if len(parts) != 2:
+            return
+        bld_major, bld_minor = int(parts[0]), int(parts[1])
+        cur = sys.version_info
+        if (bld_major, bld_minor) != (cur.major, cur.minor):
+            raise TomiiInterpreterMismatch(
+                f"Bridge was built with Python {bld_major}.{bld_minor} "
+                f"({build_interp!r}) but the current interpreter is "
+                f"Python {cur.major}.{cur.minor} ({sys.executable!r}).\n"
+                f"Rebuild with app.build(python_plugin=True) using the current "
+                f"interpreter, or pass python_interpreter=None to app.build()."
+            )
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        pass  # best-effort; don't block execution on probe failure
 
 
 def _warn_about_gil(python_interp: str) -> None:
