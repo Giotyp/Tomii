@@ -32,3 +32,6 @@ test_folder/**
 examples/**
 .worktrees/*
 .*
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml

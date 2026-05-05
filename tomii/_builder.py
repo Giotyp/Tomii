@@ -79,9 +79,11 @@ def _bridge_cache_dir() -> Path:
 
 def _bundled_binary() -> Optional[str]:
     """Return path to the pre-built tomii binary bundled with the wheel, or None."""
-    candidate = Path(__file__).resolve().parent / "_bin" / "main"
-    if candidate.exists():
-        return str(candidate)
+    bin_dir = Path(__file__).resolve().parent / "_bin"
+    for name in ("main.exe", "main") if sys.platform == "win32" else ("main",):
+        candidate = bin_dir / name
+        if candidate.exists():
+            return str(candidate)
     return None
 
 

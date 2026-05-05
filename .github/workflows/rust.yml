@@ -21,6 +21,12 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      # Bridge crate (workspace member) uses PyO3 — Python headers required.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -32,6 +38,40 @@ jobs:
 
       - name: Build documentation
         run: cargo doc --no-deps
+
+  maturin-smoke:
+    name: Packaging smoke test
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install maturin
+        run: pip install "maturin>=1.7,<2"
+
+      - name: Build wheel
+        run: maturin build --release
+
+      - name: Verify wheel structure
+        run: |
+          python - <<'EOF'
+          import zipfile, glob
+          whl = glob.glob("target/wheels/*.whl")[0]
+          names = [n for n in zipfile.ZipFile(whl).namelist() if not n.endswith("/")]
+          so = [n for n in names if "tomii_python_bridge" in n and n.endswith(".so")]
+          assert so, f"Bridge .so missing. Contents: {names}"
+          assert so[0].startswith("tomii/_lib/"), f"Bridge at unexpected path: {so[0]}"
+          print(f"OK: {so[0]}")
+          EOF
 
   verify:
     runs-on: ubuntu-latest
