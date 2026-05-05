@@ -23,18 +23,20 @@ class TomiiExportError(ValueError):
 @dataclass
 class ExportMeta:
     fn: Callable
-    qualname: str     # registry key, e.g. "matcomp.generate_vector"
-    module: str       # e.g. "matcomp"
-    fn_name: str      # e.g. "generate_vector"
+    qualname: str  # registry key, e.g. "matcomp.generate_vector"
+    module: str  # e.g. "matcomp"
+    fn_name: str  # e.g. "generate_vector"
     py_qualname: str  # Python's __qualname__, e.g. "MyClass.method"
-    variadic: bool    # True → bridge uses py_call_void (list-of-results sink)
-    bridge: str       # bridge function name: "py_call_any" or "py_call_void"
+    variadic: bool  # True → bridge uses py_call_void (list-of-results sink)
+    bridge: str  # bridge function name: "py_call_any" or "py_call_void"
 
 
 _TOMII_REGISTRY: dict[str, ExportMeta] = {}
 
 
-def export(fn: Optional[Callable] = None, *, variadic: bool = False, name: Optional[str] = None) -> Any:
+def export(
+    fn: Optional[Callable] = None, *, variadic: bool = False, name: Optional[str] = None
+) -> Any:
     """Mark a Python function as a Tomii-callable node body.
 
     Analogous to Rust's #[tomii_export]. The decorated function is registered
@@ -67,6 +69,7 @@ def export(fn: Optional[Callable] = None, *, variadic: bool = False, name: Optio
         launched by the Tomii binary cannot import ``__main__`` to look up the
         function; move it to an importable ``.py`` module instead.
     """
+
     def _wrap(f: Callable) -> Callable:
         mod = f.__module__
 

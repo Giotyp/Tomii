@@ -27,7 +27,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Check formatting
+      - name: Install ruff
+        run: pip install "ruff>=0.4"
+
+      - name: Check Python formatting
+        run: ruff format --check tomii/
+
+      - name: Check Rust formatting
         run: cargo fmt --check
 
       - name: Clippy (deny warnings)

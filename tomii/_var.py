@@ -20,13 +20,9 @@ class Var:
         factor: Optional[Union[int, "Var"]] = None,
     ) -> None:
         if value is None and func is None:
-            raise ValueError(
-                f"Var '{name}': must provide either 'value' or 'func'."
-            )
+            raise ValueError(f"Var '{name}': must provide either 'value' or 'func'.")
         if value is not None and func is not None:
-            raise ValueError(
-                f"Var '{name}': cannot specify both 'value' and 'func'."
-            )
+            raise ValueError(f"Var '{name}': cannot specify both 'value' and 'func'.")
         self.name = name
         self.value = value
         self.func = func

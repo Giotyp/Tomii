@@ -113,6 +113,7 @@ def procs(workers: Optional[int] = None):
     For very large arrays (> ~50 MB), consider ``multiprocessing.shared_memory``
     inside your function body instead.
     """
+
     def decorator(fn: Callable) -> Callable:
         executor = _get_executor(workers)
 
@@ -123,4 +124,5 @@ def procs(workers: Optional[int] = None):
             return future.result()  # blocks with GIL released
 
         return wrapper
+
     return decorator

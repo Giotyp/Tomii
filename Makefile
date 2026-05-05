@@ -1,4 +1,4 @@
-.PHONY: schema test lint wheel wheel-sdist
+.PHONY: schema test lint fmt fmt-check wheel wheel-sdist
 
 # Temp stubs used only during schema generation — not baked into any build
 _SCHEMA_WRAP := /tmp/_ss_schema_wrap.rs
@@ -25,8 +25,19 @@ schema:
 test:
 	python -m pytest tomii/tests/ -v
 
-## lint: Type-check the Python package
+## fmt: Format all Python and Rust source in-place
+fmt:
+	ruff format tomii/
+	cargo fmt
+
+## fmt-check: Check formatting without modifying files (used in CI)
+fmt-check:
+	ruff format --check tomii/
+	cargo fmt --check
+
+## lint: Check formatting and type-check the Python package
 lint:
+	ruff format --check tomii/
 	python -m mypy tomii/
 
 ## wheel: Build a release wheel for the current interpreter.

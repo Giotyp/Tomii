@@ -61,13 +61,17 @@ def generate_python(graph_data: dict) -> str:
                 kwargs.append(f"factor={_factor_expr(factor, var_names)}")
 
             if func:
-                lines.append(f"    {_pyname(name)} = app.var({name!r}, {', '.join(kwargs)})")
+                lines.append(
+                    f"    {_pyname(name)} = app.var({name!r}, {', '.join(kwargs)})"
+                )
             else:
                 # positional value is first, rest are kwargs
                 val_arg = kwargs[0] if kwargs else "None"
                 rest = kwargs[1:]
                 rest_str = (", " + ", ".join(rest)) if rest else ""
-                lines.append(f"    {_pyname(name)} = app.var({name!r}, {val_arg}{rest_str})")
+                lines.append(
+                    f"    {_pyname(name)} = app.var({name!r}, {val_arg}{rest_str})"
+                )
         lines.append("")
 
     # Build node name → Python identifier map
@@ -98,6 +102,7 @@ def generate_python(graph_data: dict) -> str:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _pyname(name: str) -> str:
     """Convert a graph name to a safe Python identifier (replace hyphens)."""
@@ -159,7 +164,9 @@ def _encode_init_args(args: list[dict], var_names: set[str]) -> str:
     return ", ".join(parts)
 
 
-def _encode_arg(arg: dict, node_pynames: dict[str, str], var_names: set[str]) -> Optional[str]:
+def _encode_arg(
+    arg: dict, node_pynames: dict[str, str], var_names: set[str]
+) -> Optional[str]:
     """Encode a single ArgJson dict as a Python expression. Returns None to skip."""
     type_ = arg.get("type", "")
     value = arg.get("value")
@@ -176,7 +183,11 @@ def _encode_arg(arg: dict, node_pynames: dict[str, str], var_names: set[str]) ->
 
         method = {"$res": "out", "$dep": "dep", "$barrier": "wait"}[type_]
         index_args = _format_indexes(indexes, var_names)
-        gb_kw = f", group_by={_factor_expr(group_by, var_names)}" if group_by is not None else ""
+        gb_kw = (
+            f", group_by={_factor_expr(group_by, var_names)}"
+            if group_by is not None
+            else ""
+        )
         return f"{src_py}.{method}({index_args}{gb_kw})"
 
     # Literal type
@@ -215,7 +226,9 @@ def _format_indexes(indexes: str, var_names: set[str]) -> str:
     return indexes.strip()
 
 
-def _encode_condition(cond: dict, node_pynames: dict[str, str], var_names: set[str]) -> str:
+def _encode_condition(
+    cond: dict, node_pynames: dict[str, str], var_names: set[str]
+) -> str:
     """Encode a NodeConditionJson dict as a Condition(...) expression."""
     op = cond.get("operation", "Eq")
     val = cond.get("value", "")
@@ -233,7 +246,11 @@ def _encode_condition(cond: dict, node_pynames: dict[str, str], var_names: set[s
     else:
         val_repr = repr(val)
 
-    args_exprs = [e for a in args_raw if (e := _encode_arg(a, node_pynames, var_names)) is not None]
+    args_exprs = [
+        e
+        for a in args_raw
+        if (e := _encode_arg(a, node_pynames, var_names)) is not None
+    ]
     args_str = f"[{', '.join(args_exprs)}]" if args_exprs else "[]"
 
     return (
@@ -247,7 +264,7 @@ def _encode_loop(loop: dict, var_names: set[str]) -> str:
     name = loop.get("name", "")
     factor = loop.get("factor")
     factor_expr = _factor_expr(factor, var_names) if factor is not None else "1"
-    return f'Loop(name={name!r}, factor={factor_expr})'
+    return f"Loop(name={name!r}, factor={factor_expr})"
 
 
 def _append_node(
@@ -290,7 +307,8 @@ def _append_node(
 
     if loop_args_raw:
         loop_args_exprs = [
-            e for a in loop_args_raw
+            e
+            for a in loop_args_raw
             if (e := _encode_arg(a, node_pynames, var_names)) is not None
         ]
         kwargs.append(f"loop_args=[{', '.join(loop_args_exprs)}]")
@@ -299,7 +317,8 @@ def _append_node(
         kwargs.append(f"condition={_encode_condition(cond, node_pynames, var_names)}")
 
     args_exprs = [
-        e for a in args_raw
+        e
+        for a in args_raw
         if (e := _encode_arg(a, node_pynames, var_names)) is not None
     ]
     if args_exprs:

@@ -82,10 +82,12 @@ def visualize(
 
     if mode == "ascii":
         from ._ascii import print_graph
+
         print_graph(viz)
 
     elif mode == "web":
         from ._server import serve
+
         serve(
             viz,
             port=port,

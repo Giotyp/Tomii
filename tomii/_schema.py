@@ -15,9 +15,18 @@ def graph_schema() -> dict:
                 "description": "Define an initialization variable (computed once before streaming begins).",
                 "parameters": {
                     "name": {"type": "str", "description": "Unique node name"},
-                    "func": {"type": "str", "description": "Plugin function name (optional; use value= for constants)"},
-                    "args": {"type": "list", "description": "Arguments to pass to func (see arg_types)"},
-                    "factor": {"type": "int | Var", "description": "Number of instances to create (for vectorized inits)"},
+                    "func": {
+                        "type": "str",
+                        "description": "Plugin function name (optional; use value= for constants)",
+                    },
+                    "args": {
+                        "type": "list",
+                        "description": "Arguments to pass to func (see arg_types)",
+                    },
+                    "factor": {
+                        "type": "int | Var",
+                        "description": "Number of instances to create (for vectorized inits)",
+                    },
                 },
                 "returns": "Var — a handle that can be referenced in node args via $ref",
             },
@@ -26,7 +35,10 @@ def graph_schema() -> dict:
                 "parameters": {
                     "name": {"type": "str", "description": "Unique node name"},
                     "func": {"type": "str", "description": "Plugin function name"},
-                    "args": {"type": "list", "description": "Arguments to pass to func (see arg_types)"},
+                    "args": {
+                        "type": "list",
+                        "description": "Arguments to pass to func (see arg_types)",
+                    },
                     "factor": {
                         "type": "int | Var",
                         "description": (

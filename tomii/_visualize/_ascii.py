@@ -17,15 +17,15 @@ _LARROW = "◄"
 _BOX_W = 28
 
 _EDGE_SYMBOLS = {
-    "res":     "→",
-    "dep":     "⇢",    # dashed feel
+    "res": "→",
+    "dep": "⇢",  # dashed feel
     "barrier": "⟹",
 }
 
 _KIND_BADGE = {
     "conditional": "[cond]",
-    "post":        "[post]",
-    "compute":     "",
+    "post": "[post]",
+    "compute": "",
 }
 
 
@@ -83,7 +83,7 @@ def _box(node: VizNode, width: int = _BOX_W) -> List[str]:
 
     # Build box
     inner_w = max(width, max(len(l) for l in lines))
-    top    = _TL + _H * (inner_w + 2) + _TR
+    top = _TL + _H * (inner_w + 2) + _TR
     bottom = _BL + _H * (inner_w + 2) + _BR
     rows = [top]
     for l in lines:
@@ -226,7 +226,9 @@ def render(viz: VizGraph) -> str:
                 if out_edges:
                     inner_w = box_w + 2
                     center_pos = inner_w // 2
-                    arrow_line += " " * (center_pos) + "│" + " " * (inner_w - center_pos) + "    "
+                    arrow_line += (
+                        " " * (center_pos) + "│" + " " * (inner_w - center_pos) + "    "
+                    )
                 else:
                     arrow_line += " " * (box_w + 6)
             if arrow_line.strip():

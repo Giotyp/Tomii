@@ -88,23 +88,39 @@ class TestMatrixComputeGraph:
         assert len(self.got["nodes"]) == len(self.ref["nodes"])
 
     def test_buf_size_init(self):
-        got_init = next(i for i in self.got["initializations"] if i["name"] == "buf_size")
-        ref_init = next(i for i in self.ref["initializations"] if i["name"] == "buf_size")
+        got_init = next(
+            i for i in self.got["initializations"] if i["name"] == "buf_size"
+        )
+        ref_init = next(
+            i for i in self.ref["initializations"] if i["name"] == "buf_size"
+        )
         assert got_init == ref_init
 
     def test_num_nodes_init(self):
-        got_init = next(i for i in self.got["initializations"] if i["name"] == "num_nodes")
-        ref_init = next(i for i in self.ref["initializations"] if i["name"] == "num_nodes")
+        got_init = next(
+            i for i in self.got["initializations"] if i["name"] == "num_nodes"
+        )
+        ref_init = next(
+            i for i in self.ref["initializations"] if i["name"] == "num_nodes"
+        )
         assert got_init == ref_init
 
     def test_fft_planner_init(self):
-        got_init = next(i for i in self.got["initializations"] if i["name"] == "fft_planner")
-        ref_init = next(i for i in self.ref["initializations"] if i["name"] == "fft_planner")
+        got_init = next(
+            i for i in self.got["initializations"] if i["name"] == "fft_planner"
+        )
+        ref_init = next(
+            i for i in self.ref["initializations"] if i["name"] == "fft_planner"
+        )
         assert got_init == ref_init
 
     def test_result_file_init(self):
-        got_init = next(i for i in self.got["initializations"] if i["name"] == "result_file")
-        ref_init = next(i for i in self.ref["initializations"] if i["name"] == "result_file")
+        got_init = next(
+            i for i in self.got["initializations"] if i["name"] == "result_file"
+        )
+        ref_init = next(
+            i for i in self.ref["initializations"] if i["name"] == "result_file"
+        )
         assert got_init == ref_init
 
     def test_gen_vec_node(self):

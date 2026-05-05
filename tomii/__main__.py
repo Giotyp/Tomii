@@ -12,6 +12,7 @@ Usage:
     python -m tomii --visualize graph.json --ascii  # terminal ASCII art
     python -m tomii --visualize graph.json --port 8080  # custom port
 """
+
 import json
 import sys
 
@@ -27,12 +28,15 @@ def main() -> None:
         print(json.dumps(list_knobs_json(), indent=2))
     elif "--schema" in args:
         from ._schema import graph_schema
+
         print(json.dumps(graph_schema(), indent=2))
     elif "--visualize" in args:
         _cmd_visualize(args)
     else:
         print(f"Unknown argument(s): {args}")
-        print("Usage: python -m tomii [--list-knobs | --list-knobs-json | --schema | --visualize <graph.json> | --help]")
+        print(
+            "Usage: python -m tomii [--list-knobs | --list-knobs-json | --schema | --visualize <graph.json> | --help]"
+        )
         sys.exit(1)
 
 
@@ -47,7 +51,9 @@ def _cmd_visualize(args: list) -> None:
         graph_path = args[idx + 1]
 
     if graph_path is None:
-        print("Usage: python -m tomii --visualize <graph.json> [--edit] [--ascii] [--port N]")
+        print(
+            "Usage: python -m tomii --visualize <graph.json> [--edit] [--ascii] [--port N]"
+        )
         sys.exit(1)
 
     mode = "web"

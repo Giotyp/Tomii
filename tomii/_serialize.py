@@ -34,6 +34,7 @@ from ._var import Var
 # Internal helpers
 # --------------------------------------------------------------------------- #
 
+
 def _factor(f: Any) -> Optional[Factor]:
     """Convert int or Var to a Factor (Union[int, str])."""
     if f is None:
@@ -194,6 +195,7 @@ def _network(config: dict) -> NetworkConfigJson:
 # --------------------------------------------------------------------------- #
 # Public API (preserved for test compatibility)
 # --------------------------------------------------------------------------- #
+
 
 def serialize_arg(arg: Any) -> dict:
     """Convert a single argument to its JSON DSL dict representation."""

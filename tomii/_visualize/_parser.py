@@ -11,25 +11,25 @@ from typing import Any, List, Optional
 @dataclass
 class VizNode:
     id: str
-    label: str          # display label shown in renderers
-    kind: str           # "compute" | "post" | "conditional"
+    label: str  # display label shown in renderers
+    kind: str  # "compute" | "post" | "conditional"
     function: str
     factor: Optional[str] = None
     priority: Optional[str] = None
     group_size: Optional[str] = None
     has_loop: bool = False
     condition_summary: Optional[str] = None  # e.g. "check_bool == true"
-    raw: Optional[dict] = None               # original graph JSON dict for round-trip editing
+    raw: Optional[dict] = None  # original graph JSON dict for round-trip editing
 
 
 @dataclass
 class VizEdge:
-    source: str         # predecessor node name
-    target: str         # successor node name
-    edge_type: str      # "res" | "dep" | "barrier"
+    source: str  # predecessor node name
+    target: str  # successor node name
+    edge_type: str  # "res" | "dep" | "barrier"
     indexes: str = "0"
     group_by: Optional[str] = None
-    label: str = ""     # rendered label (edge_type + indexes)
+    label: str = ""  # rendered label (edge_type + indexes)
 
 
 @dataclass
@@ -52,6 +52,7 @@ class VizGraph:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _factor_str(f: Any) -> Optional[str]:
     if f is None:
@@ -87,14 +88,16 @@ def _edges_from_args(args: list, target_name: str) -> List[VizEdge]:
             label_parts.append(f"grp={group_by}")
         label = " ".join(label_parts)
 
-        edges.append(VizEdge(
-            source=source,
-            target=target_name,
-            edge_type=edge_type,
-            indexes=str(indexes),
-            group_by=str(group_by) if group_by is not None else None,
-            label=label,
-        ))
+        edges.append(
+            VizEdge(
+                source=source,
+                target=target_name,
+                edge_type=edge_type,
+                indexes=str(indexes),
+                group_by=str(group_by) if group_by is not None else None,
+                label=label,
+            )
+        )
 
     return edges
 
@@ -110,6 +113,7 @@ def _condition_summary(cond: dict) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def parse_json_file(path: str | Path) -> VizGraph:
     """Parse a Τομί JSON graph file into a VizGraph."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -119,6 +123,7 @@ def parse_json_file(path: str | Path) -> VizGraph:
 def parse_graph(graph: Any) -> VizGraph:
     """Parse a live tomii.Graph object into a VizGraph."""
     from .._serialize import serialize_graph
+
     data = serialize_graph(graph)
     return _parse_dict(data)
 
@@ -131,12 +136,14 @@ def _parse_dict(data: dict) -> VizGraph:
         val = None
         if init.get("args"):
             val = init["args"][0].get("value")
-        viz.init_vars.append(VizInitVar(
-            name=init["name"],
-            value=val,
-            function=init.get("function"),
-            raw=init,
-        ))
+        viz.init_vars.append(
+            VizInitVar(
+                name=init["name"],
+                value=val,
+                function=init.get("function"),
+                raw=init,
+            )
+        )
 
     # Compute nodes
     node_names: set[str] = set()
@@ -154,18 +161,20 @@ def _parse_dict(data: dict) -> VizGraph:
         if priority:
             label_parts.append(f"[{priority}]")
 
-        viz.nodes.append(VizNode(
-            id=name,
-            label=" | ".join(label_parts),
-            kind="conditional" if has_cond else "compute",
-            function=node["function"],
-            factor=factor,
-            priority=priority,
-            group_size=_factor_str(node.get("group_size")),
-            has_loop=node.get("loop") is not None,
-            condition_summary=_condition_summary(cond) if cond else None,
-            raw=node,
-        ))
+        viz.nodes.append(
+            VizNode(
+                id=name,
+                label=" | ".join(label_parts),
+                kind="conditional" if has_cond else "compute",
+                function=node["function"],
+                factor=factor,
+                priority=priority,
+                group_size=_factor_str(node.get("group_size")),
+                has_loop=node.get("loop") is not None,
+                condition_summary=_condition_summary(cond) if cond else None,
+                raw=node,
+            )
+        )
 
         # Edges from main args
         viz.edges.extend(_edges_from_args(node.get("args", []), name))
@@ -184,14 +193,16 @@ def _parse_dict(data: dict) -> VizGraph:
         if factor:
             label_parts.append(f"f={factor}")
 
-        viz.nodes.append(VizNode(
-            id=name,
-            label=" ".join(label_parts),
-            kind="post",
-            function=node["function"],
-            factor=factor,
-            raw=node,
-        ))
+        viz.nodes.append(
+            VizNode(
+                id=name,
+                label=" ".join(label_parts),
+                kind="post",
+                function=node["function"],
+                factor=factor,
+                raw=node,
+            )
+        )
         viz.edges.extend(_edges_from_args(node.get("args", []), name))
         viz.has_post_nodes = True
 

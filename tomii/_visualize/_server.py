@@ -70,7 +70,7 @@ def serve(
     viz: VizGraph,
     port: Optional[int] = None,
     open_browser: bool = True,
-    editor_mode: str = "view",   # "view" | "edit" | "create"
+    editor_mode: str = "view",  # "view" | "edit" | "create"
     save_path: Optional[str] = None,
 ) -> None:
     """Serve the graph visualizer/editor on localhost.
@@ -96,8 +96,7 @@ def serve(
     graph_json = json.dumps(_viz_to_dict(viz))
     template = _html_template()
     html = (
-        template
-        .replace("{{GRAPH_DATA}}", graph_json)
+        template.replace("{{GRAPH_DATA}}", graph_json)
         .replace("{{EDITOR_MODE}}", editor_mode)
         .replace("{{SAVE_PATH}}", save_path or "")
     )
@@ -147,6 +146,7 @@ def serve(
         def _handle_export_python(self, body: bytes) -> None:
             try:
                 from ._codegen import generate_python
+
                 data = json.loads(body)
                 code = generate_python(data)
                 code_bytes = code.encode("utf-8")

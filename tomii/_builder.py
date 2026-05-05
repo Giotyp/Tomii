@@ -25,7 +25,9 @@ class BuildConfig:
     env: Dict[str, str] = field(default_factory=dict)
     # Python bridge options
     python_plugin: bool = False
-    python_interpreter: Optional[str] = None  # path to python executable; defaults to sys.executable
+    python_interpreter: Optional[str] = (
+        None  # path to python executable; defaults to sys.executable
+    )
 
 
 class TomiiInterpreterMismatch(RuntimeError):
@@ -35,7 +37,7 @@ class TomiiInterpreterMismatch(RuntimeError):
 
 @dataclass
 class BuildResult:
-    dylib: str   # Absolute path to compiled .so
+    dylib: str  # Absolute path to compiled .so
     binary: str  # Absolute path to tomii binary
     python_interpreter: Optional[str] = None  # interpreter used to build the bridge
 
@@ -180,7 +182,11 @@ def build(config: BuildConfig) -> BuildResult:
     if config.clean:
         _cargo(["clean", "-p", "tomii-core"], build_env, workspace)
 
-    _cargo(["build", "-p", "tomii-core", "--bin", "main"] + release_flag, build_env, workspace)
+    _cargo(
+        ["build", "-p", "tomii-core", "--bin", "main"] + release_flag,
+        build_env,
+        workspace,
+    )
     _cargo(["build", "-p", "tomii-types"] + release_flag, build_env, workspace)
 
     binary = _find_binary_in_workspace(workspace, profile)
@@ -207,8 +213,7 @@ def _find_binary_in_workspace(workspace: Path, profile: str) -> str:
     if binary.exists():
         return str(binary.resolve())
     raise BuildError(
-        f"tomii binary not found at {binary}. "
-        "Did tomii-core build successfully?"
+        f"tomii binary not found at {binary}. Did tomii-core build successfully?"
     )
 
 
@@ -278,7 +283,13 @@ def _build_python_plugin(config: BuildConfig) -> BuildResult:
         # Build bridge plugin ------------------------------------------------- #
         if config.clean:
             _cargo(
-                ["clean", "--manifest-path", manifest_path, "--target-dir", str(target_dir)],
+                [
+                    "clean",
+                    "--manifest-path",
+                    manifest_path,
+                    "--target-dir",
+                    str(target_dir),
+                ],
                 build_env,
                 workspace,
             )
@@ -302,7 +313,11 @@ def _build_python_plugin(config: BuildConfig) -> BuildResult:
         build_env.pop("REG_PATH", None)
         if config.clean:
             _cargo(["clean", "-p", "tomii-core"], build_env, workspace)
-        _cargo(["build", "-p", "tomii-core", "--bin", "main"] + release_flag, build_env, workspace)
+        _cargo(
+            ["build", "-p", "tomii-core", "--bin", "main"] + release_flag,
+            build_env,
+            workspace,
+        )
         _cargo(["build", "-p", "tomii-types"] + release_flag, build_env, workspace)
         binary = _find_binary_in_workspace(workspace, profile)
     else:
@@ -338,9 +353,14 @@ def check_interpreter_match(build_result: BuildResult) -> None:
 
     try:
         result = subprocess.run(
-            [build_interp, "-c",
-             "import sys; vi=sys.version_info; print(vi.major, vi.minor)"],
-            capture_output=True, text=True, timeout=5,
+            [
+                build_interp,
+                "-c",
+                "import sys; vi=sys.version_info; print(vi.major, vi.minor)",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode != 0:
             return  # can't probe — skip check
@@ -364,11 +384,16 @@ def check_interpreter_match(build_result: BuildResult) -> None:
 def _warn_about_gil(python_interp: str) -> None:
     """Print a one-time advisory if the interpreter has the GIL."""
     import subprocess as sp
+
     try:
         out = sp.check_output(
-            [python_interp, "-c",
-             "import sys; print(getattr(sys, '_is_gil_enabled', lambda: True)())"],
-            stderr=sp.DEVNULL, text=True,
+            [
+                python_interp,
+                "-c",
+                "import sys; print(getattr(sys, '_is_gil_enabled', lambda: True)())",
+            ],
+            stderr=sp.DEVNULL,
+            text=True,
         ).strip()
         if out.lower() == "true":
             print(

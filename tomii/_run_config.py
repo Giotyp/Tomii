@@ -1,4 +1,5 @@
 """Runtime configuration for the Τομί executor binary."""
+
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -13,7 +14,7 @@ class RunConfig:
     receiver_threads: int = 1
     slots: int = 1
     max_streams: int = 1
-    max_runtime: int = 0          # 0 = no limit
+    max_runtime: int = 0  # 0 = no limit
     # ── Scheduler ────────────────────────────────────────────────────────────
     fifo: bool = False
     custom: bool = False
@@ -42,27 +43,47 @@ class RunConfig:
     def to_args(self, json: str, dylib: str) -> List[str]:
         """Convert to CLI argument list for the tomii binary."""
         args = [
-            "--json", json,
-            "--dylib", dylib,
-            "--workers", str(self.workers),
-            "--core-offset", str(self.core_offset),
-            "--system-threads", str(self.system_threads),
-            "--receiver-threads", str(self.receiver_threads),
-            "--slots", str(self.slots),
-            "--max-streams", str(self.max_streams),
-            "--max-runtime", str(self.max_runtime),
-            "--batching-size", str(self.batching_size),
-            "--batching-limit", str(self.batching_limit),
-            "--exclude-streams", str(self.exclude_streams),
+            "--json",
+            json,
+            "--dylib",
+            dylib,
+            "--workers",
+            str(self.workers),
+            "--core-offset",
+            str(self.core_offset),
+            "--system-threads",
+            str(self.system_threads),
+            "--receiver-threads",
+            str(self.receiver_threads),
+            "--slots",
+            str(self.slots),
+            "--max-streams",
+            str(self.max_streams),
+            "--max-runtime",
+            str(self.max_runtime),
+            "--batching-size",
+            str(self.batching_size),
+            "--batching-limit",
+            str(self.batching_limit),
+            "--exclude-streams",
+            str(self.exclude_streams),
             # Tuning knobs
-            "--batch-queue-capacity", str(self.batch_queue_capacity),
-            "--spin-iterations", str(self.spin_iterations),
-            "--sched-flush-threshold", str(self.sched_flush_threshold),
-            "--socket-recv-buf-bytes", str(self.socket_recv_buf_bytes),
-            "--recv-pool-size", str(self.recv_pool_size),
-            "--spin-wait-spin-iters", str(self.spin_wait_spin_iters),
-            "--spin-wait-yield-iters", str(self.spin_wait_yield_iters),
-            "--spin-wait-park-ns", str(self.spin_wait_park_ns),
+            "--batch-queue-capacity",
+            str(self.batch_queue_capacity),
+            "--spin-iterations",
+            str(self.spin_iterations),
+            "--sched-flush-threshold",
+            str(self.sched_flush_threshold),
+            "--socket-recv-buf-bytes",
+            str(self.socket_recv_buf_bytes),
+            "--recv-pool-size",
+            str(self.recv_pool_size),
+            "--spin-wait-spin-iters",
+            str(self.spin_wait_spin_iters),
+            "--spin-wait-yield-iters",
+            str(self.spin_wait_yield_iters),
+            "--spin-wait-park-ns",
+            str(self.spin_wait_park_ns),
         ]
         if self.fifo:
             args.append("--fifo")

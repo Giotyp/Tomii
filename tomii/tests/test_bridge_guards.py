@@ -6,6 +6,7 @@ Covers:
   - Graph.run() env block sets TOMII_PARENT_PYTHON, PYTHONHOME, and a
     widened PYTHONPATH that includes non-site-packages sys.path entries
 """
+
 from __future__ import annotations
 
 import sys
@@ -26,8 +27,10 @@ from tomii._export import TomiiExportError, _TOMII_REGISTRY
 # @tomii.export guards
 # --------------------------------------------------------------------------- #
 
+
 def test_export_main_raises():
     """Functions defined in __main__ must raise TomiiExportError."""
+
     def fake_main_fn():
         pass
 
@@ -41,6 +44,7 @@ def test_export_main_raises():
 
 def test_export_main_error_message_includes_qualname():
     """Error message should mention the function's qualified name."""
+
     def my_func():
         pass
 
@@ -54,6 +58,7 @@ def test_export_main_error_message_includes_qualname():
 
 def test_export_module_function_succeeds():
     """Functions from a proper module (not __main__) register without error."""
+
     def real_fn():
         pass
 
@@ -75,6 +80,7 @@ def test_export_module_function_succeeds():
 
 def test_export_stores_py_qualname():
     """ExportMeta.py_qualname holds f.__qualname__, not the registry key."""
+
     def nested():
         pass
 
@@ -94,9 +100,13 @@ def test_export_stores_py_qualname():
 # Graph.run() environment block
 # --------------------------------------------------------------------------- #
 
-def _make_minimal_graph_with_build_result(dylib: str = "/fake/bridge.so") -> tomii.Graph:
+
+def _make_minimal_graph_with_build_result(
+    dylib: str = "/fake/bridge.so",
+) -> tomii.Graph:
     """Return a Graph with a fake build result pointing at a given dylib."""
     from tomii._builder import BuildResult
+
     app = tomii.Graph()
     app._build_result = BuildResult(
         dylib=dylib,
@@ -115,9 +125,15 @@ def _capture_run_env(app: tomii.Graph) -> dict:
         # Return a mock CompletedProcess so callers don't crash
         return mock.MagicMock()
 
-    with mock.patch("tomii._graph._run" if hasattr(tomii._graph, "_run") else "tomii._runner.run",
-                    side_effect=fake_run), \
-         mock.patch("tomii._runner.run", side_effect=fake_run):
+    with (
+        mock.patch(
+            "tomii._graph._run"
+            if hasattr(tomii._graph, "_run")
+            else "tomii._runner.run",
+            side_effect=fake_run,
+        ),
+        mock.patch("tomii._runner.run", side_effect=fake_run),
+    ):
         try:
             app.run()
         except Exception:

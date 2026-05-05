@@ -13,6 +13,7 @@ class Loop:
         name:   Loop name (used as the loop key in JSON).
         factor: Number of loop iterations (int or Var).
     """
+
     name: str
     factor: Union[int, Any]  # int or Var
 
@@ -28,6 +29,7 @@ class Condition:
         func:       Plugin function that returns the condition value.
         args:       Arguments passed to ``func``.
     """
+
     operation: str
     value: Any
     value_type: str
@@ -43,5 +45,6 @@ class IndexFunc:
         function: Plugin function name.
         args:     Arguments passed to the function.
     """
+
     function: str
     args: List[Any] = field(default_factory=list)

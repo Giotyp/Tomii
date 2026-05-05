@@ -24,7 +24,7 @@ class Graph:
         self._names: set = set()
         self._build_result: Optional[Any] = None  # BuildResult, set after build()
         self._py_callable_vars: Dict[str, Var] = {}  # qualname → Var for dedup
-        self._py_module_dirs: List[str] = []        # dirs to prepend to PYTHONPATH at run()
+        self._py_module_dirs: List[str] = []  # dirs to prepend to PYTHONPATH at run()
 
     # ---------------------------------------------------------------------- #
     # Graph construction
@@ -175,6 +175,7 @@ class Graph:
 
         # Record the module's directory so run() can prepend it to PYTHONPATH -- #
         import sys as _sys
+
         module_obj = _sys.modules.get(meta.module)
         if module_obj and getattr(module_obj, "__file__", None):
             module_dir = str(Path(module_obj.__file__).resolve().parent)
@@ -255,6 +256,7 @@ class Graph:
         Returns a BuildResult with the path to the compiled .so.
         """
         from ._builder import BuildConfig, build as _build
+
         cfg = BuildConfig(
             func_path=func_path,
             wrap_path=wrap_path,
@@ -285,6 +287,7 @@ class Graph:
         import os as _os
         from ._runner import run as _run
         from ._builder import check_interpreter_match as _check_interp
+
         if dylib is None:
             if self._build_result is None:
                 raise RuntimeError(
@@ -299,6 +302,7 @@ class Graph:
         # so we explicitly propagate the packages the current interpreter sees.
         import sys as _sys
         import warnings as _warnings
+
         merged_env: Dict[str, str] = dict(env or {})
 
         # TOMII_PARENT_PYTHON: pass the real Python executable to the bridge so
@@ -311,19 +315,23 @@ class Graph:
         # process, regardless of venv layout (works with conda, Nix, pyenv, etc.).
         # Callers can append extra dirs via TOMII_EXTRA_PYTHONPATH.
         existing = merged_env.get("PYTHONPATH") or _os.environ.get("PYTHONPATH", "")
-        script_dir = _os.path.dirname(_os.path.abspath(_sys.argv[0])) if _sys.argv else ""
+        script_dir = (
+            _os.path.dirname(_os.path.abspath(_sys.argv[0])) if _sys.argv else ""
+        )
         extra_parts: list = list(self._py_module_dirs)
+        extra_parts += [p for p in _sys.path if p and p != script_dir]
         extra_parts += [
-            p for p in _sys.path
-            if p and p != script_dir
-        ]
-        extra_parts += [
-            p for p in _os.environ.get("TOMII_EXTRA_PYTHONPATH", "").split(_os.pathsep)
+            p
+            for p in _os.environ.get("TOMII_EXTRA_PYTHONPATH", "").split(_os.pathsep)
             if p
         ]
         if extra_parts:
-            extra = _os.pathsep.join(dict.fromkeys(extra_parts))  # dedup, preserve order
-            merged_env["PYTHONPATH"] = f"{extra}{_os.pathsep}{existing}" if existing else extra
+            extra = _os.pathsep.join(
+                dict.fromkeys(extra_parts)
+            )  # dedup, preserve order
+            merged_env["PYTHONPATH"] = (
+                f"{extra}{_os.pathsep}{existing}" if existing else extra
+            )
 
         # PYTHONHOME: ensure the embedded interpreter finds the correct stdlib and
         # venv activation when running inside the Rust binary.
@@ -338,11 +346,14 @@ class Graph:
         # Binaries built with embed-python link libpython directly and do not need this.
         if _sys.platform == "linux":
             import ctypes.util as _cu
+
             _libpython = _cu.find_library(
                 f"python{_sys.version_info.major}.{_sys.version_info.minor}"
             )
             if _libpython:
-                _existing_preload = merged_env.get("LD_PRELOAD") or _os.environ.get("LD_PRELOAD", "")
+                _existing_preload = merged_env.get("LD_PRELOAD") or _os.environ.get(
+                    "LD_PRELOAD", ""
+                )
                 merged_env["LD_PRELOAD"] = (
                     f"{_libpython}{_os.pathsep}{_existing_preload}"
                     if _existing_preload
@@ -416,6 +427,7 @@ class Graph:
             TCP port for the web server.
         """
         from ._visualize import visualize
+
         visualize(self, mode=mode, editable=editable, save_path=save_path, port=port)
 
     def _check_name(self, name: str) -> None:

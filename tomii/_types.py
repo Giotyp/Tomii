@@ -26,28 +26,30 @@ class TypedValue:
 # Scalar type wrappers
 # --------------------------------------------------------------------------- #
 
+
 def _scalar(type_name: str):
     def factory(value) -> TypedValue:
         return TypedValue(type_name, str(value))
+
     factory.__name__ = type_name
     factory.__qualname__ = type_name
     return factory
 
 
-usize   = _scalar("usize")
-isize   = _scalar("isize")
-i8      = _scalar("i8")
-i16     = _scalar("i16")
-i32     = _scalar("i32")
-i64     = _scalar("i64")
-i128    = _scalar("i128")
-u8      = _scalar("u8")
-u16     = _scalar("u16")
-u32     = _scalar("u32")
-u64     = _scalar("u64")
-u128    = _scalar("u128")
-f32     = _scalar("f32")
-f64     = _scalar("f64")
+usize = _scalar("usize")
+isize = _scalar("isize")
+i8 = _scalar("i8")
+i16 = _scalar("i16")
+i32 = _scalar("i32")
+i64 = _scalar("i64")
+i128 = _scalar("i128")
+u8 = _scalar("u8")
+u16 = _scalar("u16")
+u32 = _scalar("u32")
+u64 = _scalar("u64")
+u128 = _scalar("u128")
+f32 = _scalar("f32")
+f64 = _scalar("f64")
 
 
 def String(value: str) -> TypedValue:  # noqa: N802
@@ -68,6 +70,7 @@ def char_(value: str) -> TypedValue:
 # Complex types
 # --------------------------------------------------------------------------- #
 
+
 def Complex32(real: float, imag: float) -> TypedValue:
     return TypedValue("Complex32", f"{real},{imag}")
 
@@ -80,6 +83,7 @@ def Complex64(real: float, imag: float) -> TypedValue:
 # Vec type
 # --------------------------------------------------------------------------- #
 
+
 def Vec(element_type: str, values: list) -> TypedValue:  # noqa: N802
     return TypedValue(f"Vec<{element_type}>", ",".join(str(v) for v in values))
 
@@ -87,6 +91,7 @@ def Vec(element_type: str, values: list) -> TypedValue:  # noqa: N802
 # --------------------------------------------------------------------------- #
 # Auto-inference
 # --------------------------------------------------------------------------- #
+
 
 def infer_type(value) -> TypedValue:
     """Convert a plain Python value to a TypedValue using auto-inference rules."""
