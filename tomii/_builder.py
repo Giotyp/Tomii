@@ -85,6 +85,28 @@ def _bundled_binary() -> Optional[str]:
     return None
 
 
+def _bundled_bridge() -> Optional[str]:
+    """Return path to the wheel-bundled bridge dylib matching the current interpreter.
+
+    Searches tomii/_lib/ for a file whose name matches the current CPython ABI tag,
+    e.g. ``tomii_python_bridge.cpython-312-x86_64-linux-gnu.so``.  Returns None when
+    running from a source checkout (Cargo workspace present) or when no matching
+    artifact is found (wheel not yet built for this Python).
+    """
+    if _try_workspace_root() is not None:
+        return None  # development install — let cargo build it
+
+    lib_dir = Path(__file__).resolve().parent / "_lib"
+    vi = sys.version_info
+    # Match any .so whose name contains the CPython minor-version tag.
+    # Pattern: tomii_python_bridge.cpython-3XX-*.so  (standard PEP 425 suffix)
+    tag = f"cpython-{vi.major}{vi.minor}"
+    for candidate in lib_dir.glob("tomii_python_bridge*.so"):
+        if tag in candidate.name:
+            return str(candidate)
+    return None
+
+
 def _resolve(path: Optional[str]) -> Optional[str]:
     return str(Path(path).resolve()) if path else None
 
@@ -248,38 +270,30 @@ def _build_python_plugin(config: BuildConfig) -> BuildResult:
     workspace = _try_workspace_root()
 
     if workspace is not None:
-        # Development path — share the workspace target cache.
+        # Development path: compile from source, share workspace target cache.
         target_dir = workspace / "target"
-        cwd = workspace
-    else:
-        # PyPI path — compile bridge into a per-prefix cache dir.
-        target_dir = _bridge_cache_dir()
-        target_dir.mkdir(parents=True, exist_ok=True)
-        cwd = bridge_dir
 
-    # Build bridge plugin ------------------------------------------------------ #
-    if config.clean:
+        # Build bridge plugin ------------------------------------------------- #
+        if config.clean:
+            _cargo(
+                ["clean", "--manifest-path", manifest_path, "--target-dir", str(target_dir)],
+                build_env,
+                workspace,
+            )
         _cargo(
-            ["clean", "--manifest-path", manifest_path, "--target-dir", str(target_dir)],
+            ["build", "--manifest-path", manifest_path, "--target-dir", str(target_dir)]
+            + release_flag,
             build_env,
-            cwd,
+            workspace,
         )
-    _cargo(
-        ["build", "--manifest-path", manifest_path, "--target-dir", str(target_dir)]
-        + release_flag,
-        build_env,
-        cwd,
-    )
 
-    dylib_name = _dylib_name("tomii_python_bridge")
-    dylib_path = target_dir / profile / dylib_name
-    if not dylib_path.exists():
-        raise BuildError(f"Bridge dylib not found at {dylib_path} after build.")
-    dylib = str(dylib_path.resolve())
+        dylib_name = _dylib_name("tomii_python_bridge")
+        dylib_path = target_dir / profile / dylib_name
+        if not dylib_path.exists():
+            raise BuildError(f"Bridge dylib not found at {dylib_path} after build.")
+        dylib = str(dylib_path.resolve())
 
-    # Locate or build tomii-core binary --------------------------------------- #
-    if workspace is not None:
-        # Build tomii-core from source with FUNC_PATH pointing at the bridge so
+        # Build tomii-core with FUNC_PATH pointing at the bridge so
         # the generated func_reg.rs includes the four bridge entry points.
         build_env["FUNC_PATH"] = str(bridge_dir / "src" / "lib.rs")
         build_env.pop("WRAP_PATH", None)
@@ -290,15 +304,21 @@ def _build_python_plugin(config: BuildConfig) -> BuildResult:
         _cargo(["build", "-p", "tomii-types"] + release_flag, build_env, workspace)
         binary = _find_binary_in_workspace(workspace, profile)
     else:
-        # PyPI path — use the pre-built binary bundled in the wheel.
-        bundled = _bundled_binary()
-        if bundled is None:
+        # PyPI path: use artifacts bundled in the wheel (no Rust toolchain needed).
+        dylib = _bundled_bridge()
+        if dylib is None:
             raise BuildError(
-                "No tomii binary found. When using an installed (PyPI) tomii package, "
-                "the wheel must include a pre-built 'tomii/_bin/main' binary for this "
-                "platform. Try reinstalling: pip install --upgrade tomii"
+                f"No pre-built bridge dylib found in tomii/_lib/ for Python "
+                f"{sys.version_info.major}.{sys.version_info.minor}. "
+                "Try reinstalling: pip install --upgrade tomii"
             )
-        binary = bundled
+
+        binary = _bundled_binary()
+        if binary is None:
+            raise BuildError(
+                "No tomii binary found in tomii/_bin/. "
+                "Try reinstalling: pip install --upgrade tomii"
+            )
 
     return BuildResult(dylib=dylib, binary=binary, python_interpreter=python_interp)
 

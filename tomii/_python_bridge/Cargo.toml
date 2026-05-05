@@ -3,11 +3,6 @@ name = "tomii-python-bridge"
 version = "0.1.0"
 edition = "2021"
 
-# Standalone package — not a workspace member. Built independently via
-# `cargo build --manifest-path` with `--target-dir <workspace>/target`
-# to share the workspace build cache.
-[workspace]
-
 [lib]
 name = "tomii_python_bridge"
 # cdylib: clean C ABI dylib; Python symbols resolved from the tomii-core

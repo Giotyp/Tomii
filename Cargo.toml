@@ -4,6 +4,7 @@ members = [
     "tomii-types",
     "tomii-macro",
     "tomii-converter",
+    "tomii/_python_bridge",
     "examples/*",
 ]
 exclude = [

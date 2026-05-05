@@ -17,12 +17,14 @@ target/*
 shared/**
 cst_macros/**
 tomii/__pycache__/*
+tomii/tests/__pycache__/*
 tomii/_visualize/__pycache__/*
 tomii-core/_examples/**
 tomii-core/src/batch_queue_lockfree.rs
 tomii-core/src/batch_queue_factory.rs
 tomii-core/plot.py
 tomii.egg-info/*
+tomii/_bin/main
 tomii-core/src/ignored/**
 jraph-py/**
 rust-translator/**

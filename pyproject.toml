@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
 
 [project]
 name = "tomii"
@@ -16,9 +16,21 @@ dev = [
     "mypy>=1.0",
 ]
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["tomii*"]
+[tool.maturin]
+# Bridge crate — the only Rust artifact compiled into the wheel.
+manifest-path = "tomii/_python_bridge/Cargo.toml"
+# Place the extension at tomii/_lib/tomii_python_bridge.<abi-tag>.so
+module-name = "tomii._lib.tomii_python_bridge"
+# Python sources live in the project root alongside Cargo.toml
+python-source = "."
+# Bundle the pre-built tomii binary (copied by the `wheel` Makefile target)
+include = [{ path = "tomii/_bin/**", format = ["wheel"] }]
+# Exclude Rust sources and build artefacts that are not Python runtime deps
+exclude = [
+    "tomii/_python_bridge/**",
+    "tomii/tests/**",
+    "**/__pycache__/**",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tomii/tests"]

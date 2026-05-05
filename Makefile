@@ -1,4 +1,4 @@
-.PHONY: schema test lint
+.PHONY: schema test lint wheel wheel-sdist
 
 # Temp stubs used only during schema generation — not baked into any build
 _SCHEMA_WRAP := /tmp/_ss_schema_wrap.rs
@@ -28,3 +28,15 @@ test:
 ## lint: Type-check the Python package
 lint:
 	python -m mypy tomii/
+
+## wheel: Build a release wheel for the current interpreter.
+##        Copies the tomii-core binary into tomii/_bin/ first, then
+##        invokes maturin to compile the bridge and assemble the wheel.
+wheel:
+	cargo build --release --features embed-python -p tomii-core --bin main
+	cp target/release/main tomii/_bin/main
+	maturin build --release
+
+## wheel-sdist: Build a source distribution.
+wheel-sdist:
+	maturin sdist
