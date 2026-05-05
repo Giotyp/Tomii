@@ -19,6 +19,7 @@ cst_macros/**
 tomii/__pycache__/*
 tomii/tests/__pycache__/*
 tomii/_visualize/__pycache__/*
+tomii/_python_bridge/target/*
 tomii-core/_examples/**
 tomii-core/src/batch_queue_lockfree.rs
 tomii-core/src/batch_queue_factory.rs

@@ -110,9 +110,7 @@ fn cm_to_py<'py>(py: Python<'py>, cm: &CmTypes) -> Bound<'py, PyAny> {
         CmTypes::F32(f) => f.into_py(py).into_bound(py),
         CmTypes::F64(f) => f.into_py(py).into_bound(py),
         CmTypes::String(s) => PyString::new_bound(py, s.as_ref()).into_any(),
-        CmTypes::Bytes(data) => {
-            pyo3::types::PyBytes::new_bound(py, data.as_slice()).into_any()
-        }
+        CmTypes::Bytes(data) => pyo3::types::PyBytes::new_bound(py, data.as_slice()).into_any(),
         // Barrier sentinels — not a real value; convert to Python None so callers
         // can filter them with `if arg is None` if needed.
         CmTypes::None => py.None().into_bound(py),
@@ -204,9 +202,9 @@ pub fn py_call_any_cm(args: &[CmTypes]) -> CmTypes {
             .collect();
 
         let tuple = PyTuple::new_bound(py, &py_args);
-        let result = callable_bound.call1(tuple).unwrap_or_else(|e| {
-            panic!("py_call_any: call failed: {}", e)
-        });
+        let result = callable_bound
+            .call1(tuple)
+            .unwrap_or_else(|e| panic!("py_call_any: call failed: {}", e));
 
         py_to_cm(py, result)
     })
@@ -250,9 +248,9 @@ pub fn py_call_void_cm(args: &[CmTypes]) -> CmTypes {
         let py_list = PyList::new_bound(py, &rest);
 
         let tuple = PyTuple::new_bound(py, &[first_arg, py_list.into_any()]);
-        callable_bound.call1(tuple).unwrap_or_else(|e| {
-            panic!("py_call_void: call failed: {}", e)
-        });
+        callable_bound
+            .call1(tuple)
+            .unwrap_or_else(|e| panic!("py_call_void: call failed: {}", e));
 
         CmTypes::None
     })
@@ -294,9 +292,9 @@ pub fn py_call_bytes_cm(args: &[CmTypes]) -> CmTypes {
         let py_meta = PyString::new_bound(py, meta.as_ref()).into_any();
         let tuple = PyTuple::new_bound(py, &[py_bytes.into_any(), py_meta]);
 
-        let result = callable_bound.call1(tuple).unwrap_or_else(|e| {
-            panic!("py_call_bytes: call failed: {}", e)
-        });
+        let result = callable_bound
+            .call1(tuple)
+            .unwrap_or_else(|e| panic!("py_call_bytes: call failed: {}", e));
 
         // Expect a bytes-like object back
         let py_bytes_result = result
