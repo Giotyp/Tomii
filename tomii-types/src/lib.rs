@@ -16,7 +16,58 @@ pub use num_complex::{Complex32, Complex64};
 /// Increment when `CmTypes` layout changes (new variant, removed variant, changed repr).
 #[no_mangle]
 pub extern "C" fn tomii_abi_version() -> u32 {
-    1
+    2
+}
+
+/// Backing store for [`CmTypes::AnyHeld`].
+///
+/// Holds a raw pointer obtained from [`parking_lot::RwLock::data_ptr`] (no lock
+/// acquisition) plus the Arc that keeps the allocation alive.  Valid only within
+/// the bulk-task execution window during which the graph's data-flow model
+/// guarantees no concurrent writer holds the same Arc.
+///
+/// # Safety
+/// The pointer must only be read while `_arc` is alive and no concurrent
+/// `with_any_mut` call is in progress on the same Arc.
+pub struct AnyHeldData {
+    ptr: *const Box<dyn Any + Send + Sync>,
+    _arc: Arc<parking_lot::RwLock<Box<dyn Any + Send + Sync>>>,
+}
+
+// SAFETY: The raw pointer is read-only and the Arc keeps the allocation alive.
+// No thread can hold a write lock on the inner RwLock during bulk-task execution
+// (data-flow guarantee: predecessors have completed, no writer is dispatched).
+unsafe impl Send for AnyHeldData {}
+unsafe impl Sync for AnyHeldData {}
+
+impl Clone for AnyHeldData {
+    fn clone(&self) -> Self {
+        Self {
+            ptr: self.ptr,
+            _arc: Arc::clone(&self._arc),
+        }
+    }
+}
+
+impl AnyHeldData {
+    /// Construct an `AnyHeldData` from a raw pointer obtained via `RwLock::data_ptr()`
+    /// and the owning Arc.  Only called by `execute_bulk_task`.
+    #[inline]
+    pub fn new(
+        ptr: *const Box<dyn Any + Send + Sync>,
+        arc: Arc<parking_lot::RwLock<Box<dyn Any + Send + Sync>>>,
+    ) -> Self {
+        Self { ptr, _arc: arc }
+    }
+
+    /// Downcast to `&T` without acquiring the RwLock.
+    ///
+    /// # Safety
+    /// Same as [`CmTypes::AnyHeld`]: no concurrent writer, Arc is alive.
+    #[inline]
+    pub unsafe fn downcast_ref<T: Any + Send + Sync>(&self) -> Option<&T> {
+        (*self.ptr).downcast_ref::<T>()
+    }
 }
 
 #[derive(Clone)]
@@ -60,6 +111,17 @@ pub enum CmTypes {
     /// Raw byte buffer — cheap-clone packet data via Arc (no RwLock/Box overhead).
     /// Used by network receiver path instead of from_any(Vec<u8>).
     Bytes(Arc<Vec<u8>>),
+    /// Pre-resolved read-only reference to the inner value of a `CmTypes::Any`.
+    ///
+    /// `execute_bulk_task` upgrades each `Any` slot in the arg buffer to `AnyHeld`
+    /// once per bulk task. `with_any` then serves the borrow without calling
+    /// `RwLock::read()` again — zero lock acquisition per cell.
+    ///
+    /// This variant is **transient**: created at the start of a bulk-task loop
+    /// and dropped when `buf.clear()` is called after the loop. It is never
+    /// serialized, never returned from a plugin function, and never stored in a
+    /// result map.
+    AnyHeld(AnyHeldData),
 }
 
 // Custom Deserialize implementation for CmTypes to handle Arc-wrapped types
@@ -400,22 +462,26 @@ impl CmTypes {
     where
         F: FnOnce(&T) -> R,
     {
-        if let CmTypes::Any(lock) = self {
-            let guard = lock.read();
-            match guard.downcast_ref::<T>() {
-                Some(value) => Some(f(value)),
-                None => {
-                    // Print both expected and actual type for debugging
-                    println!(
-                        "Downcast failed: Expected type '{}', but got type '{:?}'",
-                        std::any::type_name::<T>(),
-                        std::any::type_name_of_val(guard.as_ref())
-                    );
-                    None
+        match self {
+            CmTypes::Any(lock) => {
+                let guard = lock.read();
+                match guard.downcast_ref::<T>() {
+                    Some(value) => Some(f(value)),
+                    None => {
+                        println!(
+                            "Downcast failed: Expected type '{}', but got type '{:?}'",
+                            std::any::type_name::<T>(),
+                            std::any::type_name_of_val(guard.as_ref())
+                        );
+                        None
+                    }
                 }
             }
-        } else {
-            None
+            // Pre-resolved pointer — zero lock acquisition needed.
+            // SAFETY: data.ptr was obtained from RwLock::data_ptr(); the Arc keeps
+            // the allocation alive; no concurrent write can occur during bulk execution.
+            CmTypes::AnyHeld(data) => unsafe { (*data.ptr).downcast_ref::<T>() }.map(f),
+            _ => None,
         }
     }
 
@@ -1426,6 +1492,7 @@ impl std::fmt::Debug for CmTypes {
             CmTypes::None => write!(f, "None"),
             CmTypes::Init => write!(f, "Init"),
             CmTypes::Any(_) => write!(f, "CustomType"),
+            CmTypes::AnyHeld(_) => write!(f, "AnyHeld"),
             CmTypes::AnySliced(_) => write!(f, "SlicedType"),
             CmTypes::VecAny(lock) => {
                 let guard = lock.read();
@@ -1488,6 +1555,7 @@ impl fmt::Display for CmTypes {
                 write!(f, "]")
             }
             CmTypes::Any(_) => write!(f, "CustomType"),
+            CmTypes::AnyHeld(_) => write!(f, "AnyHeld"),
             CmTypes::AnySliced(_) => write!(f, "CustomSlicedType"),
             CmTypes::VecAny(lock) => {
                 let guard = lock.read();

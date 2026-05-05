@@ -43,6 +43,13 @@ pub struct NodeDependencyEntry {
 
     /// Whether this node has a barrier dependency
     has_barrier: bool,
+
+    /// Whether this node has a runtime condition expression.
+    /// When true, `instances_sent` tracking is kept to allow `reset_sent_flag` /
+    /// `increment_dependency` to selectively reopen individual instances on
+    /// condition-failure.  When false, the barrier fast-path bypasses the
+    /// per-instance CAS loop entirely.
+    is_condition: bool,
 }
 
 impl NodeDependencyEntry {
@@ -54,6 +61,7 @@ impl NodeDependencyEntry {
         total_deps: usize,
         has_barrier: bool,
         group_size_opt: Option<usize>,
+        is_condition: bool,
     ) -> Self {
         let (group_size, num_groups) = match group_size_opt {
             Some(gs) if gs > 0 && gs < factor => (gs, factor / gs),
@@ -83,6 +91,7 @@ impl NodeDependencyEntry {
             deps_per_group,
             deps_per_instance,
             has_barrier,
+            is_condition,
         }
     }
 
@@ -140,14 +149,15 @@ impl NodeDependencyEntry {
                 })
                 .unwrap(); // fetch_update always succeeds (closure returns Some)
 
-            let new_remaining = {
+            let (old_remaining, new_remaining) = {
                 let stored_gen = gen_unpack_gen(prev_packed);
                 let old_val = if stored_gen == slot_gen {
                     gen_unpack_val(prev_packed)
                 } else {
                     init_val
                 };
-                old_val.saturating_sub(count as u32) as usize
+                let new_val = old_val.saturating_sub(count as u32);
+                (old_val as usize, new_val as usize)
             };
 
             // Determine instance range for this group
@@ -155,33 +165,41 @@ impl NodeDependencyEntry {
             let end = std::cmp::min(start + self.group_size, self.factor);
 
             if self.has_barrier {
-                // Barrier: spawn all instances in group when counter reaches 0
-                if new_remaining == 0 {
-                    for idx in start..end {
-                        // CAS from (any_gen, 0) to (slot_gen, 1) — marks as sent this generation
-                        loop {
-                            let cur = self.instances_sent[idx].load(Ordering::SeqCst);
-                            let cur_gen = gen_unpack_gen(cur);
-                            let cur_sent = gen_unpack_val(cur) != 0;
-                            // If same gen and already sent, skip
-                            if cur_gen == slot_gen && cur_sent {
-                                break;
+                // Tier 3 fast-path: `fetch_update` serialises all decrements, so exactly
+                // one thread observes old_remaining > 0 && new_remaining == 0 — the
+                // unique thread that caused the 0-transition.  That thread is the sole
+                // publisher for [start..end); no per-instance CAS is needed.
+                //
+                // Exception: condition nodes may call `increment_dependency` +
+                // `reset_sent_flag` to selectively reopen one instance on failure.
+                // For those nodes the CAS loop is preserved so that already-sent
+                // instances (whose flag was NOT reset) are skipped on the next fire.
+                if old_remaining > 0 && new_remaining == 0 {
+                    if !self.is_condition {
+                        ready.extend(start..end);
+                    } else {
+                        for idx in start..end {
+                            loop {
+                                let cur = self.instances_sent[idx].load(Ordering::Acquire);
+                                let cur_gen = gen_unpack_gen(cur);
+                                let cur_sent = gen_unpack_val(cur) != 0;
+                                if cur_gen == slot_gen && cur_sent {
+                                    break;
+                                }
+                                let new_packed = gen_pack(slot_gen, 1);
+                                if self.instances_sent[idx]
+                                    .compare_exchange(
+                                        cur,
+                                        new_packed,
+                                        Ordering::Release,
+                                        Ordering::Relaxed,
+                                    )
+                                    .is_ok()
+                                {
+                                    ready.push(idx);
+                                    break;
+                                }
                             }
-                            let new_packed = gen_pack(slot_gen, 1);
-                            if self.instances_sent[idx]
-                                .compare_exchange(
-                                    cur,
-                                    new_packed,
-                                    Ordering::SeqCst,
-                                    Ordering::SeqCst,
-                                )
-                                .is_ok()
-                            {
-                                // Won the CAS: instance is newly ready for this generation
-                                ready.push(idx);
-                                break;
-                            }
-                            // CAS failed (another thread raced), retry
                         }
                     }
                 }
@@ -192,15 +210,20 @@ impl NodeDependencyEntry {
                 // This prevents spin_wait_for_result deadlock when all Rayon workers block.
                 if specific_idx < self.factor {
                     loop {
-                        let cur = self.instances_sent[specific_idx].load(Ordering::SeqCst);
+                        let cur = self.instances_sent[specific_idx].load(Ordering::Acquire);
                         let cur_gen = gen_unpack_gen(cur);
                         let cur_sent = gen_unpack_val(cur) != 0;
                         if cur_gen == slot_gen && cur_sent {
-                            break; // Already sent this generation
+                            break;
                         }
                         let new_packed = gen_pack(slot_gen, 1);
                         if self.instances_sent[specific_idx]
-                            .compare_exchange(cur, new_packed, Ordering::SeqCst, Ordering::SeqCst)
+                            .compare_exchange(
+                                cur,
+                                new_packed,
+                                Ordering::Release,
+                                Ordering::Relaxed,
+                            )
                             .is_ok()
                         {
                             ready.push(specific_idx);
@@ -216,19 +239,19 @@ impl NodeDependencyEntry {
                         let idx_in_group = idx - start;
                         if new_remaining <= self.threshold_for_instance_in_group(idx_in_group) {
                             loop {
-                                let cur = self.instances_sent[idx].load(Ordering::SeqCst);
+                                let cur = self.instances_sent[idx].load(Ordering::Acquire);
                                 let cur_gen = gen_unpack_gen(cur);
                                 let cur_sent = gen_unpack_val(cur) != 0;
                                 if cur_gen == slot_gen && cur_sent {
-                                    break; // Already sent this generation
+                                    break;
                                 }
                                 let new_packed = gen_pack(slot_gen, 1);
                                 if self.instances_sent[idx]
                                     .compare_exchange(
                                         cur,
                                         new_packed,
-                                        Ordering::SeqCst,
-                                        Ordering::SeqCst,
+                                        Ordering::Release,
+                                        Ordering::Relaxed,
                                     )
                                     .is_ok()
                                 {
@@ -288,7 +311,9 @@ impl NodeDependencyEntry {
     /// `slot_gen`: current slot generation — writes generation so future CAS sees correct state.
     pub fn reset_sent_flag(&self, slot_gen: u32, instance_idx: usize) {
         if instance_idx < self.instances_sent.len() {
-            self.instances_sent[instance_idx].store(gen_pack(slot_gen, 0), Ordering::SeqCst);
+            // Release: pairs with the Acquire load in the CAS loop above so the
+            // reset is visible before the next barrier fire reads instances_sent.
+            self.instances_sent[instance_idx].store(gen_pack(slot_gen, 0), Ordering::Release);
         }
     }
 }
@@ -375,6 +400,7 @@ impl NodeDepMap {
                     total_deps,
                     has_barrier,
                     effective_group_size,
+                    node.condition.is_some(),
                 );
                 slot_entries.push(entry);
             }
@@ -449,7 +475,7 @@ mod tests {
     #[test]
     fn test_node_dependency_entry_creation() {
         // factor=4, total_deps=8 (2 per instance), no groups
-        let entry = NodeDependencyEntry::new(4, 8, false, None);
+        let entry = NodeDependencyEntry::new(4, 8, false, None, false);
         assert_eq!(entry.factor, 4);
         assert_eq!(entry.deps_per_instance, 2);
         assert_eq!(entry.num_groups, 1);
@@ -459,7 +485,7 @@ mod tests {
     #[test]
     fn test_threshold_calculation() {
         // factor=4, deps_per_inst=2, no groups
-        let entry = NodeDependencyEntry::new(4, 8, false, None);
+        let entry = NodeDependencyEntry::new(4, 8, false, None, false);
         // Instance 0: (4-0-1)*2 = 6
         // Instance 1: (4-1-1)*2 = 4
         // Instance 2: (4-2-1)*2 = 2
@@ -473,7 +499,7 @@ mod tests {
     #[test]
     fn test_threshold_spawning_factor_4() {
         // factor=4, deps_per_inst=2, total_deps=8, no groups; use gen=0
-        let entry = NodeDependencyEntry::new(4, 8, false, None);
+        let entry = NodeDependencyEntry::new(4, 8, false, None, false);
         let gen: u32 = 0;
 
         // Call 1: 8->7, instance 0 threshold=6, not ready (7 > 6)
@@ -512,7 +538,7 @@ mod tests {
     #[test]
     fn test_barrier_spawns_all_at_once() {
         // Barrier node with factor=3, total_deps=3, no groups; use gen=0
-        let entry = NodeDependencyEntry::new(3, 3, true, None);
+        let entry = NodeDependencyEntry::new(3, 3, true, None, false);
         let gen: u32 = 0;
 
         // Decrease until deps reach 0
@@ -531,7 +557,7 @@ mod tests {
 
     #[test]
     fn test_no_double_spawn() {
-        let entry = NodeDependencyEntry::new(2, 4, false, None);
+        let entry = NodeDependencyEntry::new(2, 4, false, None, false);
         let gen: u32 = 0;
 
         // factor=2, total_deps=4, deps_per_instance=2
@@ -564,7 +590,7 @@ mod tests {
     fn test_entry_reset() {
         // The generational design lazy-resets on generation change.
         // Simulate "reset" by using gen=1 after initial decrements with gen=0.
-        let entry = NodeDependencyEntry::new(2, 4, false, None);
+        let entry = NodeDependencyEntry::new(2, 4, false, None, false);
 
         // Decrease twice with gen=0
         let _ = entry.decrease_and_get_ready(0, None, 1);
@@ -579,7 +605,7 @@ mod tests {
     fn test_per_group_barrier() {
         // factor=6, group_size=3, 2 groups. total_deps=6 (3 per group)
         // Each group has 3 deps. Barrier fires per-group when group counter reaches 0.
-        let entry = NodeDependencyEntry::new(6, 6, true, Some(3));
+        let entry = NodeDependencyEntry::new(6, 6, true, Some(3), false);
         assert_eq!(entry.num_groups, 2);
         assert_eq!(entry.deps_per_group, 3);
         let gen: u32 = 0;
@@ -619,7 +645,7 @@ mod tests {
     fn test_specific_succ_idx_fires_exact_instance() {
         // factor=4, deps=4. With specific_succ_idx=Some(2) the function should
         // immediately mark instance 2 as ready, bypassing the threshold scan.
-        let entry = NodeDependencyEntry::new(4, 4, false, None);
+        let entry = NodeDependencyEntry::new(4, 4, false, None, false);
         let gen: u32 = 0;
         let mut ready = Vec::new();
         entry.decrease_and_get_ready_into(gen, None, 1, Some(2), &mut ready);
@@ -629,7 +655,7 @@ mod tests {
     #[test]
     fn test_specific_succ_idx_no_double_fire() {
         // Calling twice with the same specific_succ_idx should NOT re-add the instance.
-        let entry = NodeDependencyEntry::new(4, 4, false, None);
+        let entry = NodeDependencyEntry::new(4, 4, false, None, false);
         let gen: u32 = 0;
         let mut ready = Vec::new();
         entry.decrease_and_get_ready_into(gen, None, 1, Some(1), &mut ready);
@@ -646,7 +672,7 @@ mod tests {
     #[test]
     fn test_specific_succ_idx_generation_reset() {
         // After a generation bump, the same specific_succ_idx fires again (lazy reinit).
-        let entry = NodeDependencyEntry::new(4, 4, false, None);
+        let entry = NodeDependencyEntry::new(4, 4, false, None, false);
 
         let mut ready = Vec::new();
         entry.decrease_and_get_ready_into(0, None, 1, Some(3), &mut ready);
@@ -661,7 +687,7 @@ mod tests {
     #[test]
     fn test_specific_succ_idx_out_of_range_ignored() {
         // specific_succ_idx >= factor → silently ignored, no panic, no ready instances.
-        let entry = NodeDependencyEntry::new(4, 4, false, None);
+        let entry = NodeDependencyEntry::new(4, 4, false, None, false);
         let mut ready = Vec::new();
         entry.decrease_and_get_ready_into(0, None, 1, Some(10), &mut ready);
         assert!(ready.is_empty());
@@ -679,7 +705,7 @@ mod tests {
         // factor=8, total_deps=8 (1 dep per instance, deps_per_instance=1).
         // Dispatch 8 threads each doing 1 decrement. Every instance must appear
         // in the ready list exactly once across all threads — no double-spawn.
-        let entry = StdArc::new(NodeDependencyEntry::new(8, 8, false, None));
+        let entry = StdArc::new(NodeDependencyEntry::new(8, 8, false, None, false));
         let all_ready = StdArc::new(Mutex::new(Vec::<usize>::new()));
         let gen: u32 = 0;
 
@@ -715,7 +741,7 @@ mod tests {
         // Barrier node: factor=4, total_deps=4, has_barrier=true.
         // 4 threads each decrement once. When the last one brings counter to 0,
         // all 4 instances become ready — but only once per instance.
-        let entry = StdArc::new(NodeDependencyEntry::new(4, 4, true, None));
+        let entry = StdArc::new(NodeDependencyEntry::new(4, 4, true, None, false));
         let all_ready = StdArc::new(Mutex::new(Vec::<usize>::new()));
         let gen: u32 = 0;
 

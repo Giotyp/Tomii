@@ -11,7 +11,7 @@
 //! bookkeeping (that is `batch_resolution`/`buffers`).  Its only shared-state writes are
 //! `node_results.set()` and `pending_tasks`/`pending_cond_tasks` decrements.
 
-use super::arg_resolution::populate_cached_args_into;
+use super::arg_resolution::{populate_cached_args_into, populate_dynamic_args_into};
 use super::ordering::{slot_gen_load, slot_gen_rmw};
 use super::scheduling::send_to_scheduler;
 use super::shared_data::{SchedCtx, SharedData};
@@ -185,6 +185,17 @@ pub(super) fn execute_task(
 /// Spawned by `push_ready_chunked` when a barrier fan-out produces N > num_workers
 /// ready instances simultaneously (e.g. wavefront diagonal). Eliminates O(N) individual
 /// Rayon spawns by covering a contiguous range `index..index+bulk_count` in one task.
+///
+/// **Tier 1 (arg hoist)**: The static arg template is extended into `buf` once as a
+/// prologue; per-iteration only the instance-dependent slots (buffer refs, runtime
+/// index/workers, $res results) are patched via `populate_dynamic_args_into`. Static
+/// `Arc`s (including `Any` objects) are cloned once per bulk task rather than once
+/// per cell.
+///
+/// **Tier 2 (lock hoist)**: After the static extend, each `CmTypes::Any` slot in
+/// `buf` is upgraded to `CmTypes::AnyHeld`, which carries a pre-acquired
+/// `ArcRwLockReadGuard`. `with_any` inside the kernel body then returns without
+/// calling `RwLock::read()` again — the guard is held for the full bulk range.
 fn execute_bulk_task(
     shared: &Arc<SharedData>,
     sctx: &SchedCtx<'_>,
@@ -192,32 +203,65 @@ fn execute_bulk_task(
     node_info: &NodeInfo,
 ) -> Option<NodeInfo> {
     let node_cache = &sctx.cache.node_cache[node_info.id as usize];
+    let args_cache = &node_cache.arg_cache;
     let exec_slot = node_info.slot;
     let exec_gen = node_info.gen;
     let mut bulk_stale = false;
 
+    let workers = if !args_cache.rt_workers_indexes.is_empty() {
+        shared.config.workers
+    } else {
+        0
+    };
+    let has_dynamic = !args_cache.buffer_ref_indexes.is_empty()
+        || !args_cache.rt_idxs_indexes.is_empty()
+        || !args_cache.rt_workers_indexes.is_empty()
+        || !args_cache.res_indexes.is_empty();
+
     ARG_BUF.with(|buf_cell| {
         let mut buf = buf_cell.borrow_mut();
+
+        // Tier 1 prologue: clone the static template once (Arc::clone per static Any,
+        // not per cell). Placeholders for dynamic slots remain as CmTypes::None.
+        buf.extend(args_cache.args.iter().cloned());
+
+        // Tier 2 prologue: upgrade Any slots to AnyHeld so with_any inside the kernel
+        // body skips RwLock::read() for the entire bulk range.
+        // data_ptr() returns a raw pointer to the Box inside the RwLock's storage;
+        // the cloned Arc keeps the allocation alive for the full loop.
+        let any_idxs: Vec<usize> = (0..buf.len())
+            .filter(|&i| matches!(buf[i], CmTypes::Any(_)))
+            .collect();
+        for i in any_idxs {
+            let held = match &buf[i] {
+                CmTypes::Any(arc) => {
+                    let ptr = arc.data_ptr() as *const Box<dyn std::any::Any + Send + Sync>;
+                    CmTypes::AnyHeld(tomii_types::AnyHeldData::new(ptr, Arc::clone(arc)))
+                }
+                _ => unreachable!(),
+            };
+            buf[i] = held;
+        }
+
         for inst_idx in node_info.index..node_info.index + node_info.bulk_count {
-            buf.clear();
-            let stale = populate_cached_args_into(
-                &mut buf,
-                shared,
-                &node_cache.arg_cache,
-                node_info.id,
-                inst_idx,
-                node_info.slot,
-                node_info.pred_index,
-                exec_slot,
-                exec_gen,
-            );
-            if stale {
-                buf.clear();
-                bulk_stale = true;
-                return; // Slot recycled mid-bulk — drop remaining instances
+            if has_dynamic {
+                let stale = populate_dynamic_args_into(
+                    &mut buf,
+                    shared,
+                    args_cache,
+                    inst_idx,
+                    node_info.slot,
+                    node_info.pred_index,
+                    exec_slot,
+                    exec_gen,
+                    workers,
+                );
+                if stale {
+                    bulk_stale = true;
+                    break;
+                }
             }
             let result = func(&buf);
-            buf.clear(); // release Arc refs promptly
             if node_cache.needs_result_store {
                 let mut inst_info = node_info.clone();
                 inst_info.index = inst_idx;
@@ -225,6 +269,8 @@ fn execute_bulk_task(
                 sctx.exec.node_results.set(&inst_info, result);
             }
         }
+
+        buf.clear(); // release all Arc refs (including AnyHeld guards) once after loop
     });
 
     if bulk_stale {

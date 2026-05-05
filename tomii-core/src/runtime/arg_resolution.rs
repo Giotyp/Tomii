@@ -52,6 +52,53 @@ fn process_runtime_refs(
     }
 }
 
+/// Patch only the instance-dependent slots of an already-filled arg buffer.
+///
+/// Called per-instance inside `execute_bulk_task` after the static template has been
+/// `extend`ed into `buf` once in the prologue (Tier 1 hoist). Only overwrites
+/// `buffer_ref_indexes`, `rt_idxs_indexes`, `rt_workers_indexes`, and `res_indexes`
+/// positions — static slots (including `Any`/`AnyHeld` arcs) are left untouched.
+///
+/// Returns `true` if a stale-task was detected.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn populate_dynamic_args_into(
+    buf: &mut Vec<CmTypes>,
+    shared: &Arc<SharedData>,
+    args_cache: &ArgCacheEntry,
+    node_index: usize,
+    slot: usize,
+    pred_index: usize,
+    exec_slot: usize,
+    exec_gen: u32,
+    workers: usize,
+) -> bool {
+    process_buffer_refs(buf, args_cache, node_index);
+    process_runtime_refs(buf, args_cache, node_index, workers);
+
+    let mut stale = false;
+    for (res_idx, rp) in args_cache
+        .res_indexes
+        .iter()
+        .zip(args_cache.res_predecessors.iter())
+    {
+        if stale {
+            break;
+        }
+        let result_opt = collect_res_from_cache(
+            rp, node_index, slot, pred_index, None, shared, exec_slot, exec_gen, &mut stale,
+        );
+        if let Some(mut result) = result_opt {
+            if result.len() == 1 {
+                buf[*res_idx] = result.remove(0);
+            } else {
+                buf.splice(*res_idx..*res_idx + 1, result);
+            }
+        }
+    }
+    stale
+}
+
 /// Populate args directly into a provided buffer, avoiding heap allocation.
 ///
 /// Returns `true` if a stale-task was detected (slot generation changed mid-resolution).
