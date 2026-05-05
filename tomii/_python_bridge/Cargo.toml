@@ -10,9 +10,16 @@ edition = "2021"
 
 [lib]
 name = "tomii_python_bridge"
-crate-type = ["dylib"]
+# cdylib: clean C ABI dylib; Python symbols resolved from the tomii-core
+# binary that links libpython directly (embed-python feature).
+crate-type = ["cdylib"]
 
 [dependencies]
 tomii-types = { path = "../../tomii-types" }
-pyo3 = { version = "0.22", features = ["auto-initialize"] }
+# extension-module: tells PyO3 NOT to link libpython — symbols come from
+# the already-loaded libpython in the embedding tomii-core binary.
+pyo3 = { version = "0.22", features = ["extension-module"] }
 parking_lot = "0.12"
+
+[build-dependencies]
+pyo3-build-config = { version = "0.22", features = ["resolve-config"] }

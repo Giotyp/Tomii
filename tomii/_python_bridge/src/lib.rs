@@ -8,11 +8,18 @@
 //!   py_call_void       — variadic sink: call a callable, collect trailing args into a list
 //!   py_call_bytes      — NumPy fast path: bytes in, bytes out, zero extra allocation
 //!
+//! Also exports `tomii_python_bridge_abi() -> u32` so the embedding `tomii-core`
+//! binary (built with `--features embed-python`) can verify Python version
+//! compatibility before the graph starts.
+//!
 //! GIL strategy (auto-detected at startup):
 //!   Tier 1 (default, stock 3.11/3.12): Python::with_gil per call. NumPy/BLAS
 //!     release the GIL internally, so matmul/FFT-heavy graphs scale with worker count.
 //!   Tier 3 (python3.13t, PEP 703): Python::with_gil is a no-op in the free-threaded
 //!     build (compiled with Py_GIL_DISABLED). Full parallelism for all Python code.
+//!
+//! Python initialization is owned by the embedding binary; the bridge uses the
+//! `extension-module` PyO3 feature so it does NOT link its own libpython copy.
 //!
 //! Sub-interpreter isolation (Tier 2, PEP 684) is not implemented here because
 //! NumPy 2.x has partial sub-interpreter support and C extensions that lack
@@ -29,8 +36,23 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tomii_types::CmTypes;
 
-// Re-export the ABI version symbol so the runtime can verify it.
-pub use tomii_types::tomii_abi_version;
+// PYTHON_BRIDGE_ABI_BASE: u32 — (major<<24)|(minor<<16), no GIL bit.
+// Generated at bridge compile time by build.rs using pyo3-build-config.
+include!(concat!(env!("OUT_DIR"), "/python_abi.rs"));
+
+/// Return the packed Python ABI for this bridge: (major<<24)|(minor<<16)|(gil_disabled<<15).
+///
+/// The GIL_DISABLED bit is set via compile-time cfg so that the build script
+/// does not need pyo3-build-config >= 0.23 for the `gil_disabled` field.
+///
+/// The embedding binary (`tomii-core --features embed-python`) calls this
+/// immediately after loading the bridge dylib and aborts on mismatch,
+/// preventing silent runtime corruption from interpreter version skew.
+#[no_mangle]
+pub extern "C" fn tomii_python_bridge_abi() -> u32 {
+    let gil_bit: u32 = if cfg!(Py_GIL_DISABLED) { 1 << 15 } else { 0 };
+    PYTHON_BRIDGE_ABI_BASE | gil_bit
+}
 
 // --------------------------------------------------------------------------- //
 // Startup logging (printed once on first call)

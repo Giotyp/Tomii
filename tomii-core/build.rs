@@ -9,6 +9,11 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(build_rs_ran)");
     println!("cargo:rustc-cfg=build_rs_ran");
 
+    // Declare Py_GIL_DISABLED as a valid cfg key so that code gated with
+    // #[cfg(Py_GIL_DISABLED)] in tomii-core compiles without warnings.
+    // The actual flag is emitted by pyo3's build script when embed-python is active.
+    println!("cargo::rustc-check-cfg=cfg(Py_GIL_DISABLED)");
+
     // Re-run the build script whenever the wrapper/registry/func env vars change
     // so that cargo detects the new paths and recompiles with the correct functions.
     println!("cargo:rerun-if-env-changed=WRAP_PATH");

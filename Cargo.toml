@@ -13,6 +13,8 @@ exclude = [
     "examples/gpu-vectoradd",
     # Pure-Python examples: no Rust source; bridge is in tomii/_python_bridge/.
     "examples/matrix-compute-python",
+    # Stale worktree remnant from a prunable branch; exclude to avoid broken path dep.
+    "examples/.mimolib",
 ]
 resolver = "3"
 

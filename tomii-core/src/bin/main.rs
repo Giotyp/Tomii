@@ -3,6 +3,7 @@ use core_affinity;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::time::Instant;
+
 use tomii_core::debug::init_debug;
 use tomii_core::graph_gen::{from_json, GraphSpec}; // GraphCompiled produced via spec.compile()
 use tomii_core::runtime::{BatchConfig, SpinWaitConfig, TomiiRt, TomiiRtBuilder};
@@ -226,9 +227,17 @@ fn main() {
         None
     };
 
+    #[cfg(feature = "embed-python")]
+    {
+        // Initialize the embedded Python interpreter before loading the bridge
+        // dylib so that libpython symbols are globally visible when dlopen runs.
+        pyo3::prepare_freethreaded_python();
+        check_python_bridge_abi(&args.dylib);
+    }
+
     {
         // set PLUGIN_LIB environment variable
-        unsafe { std::env::set_var("PLUGIN_LIB", args.dylib) };
+        unsafe { std::env::set_var("PLUGIN_LIB", &args.dylib) };
         tomii_core::wrappers::init_wrappers();
     }
 
@@ -447,4 +456,64 @@ pub fn run_graph(
         std::process::exit(1);
     });
     synrt
+}
+
+/// Load the dylib, look for the `tomii_python_bridge_abi` symbol, and abort
+/// with a clear diagnostic if the packed Python version doesn't match the
+/// version this binary was linked against.
+///
+/// Expected ABI is computed at runtime from the already-initialized interpreter
+/// so no build-time Python resolution is needed in tomii-core's build script.
+/// Only compiled when `--features embed-python` is active.
+#[cfg(feature = "embed-python")]
+fn check_python_bridge_abi(dylib_path: &str) {
+    use libloading::{Library, Symbol};
+
+    // Build the expected ABI from the live interpreter. Python is already
+    // initialized by prepare_freethreaded_python() in the caller.
+    let expected_abi: u32 = pyo3::Python::with_gil(|py| {
+        let vi = py.version_info();
+        let gil_disabled: u32 = if cfg!(Py_GIL_DISABLED) { 1 } else { 0 };
+        ((vi.major as u32) << 24) | ((vi.minor as u32) << 16) | (gil_disabled << 15)
+    });
+
+    let lib = unsafe {
+        Library::new(dylib_path).unwrap_or_else(|e| {
+            eprintln!("tomii: failed to pre-load bridge dylib for ABI check: {e}");
+            std::process::exit(1);
+        })
+    };
+
+    // Non-Python plugins won't have this symbol — skip the check silently.
+    let bridge_abi: u32 = unsafe {
+        match lib.get::<unsafe extern "C" fn() -> u32>(b"tomii_python_bridge_abi\0") {
+            Ok(sym) => {
+                let f: Symbol<unsafe extern "C" fn() -> u32> = sym;
+                f()
+            }
+            Err(_) => return,
+        }
+    };
+
+    if bridge_abi != expected_abi {
+        eprintln!(
+            "tomii: Python bridge ABI mismatch!\n\
+             \x20 Binary expects: Python {}.{} (GIL_DISABLED={})\n\
+             \x20 Bridge reports: Python {}.{} (GIL_DISABLED={})\n\
+             Rebuild the bridge with the same Python interpreter used to build this binary,\n\
+             or pass python_interpreter= matching the bridge's Python version to app.build().",
+            (expected_abi >> 24) & 0xFF,
+            (expected_abi >> 16) & 0xFF,
+            (expected_abi >> 15) & 1,
+            (bridge_abi >> 24) & 0xFF,
+            (bridge_abi >> 16) & 0xFF,
+            (bridge_abi >> 15) & 1,
+        );
+        std::process::exit(1);
+    }
+
+    tracing::debug!(
+        abi = format!("0x{:08X}", bridge_abi),
+        "Python bridge ABI verified"
+    );
 }
