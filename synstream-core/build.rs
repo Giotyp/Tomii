@@ -11,6 +11,11 @@ fn main() {
     println!("cargo:rerun-if-env-changed=REG_PATH");
     println!("cargo:rerun-if-env-changed=FUNC_PATH");
 
+    // Also track file contents — env vars hold paths, not content.
+    // Without these, changing the file content at a fixed path goes undetected.
+    if let Ok(p) = env::var("WRAP_PATH") { println!("cargo:rerun-if-changed={p}"); }
+    if let Ok(p) = env::var("REG_PATH")  { println!("cargo:rerun-if-changed={p}"); }
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     let name_funcs = "funcs.rs";

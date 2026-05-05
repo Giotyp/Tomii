@@ -20,8 +20,11 @@ WARMUP="${WARMUP:-3}"
 mkdir -p "$RESULTS_DIR"
 
 BIN="$SCRIPT_DIR/wavefront"
-if [ ! -x "$BIN" ]; then
-    echo "Building wavefront benchmark..."
+BIN_FLOW="$SCRIPT_DIR/wavefront_flow"
+TILE_SIZE="${TILE_SIZE:-32}"
+
+if [ ! -x "$BIN" ] || [ ! -x "$BIN_FLOW" ]; then
+    echo "Building wavefront benchmarks..."
     make -C "$SCRIPT_DIR"
 fi
 
@@ -36,13 +39,33 @@ echo "=========================================="
 for N in $N_LIST; do
     for W in $WORKERS_LIST; do
         OUT="$RESULTS_DIR/tbb_wavefront_n${N}_w${W}.csv"
-        echo "  TBB (pinned) N=$N workers=$W -> $OUT"
+        echo "  TBB parallel_for (pinned) N=$N workers=$W -> $OUT"
         "$BIN" \
             --n "$N" \
             --workers "$W" \
             --iterations "$ITERS" \
             --warmup "$WARMUP" \
             --pin \
+            --output "$OUT"
+    done
+done
+
+echo ""
+echo "=========================================="
+echo "  Intel TBB flow_graph Block-DAG Benchmark"
+echo "  Tile size: $TILE_SIZE"
+echo "=========================================="
+
+for N in $N_LIST; do
+    for W in $WORKERS_LIST; do
+        OUT="$RESULTS_DIR/tbb_flow_wavefront_n${N}_w${W}.csv"
+        echo "  TBB flow_graph N=$N workers=$W tile=$TILE_SIZE -> $OUT"
+        "$BIN_FLOW" \
+            --n "$N" \
+            --tile-size "$TILE_SIZE" \
+            --workers "$W" \
+            --iterations "$ITERS" \
+            --warmup "$WARMUP" \
             --output "$OUT"
     done
 done

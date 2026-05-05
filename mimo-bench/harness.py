@@ -153,6 +153,25 @@ def validate_config(cfg: dict, opt_config: MimoOptConfig) -> dict:
 
 # ── Benchmark execution ───────────────────────────────────────────────────────
 
+def _kill_port(port: int) -> None:
+    """Kill any process holding the given UDP port to prevent EADDRINUSE."""
+    try:
+        result = subprocess.run(
+            ["fuser", f"{port}/udp"],
+            capture_output=True, text=True,
+        )
+        pids = result.stdout.split()
+        for pid in pids:
+            try:
+                subprocess.run(["kill", "-9", pid], check=False)
+            except Exception:
+                pass
+        if pids:
+            time.sleep(0.5)
+    except FileNotFoundError:
+        pass
+
+
 def run_benchmark(
     config: dict,
     run_script: str,
@@ -163,6 +182,7 @@ def run_benchmark(
     Run run_mimo.sh with the given knob config.
     Streams stdout line-by-line; returns True when 'RUN COMPLETED' is seen.
     """
+    _kill_port(8000)
     env = os.environ.copy()
     env["MIMO_CLEANUP"] = "0"
     env["MIMO_SKIP_VIZ"] = "1"
