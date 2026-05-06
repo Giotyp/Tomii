@@ -125,7 +125,13 @@ fn worker_resolve_successors(
             );
 
             let succ_entry = &rctx.cache.node_cache[succ_node_id];
-            if succ_entry.is_fanout_bulk && !sctx.cfg.no_fanout_bulk && !ready.is_empty() {
+            // Only apply fanout-bulk when inline_continuation is disabled or W=1.
+            // With inline_continuation + W>1, ingest→transform runs zero-cost inline;
+            // batching would block that pipeline and lose the Rayon-free fast path.
+            let fanout_bulk_eligible = succ_entry.is_fanout_bulk
+                && !sctx.cfg.no_fanout_bulk
+                && (!sctx.cfg.inline_continuation || sctx.cfg.workers == 1);
+            if fanout_bulk_eligible && !ready.is_empty() {
                 // Fanout-bulk path: accumulate arrivals; dispatch one bulk task
                 // when all factor instances have completed.
                 let new_arrived = fanout_bulk_increment(
@@ -135,10 +141,19 @@ fn worker_resolve_successors(
                 );
                 ready.clear();
                 if new_arrived >= succ_entry.factor {
-                    let mut bulk_ni = NodeInfo::new(*succ_id, slot, 0, node_info.index);
-                    bulk_ni.bulk_count = succ_entry.factor;
-                    bulk_ni.gen = slot_gen;
-                    sched.push(bulk_ni);
+                    let factor = succ_entry.factor;
+                    let n_chunks = sctx.cfg.workers.min(factor).max(1);
+                    let base = factor / n_chunks;
+                    let extra = factor % n_chunks;
+                    let mut start = 0usize;
+                    for c in 0..n_chunks {
+                        let count = base + if c < extra { 1 } else { 0 };
+                        let mut chunk_ni = NodeInfo::new(*succ_id, slot, start, node_info.index);
+                        chunk_ni.bulk_count = count;
+                        chunk_ni.gen = slot_gen;
+                        sched.push(chunk_ni);
+                        start += count;
+                    }
                 }
             } else {
                 push_ready_chunked(

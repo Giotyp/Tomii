@@ -158,10 +158,11 @@ pub(super) fn process_batch_inner(
             // Fanout-bulk: accumulate arrivals for 1:1 bulk dispatch (Upgrade 5).
             // Only applies to non-condition successors (is_fanout_bulk requires !is_condition).
             let succ_entry = &rctx.cache.node_cache[succ_node_id];
-            if !has_cond
+            let fanout_bulk_eligible = !has_cond
                 && succ_entry.is_fanout_bulk
                 && !shared.config.no_fanout_bulk
-                && !ready.is_empty()
+                && (!shared.config.inline_continuation || shared.config.workers == 1);
+            if fanout_bulk_eligible && !ready.is_empty()
             {
                 let new_arrived = super::task_execution::fanout_bulk_increment(
                     &rctx.slots.fanout_bulk_arrived[node_info.slot][succ_node_id],
@@ -169,15 +170,24 @@ pub(super) fn process_batch_inner(
                     ready.len(),
                 );
                 if new_arrived >= succ_entry.factor {
-                    let mut bulk_ni = NodeInfo::new(
-                        succ_node_id as IdType,
-                        node_info.slot,
-                        0,
-                        node_info.index,
-                    );
-                    bulk_ni.bulk_count = succ_entry.factor;
-                    bulk_ni.gen = slot_gen;
-                    sched.push(bulk_ni);
+                    let factor = succ_entry.factor;
+                    let n_chunks = shared.config.workers.min(factor).max(1);
+                    let base = factor / n_chunks;
+                    let extra = factor % n_chunks;
+                    let mut start = 0usize;
+                    for c in 0..n_chunks {
+                        let count = base + if c < extra { 1 } else { 0 };
+                        let mut chunk_ni = NodeInfo::new(
+                            succ_node_id as IdType,
+                            node_info.slot,
+                            start,
+                            node_info.index,
+                        );
+                        chunk_ni.bulk_count = count;
+                        chunk_ni.gen = slot_gen;
+                        sched.push(chunk_ni);
+                        start += count;
+                    }
                 }
                 continue;
             }
