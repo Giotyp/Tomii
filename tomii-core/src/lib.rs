@@ -120,7 +120,19 @@ pub mod func_reg {
     include!(concat!(env!("OUT_DIR"), "/func_reg.rs"));
 }
 #[cfg(not(build_rs_ran))]
-pub mod func_reg {}
+pub mod func_reg {
+    use tomii_types::{CmBulkPtr, CmPtr, CmTypes};
+    /// Stub used when no plugin registry has been generated (test / check-only builds).
+    #[allow(dead_code)]
+    pub fn get_func(_: &str) -> Option<CmPtr> {
+        None
+    }
+    /// Stub: no bulk kernels registered in test / check-only builds.
+    #[allow(dead_code)]
+    pub fn get_bulk_func(_: &str) -> Option<CmBulkPtr> {
+        None
+    }
+}
 #[cfg(build_rs_ran)]
 pub mod funcs {
     include!(concat!(env!("OUT_DIR"), "/funcs.rs"));

@@ -30,10 +30,21 @@ use syn::{
 // ---------------------------------------------------------------------------
 
 /// Returns true if the attribute token stream contains the word `variadic`.
-fn has_variadic_attr(attr: TokenStream) -> bool {
-    attr.into_iter().any(|t| {
+fn has_variadic_attr(attr: &TokenStream) -> bool {
+    attr.clone().into_iter().any(|t| {
         if let proc_macro::TokenTree::Ident(id) = t {
             id.to_string() == "variadic"
+        } else {
+            false
+        }
+    })
+}
+
+/// Returns true if the attribute token stream contains the word `bulk`.
+fn has_bulk_attr(attr: &TokenStream) -> bool {
+    attr.clone().into_iter().any(|t| {
+        if let proc_macro::TokenTree::Ident(id) = t {
+            id.to_string() == "bulk"
         } else {
             false
         }
@@ -189,14 +200,206 @@ fn classify_return(ty: &Type) -> RetKind {
 
 #[proc_macro_attribute]
 pub fn tomii_export(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let variadic = has_variadic_attr(attr);
+    let variadic = has_variadic_attr(&attr);
+    let bulk = has_bulk_attr(&attr);
     let func = parse_macro_input!(item as ItemFn);
     let companion = build_companion(&func, variadic);
-    let output = quote! {
-        #func
-        #companion
+    let output = if bulk {
+        let bulk_companion = build_bulk_companion(&func);
+        quote! {
+            #func
+            #companion
+            #bulk_companion
+        }
+    } else {
+        quote! {
+            #func
+            #companion
+        }
     };
     output.into()
+}
+
+// ---------------------------------------------------------------------------
+// Build the _bulk_cm companion
+// ---------------------------------------------------------------------------
+
+/// Build the `_bulk_cm` companion for functions annotated with `#[tomii_export(bulk)]`.
+///
+/// The bulk companion has signature `fn(start: usize, end: usize, args: &[CmTypes]) -> CmTypes`.
+/// It extracts all static (non-index) arguments once before the loop, then calls the original
+/// function for each instance in `start..end`.
+///
+/// Parameter classification:
+/// - Parameters named `idx`, `index`, or `i` are treated as the per-instance index and
+///   are supplied by the loop variable `__bulk_inst` instead of extracted from `args`.
+/// - Primitive / `&str` parameters are extracted from `args` once before the loop.
+/// - Non-primitive reference parameters (`&T`, `&mut T`) are accessed via `with_any` closures
+///   that wrap the entire loop body, amortising any lock costs across all iterations.
+///   When the Tier 2 prologue has upgraded `Any` slots to `AnyHeld`, these closures are
+///   lock-free.
+fn build_bulk_companion(func: &ItemFn) -> proc_macro2::TokenStream {
+    let vis = &func.vis;
+    let fn_name = &func.sig.ident;
+    let bulk_cm_name = Ident::new(&format!("{}_bulk_cm", fn_name), Span::call_site());
+    let fn_name_str = fn_name.to_string();
+
+    struct Param {
+        name: Ident,
+        orig_ty: Type,
+        kind: ParamKind,
+        /// Index into the `args` slice consumed by this param.
+        /// `None` for the per-instance index param (replaced by the loop variable).
+        arg_slot: Option<usize>,
+    }
+
+    // Classify each parameter, assigning consecutive arg slots.
+    let mut params: Vec<Param> = Vec::new();
+    let mut slot = 0usize;
+    for arg in func.sig.inputs.iter() {
+        if let FnArg::Typed(PatType { pat, ty, .. }) = arg {
+            if let Pat::Ident(pi) = pat.as_ref() {
+                let kind = classify(ty);
+                let name_str = pi.ident.to_string();
+                // The per-instance index param is supplied by the loop variable.
+                let is_index_param = matches!(name_str.as_str(), "idx" | "index" | "i");
+                let arg_slot = if is_index_param {
+                    None
+                } else {
+                    let s = slot;
+                    slot += 1;
+                    Some(s)
+                };
+                params.push(Param {
+                    name: pi.ident.clone(),
+                    orig_ty: (*ty.as_ref()).clone(),
+                    kind,
+                    arg_slot,
+                });
+            }
+        }
+    }
+
+    // Call arguments for the original function inside the loop.
+    let call_args = params.iter().map(|p| {
+        let n = &p.name;
+        if p.arg_slot.is_none() {
+            quote! { __bulk_inst }
+        } else {
+            quote! { #n }
+        }
+    });
+    let raw_call = quote! { #fn_name(#(#call_args),*) };
+
+    // The innermost body is the loop that calls the original function.
+    let loop_body = quote! {
+        for __bulk_inst in __bulk_start..__bulk_end {
+            let _ = #raw_call;
+        }
+    };
+
+    // Non-primitive params: wrap the loop body in nested `with_any` closures.
+    // Iterate in reverse so the outermost closure binds the first such param.
+    let closure_params: Vec<&Param> = params
+        .iter()
+        .filter(|p| {
+            p.arg_slot.is_some()
+                && matches!(
+                    p.kind,
+                    ParamKind::SharedRef(_) | ParamKind::MutRef(_) | ParamKind::OwnedNonPrim(_)
+                )
+        })
+        .collect();
+
+    let mut body: proc_macro2::TokenStream = loop_body;
+    for p in closure_params.iter().rev() {
+        let name = &p.name;
+        let slot_idx = p.arg_slot.unwrap();
+        let msg = format!("{}_bulk_cm: failed to access {}", fn_name_str, name);
+        match &p.kind {
+            ParamKind::SharedRef(inner_ty) => {
+                body = quote! {
+                    args[#slot_idx].with_any(|#name: &#inner_ty| { #body }).expect(#msg)
+                };
+            }
+            ParamKind::MutRef(inner_ty) => {
+                body = quote! {
+                    args[#slot_idx].with_any_mut(|#name: &mut #inner_ty| { #body }).expect(#msg)
+                };
+            }
+            ParamKind::OwnedNonPrim(inner_ty) => {
+                body = quote! {
+                    args[#slot_idx].with_any(|#name: &#inner_ty| {
+                        let #name = #name.clone();
+                        #body
+                    }).expect(#msg)
+                };
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    // Primitive / &str params: emit `let name: ty = ...` extractions before the closures.
+    let passthrough_params: Vec<&Param> = params
+        .iter()
+        .filter(|p| p.arg_slot.is_some() && matches!(p.kind, ParamKind::Passthrough))
+        .collect();
+
+    let primitive_extractions = passthrough_params.iter().map(|p| {
+        let name = &p.name;
+        let slot_idx = p.arg_slot.unwrap();
+        let ty = &p.orig_ty;
+        // &str requires a temporary String owner.
+        if let Type::Reference(r) = ty {
+            if ref_is_str(r) {
+                let tmp = Ident::new(&format!("{}_s", name), Span::call_site());
+                return quote! {
+                    let #tmp = match &args[#slot_idx] {
+                        ::tomii_types::CmTypes::String(s) => s.to_string(),
+                        _ => panic!(
+                            concat!(stringify!(#fn_name), "_bulk_cm: expected String for ",
+                                    stringify!(#name))
+                        ),
+                    };
+                    let #name: &str = #tmp.as_str();
+                };
+            }
+        }
+        // Numeric primitive — cast from whichever CmTypes numeric variant is present.
+        let fn_name_str2 = fn_name_str.clone();
+        quote! {
+            let #name: #ty = match &args[#slot_idx] {
+                ::tomii_types::CmTypes::Bool(x)   => *x as #ty,
+                ::tomii_types::CmTypes::I8(x)     => *x as #ty,
+                ::tomii_types::CmTypes::I16(x)    => *x as #ty,
+                ::tomii_types::CmTypes::I32(x)    => *x as #ty,
+                ::tomii_types::CmTypes::I64(x)    => *x as #ty,
+                ::tomii_types::CmTypes::U8(x)     => *x as #ty,
+                ::tomii_types::CmTypes::U16(x)    => *x as #ty,
+                ::tomii_types::CmTypes::U32(x)    => *x as #ty,
+                ::tomii_types::CmTypes::U64(x)    => *x as #ty,
+                ::tomii_types::CmTypes::F32(x)    => *x as #ty,
+                ::tomii_types::CmTypes::F64(x)    => *x as #ty,
+                ::tomii_types::CmTypes::Usize(x)  => *x as #ty,
+                ::tomii_types::CmTypes::Isize(x)  => *x as #ty,
+                _ => panic!("{}_bulk_cm: unexpected CmTypes variant for {}",
+                            #fn_name_str2, stringify!(#name)),
+            };
+        }
+    });
+
+    quote! {
+        #[no_mangle]
+        #vis fn #bulk_cm_name(
+            __bulk_start: usize,
+            __bulk_end: usize,
+            args: &[::tomii_types::CmTypes],
+        ) -> ::tomii_types::CmTypes {
+            #(#primitive_extractions)*
+            #body;
+            ::tomii_types::CmTypes::None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@ pub use num_complex::{Complex32, Complex64};
 /// Increment when `CmTypes` layout changes (new variant, removed variant, changed repr).
 #[no_mangle]
 pub extern "C" fn tomii_abi_version() -> u32 {
-    2
+    3
 }
 
 /// Backing store for [`CmTypes::AnyHeld`].
@@ -1567,6 +1567,21 @@ impl fmt::Display for CmTypes {
 }
 
 pub type CmPtr = fn(&[CmTypes]) -> CmTypes;
+
+/// Bulk kernel function pointer. A bulk kernel is called **once** per bulk task with the
+/// full instance range `start..end` instead of once per cell, eliminating per-cell
+/// dispatch overhead.
+///
+/// The kernel iterates `start..end` internally; all static args (including `AnyHeld`
+/// pre-resolved read guards from the Tier 2 prologue) are available in `args`.
+///
+/// # Convention
+/// - `args` contains the pre-resolved, lock-free argument buffer prepared by
+///   `execute_bulk_task`'s Tier 1+2 prologue (same layout as `CmPtr`'s slice).
+/// - The `$index`-equivalent position is **not** patched per iteration; the kernel
+///   iterates `start..end` directly and derives its index from the loop variable.
+/// - Returns `CmTypes::None` for pure side-effecting kernels.
+pub type CmBulkPtr = fn(usize, usize, &[CmTypes]) -> CmTypes;
 
 #[derive(Debug)]
 pub struct CustomError {

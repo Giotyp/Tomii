@@ -83,7 +83,12 @@ fn main() {
         fs::write(&wrapper_file, "pub fn init_wrappers() {}\n").expect("write wrappers.rs stub");
         fs::write(
             &registry_file,
-            "use tomii_types::*;\nfn noop(_: &[CmTypes]) -> CmTypes { CmTypes::None }\npub fn get_func(name: &str) -> Option<CmPtr> { if name == \"noop\" { Some(noop) } else { None } }\n",
+            concat!(
+                "use tomii_types::*;\n",
+                "fn noop(_: &[CmTypes]) -> CmTypes { CmTypes::None }\n",
+                "pub fn get_func(name: &str) -> Option<CmPtr> { if name == \"noop\" { Some(noop) } else { None } }\n",
+                "pub fn get_bulk_func(_name: &str) -> Option<CmBulkPtr> { None }\n",
+            ),
         )
         .expect("write func_reg.rs stub");
         info!("No FUNC_PATH set — wrote empty stubs for cargo test");

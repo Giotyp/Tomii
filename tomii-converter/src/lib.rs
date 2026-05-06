@@ -102,6 +102,10 @@ struct ExportedFn {
     /// Names of C companion length parameters that are NOT consumed from
     /// `CmTypes` args — they are auto-derived from array metadata in the `_wrap`.
     auto_params: Vec<String>,
+    /// True when a `{registry_key}_bulk_cm` symbol was found alongside this entry.
+    /// When set, `render_wrappers` emits a `_bulk_cm_wrap` passthrough and
+    /// `render_registry` includes this key in `get_bulk_func`.
+    has_bulk_cm: bool,
 }
 
 /// A parameter as seen in the `_cm` / C function.
@@ -490,17 +494,75 @@ fn extract_param_type(arg: &FnArg) -> Option<&Type> {
 // ---------------------------------------------------------------------------
 
 fn collect_entries(file: &File) -> Vec<ExportedFn> {
+    // First pass: collect all no_mangle function names present in the file.
+    // This lets us detect `{fn}_bulk_cm` companions emitted by `#[tomii_export(bulk)]`.
+    let no_mangle_names: std::collections::HashSet<String> = file
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let Item::Fn(func) = item {
+                if has_attr(&func.attrs, "no_mangle") {
+                    return Some(func.sig.ident.to_string());
+                }
+            }
+            None
+        })
+        .collect();
+
+    // Also collect keys of functions annotated with `#[tomii_export(bulk)]`
+    // so we can mark entries that have a bulk companion even if the companion
+    // is generated (not yet present in the source) but will be present at link time.
+    let bulk_export_keys: std::collections::HashSet<String> = file
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let Item::Fn(func) = item {
+                if has_attr(&func.attrs, "tomii_export") && has_bulk_export(&func.attrs) {
+                    return Some(func.sig.ident.to_string());
+                }
+            }
+            None
+        })
+        .collect();
+
     let mut entries = Vec::new();
 
     for item in &file.items {
         if let Item::Fn(func) = item {
-            if let Some(entry) = try_extract(func) {
+            if let Some(mut entry) = try_extract(func) {
+                // Probe for a `{registry_key}_bulk_cm` symbol: present as a no_mangle
+                // function in the source, OR the function itself has `#[tomii_export(bulk)]`.
+                let bulk_cm_sym = format!("{}_bulk_cm", entry.registry_key);
+                entry.has_bulk_cm = no_mangle_names.contains(&bulk_cm_sym)
+                    || bulk_export_keys.contains(&entry.registry_key);
                 entries.push(entry);
             }
         }
     }
 
     entries
+}
+
+/// Returns true if `#[tomii_export(bulk)]` is present on the function.
+fn has_bulk_export(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        let is_export = a
+            .path()
+            .segments
+            .last()
+            .map(|s| s.ident == "tomii_export")
+            .unwrap_or(false);
+        if !is_export {
+            return false;
+        }
+        matches!(a.meta, syn::Meta::List(_)) && {
+            if let syn::Meta::List(ref ml) = a.meta {
+                ml.tokens.to_string().contains("bulk")
+            } else {
+                false
+            }
+        }
+    })
 }
 
 fn try_extract(func: &ItemFn) -> Option<ExportedFn> {
@@ -544,6 +606,7 @@ fn try_extract(func: &ItemFn) -> Option<ExportedFn> {
             cm_ret,
             source_lang: SourceLang::Rust,
             auto_params: vec![],
+            has_bulk_cm: false, // populated by collect_entries after full file scan
         });
     }
 
@@ -583,6 +646,7 @@ fn try_extract(func: &ItemFn) -> Option<ExportedFn> {
             cm_ret,
             source_lang: SourceLang::Rust,
             auto_params: vec![],
+            has_bulk_cm: false, // populated by collect_entries after full file scan
         });
     }
 
@@ -776,6 +840,11 @@ fn render_wrappers(entries: &[ExportedFn]) -> String {
     for entry in entries {
         out.push_str(&render_entry_wrapper(entry));
         out.push('\n');
+        // If a _bulk_cm companion exists, emit a trivial passthrough wrapper.
+        if entry.has_bulk_cm && entry.source_lang == SourceLang::Rust {
+            out.push_str(&render_bulk_entry_wrapper(entry));
+            out.push('\n');
+        }
     }
 
     out
@@ -888,6 +957,34 @@ fn render_entry_wrapper(entry: &ExportedFn) -> String {
     };
 
     out.push_str(&final_ret);
+    out.push_str("}\n");
+
+    out
+}
+
+/// Emit a `cache_sym!` + trivial `_bulk_cm_wrap` passthrough for Rust entries that have
+/// a `{registry_key}_bulk_cm` companion symbol.
+///
+/// The passthrough simply forwards `(start, end, args)` to the cached symbol — no argument
+/// extraction is needed because the bulk kernel owns its own iteration and arg interpretation.
+fn render_bulk_entry_wrapper(entry: &ExportedFn) -> String {
+    let bulk_cm_name = format!("{}_bulk_cm", entry.registry_key);
+    let sym_name = format!("{}_SYM", bulk_cm_name.to_uppercase());
+    let sym_bytes = format!("b\"{}\"", bulk_cm_name);
+    let wrap_name = format!("{}_bulk_cm_wrap", entry.registry_key);
+
+    let mut out = String::new();
+
+    // cache_sym! for the bulk symbol.
+    out.push_str(&format!(
+        "cache_sym! {{\n    pub static {sym_name}: fn(usize, usize, &[CmTypes]) -> CmTypes = {sym_bytes};\n}}\n"
+    ));
+
+    // Trivial passthrough wrapper — no extraction, just forward.
+    out.push_str(&format!(
+        "pub fn {wrap_name}(start: usize, end: usize, args: &[CmTypes]) -> CmTypes {{\n"
+    ));
+    out.push_str(&format!("    {sym_name}(start, end, args)\n"));
     out.push_str("}\n");
 
     out
@@ -1239,6 +1336,22 @@ fn render_registry(entries: &[ExportedFn]) -> String {
     out.push_str("            println!(\"Function {} not found in registry\", func_name);\n");
     out.push_str("            panic!(\"Function not found: {}\", func_name);\n");
     out.push_str("        }\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+
+    // Emit get_bulk_func only when at least one entry has a bulk companion.
+    out.push_str("pub fn get_bulk_func(func_name: &str) -> Option<CmBulkPtr> {\n");
+    out.push_str("    match func_name {\n");
+
+    for entry in entries {
+        if entry.has_bulk_cm && entry.source_lang == SourceLang::Rust {
+            let key = &entry.registry_key;
+            let bulk_wrap_fn = format!("{}_bulk_cm_wrap", key);
+            out.push_str(&format!("        \"{key}\" => Some({bulk_wrap_fn}),\n"));
+        }
+    }
+
+    out.push_str("        _ => None,\n");
     out.push_str("    }\n");
     out.push_str("}\n");
 

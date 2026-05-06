@@ -2,7 +2,7 @@
 //! [`NodeCacheEntry`] mirrors the hot fields of a `Node` with pre-computed flags such as
 //! `worker_resolvable` and `needs_result_store` that drive fast-path decisions in the runtime.
 use crate::debug::print_debug;
-use crate::func_reg::get_func;
+use crate::func_reg::{get_bulk_func, get_func};
 use crate::{graph_struct::*, IdType};
 use tomii_types::*;
 
@@ -21,6 +21,13 @@ fn resolve_func(name: &str) -> CmPtr {
         }
         get_func(name).unwrap_or(test_noop)
     }
+}
+
+/// Resolve the optional bulk kernel pointer for a function.
+/// Returns `None` when no `{name}_bulk_cm` symbol is registered (opt-in, not required).
+#[inline]
+fn resolve_bulk_func(name: &str) -> Option<CmBulkPtr> {
+    get_bulk_func(name)
 }
 
 // Cache entry for quick node access - stores commonly accessed node fields
@@ -54,6 +61,14 @@ pub struct NodeCacheEntry {
     // When false, no successor consumes the result and the node_results.set() call
     // can be elided entirely, saving a hash-map write on the hot path.
     pub needs_result_store: bool,
+    /// Optional bulk kernel pointer.  Non-`None` when the plugin exports a
+    /// `{func_name}_bulk_cm` symbol (registered via `get_bulk_func`).
+    ///
+    /// When `Some`, `execute_bulk_task` calls the bulk kernel **once** with the full
+    /// `(start, end, args)` range instead of looping over `populate_dynamic_args_into`
+    /// once per cell.  Nodes with `needs_result_store == true` always fall back to the
+    /// per-cell loop regardless of this field.
+    pub bulk_func: Option<CmBulkPtr>,
 }
 
 #[derive(Clone)]
@@ -155,6 +170,7 @@ pub(super) fn node_cache_entry(
             affinity_group: 0,
             worker_resolvable: false,
             needs_result_store: false,
+            bulk_func: None,
         };
     }
 
@@ -185,6 +201,7 @@ pub(super) fn node_cache_entry(
         affinity_group: 0,
         worker_resolvable: false,
         needs_result_store: false,
+        bulk_func: resolve_bulk_func(&node.func_name),
     }
 }
 

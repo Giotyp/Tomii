@@ -424,6 +424,7 @@ fn build_entry(decl: &str, ann: &Annotation) -> Option<ExportedFn> {
         cm_ret,
         source_lang: SourceLang::C,
         auto_params,
+        has_bulk_cm: false, // C plugins do not support bulk kernels
     })
 }
 

@@ -243,30 +243,54 @@ fn execute_bulk_task(
             buf[i] = held;
         }
 
-        for inst_idx in node_info.index..node_info.index + node_info.bulk_count {
-            if has_dynamic {
-                let stale = populate_dynamic_args_into(
-                    &mut buf,
-                    shared,
-                    args_cache,
-                    inst_idx,
-                    node_info.slot,
-                    node_info.pred_index,
-                    exec_slot,
-                    exec_gen,
-                    workers,
-                );
-                if stale {
-                    bulk_stale = true;
-                    break;
+        // Tier 4 fast path: call the bulk kernel once for the entire range.
+        // Preconditions: bulk_func is Some AND needs_result_store is false.
+        // (When needs_result_store is true, per-cell results must be stored; fall back
+        // to the per-cell loop so sctx.exec.node_results.set runs once per instance.)
+        let use_bulk_fast_path = node_cache
+            .bulk_func
+            .is_some_and(|_| !node_cache.needs_result_store);
+
+        if use_bulk_fast_path {
+            // SAFETY: checked is_some above.
+            let bulk_fn = node_cache.bulk_func.unwrap();
+            // Tier 1+2 prologue already ran: buf is populated and Any slots are upgraded
+            // to AnyHeld.  The bulk kernel owns its own `start..end` iteration; no
+            // populate_dynamic_args_into call is needed.
+            let _result = bulk_fn(
+                node_info.index,
+                node_info.index + node_info.bulk_count,
+                &buf,
+            );
+            // bulk_stale remains false: generation was checked at the top of
+            // execute_task before dispatch into execute_bulk_task.
+        } else {
+            // Per-cell loop: Tiers 1–3 (no bulk symbol, or needs_result_store).
+            for inst_idx in node_info.index..node_info.index + node_info.bulk_count {
+                if has_dynamic {
+                    let stale = populate_dynamic_args_into(
+                        &mut buf,
+                        shared,
+                        args_cache,
+                        inst_idx,
+                        node_info.slot,
+                        node_info.pred_index,
+                        exec_slot,
+                        exec_gen,
+                        workers,
+                    );
+                    if stale {
+                        bulk_stale = true;
+                        break;
+                    }
                 }
-            }
-            let result = func(&buf);
-            if node_cache.needs_result_store {
-                let mut inst_info = node_info.clone();
-                inst_info.index = inst_idx;
-                inst_info.bulk_count = 1;
-                sctx.exec.node_results.set(&inst_info, result);
+                let result = func(&buf);
+                if node_cache.needs_result_store {
+                    let mut inst_info = node_info.clone();
+                    inst_info.index = inst_idx;
+                    inst_info.bulk_count = 1;
+                    sctx.exec.node_results.set(&inst_info, result);
+                }
             }
         }
 
