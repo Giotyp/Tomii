@@ -69,6 +69,13 @@ pub struct NodeCacheEntry {
     /// once per cell.  Nodes with `needs_result_store == true` always fall back to the
     /// per-cell loop regardless of this field.
     pub bulk_func: Option<CmBulkPtr>,
+    /// True when this node is eligible for 1:1 fanout bulk dispatch (Upgrade 5).
+    ///
+    /// Eligibility: single $res predecessor with equal factor, worker_resolvable,
+    /// not a condition/network node, no $barrier args.  When true, the arrived
+    /// counter in SlotData::fanout_bulk_arrived batches N individual instances into
+    /// one bulk task instead of N per-cell dispatches.
+    pub is_fanout_bulk: bool,
 }
 
 #[derive(Clone)]
@@ -171,6 +178,7 @@ pub(super) fn node_cache_entry(
             worker_resolvable: false,
             needs_result_store: false,
             bulk_func: None,
+            is_fanout_bulk: false,
         };
     }
 
@@ -202,6 +210,7 @@ pub(super) fn node_cache_entry(
         worker_resolvable: false,
         needs_result_store: false,
         bulk_func: resolve_bulk_func(&node.func_name),
+        is_fanout_bulk: false, // populated in build_node_cache second pass
     }
 }
 

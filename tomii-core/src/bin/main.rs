@@ -116,6 +116,11 @@ struct Args {
     inline_continuation: bool,
     #[clap(
         long,
+        help = "Disable 1:1 fanout-bulk dispatch (Upgrade 5). Produces bit-identical output to the per-cell path. Use for correctness verification."
+    )]
+    no_fanout_bulk: bool,
+    #[clap(
+        long,
         value_name = "EXCLUDE_STREAMS",
         required = false,
         default_value = "0",
@@ -292,6 +297,7 @@ fn main() {
         slot_priority_enabled: args.slot_priority,
         coalesce_barriers: args.coalesce_barriers,
         inline_continuation: args.inline_continuation,
+        no_fanout_bulk: args.no_fanout_bulk,
         single_slot_mode: args.slots == 1,
         record_stream: args.record_stream,
         recv_pool_size: args.recv_pool_size,

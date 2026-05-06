@@ -267,8 +267,15 @@ pub(super) fn decrement_and_collect_ready(
     slot_gen: u32,
     ready: &mut Vec<usize>,
 ) {
-    let specific_succ_idx =
-        compute_1to1_succ_idx(ctx.cache, pred_node_id, pred_index, succ_node_id);
+    // When bulk_count > 1 the completing task represents N instances in one shot.
+    // compute_1to1_succ_idx uses pred_index=0 (the bulk start), which would fire only
+    // successor[0] — skipping [1..N-1].  Suppress 1:1 dispatch for bulk completions;
+    // the full threshold scan in decrease_and_get_ready_into handles it correctly.
+    let specific_succ_idx = if bulk_count > 1 {
+        None
+    } else {
+        compute_1to1_succ_idx(ctx.cache, pred_node_id, pred_index, succ_node_id)
+    };
     ctx.exec.resolution_state.decrease_and_get_ready_into(
         slot,
         succ_node_id,

@@ -290,8 +290,12 @@ impl TomiiRtBuilder {
         } = self.compiled;
 
         // --- Slot counters & condition tracking (slot-count-dependent) ---
-        let (slot_pending_tasks, slot_pending_cond_tasks, cond_instances_to_spawn) =
-            build_slot_counters(slots, &node_cache);
+        let (
+            slot_pending_tasks,
+            slot_pending_cond_tasks,
+            cond_instances_to_spawn,
+            fanout_bulk_arrived,
+        ) = build_slot_counters(slots, &node_cache);
 
         // --- Thread pool parameters from scheduler ---
         self.config.system_threads = self.scheduler.system_threads();
@@ -394,6 +398,7 @@ impl TomiiRtBuilder {
                 stream_id: Arc::new((0..slots).map(|_| AtomicUsize::new(usize::MAX)).collect()),
                 active_bitmap: Arc::new(AtomicU64::new(0)),
                 cond_instances_to_spawn: Arc::new(cond_instances_to_spawn),
+                fanout_bulk_arrived: Arc::new(fanout_bulk_arrived),
                 states: Arc::new(RwLock::new(vec![SlotState::Inactive; slots])),
                 running_streams: Arc::new(RwLock::new(Vec::new())),
                 buffers: slot_buffers,

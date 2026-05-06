@@ -83,6 +83,35 @@ pub(crate) fn build_node_cache(
         cache_entry.needs_result_store = has_res_consumer;
     }
 
+    // is_fanout_bulk — true when the node is eligible for 1:1 fanout bulk dispatch (Upgrade 5).
+    // Eligibility: single $res predecessor with equal factor > 1, worker_resolvable,
+    // not a condition/network node, no $barrier args.
+    for (node_id, cache_entry) in cache.iter_mut().enumerate() {
+        if !cache_entry.worker_resolvable
+            || cache_entry.is_condition
+            || cache_entry.name == "$network"
+        {
+            continue;
+        }
+        let node = &app_graph.nodes[node_id];
+        if node.args.iter().any(|a| a.is_barrier()) {
+            continue;
+        }
+        let res_args: Vec<_> = node
+            .args
+            .iter()
+            .filter(|a| a.type_.is_result())
+            .collect();
+        if res_args.len() == 1 {
+            if let Some(pred) = res_args[0].predecessor.as_ref() {
+                let pred_factor = app_graph.nodes[pred.id as usize].factor;
+                if pred_factor == node.factor && node.factor > 1 {
+                    cache_entry.is_fanout_bulk = true;
+                }
+            }
+        }
+    }
+
     // priority and affinity_group — pre-computed to avoid per-task lookups on the hot path
     {
         use crate::custom_scheduler::Priority;
@@ -226,10 +255,16 @@ pub(crate) fn build_predecessor_tables(
 /// - `pending_tasks`: per-slot regular (non-condition, non-initial) task count.
 /// - `pending_cond_tasks`: per-slot condition task count.
 /// - `cond_instances_to_spawn`: generational packed counters for condition node spawn tracking.
+/// - `fanout_bulk_arrived`: generational packed arrived counters for fanout-bulk dispatch.
 pub(super) fn build_slot_counters(
     slots: usize,
     node_cache: &[NodeCacheEntry],
-) -> (Vec<AtomicUsize>, Vec<AtomicUsize>, Vec<Vec<AtomicU64>>) {
+) -> (
+    Vec<AtomicUsize>,
+    Vec<AtomicUsize>,
+    Vec<Vec<AtomicU64>>,
+    Vec<Vec<AtomicU64>>,
+) {
     let total_tasks: usize = node_cache
         .iter()
         .filter(|nc| !nc.is_initial && !nc.is_condition)
@@ -263,5 +298,21 @@ pub(super) fn build_slot_counters(
         })
         .collect();
 
-    (pending_tasks, pending_cond_tasks, cond_instances_to_spawn)
+    // Packed (gen: u32, arrived_count: u32) — for fanout-bulk arrival tracking.
+    // All counters start at 0 (no arrivals in generation 0).
+    let fanout_bulk_arrived: Vec<Vec<AtomicU64>> = (0..slots)
+        .map(|_| {
+            node_cache
+                .iter()
+                .map(|_| AtomicU64::new(crate::buffers::gen_pack(0, 0)))
+                .collect()
+        })
+        .collect();
+
+    (
+        pending_tasks,
+        pending_cond_tasks,
+        cond_instances_to_spawn,
+        fanout_bulk_arrived,
+    )
 }

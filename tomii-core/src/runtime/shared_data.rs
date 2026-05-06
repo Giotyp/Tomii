@@ -119,6 +119,9 @@ pub struct RuntimeConfig {
     pub recv_pool_size: usize,
     pub spin_wait: SpinWaitConfig,
     pub batch: BatchConfig,
+    /// When true, disable the 1:1 fanout-bulk dispatch path (Upgrade 5).
+    /// Produces bit-identical output to the per-cell path; used for verification.
+    pub no_fanout_bulk: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -140,6 +143,7 @@ impl Default for RuntimeConfig {
             recv_pool_size: 1024,
             spin_wait: SpinWaitConfig::default(),
             batch: BatchConfig::default(),
+            no_fanout_bulk: false,
         }
     }
 }
@@ -158,6 +162,11 @@ pub struct SlotData {
     pub active_bitmap: Arc<AtomicU64>,
     /// Condition node spawn tracking per slot.
     pub cond_instances_to_spawn: Arc<Vec<Vec<AtomicU64>>>,
+    /// Per-node arrived counters for 1:1 fanout-bulk dispatch (Upgrade 5).
+    /// Indexed [slot][node_id]. Each entry is gen-packed: high 32 = slot gen,
+    /// low 32 = number of instances that have completed in this generation.
+    /// When low 32 reaches node.factor, one bulk task is dispatched.
+    pub fanout_bulk_arrived: Arc<Vec<Vec<AtomicU64>>>,
     pub states: Arc<RwLock<Vec<SlotState>>>,
     pub running_streams: Arc<RwLock<Vec<(usize, usize)>>>,
     /// Per-slot buffering: holds ready nodes with packet data waiting for slot activation.

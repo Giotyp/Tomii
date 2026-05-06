@@ -24,6 +24,37 @@ use crate::debug::print_debug;
 use std::sync::Arc;
 use tomii_types::*;
 
+/// Atomically add `count` arrivals to the gen-packed fanout-bulk counter for a successor.
+///
+/// Returns the new total arrived count for this slot generation.  If the stored generation
+/// differs from `slot_gen`, the counter is treated as 0 before adding (lazy reset).
+///
+/// Uses AcqRel ordering: the fetch_update acquires the previous release from a completing
+/// predecessor, establishing the happens-before chain needed for result visibility on ARM.
+#[inline]
+pub(super) fn fanout_bulk_increment(counter: &std::sync::atomic::AtomicU64, slot_gen: u32, count: usize) -> usize {
+    use crate::buffers::{gen_pack, gen_unpack_gen, gen_unpack_val};
+    use std::sync::atomic::Ordering;
+    let result = counter
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |packed| {
+            let stored_gen = gen_unpack_gen(packed);
+            let cur = if stored_gen == slot_gen {
+                gen_unpack_val(packed)
+            } else {
+                0
+            };
+            Some(gen_pack(slot_gen, cur.saturating_add(count as u32)))
+        })
+        .unwrap(); // fetch_update closure always returns Some
+    let stored_gen = gen_unpack_gen(result);
+    let old_count = if stored_gen == slot_gen {
+        gen_unpack_val(result)
+    } else {
+        0
+    };
+    (old_count as usize) + count
+}
+
 /// Worker-side dependency resolution: resolves successors directly on the worker
 /// thread that completed the task, bypassing the batch_queue → resolution thread
 /// round-trip. Only called for nodes where all successors are non-condition
@@ -93,15 +124,33 @@ fn worker_resolve_successors(
                 ready,
             );
 
-            push_ready_chunked(
-                ready,
-                succ_node_id as crate::IdType,
-                slot,
-                node_info.index,
-                sctx.cfg.workers,
-                sctx.cfg.coalesce_barriers,
-                sched,
-            );
+            let succ_entry = &rctx.cache.node_cache[succ_node_id];
+            if succ_entry.is_fanout_bulk && !sctx.cfg.no_fanout_bulk && !ready.is_empty() {
+                // Fanout-bulk path: accumulate arrivals; dispatch one bulk task
+                // when all factor instances have completed.
+                let new_arrived = fanout_bulk_increment(
+                    &rctx.slots.fanout_bulk_arrived[slot][succ_node_id],
+                    slot_gen,
+                    ready.len(),
+                );
+                ready.clear();
+                if new_arrived >= succ_entry.factor {
+                    let mut bulk_ni = NodeInfo::new(*succ_id, slot, 0, node_info.index);
+                    bulk_ni.bulk_count = succ_entry.factor;
+                    bulk_ni.gen = slot_gen;
+                    sched.push(bulk_ni);
+                }
+            } else {
+                push_ready_chunked(
+                    ready,
+                    succ_node_id as crate::IdType,
+                    slot,
+                    node_info.index,
+                    sctx.cfg.workers,
+                    sctx.cfg.coalesce_barriers,
+                    sched,
+                );
+            }
         }
 
         // Inline continuation: reserve one ready successor for this worker

@@ -155,6 +155,33 @@ pub(super) fn process_batch_inner(
                 )
             });
 
+            // Fanout-bulk: accumulate arrivals for 1:1 bulk dispatch (Upgrade 5).
+            // Only applies to non-condition successors (is_fanout_bulk requires !is_condition).
+            let succ_entry = &rctx.cache.node_cache[succ_node_id];
+            if !has_cond
+                && succ_entry.is_fanout_bulk
+                && !shared.config.no_fanout_bulk
+                && !ready.is_empty()
+            {
+                let new_arrived = super::task_execution::fanout_bulk_increment(
+                    &rctx.slots.fanout_bulk_arrived[node_info.slot][succ_node_id],
+                    slot_gen,
+                    ready.len(),
+                );
+                if new_arrived >= succ_entry.factor {
+                    let mut bulk_ni = NodeInfo::new(
+                        succ_node_id as IdType,
+                        node_info.slot,
+                        0,
+                        node_info.index,
+                    );
+                    bulk_ni.bulk_count = succ_entry.factor;
+                    bulk_ni.gen = slot_gen;
+                    sched.push(bulk_ni);
+                }
+                continue;
+            }
+
             for &ready_index in ready.iter() {
                 let scheduled_succ_info = NodeInfo::new(
                     succ_node_id as IdType,
