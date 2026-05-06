@@ -38,6 +38,7 @@ _BOOL_FLAGS: Dict[str, str] = {
     "slot_priority": "--slot-priority",
     "coalesce_barriers": "--coalesce-barriers",
     "inline_continuation": "--inline-continuation",
+    "no_fanout_bulk": "--no-fanout-bulk",
 }
 
 _STR_FLAGS: Dict[str, str] = {
