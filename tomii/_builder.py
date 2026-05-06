@@ -314,7 +314,8 @@ def _build_python_plugin(config: BuildConfig) -> BuildResult:
         if config.clean:
             _cargo(["clean", "-p", "tomii-core"], build_env, workspace)
         _cargo(
-            ["build", "-p", "tomii-core", "--bin", "main"] + release_flag,
+            ["build", "-p", "tomii-core", "--bin", "main", "--features", "embed-python"]
+            + release_flag,
             build_env,
             workspace,
         )
