@@ -539,11 +539,56 @@ fn build_companion(func: &ItemFn, variadic: bool) -> proc_macro2::TokenStream {
             _ => unreachable!(),
         };
         let msg = format!("{}: failed to extract variadic element", fn_name_str);
-        quote! {
-            let #vname: Vec<#elem_ty> = #vname.iter()
-                .map(|__v| __v.with_any(|__v: &#elem_ty| __v.clone()).expect(#msg))
-                .collect();
-            #body
+        // For numeric primitives: extract directly from CmTypes numeric variants
+        // (no Arc/RwLock overhead from with_any).
+        // String and non-primitive types fall through to the with_any path.
+        let is_numeric = if let Type::Path(TypePath { qself: None, path }) = elem_ty {
+            if path.segments.len() == 1 {
+                matches!(
+                    path.segments[0].ident.to_string().as_str(),
+                    "bool" | "i8" | "i16" | "i32" | "i64" | "i128"
+                        | "u8" | "u16" | "u32" | "u64" | "u128"
+                        | "f32" | "f64" | "usize" | "isize"
+                )
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if is_numeric {
+            let fn_name_str2 = fn_name_str.clone();
+            quote! {
+                let #vname: Vec<#elem_ty> = #vname.iter()
+                    .map(|__v| match __v {
+                        ::tomii_types::CmTypes::Bool(x)   => (*x as u8) as #elem_ty,
+                        ::tomii_types::CmTypes::I8(x)     => *x as #elem_ty,
+                        ::tomii_types::CmTypes::I16(x)    => *x as #elem_ty,
+                        ::tomii_types::CmTypes::I32(x)    => *x as #elem_ty,
+                        ::tomii_types::CmTypes::I64(x)    => *x as #elem_ty,
+                        ::tomii_types::CmTypes::I128(x)   => **x as #elem_ty,
+                        ::tomii_types::CmTypes::U8(x)     => *x as #elem_ty,
+                        ::tomii_types::CmTypes::U16(x)    => *x as #elem_ty,
+                        ::tomii_types::CmTypes::U32(x)    => *x as #elem_ty,
+                        ::tomii_types::CmTypes::U64(x)    => *x as #elem_ty,
+                        ::tomii_types::CmTypes::U128(x)   => **x as #elem_ty,
+                        ::tomii_types::CmTypes::F32(x)    => *x as #elem_ty,
+                        ::tomii_types::CmTypes::F64(x)    => *x as #elem_ty,
+                        ::tomii_types::CmTypes::Usize(x)  => *x as #elem_ty,
+                        ::tomii_types::CmTypes::Isize(x)  => *x as #elem_ty,
+                        _ => panic!("{}: expected numeric CmTypes variant for variadic element",
+                                    #fn_name_str2),
+                    })
+                    .collect();
+                #body
+            }
+        } else {
+            quote! {
+                let #vname: Vec<#elem_ty> = #vname.iter()
+                    .map(|__v| __v.with_any(|__v: &#elem_ty| __v.clone()).expect(#msg))
+                    .collect();
+                #body
+            }
         }
     } else {
         body
