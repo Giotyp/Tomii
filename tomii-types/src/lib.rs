@@ -1446,6 +1446,7 @@ impl PartialEq for CmTypes {
             (CmTypes::F64(a), CmTypes::F64(b)) => a == b,
             (CmTypes::Char(a), CmTypes::Char(b)) => a == b,
             (CmTypes::Usize(a), CmTypes::Usize(b)) => a == b,
+            (CmTypes::Isize(a), CmTypes::Isize(b)) => a == b,
             (CmTypes::String(a), CmTypes::String(b)) => **a == **b,
             (CmTypes::VecCmt(a), CmTypes::VecCmt(b)) => **a == **b,
             (CmTypes::Ref(a), CmTypes::Ref(b)) => a == b,

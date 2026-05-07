@@ -64,6 +64,12 @@ parking_lot = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+[dev-dependencies]
+loom = { version = "0.7", features = ["checkpoint"] }
+
 [build-dependencies]
 build-print = "0.1.1"
 tomii-converter = { path = "../tomii-converter" }
