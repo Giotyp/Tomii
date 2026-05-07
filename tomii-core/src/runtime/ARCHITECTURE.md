@@ -369,3 +369,52 @@ Do not break these without fully understanding the consequences:
 - `SeqCst` on all slot-counter operations in multi-slot mode. Weakening to
   `AcqRel` or `Release` causes non-deterministic counter corruption across
   stream boundaries (Bugs #14, #18, #19).
+
+## Performance envelope
+
+### Intrinsic costs
+
+These costs are structural and cannot be removed without changing the programming
+model or the safety invariants above.
+
+**K-way SeqCst on `remaining_deps`.**  Every task arrival does an `AcqRel` fetch-sub
+on `remaining_deps` followed by a comparison.  In multi-slot mode the counter
+operations must be `SeqCst` (see invariants above).  At W workers and S concurrent
+slots this produces W×S SeqCst RMWs competing on the same cache line per node,
+which becomes the dominant cost for fan-in nodes with large K.
+
+**Type-erased dispatch (~40–85 ns/call).** Task functions are stored as
+`Box<dyn FnOnce()>` (Rayon path) or raw `fn` pointers (inline-continuation path).
+The inline-continuation path eliminates the box allocation but retains one indirect
+call per task.  Sub-µs workloads where per-task work is comparable to this overhead
+will not amortise it.
+
+**Resolution-thread state machine.**  By default a single resolution thread runs
+the four-phase batch protocol (batch drain → completion detection → successor
+collection → scheduling).  At high S or large fan-out graphs the resolution thread
+becomes the bottleneck.  `--system-threads N` raises the resolution-thread count but
+introduces cross-thread slot ownership checks at each phase boundary.
+
+**Slot lifecycle overhead.**  Each stream requires one `reinit_slot` (generational
+reset of all node buffers, O(nodes)) and one `release_slot` call.  For pipelines
+with many nodes and short per-stream work this can dominate.
+
+### Workload classes Tomii targets
+
+- **Streaming MIMO pipelines**: large per-task work (≥10 µs), O(10–100) nodes, 1–64
+  concurrent slots, long-running (minutes to hours).  The scheduling abstraction and
+  slot lifecycle amortise well over these workloads.
+- **Multi-slot fan-out**: pipelines where the same graph topology is applied to many
+  independent streams concurrently.  Slot parallelism hides resolution-thread latency.
+- **Heterogeneous DAGs with barriers**: mixed compute/network nodes, conditional
+  routing via `$barrier`/`$dep`, grouped synchronisation across fan-in nodes.
+
+### Workload classes Tomii does not target
+
+- **Sub-µs micro-tasks**: per-task work below ~1 µs will be dominated by dispatch and
+  resolution overhead.  Static-graph executors (Taskflow, TBB flow graph) with
+  pre-compiled task graphs have lower per-invocation cost here.
+- **Pure `parallel_for` workloads**: homogeneous loops over independent elements are
+  better served by Rayon directly or a fork-join runtime without the slot/stream model.
+- **Dynamic-topology DAGs**: graphs where the node set or edges change between streams
+  are not supported; the graph is compiled once at startup and reused across all slots.
