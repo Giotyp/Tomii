@@ -56,7 +56,7 @@ pub fn generate_from_file(
         "rs" => {
             let ast: File = parse_str(&source)
                 .map_err(|e| format!("cannot parse {}: {}", input_path.display(), e))?;
-            collect_entries(&ast)
+            collect_entries_recursive(&ast, input_path)
         }
         "h" | "hpp" => c_header::collect_c_entries(&source),
         other => return Err(format!("unsupported extension: {other}").into()),
@@ -492,6 +492,28 @@ fn extract_param_type(arg: &FnArg) -> Option<&Type> {
 // ---------------------------------------------------------------------------
 // Collecting entries from the AST
 // ---------------------------------------------------------------------------
+
+/// Collect entries from `file` and, for each `pub mod name;` declaration
+/// (non-inline external module), recursively scan `<dir>/name.rs`.
+fn collect_entries_recursive(file: &File, file_path: &Path) -> Vec<ExportedFn> {
+    let mut entries = collect_entries(file);
+    let dir = file_path.parent().unwrap_or(Path::new("."));
+    for item in &file.items {
+        if let Item::Mod(m) = item {
+            if m.content.is_none() {
+                // External module — try <dir>/<name>.rs
+                let mod_name = m.ident.to_string();
+                let mod_path = dir.join(format!("{}.rs", mod_name));
+                if let Ok(src) = std::fs::read_to_string(&mod_path) {
+                    if let Ok(ast) = parse_str::<File>(&src) {
+                        entries.extend(collect_entries_recursive(&ast, &mod_path));
+                    }
+                }
+            }
+        }
+    }
+    entries
+}
 
 fn collect_entries(file: &File) -> Vec<ExportedFn> {
     // First pass: collect all no_mangle function names present in the file.
