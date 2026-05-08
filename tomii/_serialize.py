@@ -184,7 +184,7 @@ def _network(config: dict) -> NetworkConfigJson:
         packet_length=_factor_net(config["packet_length"]),
         stream_packets=_factor_net(config["stream_packets"]),
         buffer_depth=config.get("buffer_depth", 128),
-        address=config["address"],
+        address=_factor_net(config["address"]),
         start_port=_factor_net(config["start_port"]),
         extract_packet_func=config["extract_packet_func"],
         id_function=config["id_function"],
