@@ -9,16 +9,17 @@
 set -e
 
 SCRIPTS_DIR=$(dirname "$(readlink -f "$0")")
-TOMII_DIR=$(readlink -f "$SCRIPTS_DIR/..")
-BENCH_ROOT=$(readlink -f "$TOMII_DIR/../..")
-SYNSTREAM_DIR=$(readlink -f "$BENCH_ROOT/../..")
-BIN_DIR="$SYNSTREAM_DIR/tomii-core"
+TOMII_DIR=$(readlink -f "$SCRIPTS_DIR/..")          # bench/mimo-bench/tomii/
+BENCH_ROOT=$(readlink -f "$TOMII_DIR/../..")        # bench/ (two dirs up from tomii)
+WORKSPACE_ROOT=$(readlink -f "$BENCH_ROOT/..")      # workspace root (Tomii/)
 SENDER_DIR=$(readlink -f ~/Agora)
 
 FUNC_PATH="$TOMII_DIR/src/lib.rs"
-DYN_LIB="$BENCH_ROOT/target/release/libmimo_bench_tomii.so"
+# MIMO bench has its own [workspace], so its dylib is under TOMII_DIR/target/
+DYN_LIB="$TOMII_DIR/target/release/libmimo_bench_tomii.so"
+BINARY="$WORKSPACE_ROOT/target/release/main"
 APP_GRAPH=$(python3 -c "
-import sys; sys.path.insert(0, '$SYNSTREAM_DIR')
+import sys; sys.path.insert(0, '$WORKSPACE_ROOT')
 sys.path.insert(0, '$TOMII_DIR')
 from build_graph import build_mimo_graph
 import tempfile, os
@@ -66,14 +67,14 @@ export GOTO_NUM_THREADS=1
 
 # Build
 if [ $CLEANUP -eq 1 ]; then
-    cargo build --manifest-path "$SYNSTREAM_DIR/Cargo.toml" -r -p tomii-core
+    cargo build --manifest-path "$WORKSPACE_ROOT/Cargo.toml" -r -p tomii-core --bin main
     cargo build --manifest-path "$TOMII_DIR/Cargo.toml" -r
 fi
 
 rm -f "$OUTPUT" "$TIMING_FILE" "$SCHED_FILE"
 
 # Start Tomii receiver in background
-cargo run --manifest-path "$BIN_DIR/Cargo.toml" -r --bin main -- \
+"$BINARY" \
     --json "$APP_GRAPH" \
     --dylib "$DYN_LIB" \
     --timing "$TIMING_FILE" \
@@ -92,7 +93,8 @@ cargo run --manifest-path "$BIN_DIR/Cargo.toml" -r --bin main -- \
     --spin-wait-spin-iters $SPIN_WAIT_SPIN_ITERS \
     --spin-wait-yield-iters $SPIN_WAIT_YIELD_ITERS \
     --spin-wait-park-ns $SPIN_WAIT_PARK_NS \
-    --use-rdtsc --inits --slot-priority --custom &
+    --use-rdtsc --inits --slot-priority --custom \
+    --coalesce-barriers --inline-continuation &
 CARGO_PID=$!
 
 # Start Agora sender after 5 s (same delay as run_mimo.sh)

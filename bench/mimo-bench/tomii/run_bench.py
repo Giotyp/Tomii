@@ -22,8 +22,8 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent          # mimo-bench/tomii/
-BENCH_ROOT = HERE.parents[1]                    # bench worktree root
-DEVELOP_ROOT = BENCH_ROOT.parents[1]            # workspace root
+BENCH_ROOT = HERE.parents[2]                    # workspace root
+DEVELOP_ROOT = BENCH_ROOT                       # same as workspace root on develop
 AGORA_DIR = Path("~/Agora").expanduser().resolve()
 sys.path.insert(0, str(DEVELOP_ROOT))
 
@@ -209,8 +209,8 @@ def main() -> None:
         env=bench_build_env,
     )
 
-    dylib = str(BENCH_ROOT / "target" / "release" / "libmimo_bench_tomii.so")
-    binary = str(BENCH_ROOT / "target" / "release" / "main")
+    dylib = str(HERE / "target" / "release" / "libmimo_bench_tomii.so")
+    binary = str(DEVELOP_ROOT / "target" / "release" / "main")
     print(f"  dylib: {dylib}", flush=True)
     print(f"  binary: {binary}", flush=True)
 

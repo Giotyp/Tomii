@@ -68,6 +68,13 @@ impl AnyHeldData {
     pub unsafe fn downcast_ref<T: Any + Send + Sync>(&self) -> Option<&T> {
         (*self.ptr).downcast_ref::<T>()
     }
+
+    /// Return a reference to the backing `RwLock` Arc, for write-lock access
+    /// when the caller needs mutation (e.g. `with_any_mut` on an `AnyHeld` slot).
+    #[inline]
+    pub fn lock(&self) -> &Arc<parking_lot::RwLock<Box<dyn Any + Send + Sync>>> {
+        &self._arc
+    }
 }
 
 #[derive(Clone)]
@@ -490,22 +497,22 @@ impl CmTypes {
     where
         F: FnOnce(&mut T) -> R,
     {
-        if let CmTypes::Any(lock) = self {
-            let mut guard = lock.write();
-            match guard.downcast_mut::<T>() {
-                Some(value) => Some(f(value)),
-                None => {
-                    // Print both expected and actual type for debugging
-                    println!(
-                        "Downcast failed: Expected type '{}', but got type '{:?}'",
-                        std::any::type_name::<T>(),
-                        std::any::type_name_of_val(guard.as_ref())
-                    );
-                    None
-                }
+        let lock: &Arc<parking_lot::RwLock<Box<dyn Any + Send + Sync>>> = match self {
+            CmTypes::Any(lock) => lock,
+            CmTypes::AnyHeld(data) => data.lock(),
+            _ => return None,
+        };
+        let mut guard = lock.write();
+        match guard.downcast_mut::<T>() {
+            Some(value) => Some(f(value)),
+            None => {
+                println!(
+                    "Downcast failed: Expected type '{}', but got type '{:?}'",
+                    std::any::type_name::<T>(),
+                    std::any::type_name_of_val(guard.as_ref())
+                );
+                None
             }
-        } else {
-            None
         }
     }
 
