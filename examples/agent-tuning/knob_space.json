@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "workload": "stream-analytics",
+  "cli_flags": {
+    "workers": [1, 2, 4, 8],
+    "slots": [1, 4, 16, 64],
+    "inline_continuation": [true, false],
+    "coalesce_barriers": [true, false],
+    "fifo": [true, false],
+    "custom": [true, false],
+    "no_fanout_bulk": [true, false],
+    "batching_size": [1, 4, 8, 16]
+  },
+  "graph_edits": {
+    "factor_multipliers": "integer scale on node factor fields (1x only — stream-analytics has fixed-factor topology)"
+  },
+  "forbidden": [
+    "removing $barrier args",
+    "removing $dep/$res args",
+    "changing node function names",
+    "adding/removing nodes"
+  ]
+}
