@@ -49,7 +49,11 @@ python taskflow/run_bench.py --workers 4 --slots 16 --streams 200
 ```
 
 Gap closes from 2.45× (S=1) to 1.33× (S=16) as multi-slot amortisation takes effect.
-Memory is 2.8× lower at all S levels. Full S×W sweep results in `pipeline_sweep_heavy.csv`.
+Per-slot RSS growth is 7.7× lower than Taskflow (+18 vs +138 kB/slot); total RSS is higher
+at S≤64 due to pre-allocated worker thread stacks. Full S×W sweep in `pipeline_sweep_post_u7c.csv`.
+
+Tomii runs use `--custom --coalesce-barriers --inline-continuation` (hardcoded in `run_bench.py`);
+these are the recommended flags for streaming workloads. Taskflow uses default `tf::Executor`.
 
 ### Ergonomics #1 — Agent-native graph tuning
 
