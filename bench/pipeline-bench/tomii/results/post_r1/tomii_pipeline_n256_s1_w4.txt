@@ -1,0 +1,37 @@
+Time Statistics for tomii_pipeline_n256_s1_w4.txt
+Total Slots: 2
+Timing Method: RDTSC
+Worker Slots: 0..1, System Thread Slots: 1..2
+****************
+Aggregated Statistics (All Slots):
+  Total Streams Processed: 210
+  Streams per Slot: Slot 0: 210
+  Excluded Streams (warm-up): 10 (Steady-state: 200 streams)
+  Total Runtime: 940.7018ms
+  Avg Time Per Stream: 4.4751ms (std: 72.7160µs)
+  Min/Max Per Stream: 4.4409ms / 4.9794ms
+  Total Compute Time: 3.4553s
+  Avg Compute Time Per Stream: 17.2767ms
+****************
+Per-Task Analysis (Aggregated):
+  ****************
+  Task 'aggregate' - Workers: 4, Total Executions: 200
+    Timing - Avg/Stream: 7.6430µs, Avg/Task: 7.6430µs, Std: 1.1080µs, Min: 5.2620µs, Max: 13.0860µs, Total: 1.5288ms
+    Worker Summary: W-5: 48 (24.0%) - 361.9690µs, W-4: 61 (30.5%) - 473.4830µs, W-6: 45 (22.5%) - 335.3280µs, W-3: 46 (23.0%) - 358.0160µs
+  ****************
+  Task 'emit' - Workers: 4, Total Executions: 200
+    Timing - Avg/Stream: 235.0000ns, Avg/Task: 235.0000ns, Std: 76.0000ns, Min: 81.0000ns, Max: 508.0000ns, Total: 47.0940µs
+    Worker Summary: W-3: 46 (23.0%) - 10.6300µs, W-5: 48 (24.0%) - 11.8650µs, W-6: 45 (22.5%) - 10.6440µs, W-4: 61 (30.5%) - 13.9550µs
+  ****************
+  Task 'ingest' - Workers: 4, Total Executions: 51200
+    Timing - Avg/Stream: 16.2320µs, Avg/Task: 63.0000ns, Std: 21.0000ns, Min: 55.0000ns, Max: 1.7110µs, Total: 3.2465ms
+    Worker Summary: W-4: 12800 (25.0%) - 805.0910µs, W-6: 12800 (25.0%) - 798.1640µs, W-3: 12800 (25.0%) - 846.4560µs, W-5: 12800 (25.0%) - 796.7590µs
+  ****************
+  Task 'transform' - Workers: 4, Total Executions: 51200
+    Timing - Avg/Stream: 17.2526ms, Avg/Task: 67.3930µs, Std: 1.6200µs, Min: 64.7390µs, Max: 90.9960µs, Total: 3.4505s
+    Worker Summary: W-3: 12800 (25.0%) - 862.6755ms, W-4: 12800 (25.0%) - 862.9836ms, W-5: 12800 (25.0%) - 862.7687ms, W-6: 12800 (25.0%) - 862.0974ms
+****************
+System Thread Tasks (Slots 1..2):
+  Resolution Thread 0 (Slot 1):
+    Task 'Preparation' - Executions: 210, Avg: 40.7460µs, Std: 2.2690µs, Min: 35.2380µs, Max: 53.4780µs, Total: 8.5567ms
+    Task 'Slot Check' - Executions: 672665, Avg: 70.0000ns, Std: 1.5530µs, Min: 21.0000ns, Max: 255.8840µs, Total: 47.4676ms

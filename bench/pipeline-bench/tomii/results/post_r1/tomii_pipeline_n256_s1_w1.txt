@@ -1,0 +1,33 @@
+Time Statistics for tomii_pipeline_n256_s1_w1.txt
+Total Slots: 2
+Timing Method: RDTSC
+Worker Slots: 0..1, System Thread Slots: 1..2
+****************
+Aggregated Statistics (All Slots):
+  Total Streams Processed: 210
+  Streams per Slot: Slot 0: 210
+  Excluded Streams (warm-up): 10 (Steady-state: 200 streams)
+  Total Runtime: 3.6561s
+  Avg Time Per Stream: 17.4049ms (std: 106.7750µs)
+  Min/Max Per Stream: 17.3584ms / 18.4359ms
+  Total Compute Time: 4.6427ms
+  Avg Compute Time Per Stream: 23.2130µs
+****************
+Per-Task Analysis (Aggregated):
+  ****************
+  Task 'aggregate' - Workers: 1, Total Executions: 200
+    Timing - Avg/Stream: 7.8160µs, Avg/Task: 7.8160µs, Std: 2.1650µs, Min: 4.2470µs, Max: 11.1970µs, Total: 1.5632ms
+    Worker Summary: W-3: 200 (100.0%) - 1.5632ms
+  ****************
+  Task 'emit' - Workers: 1, Total Executions: 200
+    Timing - Avg/Stream: 184.0000ns, Avg/Task: 184.0000ns, Std: 62.0000ns, Min: 86.0000ns, Max: 459.0000ns, Total: 36.8460µs
+    Worker Summary: W-3: 200 (100.0%) - 36.8460µs
+  ****************
+  Task 'ingest' - Workers: 1, Total Executions: 51200
+    Timing - Avg/Stream: 15.2130µs, Avg/Task: 59.0000ns, Std: 21.0000ns, Min: 55.0000ns, Max: 2.1480µs, Total: 3.0426ms
+    Worker Summary: W-3: 51200 (100.0%) - 3.0426ms
+****************
+System Thread Tasks (Slots 1..2):
+  Resolution Thread 0 (Slot 1):
+    Task 'Preparation' - Executions: 210, Avg: 49.8580µs, Std: 4.3150µs, Min: 39.7680µs, Max: 71.3620µs, Total: 10.4703ms
+    Task 'Slot Check' - Executions: 2713246, Avg: 35.0000ns, Std: 1.4530µs, Min: 21.0000ns, Max: 260.2290µs, Total: 97.5998ms

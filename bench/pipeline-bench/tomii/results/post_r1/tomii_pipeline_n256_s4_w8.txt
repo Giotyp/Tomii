@@ -1,0 +1,37 @@
+Time Statistics for tomii_pipeline_n256_s4_w8.txt
+Total Slots: 5
+Timing Method: RDTSC
+Worker Slots: 0..4, System Thread Slots: 4..5
+****************
+Aggregated Statistics (All Slots):
+  Total Streams Processed: 210
+  Streams per Slot: Slot 0: 53, Slot 1: 53, Slot 2: 52, Slot 3: 52
+  Excluded Streams (warm-up): 10 (Steady-state: 200 streams)
+  Total Runtime: 1.9022s
+  Avg Time Per Stream: 9.0865ms (std: 535.6930µs)
+  Min/Max Per Stream: 4.5550ms / 10.8285ms
+  Total Compute Time: 3.5646s
+  Avg Compute Time Per Stream: 17.8228ms
+****************
+Per-Task Analysis (Aggregated):
+  ****************
+  Task 'aggregate' - Workers: 8, Total Executions: 200
+    Timing - Avg/Stream: 6.0410µs, Avg/Task: 6.0410µs, Std: 1.4430µs, Min: 4.2870µs, Max: 12.6260µs, Total: 1.2083ms
+    Worker Summary: W-6: 32 (16.0%) - 178.8890µs, W-7: 10 (5.0%) - 66.6010µs, W-4: 46 (23.0%) - 250.5660µs, W-3: 27 (13.5%) - 181.8710µs, W-8: 26 (13.0%) - 145.7480µs, W-9: 26 (13.0%) - 179.1490µs, W-5: 22 (11.0%) - 129.7710µs, W-10: 11 (5.5%) - 75.7330µs
+  ****************
+  Task 'emit' - Workers: 8, Total Executions: 200
+    Timing - Avg/Stream: 167.0000ns, Avg/Task: 167.0000ns, Std: 60.0000ns, Min: 82.0000ns, Max: 472.0000ns, Total: 33.5180µs
+    Worker Summary: W-7: 10 (5.0%) - 1.5090µs, W-8: 26 (13.0%) - 4.3940µs, W-10: 11 (5.5%) - 2.0130µs, W-3: 27 (13.5%) - 4.6340µs, W-5: 22 (11.0%) - 3.8830µs, W-9: 26 (13.0%) - 4.3650µs, W-4: 46 (23.0%) - 7.9590µs, W-6: 32 (16.0%) - 4.7610µs
+  ****************
+  Task 'ingest' - Workers: 8, Total Executions: 51200
+    Timing - Avg/Stream: 16.2950µs, Avg/Task: 63.0000ns, Std: 21.0000ns, Min: 55.0000ns, Max: 1.9930µs, Total: 3.2591ms
+    Worker Summary: W-9: 6398 (12.5%) - 422.5970µs, W-4: 6401 (12.5%) - 394.6940µs, W-7: 6402 (12.5%) - 400.1710µs, W-10: 6399 (12.5%) - 407.0670µs, W-3: 6400 (12.5%) - 400.7800µs, W-6: 6400 (12.5%) - 412.3900µs, W-8: 6401 (12.5%) - 404.7420µs, W-5: 6399 (12.5%) - 416.6520µs
+  ****************
+  Task 'transform' - Workers: 8, Total Executions: 51200
+    Timing - Avg/Stream: 17.8003ms, Avg/Task: 69.5320µs, Std: 3.6830µs, Min: 64.2590µs, Max: 101.2470µs, Total: 3.5601s
+    Worker Summary: W-8: 6401 (12.5%) - 444.9533ms, W-3: 6400 (12.5%) - 444.9796ms, W-5: 6399 (12.5%) - 445.0055ms, W-10: 6399 (12.5%) - 445.1362ms, W-4: 6401 (12.5%) - 444.9580ms, W-6: 6400 (12.5%) - 445.0416ms, W-9: 6398 (12.5%) - 444.7618ms, W-7: 6402 (12.5%) - 445.2153ms
+****************
+System Thread Tasks (Slots 4..5):
+  Resolution Thread 0 (Slot 4):
+    Task 'Preparation' - Executions: 207, Avg: 35.4020µs, Std: 10.5990µs, Min: 28.5670µs, Max: 183.3840µs, Total: 7.3283ms
+    Task 'Slot Check' - Executions: 312106, Avg: 138.0000ns, Std: 2.0390µs, Min: 22.0000ns, Max: 96.4120µs, Total: 43.0911ms

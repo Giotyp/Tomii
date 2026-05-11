@@ -1,0 +1,37 @@
+Time Statistics for tomii_pipeline_n256_s4_w4.txt
+Total Slots: 5
+Timing Method: RDTSC
+Worker Slots: 0..4, System Thread Slots: 4..5
+****************
+Aggregated Statistics (All Slots):
+  Total Streams Processed: 210
+  Streams per Slot: Slot 0: 53, Slot 1: 53, Slot 2: 52, Slot 3: 52
+  Excluded Streams (warm-up): 10 (Steady-state: 200 streams)
+  Total Runtime: 3.6934s
+  Avg Time Per Stream: 17.6389ms (std: 682.4510µs)
+  Min/Max Per Stream: 9.2811ms / 18.8134ms
+  Total Compute Time: 3.4522s
+  Avg Compute Time Per Stream: 17.2609ms
+****************
+Per-Task Analysis (Aggregated):
+  ****************
+  Task 'aggregate' - Workers: 4, Total Executions: 200
+    Timing - Avg/Stream: 5.8720µs, Avg/Task: 5.8720µs, Std: 1.2700µs, Min: 4.5060µs, Max: 11.4310µs, Total: 1.1746ms
+    Worker Summary: W-3: 67 (33.5%) - 383.9070µs, W-6: 54 (27.0%) - 297.9370µs, W-4: 41 (20.5%) - 241.2030µs, W-5: 38 (19.0%) - 251.5470µs
+  ****************
+  Task 'emit' - Workers: 4, Total Executions: 200
+    Timing - Avg/Stream: 120.0000ns, Avg/Task: 120.0000ns, Std: 41.0000ns, Min: 76.0000ns, Max: 373.0000ns, Total: 24.0740µs
+    Worker Summary: W-4: 41 (20.5%) - 4.8420µs, W-6: 54 (27.0%) - 6.5980µs, W-5: 38 (19.0%) - 4.7830µs, W-3: 67 (33.5%) - 7.8510µs
+  ****************
+  Task 'ingest' - Workers: 4, Total Executions: 51200
+    Timing - Avg/Stream: 16.0520µs, Avg/Task: 62.0000ns, Std: 19.0000ns, Min: 55.0000ns, Max: 341.0000ns, Total: 3.2106ms
+    Worker Summary: W-5: 12799 (25.0%) - 771.3190µs, W-6: 12799 (25.0%) - 859.5040µs, W-3: 12801 (25.0%) - 804.8720µs, W-4: 12801 (25.0%) - 774.8880µs
+  ****************
+  Task 'transform' - Workers: 4, Total Executions: 51200
+    Timing - Avg/Stream: 17.2389ms, Avg/Task: 67.3390µs, Std: 1.4920µs, Min: 64.4600µs, Max: 89.3600µs, Total: 3.4478s
+    Worker Summary: W-4: 12801 (25.0%) - 861.9865ms, W-3: 12801 (25.0%) - 862.0888ms, W-5: 12799 (25.0%) - 861.7975ms, W-6: 12799 (25.0%) - 861.8991ms
+****************
+System Thread Tasks (Slots 4..5):
+  Resolution Thread 0 (Slot 4):
+    Task 'Preparation' - Executions: 207, Avg: 32.6030µs, Std: 10.8570µs, Min: 26.8290µs, Max: 186.4870µs, Total: 6.7489ms
+    Task 'Slot Check' - Executions: 644627, Avg: 87.0000ns, Std: 1.3610µs, Min: 22.0000ns, Max: 85.2670µs, Total: 56.5900ms

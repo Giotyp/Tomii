@@ -1,0 +1,45 @@
+Time Statistics for tomii_wavefront_n512_wf_cell_bulk_w2.txt
+Total Slots: 2
+Timing Method: RDTSC
+Worker Slots: 0..1, System Thread Slots: 1..2
+****************
+Aggregated Statistics (All Slots):
+  Total Streams Processed: 105
+  Streams per Slot: Slot 0: 105
+  Excluded Streams (warm-up): 5 (Steady-state: 100 streams)
+  Total Runtime: 193.7517ms
+  Avg Time Per Stream: 1.8341ms (std: 22.5720µs)
+  Min/Max Per Stream: 1.7746ms / 1.8884ms
+  Total Compute Time: 151.7620µs
+  Avg Compute Time Per Stream: 1.5170µs
+****************
+Per-Task Analysis (Aggregated):
+  ****************
+  Task 'diag_0' - Workers: 2, Total Executions: 100
+    Timing - Avg/Stream: 284.0000ns, Avg/Task: 284.0000ns, Std: 76.0000ns, Min: 130.0000ns, Max: 472.0000ns, Total: 28.4970µs
+    Worker Summary: W-4: 44 (44.0%) - 14.3140µs, W-3: 56 (56.0%) - 14.1830µs
+  ****************
+  Task 'diag_1' - Workers: 2, Total Executions: 200
+    Timing - Avg/Stream: 288.0000ns, Avg/Task: 144.0000ns, Std: 63.0000ns, Min: 84.0000ns, Max: 341.0000ns, Total: 28.8860µs
+    Worker Summary: W-4: 91 (45.5%) - 13.4400µs, W-3: 109 (54.5%) - 15.4460µs
+  ****************
+  Task 'diag_1020' - Workers: 2, Total Executions: 100
+    Timing - Avg/Stream: 190.0000ns, Avg/Task: 190.0000ns, Std: 48.0000ns, Min: 94.0000ns, Max: 331.0000ns, Total: 19.0000µs
+    Worker Summary: W-4: 56 (56.0%) - 11.7010µs, W-3: 44 (44.0%) - 7.2990µs
+  ****************
+  Task 'diag_1021' - Workers: 2, Total Executions: 200
+    Timing - Avg/Stream: 494.0000ns, Avg/Task: 247.0000ns, Std: 51.0000ns, Min: 93.0000ns, Max: 475.0000ns, Total: 49.4060µs
+    Worker Summary: W-3: 100 (50.0%) - 24.3090µs, W-4: 100 (50.0%) - 25.0970µs
+  ****************
+  Task 'diag_1022' - Workers: 2, Total Executions: 100
+    Timing - Avg/Stream: 131.0000ns, Avg/Task: 131.0000ns, Std: 63.0000ns, Min: 86.0000ns, Max: 271.0000ns, Total: 13.1600µs
+    Worker Summary: W-4: 49 (49.0%) - 7.2000µs, W-3: 51 (51.0%) - 5.9600µs
+  ****************
+  Task 'diag_2' - Workers: 2, Total Executions: 100
+    Timing - Avg/Stream: 128.0000ns, Avg/Task: 128.0000ns, Std: 23.0000ns, Min: 107.0000ns, Max: 249.0000ns, Total: 12.8130µs
+    Worker Summary: W-4: 45 (45.0%) - 5.9310µs, W-3: 55 (55.0%) - 6.8820µs
+****************
+System Thread Tasks (Slots 1..2):
+  Resolution Thread 0 (Slot 1):
+    Task 'Preparation' - Executions: 105, Avg: 2.2270µs, Std: 969.0000ns, Min: 956.0000ns, Max: 11.7280µs, Total: 233.8610µs
+    Task 'Slot Check' - Executions: 126383, Avg: 1.1840µs, Std: 35.9780µs, Min: 22.0000ns, Max: 1.2823ms, Total: 149.7100ms

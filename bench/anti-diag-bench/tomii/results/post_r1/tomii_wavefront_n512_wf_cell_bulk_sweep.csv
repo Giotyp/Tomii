@@ -1,0 +1,5 @@
+system,n,workers,iterations,ms_per_iter
+tomii_wf_cell_bulk,512,1,100,1.229800
+tomii_wf_cell_bulk,512,2,100,1.834100
+tomii_wf_cell_bulk,512,4,100,2.720800
+tomii_wf_cell_bulk,512,8,100,9.820900

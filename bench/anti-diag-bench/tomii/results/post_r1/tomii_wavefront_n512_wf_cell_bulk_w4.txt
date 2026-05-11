@@ -1,0 +1,77 @@
+Time Statistics for tomii_wavefront_n512_wf_cell_bulk_w4.txt
+Total Slots: 2
+Timing Method: RDTSC
+Worker Slots: 0..1, System Thread Slots: 1..2
+****************
+Aggregated Statistics (All Slots):
+  Total Streams Processed: 105
+  Streams per Slot: Slot 0: 105
+  Excluded Streams (warm-up): 5 (Steady-state: 100 streams)
+  Total Runtime: 286.0191ms
+  Avg Time Per Stream: 2.7208ms (std: 24.8070µs)
+  Min/Max Per Stream: 2.6857ms / 2.8601ms
+  Total Compute Time: 902.4010µs
+  Avg Compute Time Per Stream: 9.0240µs
+****************
+Per-Task Analysis (Aggregated):
+  ****************
+  Task 'diag_0' - Workers: 4, Total Executions: 100
+    Timing - Avg/Stream: 304.0000ns, Avg/Task: 304.0000ns, Std: 56.0000ns, Min: 129.0000ns, Max: 440.0000ns, Total: 30.4780µs
+    Worker Summary: W-6: 29 (29.0%) - 8.4760µs, W-3: 19 (19.0%) - 5.3370µs, W-4: 22 (22.0%) - 6.5960µs, W-5: 30 (30.0%) - 10.0690µs
+  ****************
+  Task 'diag_1' - Workers: 4, Total Executions: 200
+    Timing - Avg/Stream: 326.0000ns, Avg/Task: 163.0000ns, Std: 93.0000ns, Min: 86.0000ns, Max: 811.0000ns, Total: 32.6300µs
+    Worker Summary: W-4: 43 (21.5%) - 4.9770µs, W-5: 60 (30.0%) - 11.3260µs, W-6: 59 (29.5%) - 10.1750µs, W-3: 38 (19.0%) - 6.1520µs
+  ****************
+  Task 'diag_1016' - Workers: 4, Total Executions: 100
+    Timing - Avg/Stream: 356.0000ns, Avg/Task: 356.0000ns, Std: 117.0000ns, Min: 151.0000ns, Max: 755.0000ns, Total: 35.6160µs
+    Worker Summary: W-5: 17 (17.0%) - 6.3190µs, W-4: 34 (34.0%) - 11.8990µs, W-6: 30 (30.0%) - 11.2800µs, W-3: 19 (19.0%) - 6.1180µs
+  ****************
+  Task 'diag_1017' - Workers: 4, Total Executions: 200
+    Timing - Avg/Stream: 746.0000ns, Avg/Task: 373.0000ns, Std: 534.0000ns, Min: 168.0000ns, Max: 7.6920µs, Total: 74.6180µs
+    Worker Summary: W-6: 51 (25.5%) - 16.9890µs, W-4: 47 (23.5%) - 22.6540µs, W-3: 51 (25.5%) - 15.8680µs, W-5: 51 (25.5%) - 19.1070µs
+  ****************
+  Task 'diag_1018' - Workers: 4, Total Executions: 300
+    Timing - Avg/Stream: 937.0000ns, Avg/Task: 312.0000ns, Std: 105.0000ns, Min: 87.0000ns, Max: 1.3400µs, Total: 93.7080µs
+    Worker Summary: W-3: 77 (25.7%) - 24.8450µs, W-5: 69 (23.0%) - 22.2150µs, W-4: 77 (25.7%) - 23.1450µs, W-6: 77 (25.7%) - 23.5030µs
+  ****************
+  Task 'diag_1019' - Workers: 4, Total Executions: 400
+    Timing - Avg/Stream: 1.1400µs, Avg/Task: 285.0000ns, Std: 100.0000ns, Min: 85.0000ns, Max: 808.0000ns, Total: 114.0870µs
+    Worker Summary: W-6: 101 (25.2%) - 29.1650µs, W-5: 95 (23.8%) - 28.1900µs, W-3: 102 (25.5%) - 28.6750µs, W-4: 102 (25.5%) - 28.0570µs
+  ****************
+  Task 'diag_1020' - Workers: 4, Total Executions: 300
+    Timing - Avg/Stream: 782.0000ns, Avg/Task: 260.0000ns, Std: 81.0000ns, Min: 86.0000ns, Max: 533.0000ns, Total: 78.2250µs
+    Worker Summary: W-4: 80 (26.7%) - 21.4370µs, W-6: 74 (24.7%) - 18.8540µs, W-5: 73 (24.3%) - 19.7990µs, W-3: 73 (24.3%) - 18.1350µs
+  ****************
+  Task 'diag_1021' - Workers: 4, Total Executions: 200
+    Timing - Avg/Stream: 453.0000ns, Avg/Task: 226.0000ns, Std: 73.0000ns, Min: 90.0000ns, Max: 372.0000ns, Total: 45.3100µs
+    Worker Summary: W-3: 55 (27.5%) - 12.3720µs, W-4: 52 (26.0%) - 11.2140µs, W-6: 45 (22.5%) - 10.3840µs, W-5: 48 (24.0%) - 11.3400µs
+  ****************
+  Task 'diag_1022' - Workers: 4, Total Executions: 100
+    Timing - Avg/Stream: 121.0000ns, Avg/Task: 121.0000ns, Std: 51.0000ns, Min: 89.0000ns, Max: 275.0000ns, Total: 12.1840µs
+    Worker Summary: W-6: 21 (21.0%) - 2.2970µs, W-4: 21 (21.0%) - 2.7530µs, W-3: 33 (33.0%) - 3.7030µs, W-5: 25 (25.0%) - 3.4310µs
+  ****************
+  Task 'diag_2' - Workers: 4, Total Executions: 300
+    Timing - Avg/Stream: 765.0000ns, Avg/Task: 255.0000ns, Std: 83.0000ns, Min: 89.0000ns, Max: 532.0000ns, Total: 76.5910µs
+    Worker Summary: W-5: 73 (24.3%) - 20.9600µs, W-4: 67 (22.3%) - 17.3350µs, W-6: 88 (29.3%) - 21.0990µs, W-3: 72 (24.0%) - 17.1970µs
+  ****************
+  Task 'diag_3' - Workers: 4, Total Executions: 400
+    Timing - Avg/Stream: 1.1480µs, Avg/Task: 287.0000ns, Std: 219.0000ns, Min: 85.0000ns, Max: 3.1310µs, Total: 114.8860µs
+    Worker Summary: W-3: 103 (25.8%) - 28.3540µs, W-5: 97 (24.2%) - 32.4410µs, W-6: 108 (27.0%) - 27.5880µs, W-4: 92 (23.0%) - 26.5030µs
+  ****************
+  Task 'diag_4' - Workers: 4, Total Executions: 300
+    Timing - Avg/Stream: 1.0380µs, Avg/Task: 346.0000ns, Std: 200.0000ns, Min: 84.0000ns, Max: 3.1100µs, Total: 103.8800µs
+    Worker Summary: W-3: 77 (25.7%) - 27.0010µs, W-5: 72 (24.0%) - 25.5240µs, W-4: 73 (24.3%) - 25.3380µs, W-6: 78 (26.0%) - 26.0170µs
+  ****************
+  Task 'diag_5' - Workers: 4, Total Executions: 200
+    Timing - Avg/Stream: 594.0000ns, Avg/Task: 297.0000ns, Std: 133.0000ns, Min: 91.0000ns, Max: 1.4350µs, Total: 59.4230µs
+    Worker Summary: W-6: 49 (24.5%) - 13.8820µs, W-4: 41 (20.5%) - 11.8070µs, W-5: 55 (27.5%) - 17.8610µs, W-3: 55 (27.5%) - 15.8730µs
+  ****************
+  Task 'diag_6' - Workers: 4, Total Executions: 100
+    Timing - Avg/Stream: 307.0000ns, Avg/Task: 307.0000ns, Std: 141.0000ns, Min: 92.0000ns, Max: 959.0000ns, Total: 30.7650µs
+    Worker Summary: W-3: 28 (28.0%) - 9.0850µs, W-6: 22 (22.0%) - 6.3150µs, W-5: 27 (27.0%) - 8.7870µs, W-4: 23 (23.0%) - 6.5780µs
+****************
+System Thread Tasks (Slots 1..2):
+  Resolution Thread 0 (Slot 1):
+    Task 'Preparation' - Executions: 105, Avg: 2.4750µs, Std: 1.0020µs, Min: 1.0010µs, Max: 12.3470µs, Total: 259.8770µs
+    Task 'Slot Check' - Executions: 173628, Avg: 920.0000ns, Std: 31.0120µs, Min: 22.0000ns, Max: 1.3816ms, Total: 159.8604ms
