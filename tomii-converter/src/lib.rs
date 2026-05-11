@@ -573,10 +573,9 @@ fn collect_entries(file: &File) -> Vec<ExportedFn> {
                 // function in the source (and not the per-cell companion for another
                 // tomii_export function), OR the function itself has `#[tomii_export(bulk)]`.
                 let bulk_cm_sym = format!("{}_bulk_cm", entry.registry_key);
-                entry.has_bulk_cm =
-                    (no_mangle_names.contains(&bulk_cm_sym)
-                        && !tomii_export_cm_names.contains(&bulk_cm_sym))
-                        || bulk_export_keys.contains(&entry.registry_key);
+                entry.has_bulk_cm = (no_mangle_names.contains(&bulk_cm_sym)
+                    && !tomii_export_cm_names.contains(&bulk_cm_sym))
+                    || bulk_export_keys.contains(&entry.registry_key);
                 entries.push(entry);
             }
         }
@@ -1515,16 +1514,26 @@ mod tests {
 
         // We expect entries for the two tomii_export functions plus the three no_mangle companions.
         // The tomii_export entries should be: wf_cell (no bulk), wf_cell_bulk (has bulk).
-        let wf_cell_entry = entries.iter().find(|e| e.registry_key == "wf_cell" && e.cm_name == "wf_cell_cm");
-        let wf_cell_bulk_entry = entries.iter().find(|e| e.registry_key == "wf_cell_bulk" && e.cm_name == "wf_cell_bulk_cm");
+        let wf_cell_entry = entries
+            .iter()
+            .find(|e| e.registry_key == "wf_cell" && e.cm_name == "wf_cell_cm");
+        let wf_cell_bulk_entry = entries
+            .iter()
+            .find(|e| e.registry_key == "wf_cell_bulk" && e.cm_name == "wf_cell_bulk_cm");
 
         assert!(wf_cell_entry.is_some(), "wf_cell entry not found");
         assert!(wf_cell_bulk_entry.is_some(), "wf_cell_bulk entry not found");
 
         // wf_cell must NOT have a bulk companion (collision guard).
-        assert!(!wf_cell_entry.unwrap().has_bulk_cm, "wf_cell falsely detected as having bulk companion");
+        assert!(
+            !wf_cell_entry.unwrap().has_bulk_cm,
+            "wf_cell falsely detected as having bulk companion"
+        );
 
         // wf_cell_bulk MUST have a bulk companion.
-        assert!(wf_cell_bulk_entry.unwrap().has_bulk_cm, "wf_cell_bulk bulk companion not detected");
+        assert!(
+            wf_cell_bulk_entry.unwrap().has_bulk_cm,
+            "wf_cell_bulk bulk companion not detected"
+        );
     }
 }

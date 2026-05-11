@@ -218,12 +218,7 @@ impl NodeDependencyEntry {
                         }
                         let new_packed = gen_pack(slot_gen, 1);
                         if self.instances_sent[specific_idx]
-                            .compare_exchange(
-                                cur,
-                                new_packed,
-                                Ordering::Release,
-                                Ordering::Relaxed,
-                            )
+                            .compare_exchange(cur, new_packed, Ordering::Release, Ordering::Relaxed)
                             .is_ok()
                         {
                             ready.push(specific_idx);

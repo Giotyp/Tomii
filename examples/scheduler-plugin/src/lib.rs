@@ -26,9 +26,11 @@ pub const SCHEDULER_ABI_VERSION: u32 = 1;
 // Inner shared state
 // ---------------------------------------------------------------------------
 
+type Task = Box<dyn FnOnce() + Send + 'static>;
+
 struct FifoInner {
     /// `Some(queue)` while running; `None` after shutdown signal.
-    queue: Mutex<Option<VecDeque<Box<dyn FnOnce() + Send + 'static>>>>,
+    queue: Mutex<Option<VecDeque<Task>>>,
     condvar: Condvar,
 }
 

@@ -546,9 +546,21 @@ fn build_companion(func: &ItemFn, variadic: bool) -> proc_macro2::TokenStream {
             if path.segments.len() == 1 {
                 matches!(
                     path.segments[0].ident.to_string().as_str(),
-                    "bool" | "i8" | "i16" | "i32" | "i64" | "i128"
-                        | "u8" | "u16" | "u32" | "u64" | "u128"
-                        | "f32" | "f64" | "usize" | "isize"
+                    "bool"
+                        | "i8"
+                        | "i16"
+                        | "i32"
+                        | "i64"
+                        | "i128"
+                        | "u8"
+                        | "u16"
+                        | "u32"
+                        | "u64"
+                        | "u128"
+                        | "f32"
+                        | "f64"
+                        | "usize"
+                        | "isize"
                 )
             } else {
                 false

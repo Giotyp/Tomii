@@ -13,7 +13,7 @@ python harness.py --results-dir "$RESULTS_DIR"
 
 echo ""
 echo "=== Arm 1: Random search ==="
-python arms/random.py --iterations "$ITERATIONS" --results-dir "$RESULTS_DIR"
+python arms/random_search.py --iterations "$ITERATIONS" --results-dir "$RESULTS_DIR"
 
 echo ""
 echo "=== Arm 2: Bayesian (Optuna) ==="
