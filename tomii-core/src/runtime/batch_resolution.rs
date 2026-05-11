@@ -162,8 +162,7 @@ pub(super) fn process_batch_inner(
                 && succ_entry.is_fanout_bulk
                 && !shared.config.no_fanout_bulk
                 && (!shared.config.inline_continuation || shared.config.workers == 1);
-            if fanout_bulk_eligible && !ready.is_empty()
-            {
+            if fanout_bulk_eligible && !ready.is_empty() {
                 let new_arrived = super::task_execution::fanout_bulk_increment(
                     &rctx.slots.fanout_bulk_arrived[node_info.slot][succ_node_id],
                     slot_gen,

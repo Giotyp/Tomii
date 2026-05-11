@@ -197,6 +197,14 @@ struct Args {
         help = "spin_wait: park_timeout duration in nanoseconds"
     )]
     spin_wait_park_ns: u64,
+    #[clap(
+        long,
+        value_name = "STRATEGY",
+        required = false,
+        default_value = "multi-slot-batch",
+        help = "Resolution strategy to use. Available: multi-slot-batch"
+    )]
+    resolution_strategy: String,
 }
 
 fn main() {
@@ -312,6 +320,17 @@ fn main() {
             flush_threshold: args.sched_flush_threshold,
         },
     };
+
+    // Validate --resolution-strategy (v1: only "multi-slot-batch" is registered).
+    match args.resolution_strategy.as_str() {
+        "multi-slot-batch" => {
+            tracing::info!("Strategy: multi-slot-batch (default)");
+        }
+        unknown => {
+            eprintln!("Unknown resolution strategy '{unknown}'. Available: multi-slot-batch");
+            std::process::exit(1);
+        }
+    }
 
     let synrt = run_graph(
         spec,

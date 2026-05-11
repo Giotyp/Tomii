@@ -11,9 +11,9 @@
 //! (`Telemetry::record_timing` etc.).  No threading, scheduling, or slot logic lives
 //! here — those belong to `threading`, `scheduling`, and `slot_lifecycle` respectively.
 
+use crate::dependency_counter::DependencyCounter;
 #[cfg(feature = "network")]
 use crate::network::{NetworkSocket, PacketMessage};
-use crate::resolution_state::ResolutionState;
 use crate::time_buffer::TimeBufferManager;
 use crate::{buffers::*, graph::*, scheduler::*};
 #[cfg(feature = "network")]
@@ -195,14 +195,17 @@ pub struct NetworkInfra {
     pub frame_dropped: Arc<Vec<AtomicBool>>,
 }
 
-/// Scheduler, batch queue, resolution state, and result storage.
+/// Scheduler, batch queue, resolution state, result storage, and resolution strategy.
 pub struct ExecCtx {
     pub scheduler: Arc<SchedulerImpl>,
     pub batch_queue_tx: BatchQueueTx,
     pub batch_queue_rx: BatchQueueRx,
-    pub resolution_state: Arc<dyn ResolutionState>,
+    pub resolution_state: Arc<dyn DependencyCounter>,
     pub node_results: Arc<crate::buffers::LockFreeResultMap>,
     pub initial_prep_done: Arc<AtomicUsize>,
+    /// Pluggable resolution strategy — drives batch processing and the worker fast path.
+    /// Set at build time; v1 always uses [`super::resolution_strategy::MultiSlotBatchStrategy`].
+    pub resolution_strategy: Arc<dyn super::resolution_strategy::ResolutionStrategy>,
 }
 
 /// Timing, recording, and stream counters.
@@ -274,7 +277,12 @@ pub(super) struct ResolveCtx<'a> {
 
 /// Borrowed view of the sub-structs needed by task-scheduling functions.
 /// Constructed cheaply on the stack via [`SharedData::sched_ctx`].
-pub(super) struct SchedCtx<'a> {
+///
+/// Lifted to `pub` because it appears in [`super::resolution_strategy::ResolutionStrategy`]
+/// trait method signatures, which are part of the crate's public API surface.
+/// External code cannot construct a `SchedCtx` (no public constructor), so
+/// lifting visibility here grants no additional capability.
+pub struct SchedCtx<'a> {
     pub exec: &'a ExecCtx,
     pub telemetry: &'a Telemetry,
     pub cfg: &'a RuntimeConfig,
@@ -294,7 +302,7 @@ impl SharedData {
     }
 
     #[inline]
-    pub(super) fn sched_ctx(&self) -> SchedCtx<'_> {
+    pub(crate) fn sched_ctx(&self) -> SchedCtx<'_> {
         SchedCtx {
             exec: &self.exec,
             telemetry: &self.telemetry,

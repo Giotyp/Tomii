@@ -16,6 +16,8 @@ exclude = [
     "examples/matrix-compute-python",
     # Stale worktree remnant from a prunable branch; exclude to avoid broken path dep.
     "examples/.mimolib",
+    # agent-tuning has no Cargo.toml (Python/shell harness only).
+    "examples/agent-tuning",
 ]
 resolver = "3"
 

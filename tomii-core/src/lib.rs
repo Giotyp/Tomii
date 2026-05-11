@@ -3,6 +3,7 @@ pub(crate) mod buffers;
 pub(crate) mod core_alloc;
 pub(crate) mod custom_scheduler;
 pub mod debug;
+pub mod dependency_counter;
 pub mod graph;
 pub mod graph_gen;
 pub mod graph_struct;
@@ -10,6 +11,8 @@ pub mod json_structs;
 pub mod network;
 pub(crate) mod network_funcs;
 pub(crate) mod obj_gen;
+/// Backward-compatibility alias — new code should use `dependency_counter`.
+#[doc(hidden)]
 pub(crate) mod resolution_state;
 pub mod runtime;
 pub mod scheduler;
@@ -114,6 +117,7 @@ pub mod wrappers {}
 // Re-exports
 pub use crate::async_recorder::AsyncRecorder;
 pub use crate::custom_scheduler::Priority;
+pub use crate::dependency_counter::{DependencyCounter, MultiThreadedCounter};
 pub use crate::runtime::RuntimeConfig;
 #[cfg(build_rs_ran)]
 pub mod func_reg {

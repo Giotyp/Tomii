@@ -21,20 +21,20 @@ const TAG_BOXED: u8 = 255;
 fn encode_inline(result: &tomii_types::CmTypes) -> Option<(u8, u64)> {
     use tomii_types::CmTypes;
     match result {
-        CmTypes::F64(v)   => Some((1,  v.to_bits())),
-        CmTypes::F32(v)   => Some((2,  v.to_bits() as u64)),
-        CmTypes::I64(v)   => Some((3,  *v as u64)),
-        CmTypes::U64(v)   => Some((4,  *v)),
-        CmTypes::I32(v)   => Some((5,  *v as u64)),
-        CmTypes::U32(v)   => Some((6,  *v as u64)),
-        CmTypes::I16(v)   => Some((7,  *v as u64)),
-        CmTypes::U16(v)   => Some((8,  *v as u64)),
-        CmTypes::I8(v)    => Some((9,  *v as u64)),
-        CmTypes::U8(v)    => Some((10, *v as u64)),
-        CmTypes::Bool(v)  => Some((11, *v as u64)),
+        CmTypes::F64(v) => Some((1, v.to_bits())),
+        CmTypes::F32(v) => Some((2, v.to_bits() as u64)),
+        CmTypes::I64(v) => Some((3, *v as u64)),
+        CmTypes::U64(v) => Some((4, *v)),
+        CmTypes::I32(v) => Some((5, *v as u64)),
+        CmTypes::U32(v) => Some((6, *v as u64)),
+        CmTypes::I16(v) => Some((7, *v as u64)),
+        CmTypes::U16(v) => Some((8, *v as u64)),
+        CmTypes::I8(v) => Some((9, *v as u64)),
+        CmTypes::U8(v) => Some((10, *v as u64)),
+        CmTypes::Bool(v) => Some((11, *v as u64)),
         CmTypes::Usize(v) => Some((12, *v as u64)),
         CmTypes::Isize(v) => Some((13, *v as u64)),
-        CmTypes::Char(v)  => Some((14, *v as u64)),
+        CmTypes::Char(v) => Some((14, *v as u64)),
         _ => None,
     }
 }
@@ -43,21 +43,21 @@ fn encode_inline(result: &tomii_types::CmTypes) -> Option<(u8, u64)> {
 fn decode_inline(tag: u8, val: u64) -> tomii_types::CmTypes {
     use tomii_types::CmTypes;
     match tag {
-        1  => CmTypes::F64(f64::from_bits(val)),
-        2  => CmTypes::F32(f32::from_bits(val as u32)),
-        3  => CmTypes::I64(val as i64),
-        4  => CmTypes::U64(val),
-        5  => CmTypes::I32(val as i32),
-        6  => CmTypes::U32(val as u32),
-        7  => CmTypes::I16(val as i16),
-        8  => CmTypes::U16(val as u16),
-        9  => CmTypes::I8(val as i8),
+        1 => CmTypes::F64(f64::from_bits(val)),
+        2 => CmTypes::F32(f32::from_bits(val as u32)),
+        3 => CmTypes::I64(val as i64),
+        4 => CmTypes::U64(val),
+        5 => CmTypes::I32(val as i32),
+        6 => CmTypes::U32(val as u32),
+        7 => CmTypes::I16(val as i16),
+        8 => CmTypes::U16(val as u16),
+        9 => CmTypes::I8(val as i8),
         10 => CmTypes::U8(val as u8),
         11 => CmTypes::Bool(val != 0),
         12 => CmTypes::Usize(val as usize),
         13 => CmTypes::Isize(val as isize),
         14 => CmTypes::Char(char::from_u32(val as u32).unwrap_or('\0')),
-        _  => unreachable!("invalid inline tag {tag}"),
+        _ => unreachable!("invalid inline tag {tag}"),
     }
 }
 
@@ -173,7 +173,9 @@ impl LockFreeResultMap {
             self.inline_tag[idx].store(TAG_BOXED, Ordering::Release);
             if !old_ptr.is_null() {
                 // SAFETY: produced by `Box::into_raw`; the atomic swap gives exclusive ownership.
-                unsafe { drop(Box::from_raw(old_ptr)); }
+                unsafe {
+                    drop(Box::from_raw(old_ptr));
+                }
             }
         }
     }
@@ -252,7 +254,9 @@ impl LockFreeResultMap {
                 // SAFETY: the SeqCst swap gives exclusive ownership of the boxed ptr.
                 let old_ptr = self.buffer[idx].swap(null_mut(), Ordering::SeqCst);
                 if !old_ptr.is_null() {
-                    unsafe { drop(Box::from_raw(old_ptr)); }
+                    unsafe {
+                        drop(Box::from_raw(old_ptr));
+                    }
                 }
             }
             // Inline primitives (old_tag 1-14): no heap allocation to free.
@@ -268,7 +272,9 @@ impl Drop for LockFreeResultMap {
                 let ptr = self.buffer[idx].load(Ordering::Acquire);
                 if !ptr.is_null() {
                     // SAFETY: `&mut self` gives exclusive access; no other thread can race here.
-                    unsafe { drop(Box::from_raw(ptr)); }
+                    unsafe {
+                        drop(Box::from_raw(ptr));
+                    }
                 }
             }
         }
@@ -373,7 +379,11 @@ mod tests {
 
         for idx in 0..3 {
             let ni1 = make_node_info(1, 0, idx, 0);
-            assert!(map.get(&ni1).is_none(), "slot 1 idx {} leaked from slot 0", idx);
+            assert!(
+                map.get(&ni1).is_none(),
+                "slot 1 idx {} leaked from slot 0",
+                idx
+            );
         }
 
         let ni1_0 = make_node_info(1, 0, 0, 0);
@@ -496,11 +506,21 @@ mod tests {
 
         for val in cases {
             map.set(&ni, val.clone());
-            assert_eq!(map.get(&ni), Some(val.clone()), "round-trip failed for {val:?}");
+            assert_eq!(
+                map.get(&ni),
+                Some(val.clone()),
+                "round-trip failed for {val:?}"
+            );
             assert!(map.result_exists(&ni));
             map.reinit_slot(0);
-            assert!(!map.result_exists(&ni), "still present after reinit for {val:?}");
-            assert!(map.get(&ni).is_none(), "get non-None after reinit for {val:?}");
+            assert!(
+                !map.result_exists(&ni),
+                "still present after reinit for {val:?}"
+            );
+            assert!(
+                map.get(&ni).is_none(),
+                "get non-None after reinit for {val:?}"
+            );
         }
     }
 
@@ -532,10 +552,18 @@ mod tests {
 // Run with: RUSTFLAGS="--cfg loom" cargo test -p tomii-core --lib
 // ---------------------------------------------------------------------------
 
+// R1.7 note: the `DependencyCounter` rename (formerly `ResolutionState`) does NOT
+// affect the loom model below.  The underlying `AtomicU64` completed_slots bitmap
+// in `MultiThreadedCounter` is identical to the old `MultiThreadedState`; only the
+// type names changed.  The loom model validates the atomics that `MultiThreadedCounter`
+// relies on (`AtomicU64` fetch_or / fetch_and for `try_complete_slot` /
+// `unmark_slot_completed`), so no separate loom test for `MultiThreadedCounter` is
+// needed — the invariant is already covered by `inline_tag_slot_reset_visibility`.
+
 #[cfg(loom)]
 mod loom_tests {
-    use loom::sync::Arc;
     use loom::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+    use loom::sync::Arc;
 
     /// Three-thread model:
     ///   Writer  : store val (Relaxed) then tag=1 (Release)  — inline F64 set
@@ -576,6 +604,41 @@ mod loom_tests {
             } else {
                 assert_eq!(t, 0u8, "unexpected tag value {t}");
             }
+        });
+    }
+
+    /// Smoke test for the `MultiThreadedCounter::try_complete_slot` atomic.
+    ///
+    /// Two threads race to complete slot 0; exactly one must win (fetch_or 0→1),
+    /// the other must lose (fetch_or returns 1).  This verifies the SeqCst
+    /// fetch_or / bit-test idiom that `DependencyCounter::try_complete_slot`
+    /// relies on — the rename from `MultiThreadedState` to `MultiThreadedCounter`
+    /// did not alter any of the underlying atomics.
+    #[test]
+    fn dependency_counter_try_complete_slot_exclusive() {
+        loom::model(|| {
+            let completed_slots = Arc::new(AtomicU64::new(0));
+
+            let bits_a = Arc::clone(&completed_slots);
+            let thread_a = loom::thread::spawn(move || {
+                let prev = bits_a.fetch_or(1u64 << 0, Ordering::SeqCst);
+                prev & (1u64 << 0) == 0 // true iff this thread won
+            });
+
+            let bits_b = Arc::clone(&completed_slots);
+            let thread_b = loom::thread::spawn(move || {
+                let prev = bits_b.fetch_or(1u64 << 0, Ordering::SeqCst);
+                prev & (1u64 << 0) == 0 // true iff this thread won
+            });
+
+            let won_a = thread_a.join().unwrap();
+            let won_b = thread_b.join().unwrap();
+
+            // Exactly one thread must have seen the 0→1 transition.
+            assert!(
+                won_a ^ won_b,
+                "try_complete_slot must be exclusive: won_a={won_a} won_b={won_b}"
+            );
         });
     }
 }

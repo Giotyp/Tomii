@@ -177,7 +177,7 @@ pub(super) fn resolution(
 /// - `Some(cm)` for network packets — result stored in node_results (Phase 1).
 /// - `None` for compute tasks — result already pre-stored by the worker in execute_task.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn process_batch_resolution(
+pub(crate) fn process_batch_resolution(
     shared: &Arc<SharedData>,
     batch: &mut Vec<(NodeInfo, Option<CmTypes>)>,
     thread_core: usize,

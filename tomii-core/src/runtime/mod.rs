@@ -27,6 +27,13 @@ mod ordering;
 mod packet_processing;
 mod reporting;
 mod resolution_loop;
+/// Pluggable resolution-strategy trait and the default `MultiSlotBatchStrategy`.
+///
+/// Implementors of [`resolution_strategy::ResolutionStrategy`] can replace the
+/// batch-processing seam without touching `resolution_loop.rs` or
+/// `task_execution.rs`. In v1 the only registered strategy is
+/// `MultiSlotBatchStrategy`, selected via `--resolution-strategy multi-slot-batch`.
+pub mod resolution_strategy;
 mod scheduling;
 mod shared_data;
 mod slot_lifecycle;
@@ -47,6 +54,8 @@ use parking_lot::RwLock;
 #[cfg(feature = "network")]
 pub(crate) use shared_data::NetworkInfra;
 // SharedData is crate-internal; only BatchConfig, SpinWaitConfig, and RuntimeConfig are public.
+pub use resolution_strategy::{BatchOutcome, MultiSlotBatchStrategy, ResolutionStrategy};
+pub use shared_data::SchedCtx;
 pub(crate) use shared_data::SharedData;
 pub use shared_data::{BatchConfig, RuntimeConfig, SpinWaitConfig};
 pub(crate) use shared_data::{
@@ -58,8 +67,8 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use crate::async_recorder::AsyncRecorder;
+use crate::dependency_counter::{DependencyCounter, MultiThreadedCounter};
 use crate::graph_gen::GraphCompiled;
-use crate::resolution_state::{MultiThreadedState, ResolutionState};
 use crate::scheduler::SchedulerImpl;
 use crate::time_buffer::TimeBufferManager;
 use crossbeam_channel::bounded as cb_bounded;
@@ -329,8 +338,8 @@ impl TomiiRtBuilder {
             None
         };
 
-        // --- Resolution state ---
-        let resolution_state: Arc<dyn ResolutionState> = Arc::new(MultiThreadedState::new(
+        // --- Dependency counter ---
+        let resolution_state: Arc<dyn DependencyCounter> = Arc::new(MultiThreadedCounter::new(
             num_nodes,
             slots,
             max_factor,
@@ -338,7 +347,7 @@ impl TomiiRtBuilder {
             &graph.nodes,
         ));
         tracing::debug!(
-            "\nResolutionState initialized:\n{}\n",
+            "\nDependencyCounter initialized:\n{}\n",
             resolution_state.debug_info()
         );
 
@@ -427,6 +436,7 @@ impl TomiiRtBuilder {
                 resolution_state,
                 node_results,
                 initial_prep_done: Arc::new(AtomicUsize::new(0)),
+                resolution_strategy: Arc::new(MultiSlotBatchStrategy),
             },
             telemetry: Telemetry {
                 time_buffer,

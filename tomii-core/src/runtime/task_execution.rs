@@ -32,7 +32,11 @@ use tomii_types::*;
 /// Uses AcqRel ordering: the fetch_update acquires the previous release from a completing
 /// predecessor, establishing the happens-before chain needed for result visibility on ARM.
 #[inline]
-pub(super) fn fanout_bulk_increment(counter: &std::sync::atomic::AtomicU64, slot_gen: u32, count: usize) -> usize {
+pub(super) fn fanout_bulk_increment(
+    counter: &std::sync::atomic::AtomicU64,
+    slot_gen: u32,
+    count: usize,
+) -> usize {
     use crate::buffers::{gen_pack, gen_unpack_gen, gen_unpack_val};
     use std::sync::atomic::Ordering;
     let result = counter
@@ -62,8 +66,9 @@ pub(super) fn fanout_bulk_increment(counter: &std::sync::atomic::AtomicU64, slot
 ///
 /// Returns `Some(NodeInfo)` when `inline_continuation` is enabled and a ready
 /// successor was reserved for this worker thread to execute immediately.
+#[allow(clippy::module_name_repetitions)]
 #[inline]
-fn worker_resolve_successors(
+pub(super) fn worker_resolve_successors(
     shared: &Arc<SharedData>,
     sctx: &SchedCtx<'_>,
     node_info: &NodeInfo,
