@@ -1,0 +1,14 @@
+[workspace]
+
+[package]
+name = "sensor-pipeline"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "sensor_pipeline"
+crate-type = ["dylib", "rlib"]
+
+[dependencies]
+tomii-types = { path = "../../../../../tomii-types" }
+tomii-macro = { path = "../../../../../tomii-macro" }

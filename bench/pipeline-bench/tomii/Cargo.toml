@@ -1,0 +1,14 @@
+[workspace]
+
+[package]
+name = "pl-bench"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "pl_bench"
+crate-type = ["dylib", "rlib"]
+
+[dependencies]
+tomii-types = { path = "../../../tomii-types" }
+tomii-macro = { path = "../../../tomii-macro" }

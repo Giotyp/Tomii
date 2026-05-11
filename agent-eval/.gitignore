@@ -1,0 +1,19 @@
+# Run outputs — never commit
+results/
+smoke*/
+trial_*/
+
+# Build artifacts
+target/
+build/
+__pycache__/
+*.pyc
+*.o
+
+# Scaffold working outputs (generated per-run)
+report.json
+_oracle_*.json
+_test*.json
+out.txt
+timing.txt
+Cargo.lock
