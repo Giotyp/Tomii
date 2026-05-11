@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 
 use crate::async_recorder::{set_worker_recorder, submit_record, AsyncRecorder};
 use crate::{IdType, Record};
+use tomii_types::{CoreSpec, SchedulerPriority, SchedulerWorkerRange};
 
 thread_local! {
     // Physical core ID where this thread is pinned. usize::MAX means unassigned.
@@ -475,83 +476,72 @@ impl RayonScheduler {
 // TaskScheduler trait — extension point for external scheduler plugins
 // ---------------------------------------------------------------------------
 
-/// Object-safe trait for external scheduler implementations.
+/// External scheduler plugin interface.
 ///
-/// Enabled by the `plugin-scheduler` feature flag.  Allows third-party crates
-/// to implement custom scheduling strategies (e.g. NUMA-aware, priority-ageing,
-/// deadline-driven) and pass them to [`TomiiRtBuilder::new_with_plugin`] without
-/// forking `tomii-core`.
+/// Implement this trait to provide a custom task scheduler that integrates
+/// with Tomii's runtime. See `tomii-core/PLUGIN_SCHEDULER_API.md` for the
+/// full ABI contract, semver guarantees, and example implementation.
+///
+/// # Stability
+/// All types in this trait's signatures are stable across minor releases:
+/// [`tomii_types::SchedulerPriority`], [`tomii_types::SchedulerWorkerRange`],
+/// [`tomii_types::CoreSpec`].
 ///
 /// # Object safety
-/// Spawn methods accept `Box<dyn FnOnce() + Send + 'static>` rather than a
-/// generic `F` so the trait is object-safe.  This incurs **one heap allocation
-/// per task spawn** in the plugin path.  The built-in `Rayon` and `Custom`
-/// variants of [`SchedulerImpl`] are unaffected — they use the zero-cost
-/// generic path and only box when explicitly routed through a `Plugin` variant.
-///
-/// # Implementing
-/// ```ignore
-/// struct MyScheduler { pool: rayon::ThreadPool }
-///
-/// impl TaskScheduler for MyScheduler {
-///     fn spawn_task_with_meta_priority(
-///         &self, _p: Priority, _meta: Option<TaskMeta>,
-///         task: Box<dyn FnOnce() + Send + 'static>,
-///     ) { self.pool.spawn(task); }
-///
-///     fn spawn_to_group_with_meta(
-///         &self, _group: usize, priority: Priority,
-///         meta: Option<TaskMeta>, task: Box<dyn FnOnce() + Send + 'static>,
-///     ) { self.spawn_task_with_meta_priority(priority, meta, task); }
-///
-///     fn workers(&self) -> usize { self.pool.current_num_threads() }
-///     // ... remaining methods with sensible defaults below
-/// }
-/// ```
-#[cfg(feature = "plugin-scheduler")]
+/// This trait is object-safe and can be stored as `Arc<dyn TaskScheduler>`.
 pub trait TaskScheduler: Send + Sync + 'static {
-    /// Spawn a task with scheduling priority.  Hot path — called once per completed node.
-    fn spawn_task_with_meta_priority(
+    /// Spawn a task with a scheduling priority hint.
+    ///
+    /// Called once per completed node on the hot resolution path.
+    fn spawn_task_with_priority(
         &self,
-        priority: crate::custom_scheduler::Priority,
-        meta: Option<crate::TaskMeta>,
+        priority: SchedulerPriority,
         task: Box<dyn FnOnce() + Send + 'static>,
     );
 
-    /// Spawn a task to a specific worker affinity group.
-    /// Falls back to `spawn_task_with_meta_priority` if the scheduler does not
-    /// support worker groups.
-    fn spawn_to_group_with_meta(
+    /// Spawn a task targeting a specific worker affinity group.
+    ///
+    /// Falls back to `spawn_task_with_priority` if worker groups are not
+    /// supported by this scheduler.
+    fn spawn_to_group(
         &self,
-        group_id: usize,
-        priority: crate::custom_scheduler::Priority,
-        meta: Option<crate::TaskMeta>,
+        _group_id: usize,
+        priority: SchedulerPriority,
         task: Box<dyn FnOnce() + Send + 'static>,
-    );
+    ) {
+        self.spawn_task_with_priority(priority, task);
+    }
 
-    /// Return the affinity group id for a given [`crate::WorkerRangeSpec`].
+    /// Return the affinity group id for a given worker range specification.
+    ///
     /// Return `0` (global pool) if worker groups are not supported.
-    fn get_affinity_group(&self, use_workers: Option<&crate::WorkerRangeSpec>) -> usize {
-        let _ = use_workers;
+    fn get_affinity_group(&self, worker_range: Option<&SchedulerWorkerRange>) -> usize {
+        let _ = worker_range;
         0
     }
 
+    /// Total number of worker threads managed by this scheduler.
     fn workers(&self) -> usize;
+
+    /// CPU core index of the first worker thread (for affinity binding).
     fn core_offset(&self) -> usize;
+
+    /// Number of resolution threads.
     fn system_threads(&self) -> usize;
+
+    /// CPU core offset for network receiver threads.
     fn receiver_core_offset(&self) -> usize;
+
+    /// Number of network receiver threads.
     fn receiver_threads(&self) -> usize;
 
-    /// Write a recorded schedule to CSV.  No-op by default.
+    /// Write any recorded schedule data to a CSV file.
+    ///
+    /// No-op by default. Override to export timing data.
     fn write_record(&self, _path: &str) {}
 
-    /// Return the core to pin the main thread to, if any.
-    fn main_core(&self) -> Option<core_affinity::CoreId> {
-        None
-    }
-
-    /// Return a shared [`AsyncRecorder`] if the scheduler uses one.
-    fn get_async_recorder(&self) -> Option<Arc<AsyncRecorder>> {
+    /// Return the CPU core to pin the main (resolution) thread to, if any.
+    fn main_core(&self) -> Option<CoreSpec> {
         None
     }
 }
@@ -563,11 +553,11 @@ pub trait TaskScheduler: Send + Sync + 'static {
 /// `Rayon` covers both FIFO and work-stealing modes on a shared thread pool.
 /// `Custom` is a hand-wired scheduler with per-group worker queues and
 /// explicit CPU affinity, suitable for latency-sensitive MIMO pipelines.
-/// `Plugin` (requires `plugin-scheduler` feature) wraps any `Arc<dyn TaskScheduler>`.
+/// `Plugin` wraps any `Arc<dyn TaskScheduler>` — spawn methods are routed
+/// through `Box<dyn FnOnce()>` erasure; all other paths pay no extra cost.
 pub enum SchedulerImpl {
     Rayon(RayonScheduler),
     Custom(crate::custom_scheduler::CustomScheduler),
-    #[cfg(feature = "plugin-scheduler")]
     /// External scheduler plugin.  Spawn methods are routed through
     /// `Box<dyn FnOnce()>` erasure; all other paths pay no extra cost.
     Plugin(Arc<dyn TaskScheduler>),
@@ -578,16 +568,15 @@ pub enum SchedulerImpl {
 /// Two-arm form (no Plugin handling):
 /// `dispatch!(self, r => rayon_expr, c => custom_expr)`
 ///
-/// Three-arm form (with Plugin fallback under `plugin-scheduler` feature):
+/// Three-arm form (with Plugin dispatch):
 /// `dispatch!(self, r => rayon_expr, c => custom_expr, p => plugin_expr)`
 macro_rules! dispatch {
     ($self:expr, $rv:ident => $re:expr, $cv:ident => $ce:expr) => {
         match $self {
             SchedulerImpl::Rayon($rv) => $re,
             SchedulerImpl::Custom($cv) => $ce,
-            #[cfg(feature = "plugin-scheduler")]
             SchedulerImpl::Plugin(_) => unreachable!(
-                "plugin-scheduler variant reached two-arm dispatch; \
+                "Plugin variant reached two-arm dispatch; \
                  use three-arm dispatch for this method"
             ),
         }
@@ -596,7 +585,6 @@ macro_rules! dispatch {
         match $self {
             SchedulerImpl::Rayon($rv) => $re,
             SchedulerImpl::Custom($cv) => $ce,
-            #[cfg(feature = "plugin-scheduler")]
             SchedulerImpl::Plugin($pv) => $pe,
         }
     };
@@ -610,8 +598,7 @@ impl SchedulerImpl {
         dispatch!(self,
             s => s.spawn_task(task),
             s => s.spawn(task),
-            p => p.spawn_task_with_meta_priority(
-                crate::custom_scheduler::Priority::Normal, None, Box::new(task)))
+            p => p.spawn_task_with_priority(SchedulerPriority::Normal, Box::new(task)))
     }
 
     pub fn spawn_task_with_meta<F>(&self, meta: Option<crate::TaskMeta>, task: F)
@@ -621,8 +608,7 @@ impl SchedulerImpl {
         dispatch!(self,
             s => s.spawn_task_with_meta(meta, task),
             s => s.spawn_with_meta(meta, task),
-            p => p.spawn_task_with_meta_priority(
-                crate::custom_scheduler::Priority::Normal, meta, Box::new(task)))
+            p => p.spawn_task_with_priority(SchedulerPriority::Normal, Box::new(task)))
     }
 
     /// Spawn a task with metadata and priority.
@@ -635,10 +621,16 @@ impl SchedulerImpl {
     ) where
         F: FnOnce() + Send + 'static,
     {
+        // Convert internal Priority to the stable SchedulerPriority for the Plugin arm.
+        let sched_priority = match priority {
+            crate::custom_scheduler::Priority::High => SchedulerPriority::High,
+            crate::custom_scheduler::Priority::Normal => SchedulerPriority::Normal,
+            crate::custom_scheduler::Priority::Low => SchedulerPriority::Low,
+        };
         dispatch!(self,
             s => s.spawn_task_with_meta(meta, task),
             s => s.spawn_with_meta_priority(priority, meta, task),
-            p => p.spawn_task_with_meta_priority(priority, meta, Box::new(task)))
+            p => p.spawn_task_with_priority(sched_priority, Box::new(task)))
     }
 
     /// Spawn a task to a specific worker affinity group.
@@ -652,19 +644,36 @@ impl SchedulerImpl {
     ) where
         F: FnOnce() + Send + 'static,
     {
+        // Convert internal Priority to the stable SchedulerPriority for the Plugin arm.
+        let sched_priority = match priority {
+            crate::custom_scheduler::Priority::High => SchedulerPriority::High,
+            crate::custom_scheduler::Priority::Normal => SchedulerPriority::Normal,
+            crate::custom_scheduler::Priority::Low => SchedulerPriority::Low,
+        };
         dispatch!(self,
             s => s.spawn_task_with_meta(meta, task),
             s => s.spawn_to_group_with_meta(group_id, priority, meta, task),
-            p => p.spawn_to_group_with_meta(group_id, priority, meta, Box::new(task)))
+            p => p.spawn_to_group(group_id, sched_priority, Box::new(task)))
     }
 
     /// Return the affinity group for a given worker spec.
     /// Returns 0 (global pool) for Rayon and Plugin; delegates to CustomScheduler.
     pub fn get_affinity_group(&self, use_workers: Option<&crate::WorkerRangeSpec>) -> usize {
         dispatch!(self,
-            _s => 0,
-            s => s.get_affinity_group(use_workers),
-            p => p.get_affinity_group(use_workers))
+        _s => 0,
+        s => s.get_affinity_group(use_workers),
+        p => {
+            // Convert internal WorkerRangeSpec to the stable public SchedulerWorkerRange.
+            let sr = use_workers.map(|spec| {
+                let range = spec.to_range(0);
+                SchedulerWorkerRange {
+                    start: range.start,
+                    count: range.len(),
+                    affinity_group: 0,
+                }
+            });
+            p.get_affinity_group(sr.as_ref())
+        })
     }
 
     pub fn workers(&self) -> usize {
@@ -705,11 +714,14 @@ impl SchedulerImpl {
     }
 
     pub fn get_async_recorder(&self) -> Option<Arc<AsyncRecorder>> {
-        dispatch!(self, s => s.base.get_async_recorder(), s => s.get_async_recorder(), p => p.get_async_recorder())
+        dispatch!(self, s => s.base.get_async_recorder(), s => s.get_async_recorder(), _p => None)
     }
 
     pub fn main_core(&self) -> Option<core_affinity::CoreId> {
-        dispatch!(self, s => s.base.get_main_core(), s => s.main_core(), p => p.main_core())
+        dispatch!(self,
+            s => s.base.get_main_core(),
+            s => s.main_core(),
+            p => p.main_core().map(|c| core_affinity::CoreId { id: c.to_raw() }))
     }
 }
 

@@ -97,11 +97,7 @@ pub(crate) fn build_node_cache(
         if node.args.iter().any(|a| a.is_barrier()) {
             continue;
         }
-        let res_args: Vec<_> = node
-            .args
-            .iter()
-            .filter(|a| a.type_.is_result())
-            .collect();
+        let res_args: Vec<_> = node.args.iter().filter(|a| a.type_.is_result()).collect();
         if res_args.len() == 1 {
             if let Some(pred) = res_args[0].predecessor.as_ref() {
                 let pred_factor = app_graph.nodes[pred.id as usize].factor;
@@ -256,6 +252,7 @@ pub(crate) fn build_predecessor_tables(
 /// - `pending_cond_tasks`: per-slot condition task count.
 /// - `cond_instances_to_spawn`: generational packed counters for condition node spawn tracking.
 /// - `fanout_bulk_arrived`: generational packed arrived counters for fanout-bulk dispatch.
+#[allow(clippy::type_complexity)]
 pub(super) fn build_slot_counters(
     slots: usize,
     node_cache: &[NodeCacheEntry],

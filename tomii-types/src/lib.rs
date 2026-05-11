@@ -1569,6 +1569,63 @@ impl fmt::Display for CmTypes {
 
 pub type CmPtr = fn(&[CmTypes]) -> CmTypes;
 
+// ============================================================================
+// Stable scheduler API types
+// ============================================================================
+
+/// Task scheduling priority hint for external scheduler plugins.
+///
+/// Maps to the internal `Priority` variants; the repr is stable across releases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(u8)]
+pub enum SchedulerPriority {
+    High = 0,
+    #[default]
+    Normal = 1,
+    Low = 2,
+}
+
+/// Stable worker range specification for external scheduler plugins.
+///
+/// Describes which worker threads an affinity-grouped task should target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SchedulerWorkerRange {
+    /// First worker index (inclusive).
+    pub start: usize,
+    /// Number of workers in the range.
+    pub count: usize,
+    /// Affinity group identifier (0 = global pool).
+    pub affinity_group: u8,
+}
+
+impl SchedulerWorkerRange {
+    pub fn global(start: usize, count: usize) -> Self {
+        SchedulerWorkerRange {
+            start,
+            count,
+            affinity_group: 0,
+        }
+    }
+}
+
+/// Opaque CPU core specification for main-thread affinity binding.
+///
+/// Use [`CoreSpec::from_raw`] to construct from a core index returned by
+/// OS affinity APIs. The internal representation is stable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CoreSpec(usize);
+
+impl CoreSpec {
+    /// Construct from a raw core index (OS-level CPU number).
+    pub fn from_raw(id: usize) -> Self {
+        CoreSpec(id)
+    }
+    /// Return the raw core index.
+    pub fn to_raw(self) -> usize {
+        self.0
+    }
+}
+
 /// Bulk kernel function pointer. A bulk kernel is called **once** per bulk task with the
 /// full instance range `start..end` instead of once per cell, eliminating per-cell
 /// dispatch overhead.

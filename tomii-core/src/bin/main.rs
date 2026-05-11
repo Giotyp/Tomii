@@ -1,5 +1,4 @@
 use clap::Parser;
-use core_affinity;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -327,8 +326,8 @@ fn main() {
 
     let time_file = args.timing;
     if let Some(time_file) = &time_file {
-        let time_name = time_file.split('/').last().unwrap_or_default();
-        synrt.print_statistics(&time_name, Some(&time_file), args.exclude_streams);
+        let time_name = time_file.split('/').next_back().unwrap_or_default();
+        synrt.print_statistics(time_name, Some(time_file), args.exclude_streams);
 
         if args.record {
             // remove  extension if present
@@ -338,10 +337,8 @@ fn main() {
             let csv_file = dir.join(format!("{}_sched.csv", time_name));
             synrt.write_record(csv_file.to_str().unwrap());
         }
-    } else {
-        if args.record {
-            synrt.write_record("scheduler_record.csv");
-        }
+    } else if args.record {
+        synrt.write_record("scheduler_record.csv");
     }
 
     if let Some(report_path) = &args.report {
@@ -349,6 +346,7 @@ fn main() {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_graph(
     spec: GraphSpec,
     mut cfg: RuntimeConfig,

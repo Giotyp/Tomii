@@ -32,10 +32,8 @@ recording = []
 # Used by integration tests which run without a plugin dylib.
 test-utils = []
 rdtsc = []
-# Adds a Plugin(Arc<dyn TaskScheduler>) variant to SchedulerImpl.
-# Enables external scheduler implementations at the cost of one heap
-# allocation per task spawn (Box<dyn FnOnce()>) in the plugin path.
-# The Rayon and Custom variants are unaffected.
+# Kept as a no-op alias for backward compatibility with crates that activate it.
+# The TaskScheduler trait and SchedulerImpl::Plugin variant are now unconditional.
 plugin-scheduler = []
 # Links libpython directly into the tomii-core binary so that Python symbols
 # are globally visible before the bridge dylib is dlopen'd. Eliminates the
