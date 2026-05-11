@@ -17,7 +17,7 @@ packet-driven pipelines and agent-driven automated optimisation loops.
 | Public 4×4 MIMO uplink (S=4, W=4) | **1.26× faster than Taskflow** | Packet-overlap advantage; `bench/mimo-bench/` |
 | Multi-stream pipeline throughput (S=16, W=4) | **1.33× slower than Taskflow** | Gap closes from 2.45× at S=1; `bench/pipeline-bench/` |
 | Slot reuse, N=16,384 | **151× faster than Taskflow eager** | Generational reset vs full re-instantiation |
-| Per-slot memory, S=8 | **2.8× less than Taskflow** | 96 B vs 271 B per slot |
+| Per-slot RSS growth rate (S=1→64, W=4) | **7.7× lower than Taskflow** | Tomii +18 kB/slot vs Taskflow +138 kB/slot; total RSS is higher at S≤64 due to Rayon pool pre-allocation |
 | Anti-diagonal wavefront (single stream) | **~2.4× slower than TBB/Taskflow** | Intrinsic cost of tripartite decoupling |
 
 All numbers are verifier-gated and reproducible from this repository. See
