@@ -50,7 +50,8 @@ python taskflow/run_bench.py --workers 4 --slots 16 --streams 200
 
 Gap closes from 2.45× (S=1) to 1.33× (S=16) as multi-slot amortisation takes effect.
 Per-slot RSS growth is 7.7× lower than Taskflow (+18 vs +138 kB/slot); total RSS is higher
-at S≤64 due to pre-allocated worker thread stacks. Full S×W sweep in `pipeline_sweep_post_u7c.csv`.
+at S≤64 due to pre-allocated worker thread stacks. Full S×W sweep in
+`bench/pipeline-bench/results/pipeline_sweep_post_u7c.csv`.
 
 Tomii runs use `--custom --coalesce-barriers --inline-continuation` (hardcoded in `run_bench.py`);
 these are the recommended flags for streaming workloads. Taskflow uses default `tf::Executor`.
@@ -59,12 +60,14 @@ these are the recommended flags for streaming workloads. Taskflow uses default `
 
 ```bash
 cd examples/agent-tuning
-python run_all.sh 50   # runs all 4 arms (random, Bayesian, grid, Claude)
+bash run_all.sh 50   # runs all 4 arms (random, Bayesian, grid, Claude)
 ```
 
-Four optimisation arms compete over the stream-analytics knob space with the same perf
-threshold and verifier. An agent that drops a barrier or removes a `$dep` edge fails the
-verifier and its edit is rejected. See `examples/agent-tuning/README.md`.
+Four optimisation arms compete over the stream-analytics knob space with the same budget
+(50 iterations) and verifier. Measured result: all arms 50/50 verifier-passing; agent mean
+latency 0.33 ms vs random mean 14.5 ms — the agent converges efficiently without being
+given source code or documentation. An edit that drops a barrier or removes a `$dep` edge
+fails the verifier and is rejected. See `examples/agent-tuning/README.md`.
 
 ### Ergonomics #2 — Polyglot plugin showcase
 
@@ -287,10 +290,13 @@ target workload classes, and workloads Tomii explicitly does not target).
 ## Build
 
 ```bash
-source examples/mimolib/scripts/export.sh  # required for mimolib builds
 cargo build --release
 make schema   # regenerate Python bindings after changing json_structs.rs
 ```
+
+> **Note for `bench/mimo-bench/` builds:** the MIMO bench links Intel MKL and Agora libs.
+> Run `source examples/mimolib/scripts/export.sh` before building to set the required
+> library paths. See `bench/mimo-bench/README.md` for the full dependency list.
 
 ## Environment variables
 
