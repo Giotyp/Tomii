@@ -19,22 +19,24 @@ configurations, run the verifier, and iterate. The four arms here share:
 ## Prerequisites
 
 ```bash
-# Python deps for Bayesian arm
-pip install optuna
+# Python deps (Bayesian arm requires Optuna; agent arm uses the claude CLI)
+pip install -e ".[agent-tuning]"   # from the repo root — installs optuna>=3
 
-# Python deps for Claude agent arm
-pip install anthropic
-
-# API key for arm 4
-export ANTHROPIC_API_KEY=sk-ant-...
+# Agent arm (arm 4): requires the claude CLI on PATH
+# Install Claude Code: https://claude.ai/code
+# Verify with: claude --version
+# No API key needed — uses your active Claude Code subscription.
 ```
 
-The stream-analytics dylib is built automatically if not already present.
-A release build of `tomii-core` must exist at `target/release/main`.
-Build it with:
+The stream-analytics dylib and the `tomii-core` binary are built automatically
+if not already present, **provided** `FUNC_PATH` is set to the stream-analytics lib:
 
 ```bash
-cargo build --release -p tomii-core --bin main
+# One-time build (required before the first run)
+FUNC_PATH=$(pwd)/examples/stream-analytics/src/lib.rs \
+    cargo build --release -p tomii-core --bin main
+FUNC_PATH=$(pwd)/examples/stream-analytics/src/lib.rs \
+    cargo build --release --manifest-path examples/stream-analytics/Cargo.toml
 ```
 
 ## Quick start
@@ -63,10 +65,22 @@ the verifier passes for the full stream count.
 
 | File | Strategy |
 |---|---|
-| `arms/random.py` | Uniform random sampling (seed=42) |
+| `arms/random_search.py` | Uniform random sampling (seed=42) |
 | `arms/bayesian.py` | Optuna TPE (Tree-structured Parzen Estimator, seed=42) |
 | `arms/grid.py` | Bounded cross-product grid (first N cells of 2048-cell full grid) |
-| `arms/agent.py` | Claude (`claude-sonnet-4-6`) prompted with trial history |
+| `arms/agent.py` | Claude (`claude-sonnet-4-6`) via `claude` CLI, prompted with trial history |
+
+## Aggregate + plot
+
+After a run, generate `summary.csv` and `comparison.png`:
+
+```bash
+python aggregate.py --results-dir results/run_<ts>
+python plot.py --results-dir results/run_<ts>
+```
+
+`aggregate.py` computes per-arm best/mean ms, passing trial count, and improvement over
+baseline. `plot.py` draws convergence curves (best-so-far ms vs iteration) for all arms.
 
 ## Results format
 
@@ -93,9 +107,33 @@ See `knob_space.json` for the full list of tunable CLI flags and what is forbidd
 The forbidden list protects correctness: `$barrier`, `$dep`, and `$res` arguments
 encode data-dependency semantics that must not be removed.
 
+## Results (run 2026-05-13, 50 iter/arm)
+
+| Arm | Best ms | Mean ms (passing) | Improvement | Passing |
+|---|---|---|---|---|
+| Random | 0.0912 | 14.48 | 97.4% | 50/50 |
+| Bayesian (Optuna TPE) | 0.1206 | 9.54 | 96.6% | 50/50 |
+| Grid | 0.1218 | 0.36 | 96.5% | 50/50 |
+| **Agent (Claude)** | **0.1030** | **0.33** | **97.1%** | **50/50** |
+
+Baseline: 3.51 ms/stream. 0 rejected trials across all arms.
+
+**Interpretation**: all four arms found configurations within 0.04 ms of each other on this
+small (2048-cell) discrete knob space. The agent did **not** beat the best non-adaptive arm
+on single-trial best (random found 0.0912 vs agent's 0.1030). However, the agent had the
+**lowest mean latency across all 50 trials** (0.33 ms), matching grid and both meaningfully
+lower than random (14.48 ms) and Bayesian (9.54 ms). This reflects the agent's early
+focus on low-slot, low-worker configurations — an advantage that would compound on a
+larger or more expensive search space. On this specific workload the knob space is small
+enough that all adaptive strategies converge quickly.
+
+See `results/run_20260513_013311/` for the full trial logs, `summary.csv`, and
+`comparison.png` (convergence plot).
+
 ## Honest framing
 
-If the agent arm does not outperform the best non-adaptive baseline by at least 10%,
-we report that honestly. The value of this example is the **structured tuning surface**
-— a reproducible benchmark comparing adaptive vs non-adaptive search — not necessarily
-the agent's optimization skill on this particular workload.
+The agent arm did not beat the best non-adaptive arm by ≥10% on single-trial best in
+this run. The value of this example is the **structured tuning surface**: a reproducible
+benchmark showing that a language model can reliably stay in the valid region (0/50
+verifier rejections) and converge efficiently, without access to source code or
+documentation beyond the knob descriptions.
