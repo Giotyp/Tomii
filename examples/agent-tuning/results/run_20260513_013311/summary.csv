@@ -1,0 +1,5 @@
+arm,n_total,n_passing,n_rejected,best_ms,mean_ms_passing,improvement_pct,wall_seconds_total,baseline_ms
+random,50,50,0,0.0912,14.4778,97.4,24.5,3.5060
+bayesian,50,50,0,0.1206,9.5395,96.6,20.8,3.5060
+grid,50,50,0,0.1218,0.3562,96.5,25.7,3.5060
+agent,50,50,0,0.1030,0.3313,97.1,17.5,3.5060
