@@ -164,6 +164,7 @@ def evaluate(
         result_file.touch()
 
         out_file = tmp_dir / "out.txt"
+        timing_file = tmp_dir / "timing.txt"
         cmd = [
             binary,
             "--json", str(graph_json),
@@ -175,6 +176,7 @@ def evaluate(
             "--batching-size", str(knobs.batching_size),
             "--output", str(out_file),
             "--report", str(report_file),
+            "--timing", str(timing_file),
         ]
         if knobs.inline_continuation:
             cmd.append("--inline-continuation")
@@ -187,7 +189,7 @@ def evaluate(
         if knobs.no_fanout_bulk:
             cmd.append("--no-fanout-bulk")
 
-        run_env = {**os.environ, "SCRIPT_DIR": str(STREAM_ANALYTICS)}
+        run_env = {**os.environ, "SCRIPT_DIR": str(tmp_dir)}
 
         try:
             proc = subprocess.run(
@@ -223,7 +225,6 @@ def evaluate(
                 "--result", str(result_file),
                 "--golden", str(golden),
                 "--streams", str(streams),
-                "--exclude", str(warmup),
             ],
             capture_output=True,
             text=True,
@@ -331,7 +332,8 @@ def log_trial(record: TrialRecord, log_file: Path) -> None:
 def load_knob_space() -> dict[str, Any]:
     """Read knob_space.json and return it as a dict."""
     ks_path = _HERE / "knob_space.json"
-    return json.loads(ks_path.read_text())
+    result: dict[str, Any] = json.loads(ks_path.read_text())
+    return result
 
 
 # ---------------------------------------------------------------------------
