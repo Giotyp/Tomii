@@ -16,6 +16,9 @@ dev = [
     "mypy>=1.0",
     "ruff>=0.4",
 ]
+agent-tuning = [
+    "optuna>=3",
+]
 
 [tool.maturin]
 # Bridge crate — the only Rust artifact compiled into the wheel.
