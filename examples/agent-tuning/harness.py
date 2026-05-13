@@ -74,38 +74,50 @@ def _dylib_path() -> Path:
     return REPO_ROOT / "target" / "release" / "libstream_analytics.so"
 
 
-def _ensure_dylib() -> str:
-    """Build the stream-analytics dylib if it does not yet exist. Returns path."""
-    dylib = _dylib_path()
-    if dylib.exists():
-        return str(dylib)
+def _ensure_build() -> tuple[str, str]:
+    """Build the stream-analytics dylib and tomii-core main binary if needed.
 
-    print("[harness] libstream_analytics.so not found — building ...", flush=True)
+    Both artifacts must be compiled with the same FUNC_PATH so the function
+    registry embedded in the main binary matches the dylib's exported symbols.
+    Returns (dylib_path, binary_path).
+    """
     func_path = STREAM_ANALYTICS / "src" / "lib.rs"
     manifest = STREAM_ANALYTICS / "Cargo.toml"
-    env = {
-        "FUNC_PATH": str(func_path.resolve()),
-    }
-    build_env = {**os.environ, **env}
+    build_env = {**os.environ, "FUNC_PATH": str(func_path.resolve())}
+
+    dylib = _dylib_path()
+    binary = REPO_ROOT / "target" / "release" / "main"
+
+    if not dylib.exists():
+        print("[harness] libstream_analytics.so not found — building ...", flush=True)
+        result = subprocess.run(
+            ["cargo", "build", "--release", "--manifest-path", str(manifest.resolve())],
+            env=build_env,
+            cwd=str(REPO_ROOT),
+            capture_output=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"cargo build failed (exit {result.returncode}) for stream-analytics"
+            )
+        if not dylib.exists():
+            raise RuntimeError(f"dylib not found at {dylib} after build")
+
+    # Always build the main binary with the stream-analytics FUNC_PATH so its
+    # embedded function registry matches the dylib. cargo is a no-op if inputs
+    # are unchanged, so this is cheap when everything is already up-to-date.
     result = subprocess.run(
-        [
-            "cargo",
-            "build",
-            "--release",
-            "--manifest-path",
-            str(manifest.resolve()),
-        ],
+        ["cargo", "build", "--release", "-p", "tomii-core", "--bin", "main"],
         env=build_env,
         cwd=str(REPO_ROOT),
         capture_output=False,
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"cargo build failed (exit {result.returncode}) for stream-analytics"
+            f"cargo build failed (exit {result.returncode}) for tomii-core"
         )
-    if not dylib.exists():
-        raise RuntimeError(f"dylib not found at {dylib} after build")
-    return str(dylib)
+
+    return str(dylib), str(binary)
 
 
 def _find_binary() -> str:
@@ -115,7 +127,9 @@ def _find_binary() -> str:
         if candidate.exists():
             return str(candidate)
     raise RuntimeError(
-        "tomii binary not found. Build with: cargo build --release -p tomii-core --bin main"
+        "tomii binary not found. Build with:\n"
+        "  FUNC_PATH=$(pwd)/examples/stream-analytics/src/lib.rs "
+        "cargo build --release -p tomii-core --bin main"
     )
 
 
@@ -136,22 +150,12 @@ def evaluate(
     t0 = time.monotonic()
 
     try:
-        dylib = _ensure_dylib()
+        dylib, binary = _ensure_build()
     except RuntimeError as exc:
         return EvalResult(
             verifier_ok=False,
             ms_per_stream=None,
-            rejection_reason=f"dylib build failed: {exc}",
-            wall_seconds=time.monotonic() - t0,
-        )
-
-    try:
-        binary = _find_binary()
-    except RuntimeError as exc:
-        return EvalResult(
-            verifier_ok=False,
-            ms_per_stream=None,
-            rejection_reason=f"binary not found: {exc}",
+            rejection_reason=f"build failed: {exc}",
             wall_seconds=time.monotonic() - t0,
         )
 
