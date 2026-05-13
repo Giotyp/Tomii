@@ -80,17 +80,19 @@ pub fn write_report(file_path: &str, sensor_summaries: Vec<Vec<f64>>) {
     use std::fs::OpenOptions;
     use std::io::Write;
 
+    let mut out = String::new();
+    for (sensor_id, estimates) in sensor_summaries.iter().enumerate() {
+        let formatted: Vec<String> = estimates.iter().map(|v| format!("{:.2}", v)).collect();
+        out.push_str(&format!("Sensor-{}: [{}]\n", sensor_id, formatted.join(", ")));
+    }
+
     let mut file = OpenOptions::new()
         .create(false)
         .append(true)
         .open(file_path)
         .expect("Failed to open report file");
-
-    for (sensor_id, estimates) in sensor_summaries.iter().enumerate() {
-        let formatted: Vec<String> = estimates.iter().map(|v| format!("{:.2}", v)).collect();
-        writeln!(file, "Sensor-{}: [{}]", sensor_id, formatted.join(", "))
-            .expect("Failed to write sensor summary");
-    }
+    file.write_all(out.as_bytes())
+        .expect("Failed to write sensor summary");
 }
 
 /// Resolve the path of the output file, creating it if absent.
