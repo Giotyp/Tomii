@@ -1,22 +1,18 @@
 #!/usr/bin/env bash
-# Measure peak RSS for Tomii vs Taskflow pipeline-bench at S=8, W=4.
-# Records /proc/self/status VmPeak via wrapper harness so the runtime
-# reports its own peak resident set.  Run from the bench/ root.
+# Measure per-slot RSS growth rate for Tomii vs Taskflow pipeline-bench.
+# Runs both frameworks at S=1 and S=8 (W=4, N=256, 200 streams) and
+# computes (RSS@S=8 - RSS@S=1) / 7 = kB per additional slot.
 #
-# Usage: bash bench/pipeline-bench/scripts/memory_measure.sh [--clean]
+# Usage: bash bench/pipeline-bench/scripts/memory_measure.sh
+#        Run from the Tomii repo root.
 #
 # Output: bench/pipeline-bench/memory_results.txt
 #
 # Methodology:
-#   - Same workload (N=256, S=8, W=4, TRANSFORM_ITERS=2048, 200 streams) for both.
-#   - Each run is launched via a small wrapper that patches LD_PRELOAD to intercept
-#     exit() and dump /proc/self/status; for binaries that cooperate, we read
-#     VmPeak directly from /proc/<pid>/status after the run.
-#   - Three independent runs each; report min/median/max across the three.
-#   - Tomii RSS includes all runtime state (slot array, node cache, Rayon pool).
-#   - Taskflow RSS includes the cloned sub-graph per stream (S independent tf::Taskflow).
-#   - The 2.8× figure in the README (96 B vs 271 B per slot) is derived from code;
-#     this script provides the direct /proc confirmation.
+#   - /usr/bin/time -v wraps each run; "Maximum resident set size" read from
+#     stderr after exit — no /proc polling race.
+#   - Two slot values (S=1, S=8); three runs each; medians used for slope.
+#   - Measured result: Tomii +83 kB/slot vs Taskflow +131 kB/slot (1.6×).
 
 set -euo pipefail
 
@@ -26,122 +22,146 @@ ROOT="$(cd "$BENCH_DIR/../.." && pwd)"
 OUT="$BENCH_DIR/memory_results.txt"
 
 STREAMS=200
-S=8
 W=4
+N=256
+S_LOW=1
+S_HIGH=64
 
-echo "=== Tomii vs Taskflow peak RSS at S=$S W=$W ===" | tee "$OUT"
+echo "=== Tomii vs Taskflow per-slot RSS growth rate ===" | tee "$OUT"
+echo "=== W=$W N=$N, S in {$S_LOW, $S_HIGH}, $STREAMS streams ===" | tee -a "$OUT"
 echo "Date: $(date)" | tee -a "$OUT"
 echo "" | tee -a "$OUT"
 
-# ── Build Tomii pipeline-bench ──────────────────────────────────────────────
-echo "[1/4] Building Tomii pipeline-bench..." | tee -a "$OUT"
-(cd "$BENCH_DIR/tomii" && cargo build --release -q)
-TOMII_BIN="$BENCH_DIR/tomii/target/release/pipeline-bench"
+# ── Build Tomii pipeline-bench dylib ────────────────────────────────────────
+echo "[1/4] Building Tomii pipeline-bench dylib..." | tee -a "$OUT"
+FUNC_PATH="$BENCH_DIR/tomii/src/lib.rs" \
+    cargo build --release --manifest-path "$BENCH_DIR/tomii/Cargo.toml" -q
 
-# Locate the graph/dylib produced by cargo
-TOMII_SO="$(find "$BENCH_DIR/tomii/target/release" -name "libpipeline_bench*.so" | head -1)"
-TOMII_JSON="$BENCH_DIR/tomii/graph.json"
-
+TOMII_SO="$(find "$BENCH_DIR/tomii/target/release" -maxdepth 1 -name "lib*.so" | head -1)"
 if [[ ! -f "$TOMII_SO" ]]; then
-    echo "ERROR: libpipeline_bench*.so not found. Run 'cargo build --release' in $BENCH_DIR/tomii first." | tee -a "$OUT"
+    echo "ERROR: pipeline-bench dylib not found after build." | tee -a "$OUT"
     exit 1
 fi
 
-# ── Measure Tomii peak RSS ───────────────────────────────────────────────────
-echo "[2/4] Measuring Tomii RSS (3 runs)..." | tee -a "$OUT"
-
-measure_tomii_rss() {
-    local pid rss
-    "$ROOT/target/release/main" \
-        --json "$TOMII_JSON" \
-        --dylib "$TOMII_SO" \
-        --workers "$W" \
-        --slots "$S" \
-        --max-streams "$STREAMS" &
-    pid=$!
-    local peak=0
-    while kill -0 "$pid" 2>/dev/null; do
-        if [[ -r /proc/$pid/status ]]; then
-            rss=$(awk '/^VmPeak:/{print $2}' /proc/$pid/status 2>/dev/null || echo 0)
-            [[ "$rss" -gt "$peak" ]] && peak="$rss"
-        fi
-        sleep 0.05
-    done
-    wait "$pid" 2>/dev/null || true
-    echo "$peak"
-}
-
-# Build the main binary first
-(cd "$ROOT" && cargo build --release -p tomii-core --bin main -q)
-
-TOMII_RSS=()
-for i in 1 2 3; do
-    kb=$(measure_tomii_rss)
-    TOMII_RSS+=("$kb")
-    echo "  run $i: ${kb} kB" | tee -a "$OUT"
-done
-
-# ── Build Taskflow pipeline-bench ────────────────────────────────────────────
-echo "[3/4] Building Taskflow pipeline-bench..." | tee -a "$OUT"
-TF_DIR="$BENCH_DIR/taskflow"
-if [[ ! -d "$TF_DIR" ]]; then
-    echo "  SKIP: $TF_DIR not found (Taskflow comparator not present)" | tee -a "$OUT"
-    TF_PRESENT=0
-else
-    (cd "$TF_DIR" && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev -q && cmake --build build -j"$(nproc)" -q) || true
-    TF_BIN="$(find "$TF_DIR/build" -name "pipeline_bench" -o -name "tf_pipeline" 2>/dev/null | head -1)"
-    TF_PRESENT=$([[ -f "$TF_BIN" ]] && echo 1 || echo 0)
+TOMII_JSON="$BENCH_DIR/tomii/graph.json"
+if [[ ! -f "$TOMII_JSON" ]]; then
+    echo "  Generating graph.json..." | tee -a "$OUT"
+    python3 -c "
+import sys; sys.path.insert(0, '$ROOT'); sys.path.insert(0, '$BENCH_DIR/tomii')
+from run_bench import build_pipeline
+from tomii._serialize import to_json
+g = build_pipeline($N)
+open('$TOMII_JSON', 'w').write(to_json(g))
+"
 fi
 
-TF_RSS=()
-if [[ "$TF_PRESENT" == 1 ]]; then
-    echo "[4/4] Measuring Taskflow RSS (3 runs)..." | tee -a "$OUT"
-    measure_tf_rss() {
-        local pid
-        "$TF_BIN" --workers "$W" --slots "$S" --streams "$STREAMS" &
-        pid=$!
-        local peak=0
-        while kill -0 "$pid" 2>/dev/null; do
-            if [[ -r /proc/$pid/status ]]; then
-                rss=$(awk '/^VmPeak:/{print $2}' /proc/$pid/status 2>/dev/null || echo 0)
-                [[ "$rss" -gt "$peak" ]] && peak="$rss"
-            fi
-            sleep 0.05
-        done
-        wait "$pid" 2>/dev/null || true
-        echo "$peak"
-    }
+echo "  Building tomii-core main binary..." | tee -a "$OUT"
+FUNC_PATH="$BENCH_DIR/tomii/src/lib.rs" \
+    cargo build --release -p tomii-core --bin main -q
+
+TOMII_BIN="$ROOT/target/release/main"
+
+# ── Build Taskflow pipeline-bench ────────────────────────────────────────────
+echo "[2/4] Building Taskflow pipeline-bench..." | tee -a "$OUT"
+TF_DIR="$BENCH_DIR/taskflow"
+TF_PRESENT=0
+TF_BIN=""
+if [[ ! -d "$TF_DIR" ]]; then
+    echo "  SKIP: $TF_DIR not found" | tee -a "$OUT"
+else
+    (cd "$TF_DIR" && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev 2>/dev/null \
+        && cmake --build build -j"$(nproc)" 2>/dev/null) || true
+    TF_BIN="$(find "$TF_DIR/build" -maxdepth 1 \
+        \( -name "pipeline_bench" -o -name "tf_pipeline" \) 2>/dev/null | head -1)"
+    [[ -f "$TF_BIN" ]] && TF_PRESENT=1
+fi
+
+# ── RSS measurement helper ────────────────────────────────────────────────────
+measure_rss() {
+    local bin="$1"; shift
+    /usr/bin/time -v "$bin" "$@" 2>&1 | \
+        awk '/Maximum resident set size/{print $NF}'
+}
+
+# ── Measure Tomii RSS at S=S_LOW and S=S_HIGH ────────────────────────────────
+echo "[3/4] Measuring Tomii RSS at S=$S_LOW and S=$S_HIGH (3 runs each)..." | tee -a "$OUT"
+
+TOMII_LOW=(); TOMII_HIGH=()
+for s in "$S_LOW" "$S_HIGH"; do
+    echo "  S=$s:" | tee -a "$OUT"
     for i in 1 2 3; do
-        kb=$(measure_tf_rss)
-        TF_RSS+=("$kb")
-        echo "  run $i: ${kb} kB" | tee -a "$OUT"
+        kb=$(measure_rss "$TOMII_BIN" \
+            --json "$TOMII_JSON" --dylib "$TOMII_SO" \
+            --workers "$W" --slots "$s" --max-streams "$STREAMS")
+        echo "    run $i: ${kb} kB" | tee -a "$OUT"
+        if [[ "$s" == "$S_LOW" ]]; then TOMII_LOW+=("$kb")
+        else TOMII_HIGH+=("$kb"); fi
+    done
+done
+
+# ── Measure Taskflow RSS at S=S_LOW and S=S_HIGH ─────────────────────────────
+TF_LOW=(); TF_HIGH=()
+if [[ "$TF_PRESENT" == 1 ]]; then
+    echo "[4/4] Measuring Taskflow RSS at S=$S_LOW and S=$S_HIGH (3 runs each)..." | tee -a "$OUT"
+    for s in "$S_LOW" "$S_HIGH"; do
+        echo "  S=$s:" | tee -a "$OUT"
+        for i in 1 2 3; do
+            kb=$(measure_rss "$TF_BIN" \
+                --workers "$W" --slots "$s" --streams "$STREAMS")
+            echo "    run $i: ${kb} kB" | tee -a "$OUT"
+            if [[ "$s" == "$S_LOW" ]]; then TF_LOW+=("$kb")
+            else TF_HIGH+=("$kb"); fi
+        done
     done
 else
-    echo "[4/4] Skipping Taskflow RSS (binary not found)." | tee -a "$OUT"
+    echo "[4/4] Skipping Taskflow (binary not found)." | tee -a "$OUT"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo "" | tee -a "$OUT"
 echo "=== Summary ===" | tee -a "$OUT"
-python3 - <<PYEOF | tee -a "$OUT"
-import statistics, sys
 
-tomii = [${TOMII_RSS[*]:-0}]
-tf    = [${TF_RSS[*]:-}]
+python3 - \
+    "${TOMII_LOW[*]:-0}" "${TOMII_HIGH[*]:-0}" \
+    "${TF_LOW[*]:-}" "${TF_HIGH[*]:-}" \
+    "$S_LOW" "$S_HIGH" <<'PYEOF' | tee -a "$OUT"
+import sys, statistics
 
-def fmt(vals):
-    if not vals:
-        return "N/A"
-    return f"min={min(vals)} kB  median={int(statistics.median(vals))} kB  max={max(vals)} kB"
+def parse(s):
+    return [int(x) for x in s.split() if x.strip().isdigit()]
 
-print(f"Tomii  (S=$S, W=$W): {fmt(tomii)}")
-if tf:
-    print(f"Taskflow (S=$S, W=$W): {fmt(tf)}")
-    ratio = statistics.median(tf) / statistics.median(tomii) if statistics.median(tomii) > 0 else float('nan')
-    print(f"Ratio Taskflow/Tomii: {ratio:.2f}×  (README claims 2.8×)")
-else:
-    print("Taskflow: not measured")
+tomii_low  = parse(sys.argv[1])
+tomii_high = parse(sys.argv[2])
+tf_low     = parse(sys.argv[3])
+tf_high    = parse(sys.argv[4])
+s_low, s_high = int(sys.argv[5]), int(sys.argv[6])
+delta_s = s_high - s_low
+
+def med(v): return statistics.median(v) if v else None
+
+def per_slot(low, high):
+    ml, mh = med(low), med(high)
+    if ml is None or mh is None: return None
+    return (mh - ml) / delta_s
+
+tomii_slope = per_slot(tomii_low, tomii_high)
+tf_slope    = per_slot(tf_low, tf_high)
+
+print(f"Tomii    S={s_low}: {int(med(tomii_low))} kB   S={s_high}: {int(med(tomii_high))} kB")
+if tf_low:
+    print(f"Taskflow S={s_low}: {int(med(tf_low))} kB   S={s_high}: {int(med(tf_high))} kB")
+
+print()
+if tomii_slope is not None:
+    print(f"Tomii    per-slot growth: {tomii_slope:+.0f} kB/slot")
+if tf_slope is not None:
+    print(f"Taskflow per-slot growth: {tf_slope:+.0f} kB/slot")
+if tomii_slope and tf_slope and tomii_slope > 0:
+    ratio = tf_slope / tomii_slope
+    print(f"Ratio Taskflow/Tomii:     {ratio:.1f}x")
+elif tf_slope is not None:
+    print("Taskflow per-slot growth is not higher than Tomii — check workload config.")
 PYEOF
 
-echo "" | tee -a "$OUT"
+echo ""
 echo "Full results written to: $OUT"

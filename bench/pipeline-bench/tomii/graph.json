@@ -1,0 +1,64 @@
+{
+    "initializations": [],
+    "nodes": [
+        {
+            "name": "ingest",
+            "factor": 256,
+            "function": "pl_ingest",
+            "args": [
+                {
+                    "type": "$ref",
+                    "value": "$index"
+                },
+                {
+                    "type": "usize",
+                    "value": "256"
+                }
+            ]
+        },
+        {
+            "name": "transform",
+            "factor": 256,
+            "function": "pl_transform",
+            "args": [
+                {
+                    "type": "$res",
+                    "predecessor": {
+                        "name": "ingest",
+                        "indexes": "0"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "aggregate",
+            "function": "pl_aggregate",
+            "args": [
+                {
+                    "type": "$res",
+                    "predecessor": {
+                        "name": "transform",
+                        "indexes": "0-256"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "emit",
+            "function": "pl_emit",
+            "args": [
+                {
+                    "type": "$res",
+                    "predecessor": {
+                        "name": "aggregate",
+                        "indexes": "0"
+                    }
+                },
+                {
+                    "type": "usize",
+                    "value": "0"
+                }
+            ]
+        }
+    ]
+}

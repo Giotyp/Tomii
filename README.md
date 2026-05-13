@@ -17,7 +17,7 @@ packet-driven pipelines and agent-driven automated optimisation loops.
 | Public 4×4 MIMO uplink (S=4, W=4) | **1.26× faster than Taskflow** | Packet-overlap advantage; `bench/mimo-bench/` |
 | Multi-stream pipeline throughput (S=16, W=4) | **1.33× slower than Taskflow** | Gap closes from 2.45× at S=1; `bench/pipeline-bench/` |
 | Slot reuse, N=16,384 | **151× faster than Taskflow eager** | Generational reset vs full re-instantiation |
-| Per-slot RSS growth rate (S=1→64, W=4) | **7.7× lower than Taskflow** | Tomii +18 kB/slot vs Taskflow +138 kB/slot; total RSS is higher at S≤64 due to Rayon pool pre-allocation |
+| Per-slot RSS growth rate (S=1→64, W=4) | **1.6× lower than Taskflow** | Tomii +83 kB/slot vs Taskflow +131 kB/slot; measured via `bench/pipeline-bench/scripts/memory_measure.sh` |
 | Anti-diagonal wavefront (single stream) | **~2.4× slower than TBB/Taskflow** | Intrinsic cost of tripartite decoupling |
 
 All numbers are verifier-gated and reproducible from this repository. See
@@ -49,8 +49,7 @@ python taskflow/run_bench.py --workers 4 --slots 16 --streams 200
 ```
 
 Gap closes from 2.45× (S=1) to 1.33× (S=16) as multi-slot amortisation takes effect.
-Per-slot RSS growth is 7.7× lower than Taskflow (+18 vs +138 kB/slot); total RSS is higher
-at S≤64 due to pre-allocated worker thread stacks. Full S×W sweep in
+Per-slot RSS growth is 1.6× lower than Taskflow (+83 vs +131 kB/slot). Full S×W sweep in
 `bench/pipeline-bench/results/pipeline_sweep_post_u7c.csv`.
 
 Tomii runs use `--custom --coalesce-barriers --inline-continuation` (hardcoded in `run_bench.py`);
