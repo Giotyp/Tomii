@@ -16,12 +16,18 @@ packet-driven pipelines and agent-driven automated optimisation loops.
 |---|---|---|
 | Public 4×4 MIMO uplink (S=4, W=4) | **1.26× faster than Taskflow** | Packet-overlap advantage; `bench/mimo-bench/` |
 | Multi-stream pipeline throughput (S=16, W=4) | **1.33× slower than Taskflow** | Gap closes from 2.45× at S=1; `bench/pipeline-bench/` |
-| Slot reuse, N=16,384 | **151× faster than Taskflow eager** | Generational reset vs full re-instantiation |
-| Per-slot RSS growth rate (S=1→64, W=4) | **1.6× lower than Taskflow** | Tomii +83 kB/slot vs Taskflow +131 kB/slot; measured via `bench/pipeline-bench/scripts/memory_measure.sh` |
+| Per-slot RSS growth rate (S=1→64, W=4) | **1.6× lower than Taskflow** | Tomii +81 kB/slot vs Taskflow +132 kB/slot; measured via `bench/pipeline-bench/scripts/memory_measure.sh` |
 | Anti-diagonal wavefront (single stream) | **~2.4× slower than TBB/Taskflow** | Intrinsic cost of tripartite decoupling |
 
-All numbers are verifier-gated and reproducible from this repository. See
-`bench/*/README.md` for methodology and hardware details.
+Every row above is verifier-gated and reproducible from this repository — run the
+script under the named `bench/<name>/` directory; see `bench/*/README.md` for
+methodology and hardware. (Result CSVs are regenerated outputs and are not committed;
+a small regression baseline ships under each bench's `results/post_r1/`.)
+
+Tomii's generational slot reuse also completes a stream in O(1) (bump a generation
+counter, mark the slot free) where an eager comparator rebuilds the graph per stream —
+measured at **151× faster than Taskflow eager** at N=16,384 in the paper
+(`5-evaluation.tex`); this repo does not ship a standalone slot-reuse microbenchmark.
 
 ---
 
@@ -49,8 +55,10 @@ python taskflow/run_bench.py --workers 4 --slots 16 --streams 200
 ```
 
 Gap closes from 2.45× (S=1) to 1.33× (S=16) as multi-slot amortisation takes effect.
-Per-slot RSS growth is 1.6× lower than Taskflow (+83 vs +131 kB/slot). Full S×W sweep in
-`bench/pipeline-bench/results/pipeline_sweep_post_u7c.csv`.
+Per-slot RSS growth is 1.6× lower than Taskflow (+83 vs +131 kB/slot). The committed
+regression baseline for the full S×W sweep is under
+`bench/pipeline-bench/tomii/results/post_r1/`; re-run `run_bench.py` to regenerate the
+live sweep CSV.
 
 Tomii runs use `--custom --coalesce-barriers --inline-continuation` (hardcoded in `run_bench.py`);
 these are the recommended flags for streaming workloads. Taskflow uses default `tf::Executor`.

@@ -90,6 +90,12 @@ Gap closes from ~2.5× at S=1 to **1.28–1.36× at S≥16** across W∈{4,8}.
 
 ## High-S Memory Scaling
 
+> **Superseded (exploratory).** The slopes below come from an earlier high-S binary-RSS
+> probe on the 128-slot bench-branch binary and measure a different quantity than the
+> headline per-slot growth claim. The authoritative, reproducible figure is **+81 vs
+> +132 kB/slot = 1.6× steeper for Taskflow** (S=1 vs S=64, `scripts/memory_measure.sh`,
+> `memory_results.txt`). Treat the numbers in this section as exploratory only.
+
 Fixed W=4, TRANSFORM_ITERS=8192, T = max(4S, 2000) streams.
 RSS measured directly on the binary process via `/usr/bin/time -v` (not the Python driver wrapper).
 
