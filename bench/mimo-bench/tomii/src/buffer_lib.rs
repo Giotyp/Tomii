@@ -107,4 +107,9 @@ impl DemodBuffer {
     pub fn get(&self) -> &Cube<i8> {
         &self.buffer
     }
+
+    pub fn flat_bytes(&self) -> &[u8] {
+        let s = self.buffer.flat_slice();
+        unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len()) }
+    }
 }

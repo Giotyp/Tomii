@@ -65,13 +65,13 @@ def build_cmake(clean: bool) -> None:
     print(f"  binary: {binary}", flush=True)
 
 
-def _start_sender(sender_config: str) -> "subprocess.Popen[bytes]":
+def _start_sender(sender_config: str, frame_duration: int = 1000) -> "subprocess.Popen[bytes]":
     sender_bin = AGORA_DIR / "build" / "sender"
     cmd = [
         str(sender_bin),
         "--num_threads=2",
         "--core_offset=55",
-        "--frame_duration=1000",
+        f"--frame_duration={frame_duration}",
         "--enable_slow_start=0",
         "--inter_frame_delay=0",
         f"--conf_file={sender_config}",
@@ -91,6 +91,7 @@ def run_one(
     warmup: int,
     config: Path,
     sender_config: str,
+    frame_duration: int,
     output_csv: Path,
     sender_delay: int = 5,
 ) -> None:
@@ -120,7 +121,7 @@ def run_one(
     tf_proc = subprocess.Popen(cmd, env=bench_env)
 
     time.sleep(sender_delay)
-    sender_proc = _start_sender(sender_config)
+    sender_proc = _start_sender(sender_config, frame_duration=frame_duration)
     print("  sender started", flush=True)
 
     ret = tf_proc.wait()
@@ -155,6 +156,8 @@ def main() -> None:
     p.add_argument("--sender-config", default="files/config/ci/tddconfig-4x4.json",
                    dest="sender_config",
                    help="Agora sender --conf_file path (relative to ~/Agora)")
+    p.add_argument("--frame-duration", type=int, default=1000, dest="frame_duration",
+                   help="sender --frame_duration in µs (use ≥2000 for 16×16)")
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
                    help="tddconfig JSON path")
     p.add_argument("--csv-out", type=Path, default=None,
@@ -180,6 +183,7 @@ def main() -> None:
                 warmup=args.warmup,
                 config=args.config,
                 sender_config=args.sender_config,
+                frame_duration=args.frame_duration,
                 output_csv=output_csv,
             )
 

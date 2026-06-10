@@ -127,6 +127,10 @@ impl<T: GenType> Cube<T> {
         let idx = (d3 * self.dim1 * self.dim2 + d1 * self.dim2 + d2) * self.n_entries;
         &mut self.buffer.get_mut()[idx..idx + self.n_entries]
     }
+
+    pub fn flat_slice(&self) -> &[T] {
+        self.buffer.get()
+    }
 }
 
 #[repr(C, align(64))]

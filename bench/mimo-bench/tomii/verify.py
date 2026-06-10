@@ -1,15 +1,15 @@
 """Tomii MIMO correctness verifier.
 
-Runs two consecutive single-frame passes with a deterministic Agora sender
-(fixed seed or packet replay) and checks that the post-demul demod buffers
-are byte-for-byte identical across both runs.
+Runs two consecutive single-frame passes and checks that the post-demul
+demod buffers are byte-for-bit identical across both runs.
 
-Requires the same external deps as run_bench.py plus an Agora sender
-started with a fixed seed:
-    cd ~/Agora && python scripts/sim_sender.py --seed 42 ...
+The verifier manages the Agora sender lifecycle internally: it starts the
+Tomii receiver first, waits for sockets to be ready, then starts the sender.
 
 Usage:
-    python mimo-bench/tomii/verify.py [--passes 2]
+    python mimo-bench/tomii/verify.py \\
+        --graph graphs/graph_4nodes_16x16.json \\
+        --sender-config graphs/tddconfig-16x16.json
 """
 
 from __future__ import annotations
@@ -19,14 +19,32 @@ import hashlib
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 BENCH_ROOT = HERE.parents[1]
 DEVELOP_ROOT = BENCH_ROOT.parents[1]
+WORKSPACE_ROOT = HERE.parents[2]   # Tomii/ workspace root (bench/mimo-bench/tomii → Tomii/)
+AGORA_DIR = Path("~/Agora").expanduser().resolve()
 sys.path.insert(0, str(DEVELOP_ROOT))
 
 from tomii._runner import build_command, _find_binary
+
+
+def _start_sender(sender_config: str, frame_duration: int = 1000) -> "subprocess.Popen[bytes]":
+    sender_bin = AGORA_DIR / "build" / "sender"
+    cmd = [
+        str(sender_bin),
+        "--num_threads=2",
+        "--core_offset=55",
+        f"--frame_duration={frame_duration}",
+        "--enable_slow_start=0",
+        "--inter_frame_delay=0",
+        f"--conf_file={sender_config}",
+    ]
+    return subprocess.Popen(cmd, cwd=str(AGORA_DIR), stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, env=os.environ.copy())
 
 
 def _run_pass(
@@ -36,9 +54,12 @@ def _run_pass(
     dylib: str,
     binary: str,
     output_dir: Path,
+    sender_config: str | None,
+    sender_delay: int,
+    frame_duration: int,
 ) -> Path:
     timing_file = output_dir / f"verify_pass{pass_id}.txt"
-    output_file = output_dir / f"verify_pass{pass_id}_demul.bin"
+    demod_file = output_dir / f"verify_pass{pass_id}_demul.bin"
 
     cmd = build_command(
         binary,
@@ -56,10 +77,28 @@ def _run_pass(
         custom=True,
         coalesce_barriers=True,
         inline_continuation=True,
-        output=str(output_file),
+        slot_priority=True,
     )
-    subprocess.run(cmd, check=True, env=os.environ.copy())
-    return output_file
+
+    bench_env = {**os.environ, "TOMII_VERIFY_PATH": str(demod_file)}
+    tomii_proc = subprocess.Popen(cmd, env=bench_env)
+    sender_proc = None
+    try:
+        if sender_config is not None:
+            time.sleep(sender_delay)
+            sender_proc = _start_sender(sender_config, frame_duration=frame_duration)
+        ret = tomii_proc.wait()
+        if ret != 0:
+            raise subprocess.CalledProcessError(ret, cmd)
+    finally:
+        if sender_proc is not None and sender_proc.poll() is None:
+            sender_proc.terminate()
+            try:
+                sender_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                sender_proc.kill()
+
+    return demod_file
 
 
 def sha256(path: Path) -> str:
@@ -78,7 +117,20 @@ def main() -> None:
                    default=HERE / "graphs" / "graph_4nodes.json")
     p.add_argument("--output-dir", type=Path, default=HERE / "results" / "verify")
     p.add_argument("--no-clean", dest="clean", action="store_false", default=True)
+    p.add_argument("--sender-config", type=str,
+                   default="files/config/ci/tddconfig-sim-ul.json",
+                   help="tddconfig path relative to ~/Agora (or absolute); verify.py "
+                        "starts and stops the Agora sender for each pass")
+    p.add_argument("--sender-delay", type=int, default=5,
+                   help="seconds to wait after starting Tomii before starting sender (default: 5)")
+    p.add_argument("--frame-duration", type=int, default=1000, dest="frame_duration",
+                   help="sender --frame_duration in µs (default: 1000)")
     args = p.parse_args()
+
+    # If sender_config is an absolute path, use it as-is; if relative, it is
+    # interpreted relative to AGORA_DIR (the cwd used when launching the sender).
+    if args.sender_config is not None and not Path(args.sender_config).is_absolute():
+        args.sender_config = str(AGORA_DIR / args.sender_config)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -87,10 +139,18 @@ def main() -> None:
             ["cargo", "clean", "--manifest-path", str(HERE / "Cargo.toml")],
             check=True,
         )
+    build_env = {**os.environ, "FUNC_PATH": str(HERE / "src" / "lib.rs")}
     subprocess.run(
         ["cargo", "build", "--manifest-path", str(HERE / "Cargo.toml"), "--release"],
         check=True,
-        env={**os.environ, "FUNC_PATH": str(HERE / "src" / "lib.rs")},
+        env=build_env,
+    )
+    # Rebuild main binary so its function registry includes any new plugin functions.
+    subprocess.run(
+        ["cargo", "build", "--manifest-path", str(WORKSPACE_ROOT / "Cargo.toml"),
+         "-p", "tomii-core", "--bin", "main", "--release"],
+        check=True,
+        env=build_env,
     )
 
     dylib = str(HERE / "target" / "release" / "libmimo_bench_tomii.so")
@@ -105,6 +165,9 @@ def main() -> None:
             dylib=dylib,
             binary=binary,
             output_dir=args.output_dir,
+            sender_config=args.sender_config,
+            sender_delay=args.sender_delay,
+            frame_duration=args.frame_duration,
         )
         h = sha256(out_file)
         hashes.append(h)

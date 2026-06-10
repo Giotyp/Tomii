@@ -2,3 +2,7 @@ results/
 taskflow/build_asan/
 taskflow/build_dbg/
 tomii/report.json
+
+# Coarse-graph sensitivity variant — not part of v1.0 (headline numbers unchanged)
+tomii/graphs/*_coarse.json
+tomii/graphs/tddconfig-16x16-coarse.json

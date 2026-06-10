@@ -28,6 +28,7 @@ pub mod fft_lib;
 pub mod modulation;
 pub mod packet_lib;
 
+use buffer_lib::DemodBuffer;
 use common::config::Config;
 use common::framestats::FrameStats;
 use packet_lib::*;
@@ -149,5 +150,15 @@ pub fn total_uplink_symbols(config: &Config, framestats: &FrameStats) -> usize {
 #[tomii_export]
 pub fn get_pilot_packet_count(config: &Config, framestats: &FrameStats) -> usize {
     framestats.NumPilotSyms() * config.bs_ant_num()
+}
+
+#[tomii_export]
+pub fn dump_demod_if_env(demod_buffers: &DemodBuffer) {
+    let path = match std::env::var("TOMII_VERIFY_PATH") {
+        Ok(p) if !p.is_empty() => p,
+        _ => return,
+    };
+    std::fs::write(&path, demod_buffers.flat_bytes())
+        .unwrap_or_else(|e| panic!("dump_demod_if_env: write to {path} failed: {e}"));
 }
 

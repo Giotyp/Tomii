@@ -454,8 +454,8 @@ struct UdpReceiver {
             int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
             if (fd < 0) throw std::runtime_error("socket()");
 
-            // Increase socket receive buffer
-            int rcvbuf = 1 << 23;  // 8 MiB
+            // Increase socket receive buffer (16 MiB to handle 16×16 bursts)
+            int rcvbuf = 1 << 24;  // 16 MiB
             ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
             sockaddr_in addr{};

@@ -46,13 +46,13 @@ def _parse_avg_ms(timing_file: Path) -> float:
     return val
 
 
-def _start_sender(sender_config: str) -> "subprocess.Popen[bytes]":
+def _start_sender(sender_config: str, frame_duration: int = 1000) -> "subprocess.Popen[bytes]":
     sender_bin = AGORA_DIR / "build" / "sender"
     cmd = [
         str(sender_bin),
         "--num_threads=2",
         "--core_offset=55",
-        "--frame_duration=1000",
+        f"--frame_duration={frame_duration}",
         "--enable_slow_start=0",
         "--inter_frame_delay=0",
         f"--conf_file={sender_config}",
@@ -69,6 +69,7 @@ def run_one(
     warmup: int,
     max_runtime: int,
     sender_config: str,
+    frame_duration: int,
     graph_json: Path,
     results_dir: Path,
     dylib: str,
@@ -102,10 +103,10 @@ def run_one(
 
     bench_env = {
         **os.environ,
-        "MKL_NUM_THREADS": "1",
-        "OMP_NUM_THREADS": "1",
-        "OPENBLAS_NUM_THREADS": "1",
-        "GOTO_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS", "1"),
+        "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", "1"),
+        "OPENBLAS_NUM_THREADS": os.environ.get("OPENBLAS_NUM_THREADS", "1"),
+        "GOTO_NUM_THREADS": os.environ.get("GOTO_NUM_THREADS", "1"),
     }
 
     t0 = time.monotonic()
@@ -113,11 +114,24 @@ def run_one(
 
     # Give Tomii time to bind sockets before the sender fires.
     time.sleep(sender_delay)
-    sender_proc = _start_sender(sender_config)
+    sender_proc = _start_sender(sender_config, frame_duration=frame_duration)
     print("  sender started", flush=True)
 
     # Wait for Tomii — it exits via max_runtime after the sender finishes.
-    ret = tomii_proc.wait()
+    watchdog = max_runtime + 15
+    try:
+        ret = tomii_proc.wait(timeout=watchdog)
+    except subprocess.TimeoutExpired:
+        tomii_proc.kill()
+        if sender_proc.poll() is None:
+            sender_proc.terminate()
+            try:
+                sender_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                sender_proc.kill()
+        raise RuntimeError(
+            f"Tomii hung (>{watchdog}s) slots={slots} workers={workers}"
+        )
     t1 = time.monotonic()
 
     # Clean up sender if it outlasted Tomii (shouldn't happen, but be safe).
@@ -157,12 +171,15 @@ def main() -> None:
     p.add_argument("--max-runtime", type=int, default=30, dest="max_runtime",
                    help="per-cell time limit in seconds (sender stops after ~0.5 s; "
                         "this lets Tomii finish in-flight work then exit cleanly)")
-    p.add_argument("--sender-config", default="files/config/ci/tddconfig-4x4.json",
+    p.add_argument("--sender-config", default="files/config/ci/tddconfig-16x16.json",
                    dest="sender_config",
                    help="Agora sender --conf_file path (relative to ~/Agora)")
+    p.add_argument("--frame-duration", type=int, default=50000, dest="frame_duration",
+                   help="sender --frame_duration in µs; floored per cell at ceil(48000/slots) "
+                        "to prevent sender from outrunning the receiver")
     p.add_argument("--graph", type=Path, default=None,
                    help="graph JSON override (default: build from Python API via build_graph.py)")
-    p.add_argument("--config", default=None,
+    p.add_argument("--config", default=str(HERE / "graphs" / "tddconfig-16x16.json"),
                    help="tddconfig JSON path forwarded to build_graph.py")
     p.add_argument("--results-dir", type=Path, default=HERE / "results")
     p.add_argument("--csv-out", type=Path, default=None)
@@ -220,14 +237,20 @@ def main() -> None:
 
     for w in args.workers:
         for s in args.slots:
+            # Floor so sender never fires faster than receiver throughput (~48 ms/slot).
+            cell_frame_dur = max(args.frame_duration, -(-48_000 // s))
+            # max_runtime must exceed sender_delay + full send window (500 frames).
+            sender_runtime_s = (500 * cell_frame_dur) // 1_000_000
+            cell_max_runtime = max(args.max_runtime, 5 + sender_runtime_s + 15)
             ms = run_one(
                 slots=s,
                 workers=w,
                 system_threads=args.system_threads,
                 receiver_threads=args.receiver_threads,
                 warmup=args.warmup,
-                max_runtime=args.max_runtime,
+                max_runtime=cell_max_runtime,
                 sender_config=args.sender_config,
+                frame_duration=cell_frame_dur,
                 graph_json=graph_json,
                 results_dir=args.results_dir,
                 dylib=dylib,
