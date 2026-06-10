@@ -13,12 +13,14 @@ Topology:
                                        $barrier on fft group_by antennas,
                                        $barrier on all beam tasks)
 
-The JSON alternative lives at graphs/graph_4nodes.json — useful as a
-reference or if you prefer to inspect/edit the topology without Python.
+This Python builder is the single source of truth for the MIMO graph. It is
+preferred over a committed static JSON because the tddconfig path is resolved at
+build time, so the graph carries no machine-specific absolute path.
 
 Usage:
     python build_graph.py                         # print JSON to stdout
     python build_graph.py --out graphs/out.json   # save to file
+    python build_graph.py --config graphs/tddconfig-16x16.json --dump  # 16x16 + verify node
 """
 
 from __future__ import annotations
@@ -46,14 +48,20 @@ _index = TypedValue("$ref", "$index")
 AGORA_CONFIG = "~/Agora/files/config/ci/tddconfig-4x4.json"
 
 
-def build_mimo_graph(config_path: str = AGORA_CONFIG) -> tm.Graph:
+def build_mimo_graph(config_path: str = AGORA_CONFIG, dump: bool = False) -> tm.Graph:
     """Return a Graph for the 4-node MIMO uplink pipeline.
 
     Parameters
     ----------
     config_path:
-        Path to the tddconfig JSON consumed by Agora's packet sender.
-        Defaults to the 8×8 config at ~/Agora/files/config/ci/tddconfig-sim-ul.json.
+        Path to the tddconfig JSON consumed by Agora's packet sender. The path is
+        expanded (``~``) and resolved to an absolute path at build time, so the
+        emitted graph carries no machine-specific literal — it is generated fresh
+        on each machine rather than committed as a static file.
+    dump:
+        When True, append a terminal ``dump`` node (``dump_demod_if_env``) that
+        serialises the post-demul buffer to ``$TOMII_VERIFY_PATH``. Used by
+        ``verify.py`` for byte-for-bit determinism checks; left off for perf runs.
     """
     config_path = str(Path(config_path).expanduser().resolve())
     app = tm.Graph()
@@ -208,7 +216,7 @@ def build_mimo_graph(config_path: str = AGORA_CONFIG) -> tm.Graph:
     )
 
     # demul — equalization + demap; fires after all fft (grouped) AND all beam
-    app.node(
+    demul = app.node(
         "demul",
         func="demul_op",
         factor=total_demul_tasks,
@@ -232,11 +240,24 @@ def build_mimo_graph(config_path: str = AGORA_CONFIG) -> tm.Graph:
         ],
     )
 
+    # dump — optional terminal node: serialise the demod buffer to
+    # $TOMII_VERIFY_PATH after all demul tasks complete (verify.py only).
+    if dump:
+        app.node(
+            "dump",
+            func="dump_demod_if_env",
+            factor=1,
+            args=[
+                demod_buffers,
+                demul.wait(0, total_demul_tasks),  # barrier: all demul done
+            ],
+        )
+
     return app
 
 
 # ---------------------------------------------------------------------------
-# CLI: dump JSON for inspection or to replace the static graph_4nodes.json
+# CLI: dump JSON for inspection
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -245,6 +266,11 @@ if __name__ == "__main__":
     )
     p.add_argument("--config", default=AGORA_CONFIG, help="tddconfig JSON path")
     p.add_argument(
+        "--dump",
+        action="store_true",
+        help="append the terminal dump_demod_if_env node (verify.py determinism check)",
+    )
+    p.add_argument(
         "--out",
         type=Path,
         default=None,
@@ -252,7 +278,7 @@ if __name__ == "__main__":
     )
     args = p.parse_args()
 
-    graph = build_mimo_graph(args.config)
+    graph = build_mimo_graph(args.config, dump=args.dump)
     json_str = graph.to_json()
 
     if args.out:

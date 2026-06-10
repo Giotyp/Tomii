@@ -1,7 +1,6 @@
 .github/**
 .vscode/*
 .penv/*
-Cargo.lock
 target/
 build/
 **/__pycache__/

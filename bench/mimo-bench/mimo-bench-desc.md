@@ -216,4 +216,6 @@ per frame and cannot share workers across pending frames during packet reception
    while frame N is in-flight. Tomii S=1 is not measured here (not a streaming
    scenario at 48 ms/slot).
 5. **Verifier.** Two-pass byte-for-bit equality check passes at W=24, S=4 on the
-   16×16 graph. See `tomii/verify.py --graph graphs/graph_4nodes_16x16.json`.
+   16×16 graph. Run `tomii/verify.py --config graphs/tddconfig-16x16.json
+   --sender-config files/config/ci/tddconfig-16x16.json` (the graph, including the
+   determinism dump node, is generated from the config via `build_graph.py`).
