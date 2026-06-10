@@ -109,10 +109,7 @@ fn worker_loop(inner: Arc<FifoInner>) {
             }
         };
 
-        let name = thread::current()
-            .name()
-            .unwrap_or("?")
-            .to_owned();
+        let name = thread::current().name().unwrap_or("?").to_owned();
         eprintln!("[{name}] running task");
         task();
     }
@@ -121,7 +118,11 @@ fn worker_loop(inner: Arc<FifoInner>) {
 impl Drop for FifoScheduler {
     fn drop(&mut self) {
         // Poison the queue with `None` so all waiting workers wake and exit.
-        let mut guard = self.inner.queue.lock().expect("fifo queue poisoned on drop");
+        let mut guard = self
+            .inner
+            .queue
+            .lock()
+            .expect("fifo queue poisoned on drop");
         *guard = None;
         self.inner.condvar.notify_all();
     }
@@ -246,6 +247,6 @@ mod tests {
             }),
         );
         barrier.wait(); // ensure at least one task ran before drop
-        drop(sched);    // shutdown signal sent; workers will exit
+        drop(sched); // shutdown signal sent; workers will exit
     }
 }

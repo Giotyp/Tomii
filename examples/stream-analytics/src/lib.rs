@@ -83,7 +83,11 @@ pub fn write_report(file_path: &str, sensor_summaries: Vec<Vec<f64>>) {
     let mut out = String::new();
     for (sensor_id, estimates) in sensor_summaries.iter().enumerate() {
         let formatted: Vec<String> = estimates.iter().map(|v| format!("{:.2}", v)).collect();
-        out.push_str(&format!("Sensor-{}: [{}]\n", sensor_id, formatted.join(", ")));
+        out.push_str(&format!(
+            "Sensor-{}: [{}]\n",
+            sensor_id,
+            formatted.join(", ")
+        ));
     }
 
     let mut file = OpenOptions::new()
