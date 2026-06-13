@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -41,7 +42,24 @@ from tomii._runner import build_command, _find_binary
 from build_graph import build_mimo_graph
 
 
-def _start_sender(sender_config: str, frame_duration: int = 1000) -> "subprocess.Popen[bytes]":
+def _make_fixed_frame_config(base_config: str, num_frames: int) -> str:
+    """Write a temp copy of the sender tddconfig with max_frame pinned to
+    num_frames, so the sender emits a fixed, known number of frames and then
+    stops. This makes "the last frame of the run" a deterministic frame across
+    passes (combined with slots=1 in-order completion)."""
+    with open(base_config) as f:
+        cfg = json.load(f)
+    cfg["max_frame"] = num_frames
+    tmp = tempfile.NamedTemporaryFile(
+        prefix="verify_sender_", suffix=".json", delete=False, mode="w")
+    json.dump(cfg, tmp)
+    tmp.close()
+    return tmp.name
+
+
+def _start_sender(
+    sender_config: str, frame_duration: int = 1000, inter_frame_delay: int = 0
+) -> "subprocess.Popen[bytes]":
     sender_bin = AGORA_DIR / "build" / "sender"
     cmd = [
         str(sender_bin),
@@ -49,7 +67,7 @@ def _start_sender(sender_config: str, frame_duration: int = 1000) -> "subprocess
         "--core_offset=55",
         f"--frame_duration={frame_duration}",
         "--enable_slow_start=0",
-        "--inter_frame_delay=0",
+        f"--inter_frame_delay={inter_frame_delay}",
         f"--conf_file={sender_config}",
     ]
     return subprocess.Popen(cmd, cwd=str(AGORA_DIR), stdout=subprocess.DEVNULL,
@@ -66,6 +84,10 @@ def _run_pass(
     sender_config: str | None,
     sender_delay: int,
     frame_duration: int,
+    inter_frame_delay: int,
+    max_streams: int,
+    max_runtime: int,
+    workers: int,
 ) -> Path:
     timing_file = output_dir / f"verify_pass{pass_id}.txt"
     demod_file = output_dir / f"verify_pass{pass_id}_demul.bin"
@@ -74,13 +96,20 @@ def _run_pass(
         binary,
         str(graph_json),
         dylib,
-        workers=4,
+        workers=workers,
         core_offset=1,
         system_threads=2,
         receiver_threads=2,
         slots=1,
-        max_streams=1,           # single frame
+        # Process many frames, not one: the dump node overwrites the demod file
+        # on every frame completion, so the final file is the LAST completed
+        # frame. The first frame received after startup is timing-dependent and
+        # may be partial; a steady-state frame (buffer fully populated, all
+        # FrameWnd slots overwritten with complete data) is deterministic since
+        # the Agora sender replays identical IQ every frame and MKL is sequential.
+        max_streams=max_streams,
         exclude_streams=0,
+        max_runtime=max_runtime,
         timing=str(timing_file),
         use_rdtsc=True,
         custom=True,
@@ -89,16 +118,35 @@ def _run_pass(
         slot_priority=True,
     )
 
-    bench_env = {**os.environ, "TOMII_VERIFY_PATH": str(demod_file)}
+    # Pin the BLAS/LAPACK thread count (armadillo's backend in the beam stage may
+    # use OpenBLAS/OMP). MKL itself is linked sequential, so this is belt-and-
+    # braces for deterministic floating-point reductions.
+    bench_env = {
+        **os.environ,
+        "TOMII_VERIFY_PATH": str(demod_file),
+        "MKL_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "GOTO_NUM_THREADS": "1",
+    }
     tomii_proc = subprocess.Popen(cmd, env=bench_env)
     sender_proc = None
     try:
         if sender_config is not None:
             time.sleep(sender_delay)
-            sender_proc = _start_sender(sender_config, frame_duration=frame_duration)
-        ret = tomii_proc.wait()
+            sender_proc = _start_sender(
+                sender_config,
+                frame_duration=frame_duration,
+                inter_frame_delay=inter_frame_delay,
+            )
+        # Binary exits on max_streams or max_runtime, whichever first; add a grace
+        # watchdog so a wedged run never hangs the verifier.
+        ret = tomii_proc.wait(timeout=sender_delay + max_runtime + 30)
         if ret != 0:
             raise subprocess.CalledProcessError(ret, cmd)
+    except subprocess.TimeoutExpired:
+        tomii_proc.kill()
+        raise RuntimeError(f"Tomii hung during verify pass {pass_id}")
     finally:
         if sender_proc is not None and sender_proc.poll() is None:
             sender_proc.terminate()
@@ -140,12 +188,33 @@ def main() -> None:
                    help="seconds to wait after starting Tomii before starting sender (default: 5)")
     p.add_argument("--frame-duration", type=int, default=1000, dest="frame_duration",
                    help="sender --frame_duration in µs (default: 1000)")
+    p.add_argument("--inter-frame-delay", type=int, default=0, dest="inter_frame_delay",
+                   help="sender --inter_frame_delay in µs; spaces the per-frame packet "
+                        "burst so the receiver can drain (default: 0)")
+    p.add_argument("--num-frames", type=int, default=20, dest="num_frames",
+                   help="fixed number of frames the sender emits per pass; the dump "
+                        "captures the LAST completed frame, which is deterministic "
+                        "across passes for fixed input (default: 20)")
+    p.add_argument("--workers", type=int, default=24,
+                   help="worker threads (default: 24; use 1 to test for races)")
     args = p.parse_args()
 
     # If sender_config is an absolute path, use it as-is; if relative, it is
     # interpreted relative to AGORA_DIR (the cwd used when launching the sender).
     if args.sender_config is not None and not Path(args.sender_config).is_absolute():
         args.sender_config = str(AGORA_DIR / args.sender_config)
+
+    # Pin the sender to a fixed frame count so "the last frame" is the same frame
+    # every pass; slots=1 (in _run_pass) makes frames complete in order, so the
+    # final overwrite of the dump file is always frame (num_frames - 1).
+    args.sender_config = _make_fixed_frame_config(args.sender_config, args.num_frames)
+
+    # Run long enough to send all frames (slow, non-overlapping) and drain.
+    send_window_s = (args.num_frames * args.frame_duration) // 1_000_000
+    args.max_runtime = args.sender_delay + send_window_s + 20
+    # Cap streams well above num_frames so the run exits on max_runtime after the
+    # last frame completes, not before (avoids stopping mid-stream on a dropped frame).
+    args.max_streams = 100_000
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -196,6 +265,10 @@ def main() -> None:
             sender_config=args.sender_config,
             sender_delay=args.sender_delay,
             frame_duration=args.frame_duration,
+            inter_frame_delay=args.inter_frame_delay,
+            max_streams=args.max_streams,
+            max_runtime=args.max_runtime,
+            workers=args.workers,
         )
         h = sha256(out_file)
         hashes.append(h)

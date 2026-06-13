@@ -55,6 +55,17 @@ impl<T: GenType> Table<T> {
         // return the full contiguous backing storage
         self.buffer.get_mut()
     }
+
+    pub fn flat_slice(&self) -> &[T] {
+        self.buffer.get()
+    }
+
+    /// Raw `*mut` to a row's first element from a shared `&self` — lets concurrent
+    /// tasks write disjoint rows without an aliased `&mut`. SAFETY: disjoint writes.
+    pub fn row_ptr(&self, row: usize) -> *mut T {
+        let start = row * self.n_cols;
+        unsafe { self.buffer.get().as_ptr().add(start) as *mut T }
+    }
 }
 
 // Table row view removed; get/get_mut return slices directly
@@ -94,6 +105,17 @@ impl<T: GenType> Grid<T> {
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         self.buffer.get_mut()
     }
+
+    /// Raw `*mut` to a (row, col) cell from a shared `&self` — concurrent tasks
+    /// write disjoint cells without an aliased `&mut`. SAFETY: disjoint writes.
+    pub fn cell_ptr(&self, row: usize, col: usize) -> *mut T {
+        let idx = (row * self.n_cols + col) * self.n_entries;
+        unsafe { self.buffer.get().as_ptr().add(idx) as *mut T }
+    }
+
+    pub fn flat_slice(&self) -> &[T] {
+        self.buffer.get()
+    }
 }
 #[repr(C, align(64))]
 pub struct Cube<T: GenType> {
@@ -128,8 +150,30 @@ impl<T: GenType> Cube<T> {
         &mut self.buffer.get_mut()[idx..idx + self.n_entries]
     }
 
+    /// Raw `*mut` to a cell's first element, derived from a shared `&self`.
+    /// Lets concurrent tasks write *disjoint* cells without ever forming an
+    /// aliased `&mut` to the whole cube (which is UB and miscompiles under
+    /// concurrency). SAFETY: callers must ensure the written regions are disjoint.
+    pub fn cell_ptr(&self, d1: usize, d2: usize, d3: usize) -> *mut T {
+        let idx = (d3 * self.dim1 * self.dim2 + d1 * self.dim2 + d2) * self.n_entries;
+        unsafe { self.buffer.get().as_ptr().add(idx) as *mut T }
+    }
+
     pub fn flat_slice(&self) -> &[T] {
         self.buffer.get()
+    }
+
+    /// Gather every (d2, d3) row for a fixed d1 index into a contiguous Vec.
+    /// The flat layout interleaves d1 (see `get`), so one d1 plane is strided;
+    /// this materialises it contiguously (used to extract a single frame slot).
+    pub fn d1_plane(&self, d1: usize) -> Vec<T> {
+        let mut out = Vec::with_capacity(self.dim2 * self.dim3 * self.n_entries);
+        for d3 in 0..self.dim3 {
+            for d2 in 0..self.dim2 {
+                out.extend_from_slice(self.get(d1, d2, d3));
+            }
+        }
+        out
     }
 }
 

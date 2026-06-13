@@ -42,7 +42,10 @@ pub fn process_packet(bytes_cm: &CmTypes) -> CmTypes {
     if let CmTypes::Bytes(arc) = bytes_cm {
         CmTypes::from_any(Packet::from_bytes_ref(arc.as_slice()))
     } else {
-        panic!("process_packet: expected CmTypes::Bytes, got {:?}", bytes_cm)
+        panic!(
+            "process_packet: expected CmTypes::Bytes, got {:?}",
+            bytes_cm
+        )
     }
 }
 
@@ -153,12 +156,14 @@ pub fn get_pilot_packet_count(config: &Config, framestats: &FrameStats) -> usize
 }
 
 #[tomii_export]
-pub fn dump_demod_if_env(demod_buffers: &DemodBuffer) {
+pub fn dump_demod_if_env(demod_buffers: &DemodBuffer, frame_id: usize) {
     let path = match std::env::var("TOMII_VERIFY_PATH") {
         Ok(p) if !p.is_empty() => p,
         _ => return,
     };
-    std::fs::write(&path, demod_buffers.flat_bytes())
+    // Dump only this frame's FrameWnd slot, not the whole multi-frame buffer:
+    // the other slots hold different frames whose state at dump time is timing-
+    // dependent. A single complete frame is byte-stable for identical input.
+    std::fs::write(&path, demod_buffers.frame_bytes(frame_id))
         .unwrap_or_else(|e| panic!("dump_demod_if_env: write to {path} failed: {e}"));
 }
-

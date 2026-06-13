@@ -18,11 +18,22 @@ unsafe fn raw_mut<T: std::any::Any + Send + Sync + 'static>(cm: &CmTypes) -> *mu
     if let CmTypes::AnyHeld(data) = cm {
         return unsafe { data.downcast_ref::<T>() }
             .map(|r| r as *const T as *mut T)
-            .unwrap_or_else(|| panic!("raw_mut AnyHeld: wrong type for {}", std::any::type_name::<T>()));
+            .unwrap_or_else(|| {
+                panic!(
+                    "raw_mut AnyHeld: wrong type for {}",
+                    std::any::type_name::<T>()
+                )
+            });
     }
     unsafe { cm.as_mut_ptr::<T>() }
         .map(|g| g.ptr)
-        .unwrap_or_else(|| panic!("raw_mut Any: wrong type for {} (got {:?})", std::any::type_name::<T>(), cm))
+        .unwrap_or_else(|| {
+            panic!(
+                "raw_mut Any: wrong type for {} (got {:?})",
+                std::any::type_name::<T>(),
+                cm
+            )
+        })
 }
 
 const SIMDGather: bool = true;
@@ -68,8 +79,8 @@ pub fn create_ul_beam_matrices(config: &Config) -> UlBeamMatrix {
 #[no_mangle]
 pub fn beam_op_cm(
     config: &CmTypes,
-    ul_base_scs: &CmTypes,   // CmTypes::new_vec of Usize values (one per beam instance)
-    _beam_struct: &CmTypes,  // kept for API compat; scratch is thread-local
+    ul_base_scs: &CmTypes, // CmTypes::new_vec of Usize values (one per beam instance)
+    _beam_struct: &CmTypes, // kept for API compat; scratch is thread-local
     csi_buffer: &CmTypes,
     ul_beam_matrices: &CmTypes,
     frame_id: usize,
@@ -94,7 +105,10 @@ pub fn beam_op_cm(
     //   - args arrive as AnyHeld (zero-lock) in the bulk-task path
     let config_ref = unsafe { &*raw_mut::<Config>(config) };
     let csi_buffer_ref = unsafe { &*raw_mut::<CsiBuffer>(csi_buffer) };
-    let ul_beam_matrices_mut = unsafe { &mut *raw_mut::<UlBeamMatrix>(ul_beam_matrices) };
+    // Shared `&` (NOT `&mut`): concurrent beam tasks write disjoint subcarrier
+    // cells via raw `cell_ptr`, never forming an aliased `&mut UlBeamMatrix`
+    // (which is UB and miscompiles under W>1).
+    let ul_beam_matrices_ref = unsafe { &*raw_mut::<UlBeamMatrix>(ul_beam_matrices) };
 
     let frame_slot = frame_id % FrameWnd;
     let beam_block = config_ref.beam_block_size();
@@ -124,10 +138,21 @@ pub fn beam_op_cm(
             if num_streams == 0 {
                 continue;
             }
+            // Zero the gather region before filling it: Precoder reads up to
+            // ue_ant_num channel rows, but only `num_streams` are gathered here.
+            // Without this, unscheduled-UE rows hold residual from a previously
+            // processed subcarrier/beam task — and task dispatch order is not
+            // pinned, so that residual (and thus the beam weights) varies
+            // run-to-run, breaking determinism. Zeroing makes it reproducible.
+            let clear_len = config_ref.bs_ant_num() * config_ref.ue_ant_num();
+            csi_gather[..clear_len].fill(Complex32::new(0.0, 0.0));
             for selected_ue_idx in 0..num_streams {
                 let ue_idx = ue_list[selected_ue_idx];
-                let csi_gather_ptr =
-                    unsafe { csi_gather.as_mut_ptr().add(config_ref.bs_ant_num() * selected_ue_idx) };
+                let csi_gather_ptr = unsafe {
+                    csi_gather
+                        .as_mut_ptr()
+                        .add(config_ref.bs_ant_num() * selected_ue_idx)
+                };
                 let csi_buf = csi_buffer_ref.get().get(frame_slot, ue_idx);
                 unsafe {
                     PartialTransposeGather(
@@ -141,10 +166,8 @@ pub fn beam_op_cm(
                 }
             }
 
-            let ul_buf_ptr = ul_beam_matrices_mut
-                .get_mut()
-                .get_mut(frame_slot, cur_sc_id)
-                .as_mut_ptr() as *mut libc::c_void;
+            let ul_buf_ptr =
+                ul_beam_matrices_ref.cell_ptr(frame_slot, cur_sc_id) as *mut libc::c_void;
             unsafe {
                 Precoder(
                     csi_gather.as_mut_ptr() as *mut libc::c_void,

@@ -240,8 +240,10 @@ def build_mimo_graph(config_path: str = AGORA_CONFIG, dump: bool = False) -> tm.
         ],
     )
 
-    # dump — optional terminal node: serialise the demod buffer to
+    # dump — optional terminal node: serialise this frame's demod slot to
     # $TOMII_VERIFY_PATH after all demul tasks complete (verify.py only).
+    # fft.out(0) supplies frame_id so the dump extracts a single frame's slot
+    # (deterministic) rather than the whole multi-frame FrameWnd buffer.
     if dump:
         app.node(
             "dump",
@@ -249,6 +251,7 @@ def build_mimo_graph(config_path: str = AGORA_CONFIG, dump: bool = False) -> tm.
             factor=1,
             args=[
                 demod_buffers,
+                fft.out(0),  # frame_id
                 demul.wait(0, total_demul_tasks),  # barrier: all demul done
             ],
         )

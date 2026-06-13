@@ -23,6 +23,12 @@ impl FftBuffer {
     pub fn get(&self) -> &Table<Complex<f32>> {
         &self.buffer
     }
+
+    /// Raw `*mut` to a row from a shared `&self` (concurrent disjoint writes;
+    /// avoids aliased `&mut` UB under W>1). SAFETY: callers write disjoint rows.
+    pub fn row_ptr(&self, row: usize) -> *mut Complex<f32> {
+        self.buffer.row_ptr(row)
+    }
 }
 
 impl Sliceable<Complex<f32>> for FftBuffer {
@@ -51,6 +57,12 @@ impl CsiBuffer {
 
     pub fn get(&self) -> &Grid<Complex<f32>> {
         &self.buffer
+    }
+
+    /// Raw `*mut` to a (frame_slot, pilot) cell from a shared `&self`
+    /// (concurrent disjoint writes; avoids aliased `&mut` UB). SAFETY: disjoint.
+    pub fn cell_ptr(&self, frame_slot: usize, pilot: usize) -> *mut Complex<f32> {
+        self.buffer.cell_ptr(frame_slot, pilot)
     }
 }
 
@@ -81,6 +93,12 @@ impl UlBeamMatrix {
     pub fn get(&self) -> &Grid<Complex<f32>> {
         &self.buffer
     }
+
+    /// Raw `*mut` to a (frame_slot, sc) beam-matrix cell from a shared `&self`
+    /// (concurrent disjoint writes; avoids aliased `&mut` UB). SAFETY: disjoint.
+    pub fn cell_ptr(&self, frame_slot: usize, sc: usize) -> *mut Complex<f32> {
+        self.buffer.cell_ptr(frame_slot, sc)
+    }
 }
 
 pub struct DemodBuffer {
@@ -108,8 +126,28 @@ impl DemodBuffer {
         &self.buffer
     }
 
-    pub fn flat_bytes(&self) -> &[u8] {
-        let s = self.buffer.flat_slice();
-        unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len()) }
+    /// Raw `*mut i8` to the (frame_slot, data_symbol, stream) cell, from a shared
+    /// `&self`. Concurrent demul tasks write disjoint subcarrier ranges of these
+    /// cells; using a raw pointer (instead of `&mut DemodBuffer`) avoids the
+    /// aliased-`&mut` UB that miscompiled demod output under W>1.
+    /// SAFETY: callers must write disjoint regions (guaranteed by the
+    /// node_index → (symbol, base_sc) bijection across demul tasks).
+    pub fn cell_ptr(&self, frame_slot: usize, data_symbol: usize, ss: usize) -> *mut i8 {
+        self.buffer.cell_ptr(frame_slot, data_symbol, ss)
+    }
+
+    /// Serialise just the frame-window slot for `frame_id` (= frame_id % FrameWnd).
+    /// The demod buffer is dimensioned over FrameWnd, so the full buffer holds
+    /// several frames at once; for a deterministic per-frame verification we
+    /// extract only the slot belonging to the dumped frame. Every fully-received
+    /// frame carries identical content for identical input, so this is
+    /// byte-stable across runs (unlike hashing the whole multi-frame buffer).
+    pub fn frame_bytes(&self, frame_id: usize) -> Vec<u8> {
+        let frame_slot = frame_id % symbols::FrameWnd;
+        self.buffer
+            .d1_plane(frame_slot)
+            .into_iter()
+            .map(|b| b as u8)
+            .collect()
     }
 }
