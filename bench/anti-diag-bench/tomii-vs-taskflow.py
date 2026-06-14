@@ -25,9 +25,11 @@ import matplotlib.ticker as mticker
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TOMII_RESULTS = os.path.join(SCRIPT_DIR, "tomii", "results")
-TOMII_CELL_CSV  = os.path.join(TOMII_RESULTS, "tomii_wavefront_n512_wf_cell_sweep.csv")
-TOMII_BULK_CSV  = os.path.join(TOMII_RESULTS, "tomii_wavefront_n512_wf_cell_bulk_sweep.csv")
-TASKFLOW_CSV    = os.path.join(SCRIPT_DIR, "taskflow", "build", "tf_wavefront_sweep.csv")
+TOMII_CELL_CSV = os.path.join(TOMII_RESULTS, "tomii_wavefront_n512_wf_cell_sweep.csv")
+TOMII_BULK_CSV = os.path.join(
+    TOMII_RESULTS, "tomii_wavefront_n512_wf_cell_bulk_sweep.csv"
+)
+TASKFLOW_CSV = os.path.join(SCRIPT_DIR, "taskflow", "build", "tf_wavefront_sweep.csv")
 
 WORKERS = [1, 2, 4, 8, 16, 32]
 N = 512
@@ -75,7 +77,9 @@ def load_taskflow_best(workers=WORKERS, n=N):
 def load_taskflow_static(workers=WORKERS, n=N):
     # Accept both unpinned ("taskflow_static") and pinned ("taskflow_pinned_static") runs.
     # _load_csv_min takes min per worker count, so whichever label is present wins.
-    pinned   = _load_csv_min(TASKFLOW_CSV, workers, n, system_filter="taskflow_pinned_static")
+    pinned = _load_csv_min(
+        TASKFLOW_CSV, workers, n, system_filter="taskflow_pinned_static"
+    )
     unpinned = _load_csv_min(TASKFLOW_CSV, workers, n, system_filter="taskflow_static")
     return [
         min((v for v in (p, u) if v is not None), default=None)
@@ -105,8 +109,16 @@ def plot_line(ax, workers, vals, label, color, ls, marker):
         print(f"  Warning: no data for {label}")
         return
     wx, wy = zip(*pairs)
-    ax.plot(wx, wy, color=color, linestyle=ls, marker=marker,
-            linewidth=1.4, markersize=4, label=label)
+    ax.plot(
+        wx,
+        wy,
+        color=color,
+        linestyle=ls,
+        marker=marker,
+        linewidth=1.4,
+        markersize=4,
+        label=label,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -127,10 +139,10 @@ RC = {
 }
 
 SERIES = [
-    ("Tomii (per-cell)",   load_tomii_cell,      "#1f77b4", "--", "o"),
-    ("Tomii (bulk)",       load_tomii_bulk,       "#1f77b4", "-",  "o"),
-    ("Taskflow (static)",  load_taskflow_static,  "#555555", "-",  "s"),
-    ("Taskflow (best)",    load_taskflow_best,    "#555555", "--", "^"),
+    ("Tomii (per-cell)", load_tomii_cell, "#1f77b4", "--", "o"),
+    ("Tomii (bulk)", load_tomii_bulk, "#1f77b4", "-", "o"),
+    ("Taskflow (static)", load_taskflow_static, "#555555", "-", "s"),
+    ("Taskflow (best)", load_taskflow_best, "#555555", "--", "^"),
 ]
 
 
@@ -154,8 +166,14 @@ def figure_antidiag():
     ax.set_ylabel("ms / sweep", fontsize=8)
     ax.grid(True, which="major")
     ax.grid(True, which="minor", linewidth=0.2, alpha=0.2)
-    ax.legend(loc="upper left", frameon=True, framealpha=1.0,
-               edgecolor="#cccccc", fontsize=7.5, handlelength=2.4)
+    ax.legend(
+        loc="upper left",
+        frameon=True,
+        framealpha=1.0,
+        edgecolor="#cccccc",
+        fontsize=7.5,
+        handlelength=2.4,
+    )
 
     out = os.path.join(SCRIPT_DIR, "tomii-vs-taskflow-antidiag.png")
     fig.savefig(out, dpi=200, bbox_inches="tight")

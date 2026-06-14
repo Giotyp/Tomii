@@ -11,6 +11,7 @@ Prints exactly one of:
 And optionally (when PASS):
     latency_us=NNN.N
 """
+
 from __future__ import annotations
 import argparse
 import json
@@ -26,17 +27,24 @@ GOLDEN_PER_STREAM = (
 )
 
 GOLDEN_LINES = [l for l in GOLDEN_PER_STREAM.strip().splitlines() if l]
-LATENCY_FLOOR_US = 200.0      # physical floor: even 1 calibration call ≈ 223µs
-MIN_TASKS_PER_STREAM = 15    # collapsed graph (9 tasks) vs any real graph (≥25)
-MIN_GENERATE_PER_STREAM = 256  # must equal total_readings; any tile coarsening reduces this below 256
+LATENCY_FLOOR_US = 200.0  # physical floor: even 1 calibration call ≈ 223µs
+MIN_TASKS_PER_STREAM = 15  # collapsed graph (9 tasks) vs any real graph (≥25)
+MIN_GENERATE_PER_STREAM = (
+    256  # must equal total_readings; any tile coarsening reduces this below 256
+)
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--streams", type=int, default=5,
-                   help="Total streams run (including warm-up)")
-    p.add_argument("--exclude", type=int, default=2,
-                   help="Warm-up streams excluded from output file")
+    p.add_argument(
+        "--streams", type=int, default=5, help="Total streams run (including warm-up)"
+    )
+    p.add_argument(
+        "--exclude",
+        type=int,
+        default=2,
+        help="Warm-up streams excluded from output file",
+    )
     p.add_argument("--result-file", default="result.txt")
     return p.parse_args()
 

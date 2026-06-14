@@ -28,22 +28,24 @@ import csv
 import os
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
-SCRIPT_DIR         = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_TOMII_CSV = os.path.join(SCRIPT_DIR, "tomii", "results", "mimo_sweep.csv")
-_DEFAULT_TF_CSV    = os.path.join(SCRIPT_DIR, "taskflow", "build", "tf_mimo_sweep.csv")
+_DEFAULT_TF_CSV = os.path.join(SCRIPT_DIR, "taskflow", "build", "tf_mimo_sweep.csv")
 
-TOMII_CSV    = _DEFAULT_TOMII_CSV
+TOMII_CSV = _DEFAULT_TOMII_CSV
 TASKFLOW_CSV = _DEFAULT_TF_CSV
 
 SLOTS = [1, 4, 16, 64]
 
 
-def _load_ms(path: str, system_filter: str, workers: int,
-             slots: list[int]) -> list[float | None]:
+def _load_ms(
+    path: str, system_filter: str, workers: int, slots: list[int]
+) -> list[float | None]:
     data: dict[int, float] = {}
     if not os.path.exists(path):
         print(f"  Warning: {path} not found")
@@ -67,16 +69,16 @@ def _load_ms(path: str, system_filter: str, workers: int,
 
 
 RC = {
-    "font.family":    "serif",
-    "font.size":       9,
-    "axes.titlesize":  9,
-    "axes.labelsize":  8,
+    "font.family": "serif",
+    "font.size": 9,
+    "axes.titlesize": 9,
+    "axes.labelsize": 8,
     "legend.fontsize": 7.5,
     "xtick.labelsize": 7.5,
     "ytick.labelsize": 7.5,
-    "axes.linewidth":  0.7,
-    "grid.linewidth":  0.4,
-    "grid.alpha":      0.35,
+    "axes.linewidth": 0.7,
+    "grid.linewidth": 0.4,
+    "grid.alpha": 0.35,
 }
 
 
@@ -86,8 +88,16 @@ def plot_line(ax, slots, vals, label, color, ls, marker):
         print(f"  Warning: no data for {label}")
         return
     sx, sy = zip(*pairs)
-    ax.plot(sx, sy, color=color, linestyle=ls, marker=marker,
-            linewidth=1.4, markersize=4, label=label)
+    ax.plot(
+        sx,
+        sy,
+        color=color,
+        linestyle=ls,
+        marker=marker,
+        linewidth=1.4,
+        markersize=4,
+        label=label,
+    )
 
 
 def figure_mimo(workers: int) -> None:
@@ -95,12 +105,14 @@ def figure_mimo(workers: int) -> None:
     fig, ax = plt.subplots(figsize=(3.6, 3.0))
 
     series = [
-        ("Tomii",
-         _load_ms(TOMII_CSV, "tomii", workers, SLOTS),
-         "#1f77b4", "-", "o"),
-        ("Taskflow",
-         _load_ms(TASKFLOW_CSV, "taskflow", workers, SLOTS),
-         "#d62728", "-", "s"),
+        ("Tomii", _load_ms(TOMII_CSV, "tomii", workers, SLOTS), "#1f77b4", "-", "o"),
+        (
+            "Taskflow",
+            _load_ms(TASKFLOW_CSV, "taskflow", workers, SLOTS),
+            "#d62728",
+            "-",
+            "s",
+        ),
     ]
 
     for label, vals, color, ls, marker in series:
@@ -116,8 +128,14 @@ def figure_mimo(workers: int) -> None:
     ax.set_xlabel("Concurrent slots (S)", fontsize=8)
     ax.set_ylabel("ms / slot, first-pkt→done (lower is better)", fontsize=8)
     ax.grid(True, which="major")
-    ax.legend(loc="upper right", frameon=True, framealpha=1.0,
-              edgecolor="#cccccc", fontsize=7.5, handlelength=2.4)
+    ax.legend(
+        loc="upper right",
+        frameon=True,
+        framealpha=1.0,
+        edgecolor="#cccccc",
+        fontsize=7.5,
+        handlelength=2.4,
+    )
 
     out = os.path.join(SCRIPT_DIR, "mimo-comparison.png")
     fig.savefig(out, dpi=200, bbox_inches="tight")
@@ -127,8 +145,7 @@ def figure_mimo(workers: int) -> None:
 
 def main() -> None:
     global TOMII_CSV, TASKFLOW_CSV
-    p = argparse.ArgumentParser(
-        description="Plot Tomii vs Taskflow MIMO comparison.")
+    p = argparse.ArgumentParser(description="Plot Tomii vs Taskflow MIMO comparison.")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--slots", type=int, nargs="+", default=SLOTS)
     p.add_argument("--tomii-csv", default=None)

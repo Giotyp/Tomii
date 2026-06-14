@@ -107,33 +107,17 @@ See `knob_space.json` for the full list of tunable CLI flags and what is forbidd
 The forbidden list protects correctness: `$barrier`, `$dep`, and `$res` arguments
 encode data-dependency semantics that must not be removed.
 
-## Results (run 2026-05-13, 50 iter/arm)
+## Results
 
-| Arm | Best ms | Mean ms (passing) | Improvement | Passing |
-|---|---|---|---|---|
-| Random | 0.0912 | 14.48 | 97.4% | 50/50 |
-| Bayesian (Optuna TPE) | 0.1206 | 9.54 | 96.6% | 50/50 |
-| Grid | 0.1218 | 0.36 | 96.5% | 50/50 |
-| **Agent (Claude)** | **0.1030** | **0.33** | **97.1%** | **50/50** |
-
-Baseline: 3.51 ms/stream. 0 rejected trials across all arms.
-
-**Interpretation**: all four arms found configurations within 0.04 ms of each other on this
-small (2048-cell) discrete knob space. The agent did **not** beat the best non-adaptive arm
-on single-trial best (random found 0.0912 vs agent's 0.1030). However, the agent had the
-**lowest mean latency across all 50 trials** (0.33 ms), matching grid and both meaningfully
-lower than random (14.48 ms) and Bayesian (9.54 ms). This reflects the agent's early
-focus on low-slot, low-worker configurations — an advantage that would compound on a
-larger or more expensive search space. On this specific workload the knob space is small
-enough that all adaptive strategies converge quickly.
-
-See `results/run_20260513_013311/` for the full trial logs, `summary.csv`, and
-`comparison.png` (convergence plot).
+Running `run_all.sh` writes per-arm `*_trials.jsonl` logs; `aggregate.py` and `plot.py`
+then produce `summary.csv` and `comparison.png` (best-so-far convergence per arm) under
+the run directory. Measured comparison numbers across the four arms are published in the
+project documentation, not in this README.
 
 ## Honest framing
 
-The agent arm did not beat the best non-adaptive arm by ≥10% on single-trial best in
-this run. The value of this example is the **structured tuning surface**: a reproducible
-benchmark showing that a language model can reliably stay in the valid region (0/50
-verifier rejections) and converge efficiently, without access to source code or
-documentation beyond the knob descriptions.
+The value of this example is the **structured tuning surface**: a reproducible benchmark
+showing that a language model can reliably stay in the valid region (verifier rejections
+at zero) and converge efficiently, without access to source code or documentation beyond
+the knob descriptions. On a small discrete knob space all adaptive strategies converge
+quickly; the differentiator is the machine-readable graph, not a single-best win.

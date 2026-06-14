@@ -33,10 +33,12 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 BENCH_ROOT = HERE.parents[1]
 DEVELOP_ROOT = BENCH_ROOT.parents[1]
-WORKSPACE_ROOT = HERE.parents[2]   # Tomii/ workspace root (bench/mimo-bench/tomii → Tomii/)
+WORKSPACE_ROOT = HERE.parents[
+    2
+]  # Tomii/ workspace root (bench/mimo-bench/tomii → Tomii/)
 AGORA_DIR = Path("~/Agora").expanduser().resolve()
 sys.path.insert(0, str(DEVELOP_ROOT))
-sys.path.insert(0, str(HERE))      # so `build_graph` resolves regardless of CWD
+sys.path.insert(0, str(HERE))  # so `build_graph` resolves regardless of CWD
 
 from tomii._runner import build_command, _find_binary
 from build_graph import build_mimo_graph
@@ -51,7 +53,8 @@ def _make_fixed_frame_config(base_config: str, num_frames: int) -> str:
         cfg = json.load(f)
     cfg["max_frame"] = num_frames
     tmp = tempfile.NamedTemporaryFile(
-        prefix="verify_sender_", suffix=".json", delete=False, mode="w")
+        prefix="verify_sender_", suffix=".json", delete=False, mode="w"
+    )
     json.dump(cfg, tmp)
     tmp.close()
     return tmp.name
@@ -70,8 +73,13 @@ def _start_sender(
         f"--inter_frame_delay={inter_frame_delay}",
         f"--conf_file={sender_config}",
     ]
-    return subprocess.Popen(cmd, cwd=str(AGORA_DIR), stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, env=os.environ.copy())
+    return subprocess.Popen(
+        cmd,
+        cwd=str(AGORA_DIR),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=os.environ.copy(),
+    )
 
 
 def _run_pass(
@@ -168,35 +176,69 @@ def sha256(path: Path) -> str:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Verify Tomii MIMO determinism.")
-    p.add_argument("--passes", type=int, default=2,
-                   help="number of passes to compare (default: 2)")
-    p.add_argument("--config", type=str,
-                   default="~/Agora/files/config/ci/tddconfig-sim-ul.json",
-                   help="tddconfig JSON for the Tomii graph builder (path is "
-                        "expanded/resolved at runtime). 4x4 default; pass "
-                        "graphs/tddconfig-16x16.json for the 16x16 pipeline.")
-    p.add_argument("--graph", type=Path, default=None,
-                   help="optional explicit graph JSON; if omitted, the graph is "
-                        "generated from --config via build_graph.py (with the dump node)")
+    p.add_argument(
+        "--passes", type=int, default=2, help="number of passes to compare (default: 2)"
+    )
+    p.add_argument(
+        "--config",
+        type=str,
+        default="~/Agora/files/config/ci/tddconfig-sim-ul.json",
+        help="tddconfig JSON for the Tomii graph builder (path is "
+        "expanded/resolved at runtime). 4x4 default; pass "
+        "graphs/tddconfig-16x16.json for the 16x16 pipeline.",
+    )
+    p.add_argument(
+        "--graph",
+        type=Path,
+        default=None,
+        help="optional explicit graph JSON; if omitted, the graph is "
+        "generated from --config via build_graph.py (with the dump node)",
+    )
     p.add_argument("--output-dir", type=Path, default=HERE / "results" / "verify")
     p.add_argument("--no-clean", dest="clean", action="store_false", default=True)
-    p.add_argument("--sender-config", type=str,
-                   default="files/config/ci/tddconfig-sim-ul.json",
-                   help="tddconfig path relative to ~/Agora (or absolute); verify.py "
-                        "starts and stops the Agora sender for each pass")
-    p.add_argument("--sender-delay", type=int, default=5,
-                   help="seconds to wait after starting Tomii before starting sender (default: 5)")
-    p.add_argument("--frame-duration", type=int, default=1000, dest="frame_duration",
-                   help="sender --frame_duration in µs (default: 1000)")
-    p.add_argument("--inter-frame-delay", type=int, default=0, dest="inter_frame_delay",
-                   help="sender --inter_frame_delay in µs; spaces the per-frame packet "
-                        "burst so the receiver can drain (default: 0)")
-    p.add_argument("--num-frames", type=int, default=20, dest="num_frames",
-                   help="fixed number of frames the sender emits per pass; the dump "
-                        "captures the LAST completed frame, which is deterministic "
-                        "across passes for fixed input (default: 20)")
-    p.add_argument("--workers", type=int, default=24,
-                   help="worker threads (default: 24; use 1 to test for races)")
+    p.add_argument(
+        "--sender-config",
+        type=str,
+        default="files/config/ci/tddconfig-sim-ul.json",
+        help="tddconfig path relative to ~/Agora (or absolute); verify.py "
+        "starts and stops the Agora sender for each pass",
+    )
+    p.add_argument(
+        "--sender-delay",
+        type=int,
+        default=5,
+        help="seconds to wait after starting Tomii before starting sender (default: 5)",
+    )
+    p.add_argument(
+        "--frame-duration",
+        type=int,
+        default=1000,
+        dest="frame_duration",
+        help="sender --frame_duration in µs (default: 1000)",
+    )
+    p.add_argument(
+        "--inter-frame-delay",
+        type=int,
+        default=0,
+        dest="inter_frame_delay",
+        help="sender --inter_frame_delay in µs; spaces the per-frame packet "
+        "burst so the receiver can drain (default: 0)",
+    )
+    p.add_argument(
+        "--num-frames",
+        type=int,
+        default=20,
+        dest="num_frames",
+        help="fixed number of frames the sender emits per pass; the dump "
+        "captures the LAST completed frame, which is deterministic "
+        "across passes for fixed input (default: 20)",
+    )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=24,
+        help="worker threads (default: 24; use 1 to test for races)",
+    )
     args = p.parse_args()
 
     # If sender_config is an absolute path, use it as-is; if relative, it is
@@ -231,8 +273,17 @@ def main() -> None:
     )
     # Rebuild main binary so its function registry includes any new plugin functions.
     subprocess.run(
-        ["cargo", "build", "--manifest-path", str(WORKSPACE_ROOT / "Cargo.toml"),
-         "-p", "tomii-core", "--bin", "main", "--release"],
+        [
+            "cargo",
+            "build",
+            "--manifest-path",
+            str(WORKSPACE_ROOT / "Cargo.toml"),
+            "-p",
+            "tomii-core",
+            "--bin",
+            "main",
+            "--release",
+        ],
         check=True,
         env=build_env,
     )
@@ -247,7 +298,8 @@ def main() -> None:
     else:
         graph = build_mimo_graph(config_path=args.config, dump=True)
         _tmp = tempfile.NamedTemporaryFile(
-            prefix="mimo_verify_graph_", suffix=".json", delete=False, mode="w")
+            prefix="mimo_verify_graph_", suffix=".json", delete=False, mode="w"
+        )
         _tmp.write(graph.to_json())
         _tmp.close()
         graph_json = Path(_tmp.name)

@@ -13,6 +13,7 @@ Usage (from bench worktree root):
     python pipeline-bench/tomii/verify.py
     python pipeline-bench/tomii/verify.py --streams 10 --no-build
 """
+
 from __future__ import annotations
 
 import argparse
@@ -22,9 +23,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent        # pipeline-bench/tomii/
-BENCH_ROOT = HERE.parents[1]                  # bench worktree root
-DEVELOP_ROOT = BENCH_ROOT.parents[1]          # workspace root (tomii Python package)
+HERE = Path(__file__).resolve().parent  # pipeline-bench/tomii/
+BENCH_ROOT = HERE.parents[1]  # bench worktree root
+DEVELOP_ROOT = BENCH_ROOT.parents[1]  # workspace root (tomii Python package)
 sys.path.insert(0, str(DEVELOP_ROOT))
 
 import tomii as tm
@@ -45,6 +46,7 @@ RELATIVE_TOLERANCE = 0.30  # 30% — wide enough to survive SIMD but catches gro
 # Python reference implementation
 # ---------------------------------------------------------------------------
 
+
 def _heavy_transform(x: float, iters: int) -> float:
     if iters == 0:
         return 0.0
@@ -60,20 +62,19 @@ def expected_mean(n: int = N, iters: int = _DEFAULT_TRANSFORM_ITERS) -> float:
 # Verification graph (identical topology to benchmark, different emit)
 # ---------------------------------------------------------------------------
 
+
 def build_verify_graph(n: int) -> tm.Graph:
     app = tm.Graph()
     _index = TypedValue("$ref", "$index")
 
-    ingest    = app.node("ingest",    func="pl_ingest",      factor=n,
-                         args=[_index, tm.usize(n)])
-    transform = app.node("transform", func="pl_transform",   factor=n,
-                         args=[ingest.out()])
-    aggregate = app.node("aggregate", func="pl_aggregate",
-                         args=[transform.out(0, n)])
+    ingest = app.node("ingest", func="pl_ingest", factor=n, args=[_index, tm.usize(n)])
+    transform = app.node(
+        "transform", func="pl_transform", factor=n, args=[ingest.out()]
+    )
+    aggregate = app.node("aggregate", func="pl_aggregate", args=[transform.out(0, n)])
     # pl_emit_to_file has the same signature as pl_emit but also writes to
     # PIPELINE_BENCH_RESULT (env var) so we can capture per-stream values.
-    app.node("emit",      func="pl_emit_to_file",
-             args=[aggregate.out(), tm.usize(0)])
+    app.node("emit", func="pl_emit_to_file", args=[aggregate.out(), tm.usize(0)])
 
     return app
 
@@ -82,18 +83,24 @@ def build_verify_graph(n: int) -> tm.Graph:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     p = argparse.ArgumentParser(description="pipeline-bench correctness verifier")
-    p.add_argument("--n",       type=int, default=N,   help="items per stream")
-    p.add_argument("--streams", type=int, default=5,   help="streams to verify")
-    p.add_argument("--no-build", action="store_true",  help="skip cargo build")
-    p.add_argument("--transform-iters", type=int, default=None,
-                   help="TRANSFORM_ITERS value compiled into the plugin "
-                        "(auto-detected from lib.rs if omitted)")
+    p.add_argument("--n", type=int, default=N, help="items per stream")
+    p.add_argument("--streams", type=int, default=5, help="streams to verify")
+    p.add_argument("--no-build", action="store_true", help="skip cargo build")
+    p.add_argument(
+        "--transform-iters",
+        type=int,
+        default=None,
+        help="TRANSFORM_ITERS value compiled into the plugin "
+        "(auto-detected from lib.rs if omitted)",
+    )
     args = p.parse_args()
 
     # Detect transform_iters from lib.rs if not supplied.
     import re as _re
+
     if args.transform_iters is None:
         src = (HERE / "src" / "lib.rs").read_text()
         m = _re.search(r"const TRANSFORM_ITERS\s*:\s*usize\s*=\s*(\d+)", src)
@@ -107,7 +114,13 @@ def main() -> None:
     if not args.no_build:
         print("Building plugin...", flush=True)
         subprocess.run(
-            ["cargo", "build", "--manifest-path", str(HERE / "Cargo.toml"), "--release"],
+            [
+                "cargo",
+                "build",
+                "--manifest-path",
+                str(HERE / "Cargo.toml"),
+                "--release",
+            ],
             check=True,
             env={**os.environ, "FUNC_PATH": str(HERE / "src" / "lib.rs")},
         )
@@ -119,8 +132,10 @@ def main() -> None:
     dylib = str(HERE / "target" / "release" / "libpl_bench.so")
 
     # Compute expected value
-    print(f"Computing expected mean for n={args.n} (TRANSFORM_ITERS={args.transform_iters})...",
-          flush=True)
+    print(
+        f"Computing expected mean for n={args.n} (TRANSFORM_ITERS={args.transform_iters})...",
+        flush=True,
+    )
     exp = expected_mean(args.n, args.transform_iters)
     print(f"  expected = {exp:.10f}", flush=True)
 
@@ -160,29 +175,41 @@ def main() -> None:
         # Range check: within RELATIVE_TOLERANCE of Python-computed expected value.
         # Primary guard against gross errors (zero output, sum-instead-of-mean, etc.).
         if exp != 0.0 and abs(v - exp) / abs(exp) > RELATIVE_TOLERANCE:
-            failed.append((i, v, f"rel_delta={abs(v - exp)/abs(exp):.1%} vs tol={RELATIVE_TOLERANCE:.0%}"))
+            failed.append(
+                (
+                    i,
+                    v,
+                    f"rel_delta={abs(v - exp) / abs(exp):.1%} vs tol={RELATIVE_TOLERANCE:.0%}",
+                )
+            )
             continue
         vals.append(v)
 
     if failed:
-        print(f"FAIL: {len(failed)}/{args.streams} streams failed range check "
-              f"(Python expected ≈ {exp:.6f}, tol={RELATIVE_TOLERANCE:.0%}):")
+        print(
+            f"FAIL: {len(failed)}/{args.streams} streams failed range check "
+            f"(Python expected ≈ {exp:.6f}, tol={RELATIVE_TOLERANCE:.0%}):"
+        )
         for i, val, reason in failed[:5]:
             print(f"  stream {i}: {val!r} — {reason}")
         sys.exit(1)
 
     # Consistency check: all streams must produce identical results (pipeline is deterministic).
     if len(set(f"{v:.8f}" for v in vals)) > 1:
-        print(f"FAIL: streams produced different values (non-deterministic): {set(vals)}")
+        print(
+            f"FAIL: streams produced different values (non-deterministic): {set(vals)}"
+        )
         sys.exit(1)
 
     rust_val = vals[0]
     if exp == 0.0:
         rel_delta_str = "0.0% (zero kernel)"
     else:
-        rel_delta_str = f"{abs(rust_val-exp)/abs(exp):.1%}"
-    print(f"PASS ({args.streams} streams, rust={rust_val:.10f}, "
-          f"python_ref={exp:.10f}, rel_delta={rel_delta_str})")
+        rel_delta_str = f"{abs(rust_val - exp) / abs(exp):.1%}"
+    print(
+        f"PASS ({args.streams} streams, rust={rust_val:.10f}, "
+        f"python_ref={exp:.10f}, rel_delta={rel_delta_str})"
+    )
 
 
 if __name__ == "__main__":

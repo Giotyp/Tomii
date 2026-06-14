@@ -1,4 +1,5 @@
 """agent-eval configuration."""
+
 from __future__ import annotations
 import os
 from dataclasses import dataclass, field
@@ -7,7 +8,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENT_EVAL = Path(__file__).resolve().parent
 
-TASKFLOW_INCLUDE = Path(os.environ.get("TASKFLOW_ROOT", ""))  # header-only install; set TASKFLOW_ROOT
+TASKFLOW_INCLUDE = Path(
+    os.environ.get("TASKFLOW_ROOT", "")
+)  # header-only install; set TASKFLOW_ROOT
 
 # Golden output per task — one stream's worth (harness checks N×golden for N streams)
 GOLDEN: dict[str, str] = {

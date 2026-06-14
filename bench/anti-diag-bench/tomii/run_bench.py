@@ -19,9 +19,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent        # anti-diag-bench/tomii/
-BENCH_ROOT = HERE.parents[2]                  # workspace root
-DEVELOP_ROOT = BENCH_ROOT                     # same as workspace root on develop
+HERE = Path(__file__).resolve().parent  # anti-diag-bench/tomii/
+BENCH_ROOT = HERE.parents[2]  # workspace root
+DEVELOP_ROOT = BENCH_ROOT  # same as workspace root on develop
 # Prefer develop workspace so we pick up the installed editable tomii package
 sys.path.insert(0, str(DEVELOP_ROOT))
 

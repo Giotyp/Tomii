@@ -52,28 +52,50 @@ def diagnose(report_path: str) -> dict:
     cp_latency = cp.get("estimated_latency_us", 0.0) or 0.0
     max_factor = cp.get("max_node_factor", 1) or 1
 
-    top_nodes = sorted(per_node, key=lambda n: n.get("total_exec_us", 0), reverse=True)[:3]
+    top_nodes = sorted(per_node, key=lambda n: n.get("total_exec_us", 0), reverse=True)[
+        :3
+    ]
 
     # Decision tree
     actions = []
     if overhead_pct > 60.0:
         bottleneck = "scheduling"
-        actions.append("[graph-coarsen] overhead_pct={:.1f}% > 60% — reduce task count by coarsening nodes".format(overhead_pct))
+        actions.append(
+            "[graph-coarsen] overhead_pct={:.1f}% > 60% — reduce task count by coarsening nodes".format(
+                overhead_pct
+            )
+        )
     elif overhead_pct < 20.0:
         bottleneck = "compute"
-        actions.append("[kernel-opt] overhead_pct={:.1f}% < 20% — scheduling is negligible; optimise compute kernels".format(overhead_pct))
+        actions.append(
+            "[kernel-opt] overhead_pct={:.1f}% < 20% — scheduling is negligible; optimise compute kernels".format(
+                overhead_pct
+            )
+        )
     else:
         bottleneck = "mixed"
-        actions.append("[knob-search] overhead_pct={:.1f}% in 20-60% — try knob-search first".format(overhead_pct))
+        actions.append(
+            "[knob-search] overhead_pct={:.1f}% in 20-60% — try knob-search first".format(
+                overhead_pct
+            )
+        )
 
     if w_max < 50.0:
         bottleneck = "underutilisation"
-        actions.append("[graph-restructure] max worker_busy={:.1f}% < 50% — critical path serialises execution".format(w_max))
+        actions.append(
+            "[graph-restructure] max worker_busy={:.1f}% < 50% — critical path serialises execution".format(
+                w_max
+            )
+        )
 
     if w_spread > 30.0:
         if bottleneck not in ("scheduling", "underutilisation"):
             bottleneck = "load_imbalance"
-        actions.append("[group-rebalance] worker_busy spread={:.1f}pp > 30pp — review group_size/barrier placement".format(w_spread))
+        actions.append(
+            "[group-rebalance] worker_busy spread={:.1f}pp > 30pp — review group_size/barrier placement".format(
+                w_spread
+            )
+        )
 
     # Append priority-1 suggestions from report
     for s in sorted(suggestions, key=lambda x: x.get("priority", 99)):
@@ -82,7 +104,9 @@ def diagnose(report_path: str) -> dict:
         knob = s.get("knob", "")
         val = s.get("suggested_value", "")
         speedup = s.get("estimated_speedup", "")
-        actions.append(f"[priority={p}] {desc}  knob={knob} → {val}  est. speedup={speedup}")
+        actions.append(
+            f"[priority={p}] {desc}  knob={knob} → {val}  est. speedup={speedup}"
+        )
         if p == 1:
             break  # only highest priority here; rest go in full suggestions list
 
@@ -96,7 +120,14 @@ def diagnose(report_path: str) -> dict:
         "critical_path_nodes": cp_nodes,
         "critical_path_latency_us": cp_latency,
         "max_node_factor": max_factor,
-        "top_nodes": [{"name": n.get("name"), "total_exec_us": n.get("total_exec_us"), "on_critical_path": n.get("on_critical_path")} for n in top_nodes],
+        "top_nodes": [
+            {
+                "name": n.get("name"),
+                "total_exec_us": n.get("total_exec_us"),
+                "on_critical_path": n.get("on_critical_path"),
+            }
+            for n in top_nodes
+        ],
         "optimization_suggestions": suggestions,
         "bottleneck_hints": hints,
         "actions": actions,
@@ -107,8 +138,12 @@ if __name__ == "__main__":
     path = sys.argv[1] if len(sys.argv) > 1 else "report.json"
     result = diagnose(path)
     print(f"Bottleneck class: {result['bottleneck_class']}")
-    print(f"overhead_pct={result['overhead_pct']:.1f}%  worker_busy: min={result['worker_busy_min']:.1f}% max={result['worker_busy_max']:.1f}% spread={result['worker_busy_spread']:.1f}pp")
-    print(f"critical_path: {result['critical_path_nodes']} nodes, {result['critical_path_latency_us']:.1f}us, max_factor={result['max_node_factor']}")
+    print(
+        f"overhead_pct={result['overhead_pct']:.1f}%  worker_busy: min={result['worker_busy_min']:.1f}% max={result['worker_busy_max']:.1f}% spread={result['worker_busy_spread']:.1f}pp"
+    )
+    print(
+        f"critical_path: {result['critical_path_nodes']} nodes, {result['critical_path_latency_us']:.1f}us, max_factor={result['max_node_factor']}"
+    )
     print("Actions:")
     for a in result["actions"]:
         print(f"  {a}")

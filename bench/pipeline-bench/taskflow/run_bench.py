@@ -16,7 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent   # pipeline-bench/taskflow/
+HERE = Path(__file__).resolve().parent  # pipeline-bench/taskflow/
 BUILD_DIR = HERE / "build"
 
 
@@ -24,19 +24,20 @@ BUILD_DIR = HERE / "build"
 # Build
 # ---------------------------------------------------------------------------
 
+
 def build_cmake(clean: bool) -> None:
     """Configure and build the CMake project."""
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
 
     if clean and (BUILD_DIR / "CMakeCache.txt").exists():
         print("Cleaning build directory...", flush=True)
-        subprocess.run(["cmake", "--build", str(BUILD_DIR), "--target", "clean"],
-                       check=False)
+        subprocess.run(
+            ["cmake", "--build", str(BUILD_DIR), "--target", "clean"], check=False
+        )
 
     print("Configuring CMake...", flush=True)
     subprocess.run(
-        ["cmake", "-S", str(HERE), "-B", str(BUILD_DIR),
-         "-DCMAKE_BUILD_TYPE=Release"],
+        ["cmake", "-S", str(HERE), "-B", str(BUILD_DIR), "-DCMAKE_BUILD_TYPE=Release"],
         check=True,
     )
 
@@ -57,6 +58,7 @@ def build_cmake(clean: bool) -> None:
 # Single (S, W) run
 # ---------------------------------------------------------------------------
 
+
 def run_one(
     *,
     n: int,
@@ -71,17 +73,23 @@ def run_one(
     binary = BUILD_DIR / "tf_pipeline"
     cmd = [
         str(binary),
-        "--n",       str(n),
-        "--slots",   str(slots),
-        "--workers", str(workers),
-        "--streams", str(streams),
-        "--warmup",  str(warmup),
-        "--mode",    mode,
-        "--output",  str(output_csv),
+        "--n",
+        str(n),
+        "--slots",
+        str(slots),
+        "--workers",
+        str(workers),
+        "--streams",
+        str(streams),
+        "--warmup",
+        str(warmup),
+        "--mode",
+        mode,
+        "--output",
+        str(output_csv),
     ]
     print(
-        f"\n=== Taskflow | n={n}  slots={slots}  workers={workers}"
-        f"  mode={mode} ===",
+        f"\n=== Taskflow | n={n}  slots={slots}  workers={workers}  mode={mode} ===",
         flush=True,
     )
     subprocess.run(cmd, check=True)
@@ -91,28 +99,56 @@ def run_one(
 # Main sweep
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Taskflow pipeline benchmark sweep over slots and workers."
     )
-    p.add_argument("--n", type=int, default=256,
-                   help="items per stream (pipeline width)")
-    p.add_argument("--slots", type=int, nargs="+", default=[1, 4, 16, 64],
-                   help="concurrent slot counts to sweep")
-    p.add_argument("--workers", type=int, nargs="+", default=[1, 2, 4, 8],
-                   help="worker thread counts to sweep")
-    p.add_argument("--streams", type=int, default=2000,
-                   help="total streams to process (excluding warmup)")
-    p.add_argument("--warmup", type=int, default=200,
-                   help="warmup streams excluded from timing")
-    p.add_argument("--mode", default="clone",
-                   choices=["clone", "sequential"],
-                   help="Taskflow execution mode")
-    p.add_argument("--csv-out", type=Path, default=None,
-                   help="output CSV path (default: build/tf_pipeline_sweep_heavy.csv)")
-    p.add_argument("--no-clean", dest="clean", action="store_false",
-                   default=True,
-                   help="skip cmake clean before building")
+    p.add_argument(
+        "--n", type=int, default=256, help="items per stream (pipeline width)"
+    )
+    p.add_argument(
+        "--slots",
+        type=int,
+        nargs="+",
+        default=[1, 4, 16, 64],
+        help="concurrent slot counts to sweep",
+    )
+    p.add_argument(
+        "--workers",
+        type=int,
+        nargs="+",
+        default=[1, 2, 4, 8],
+        help="worker thread counts to sweep",
+    )
+    p.add_argument(
+        "--streams",
+        type=int,
+        default=2000,
+        help="total streams to process (excluding warmup)",
+    )
+    p.add_argument(
+        "--warmup", type=int, default=200, help="warmup streams excluded from timing"
+    )
+    p.add_argument(
+        "--mode",
+        default="clone",
+        choices=["clone", "sequential"],
+        help="Taskflow execution mode",
+    )
+    p.add_argument(
+        "--csv-out",
+        type=Path,
+        default=None,
+        help="output CSV path (default: build/tf_pipeline_sweep_heavy.csv)",
+    )
+    p.add_argument(
+        "--no-clean",
+        dest="clean",
+        action="store_false",
+        default=True,
+        help="skip cmake clean before building",
+    )
     args = p.parse_args()
 
     build_cmake(args.clean)

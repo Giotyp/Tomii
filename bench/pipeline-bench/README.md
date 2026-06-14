@@ -61,30 +61,14 @@ All Tomii runs use these flags (hardcoded in `tomii/run_bench.py`): `--custom`
 `--use-rdtsc`, `--batching-size 1`. Taskflow uses the default `tf::Executor`. Tomii's
 published numbers therefore reflect its **recommended** streaming configuration.
 
-## Headline results (W=4)
+## What the sweep shows
 
-| S | Tomii ms/stream | Taskflow ms/stream | Ratio |
-|---|---|---|---|
-| 1 | 3.02 | 1.22 | 2.48× slower |
-| 16 | 1.55 | 1.18 | **1.33× slower** |
-| 64 | 1.54 | 1.20 | 1.28× slower |
-
-**Tomii does not win this benchmark.** The claim is that the gap *closes* — from ~2.5×
-at S=1 to 1.28–1.36× at S≥16 — as multi-slot amortisation distributes the
-resolution-thread cost across concurrent lanes.
-
-### Per-slot memory growth
-
-Measured by `scripts/memory_measure.sh` (peak RSS of the binary, S=1 vs S=64, 3 runs;
-see `memory_results.txt`):
-
-| | Tomii | Taskflow |
-|---|---|---|
-| Per-slot RSS growth | **+81 kB/slot** | +132 kB/slot (**1.6× steeper**) |
-
-Tomii's base RSS is *higher* (≈8.4 MB vs 4.7 MB at S=1, from preallocated worker stacks +
-resolution machinery); the advantage is in the **growth rate**, relevant to long-running
-services with many concurrent streams — not S=1 jobs.
+Tomii does **not** win this benchmark on absolute throughput. The point of the S-sweep
+is to show how the per-stream gap *closes* as multi-slot amortisation distributes the
+resolution-thread cost across concurrent lanes, and that per-slot RSS growth is lower
+than Taskflow's (relevant to long-running services with many concurrent streams, not S=1
+jobs). Measured per-slot memory growth comes from `scripts/memory_measure.sh` (peak RSS,
+S=1 vs S=64). Comparison numbers are published in the project documentation.
 
 ## Reproducibility note
 

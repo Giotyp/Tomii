@@ -1,4 +1,5 @@
 """Utility: detect physical CPU core count."""
+
 import os
 
 
@@ -23,6 +24,7 @@ def physical_cores() -> int:
     # Fallback: logical CPUs
     try:
         import multiprocessing
+
         return multiprocessing.cpu_count()
     except Exception:
         return 4

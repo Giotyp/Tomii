@@ -1,4 +1,5 @@
 """FrameworkAdapter: per-framework build/run/report commands."""
+
 from __future__ import annotations
 import json
 import subprocess
@@ -27,7 +28,9 @@ class FrameworkAdapter:
     def build(self, workspace: Path) -> RunResult:
         raise NotImplementedError
 
-    def run(self, workspace: Path, max_streams: int, exclude_streams: int, workers: int) -> RunResult:
+    def run(
+        self, workspace: Path, max_streams: int, exclude_streams: int, workers: int
+    ) -> RunResult:
         raise NotImplementedError
 
     def parse_latency(self, workspace: Path, run_result: RunResult) -> float | None:
@@ -42,6 +45,7 @@ class TomiiAdapter(FrameworkAdapter):
 
     def scaffold_dir(self, task_id: str, tier: int) -> Path:
         from config import AGENT_EVAL
+
         subdir = "tier_2" if tier == 2 else ""
         if subdir:
             return AGENT_EVAL / "scaffolds" / "tomii" / task_id / subdir
@@ -51,8 +55,15 @@ class TomiiAdapter(FrameworkAdapter):
         env = os.environ.copy()
         env["SCRIPT_DIR"] = str(workspace)
         result = subprocess.run(
-            ["python", "run_bench.py", "--workers", "1",
-             "--max-streams", "1", "--build-only"],
+            [
+                "python",
+                "run_bench.py",
+                "--workers",
+                "1",
+                "--max-streams",
+                "1",
+                "--build-only",
+            ],
             cwd=workspace,
             capture_output=True,
             text=True,
@@ -61,8 +72,13 @@ class TomiiAdapter(FrameworkAdapter):
         )
         return RunResult(result.stdout, result.stderr, result.returncode, None)
 
-    def run(self, workspace: Path, max_streams: int = EVAL_STREAMS,
-            exclude_streams: int = EVAL_EXCLUDE_STREAMS, workers: int = 4) -> RunResult:
+    def run(
+        self,
+        workspace: Path,
+        max_streams: int = EVAL_STREAMS,
+        exclude_streams: int = EVAL_EXCLUDE_STREAMS,
+        workers: int = 4,
+    ) -> RunResult:
         # result.txt: plugin writes here (append mode) — must exist before run
         result_file = workspace / "result.txt"
         result_file.unlink(missing_ok=True)
@@ -74,11 +90,18 @@ class TomiiAdapter(FrameworkAdapter):
         env = os.environ.copy()
         env["SCRIPT_DIR"] = str(workspace)
         result = subprocess.run(
-            ["python", "run_bench.py",
-             "--max-streams", str(max_streams),
-             "--exclude-streams", str(exclude_streams),
-             "--report", "report.json",
-             "--timing", "timing.txt"],
+            [
+                "python",
+                "run_bench.py",
+                "--max-streams",
+                str(max_streams),
+                "--exclude-streams",
+                str(exclude_streams),
+                "--report",
+                "report.json",
+                "--timing",
+                "timing.txt",
+            ],
             cwd=workspace,
             capture_output=True,
             text=True,
@@ -110,6 +133,7 @@ class TaskflowAdapter(FrameworkAdapter):
 
     def scaffold_dir(self, task_id: str, tier: int) -> Path:
         from config import AGENT_EVAL
+
         subdir = "tier_2" if tier == 2 else ""
         if subdir:
             return AGENT_EVAL / "scaffolds" / "taskflow" / task_id / subdir
@@ -119,17 +143,21 @@ class TaskflowAdapter(FrameworkAdapter):
         build_dir = workspace / "build"
         build_dir.mkdir(exist_ok=True)
         cmake_result = subprocess.run(
-            ["cmake", "..",
-             f"-DTASKFLOW_DIR={TASKFLOW_INCLUDE}",
-             "-DCMAKE_BUILD_TYPE=Release"],
+            [
+                "cmake",
+                "..",
+                f"-DTASKFLOW_DIR={TASKFLOW_INCLUDE}",
+                "-DCMAKE_BUILD_TYPE=Release",
+            ],
             cwd=build_dir,
             capture_output=True,
             text=True,
             timeout=120,
         )
         if cmake_result.returncode != 0:
-            return RunResult(cmake_result.stdout, cmake_result.stderr,
-                             cmake_result.returncode, None)
+            return RunResult(
+                cmake_result.stdout, cmake_result.stderr, cmake_result.returncode, None
+            )
         make_result = subprocess.run(
             ["make", "-j4"],
             cwd=build_dir,
@@ -137,11 +165,17 @@ class TaskflowAdapter(FrameworkAdapter):
             text=True,
             timeout=120,
         )
-        return RunResult(make_result.stdout, make_result.stderr,
-                         make_result.returncode, None)
+        return RunResult(
+            make_result.stdout, make_result.stderr, make_result.returncode, None
+        )
 
-    def run(self, workspace: Path, max_streams: int = EVAL_STREAMS,
-            exclude_streams: int = EVAL_EXCLUDE_STREAMS, workers: int = 4) -> RunResult:
+    def run(
+        self,
+        workspace: Path,
+        max_streams: int = EVAL_STREAMS,
+        exclude_streams: int = EVAL_EXCLUDE_STREAMS,
+        workers: int = 4,
+    ) -> RunResult:
         result_file = workspace / "result.txt"
         result_file.unlink(missing_ok=True)
 

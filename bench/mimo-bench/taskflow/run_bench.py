@@ -25,7 +25,7 @@ import sys
 import time
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent   # mimo-bench/taskflow/
+HERE = Path(__file__).resolve().parent  # mimo-bench/taskflow/
 BUILD_DIR = HERE / "build"
 DEFAULT_CONFIG = HERE.parent / "tomii" / "graphs" / "tddconfig-4x4.json"
 AGORA_DIR = Path("~/Agora").expanduser().resolve()
@@ -34,6 +34,7 @@ AGORA_DIR = Path("~/Agora").expanduser().resolve()
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
+
 
 def build_cmake(clean: bool) -> None:
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
@@ -47,8 +48,7 @@ def build_cmake(clean: bool) -> None:
 
     print("Configuring CMake...", flush=True)
     subprocess.run(
-        ["cmake", "-S", str(HERE), "-B", str(BUILD_DIR),
-         "-DCMAKE_BUILD_TYPE=Release"],
+        ["cmake", "-S", str(HERE), "-B", str(BUILD_DIR), "-DCMAKE_BUILD_TYPE=Release"],
         check=True,
     )
 
@@ -65,7 +65,9 @@ def build_cmake(clean: bool) -> None:
     print(f"  binary: {binary}", flush=True)
 
 
-def _start_sender(sender_config: str, frame_duration: int = 1000) -> "subprocess.Popen[bytes]":
+def _start_sender(
+    sender_config: str, frame_duration: int = 1000
+) -> "subprocess.Popen[bytes]":
     sender_bin = AGORA_DIR / "build" / "sender"
     cmd = [
         str(sender_bin),
@@ -83,6 +85,7 @@ def _start_sender(sender_config: str, frame_duration: int = 1000) -> "subprocess
 # Single (slots, workers) run
 # ---------------------------------------------------------------------------
 
+
 def run_one(
     *,
     slots: int,
@@ -98,12 +101,18 @@ def run_one(
     binary = BUILD_DIR / "tf_mimo"
     cmd = [
         str(binary),
-        "--slots",   str(slots),
-        "--workers", str(workers),
-        "--streams", str(streams),
-        "--warmup",  str(warmup),
-        "--config",  str(config),
-        "--output",  str(output_csv),
+        "--slots",
+        str(slots),
+        "--workers",
+        str(workers),
+        "--streams",
+        str(streams),
+        "--warmup",
+        str(warmup),
+        "--config",
+        str(config),
+        "--output",
+        str(output_csv),
     ]
     print(
         f"\n=== Taskflow MIMO | slots={slots}  workers={workers} ===",
@@ -141,30 +150,63 @@ def run_one(
 # Main sweep
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Taskflow MIMO benchmark sweep over slots and workers."
     )
-    p.add_argument("--slots", type=int, nargs="+", default=[1, 4, 16, 64],
-                   help="concurrent slot counts to sweep")
-    p.add_argument("--workers", type=int, nargs="+", default=[1, 2, 4, 8],
-                   help="worker thread counts to sweep")
-    p.add_argument("--streams", type=int, default=200,
-                   help="total frames to time (excluding warmup)")
-    p.add_argument("--warmup", type=int, default=20,
-                   help="warmup frames excluded from timing")
-    p.add_argument("--sender-config", default="files/config/ci/tddconfig-4x4.json",
-                   dest="sender_config",
-                   help="Agora sender --conf_file path (relative to ~/Agora)")
-    p.add_argument("--frame-duration", type=int, default=1000, dest="frame_duration",
-                   help="sender --frame_duration in µs (use ≥2000 for 16×16)")
-    p.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
-                   help="tddconfig JSON path")
-    p.add_argument("--csv-out", type=Path, default=None,
-                   help="output CSV path (default: build/tf_mimo_sweep.csv)")
-    p.add_argument("--no-clean", dest="clean", action="store_false",
-                   default=True,
-                   help="skip cmake clean before building")
+    p.add_argument(
+        "--slots",
+        type=int,
+        nargs="+",
+        default=[1, 4, 16, 64],
+        help="concurrent slot counts to sweep",
+    )
+    p.add_argument(
+        "--workers",
+        type=int,
+        nargs="+",
+        default=[1, 2, 4, 8],
+        help="worker thread counts to sweep",
+    )
+    p.add_argument(
+        "--streams",
+        type=int,
+        default=200,
+        help="total frames to time (excluding warmup)",
+    )
+    p.add_argument(
+        "--warmup", type=int, default=20, help="warmup frames excluded from timing"
+    )
+    p.add_argument(
+        "--sender-config",
+        default="files/config/ci/tddconfig-4x4.json",
+        dest="sender_config",
+        help="Agora sender --conf_file path (relative to ~/Agora)",
+    )
+    p.add_argument(
+        "--frame-duration",
+        type=int,
+        default=1000,
+        dest="frame_duration",
+        help="sender --frame_duration in µs (use ≥2000 for 16×16)",
+    )
+    p.add_argument(
+        "--config", type=Path, default=DEFAULT_CONFIG, help="tddconfig JSON path"
+    )
+    p.add_argument(
+        "--csv-out",
+        type=Path,
+        default=None,
+        help="output CSV path (default: build/tf_mimo_sweep.csv)",
+    )
+    p.add_argument(
+        "--no-clean",
+        dest="clean",
+        action="store_false",
+        default=True,
+        help="skip cmake clean before building",
+    )
     args = p.parse_args()
 
     build_cmake(args.clean)

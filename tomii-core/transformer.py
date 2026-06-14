@@ -264,7 +264,7 @@ def create_arg_return(
         else:
             if retcm_type == "None":
                 # first call function and then return None
-                func_call = f"\t{norm_ret};\n" f"\tCmTypes::None\n}}\n"
+                func_call = f"\t{norm_ret};\n\tCmTypes::None\n}}\n"
             else:
                 func_call = f"\tCmTypes::{retcm_type}({norm_ret})\n}}\n"
 
@@ -419,7 +419,6 @@ def generate_wrapper(fn_name, args_signature, return_type, mode="rust"):
     carg_list = []
 
     for index, arg in enumerate(args):
-
         if mode == "rust":
             arg_details = arg.split(":")
             arg_name = arg_details[0].strip()

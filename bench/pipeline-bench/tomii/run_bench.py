@@ -29,9 +29,9 @@ import sys
 import time
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent        # pipeline-bench/tomii/
-BENCH_ROOT = HERE.parents[2]                  # workspace root
-DEVELOP_ROOT = BENCH_ROOT                     # same as workspace root on develop
+HERE = Path(__file__).resolve().parent  # pipeline-bench/tomii/
+BENCH_ROOT = HERE.parents[2]  # workspace root
+DEVELOP_ROOT = BENCH_ROOT  # same as workspace root on develop
 sys.path.insert(0, str(DEVELOP_ROOT))
 
 import tomii as tm
@@ -43,6 +43,7 @@ from tomii._serialize import to_json
 # ---------------------------------------------------------------------------
 # Timing parser
 # ---------------------------------------------------------------------------
+
 
 def _parse_avg_ms(timing_file: Path) -> float:
     """Extract 'Avg Time Per Stream' (latency) from a Tomii timing file."""
@@ -61,6 +62,7 @@ def _parse_avg_ms(timing_file: Path) -> float:
 # ---------------------------------------------------------------------------
 # RSS probe — measure peak RSS of the tomii-core binary via /usr/bin/time -v
 # ---------------------------------------------------------------------------
+
 
 def _probe_binary_rss(
     graph: "tm.Graph",
@@ -93,7 +95,9 @@ def _probe_binary_rss(
     try:
         timing_probe = Path(tmp_path).with_suffix(".timing.txt")
         cmd = build_command(
-            binary, tmp_path, dylib,
+            binary,
+            tmp_path,
+            dylib,
             workers=workers,
             core_offset=1,
             system_threads=1,
@@ -129,6 +133,7 @@ def _probe_binary_rss(
 # Graph builder
 # ---------------------------------------------------------------------------
 
+
 def build_pipeline(n: int) -> tm.Graph:
     """Return a Tomii Graph for the 4-stage fan-out/fan-in pipeline.
 
@@ -144,21 +149,19 @@ def build_pipeline(n: int) -> tm.Graph:
 
     # Stage 1: ingest N items in parallel.
     # factor=n (concrete int) and n as a usize arg for the kernel.
-    ingest = app.node("ingest", func="pl_ingest", factor=n,
-                      args=[_index, tm.usize(n)])
+    ingest = app.node("ingest", func="pl_ingest", factor=n, args=[_index, tm.usize(n)])
 
     # Stage 2: transform each item 1:1 (factor=N, depends on ingest[i]).
-    transform = app.node("transform", func="pl_transform", factor=n,
-                         args=[ingest.out()])
+    transform = app.node(
+        "transform", func="pl_transform", factor=n, args=[ingest.out()]
+    )
 
     # Stage 3: aggregate — variadic fan-in of all N transform results.
     # transform.out(0, n) uses the concrete Python int as the range bound.
-    aggregate = app.node("aggregate", func="pl_aggregate",
-                         args=[transform.out(0, n)])
+    aggregate = app.node("aggregate", func="pl_aggregate", args=[transform.out(0, n)])
 
     # Stage 4: emit — scalar result from aggregate; stream_id=0 placeholder.
-    app.node("emit", func="pl_emit",
-             args=[aggregate.out(), tm.usize(0)])
+    app.node("emit", func="pl_emit", args=[aggregate.out(), tm.usize(0)])
 
     return app
 
@@ -166,6 +169,7 @@ def build_pipeline(n: int) -> tm.Graph:
 # ---------------------------------------------------------------------------
 # Single (S, W) run
 # ---------------------------------------------------------------------------
+
 
 def run_one(
     *,
@@ -193,9 +197,7 @@ def run_one(
     /usr/bin/time -v after the main timing run to capture the tomii binary's
     peak RSS. Returns None for peak_rss_kb if measure_rss=False.
     """
-    timing_file = (
-        results_dir / f"tomii_pipeline_n{n}_s{slots}_w{workers}.txt"
-    )
+    timing_file = results_dir / f"tomii_pipeline_n{n}_s{slots}_w{workers}.txt"
     print(
         f"\n=== Tomii | n={n}  slots={slots}  workers={workers}"
         f"  iters={transform_iters} ===",
@@ -254,33 +256,66 @@ def run_one(
 # Main sweep
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Tomii pipeline benchmark sweep over slots and workers."
     )
-    p.add_argument("--n", type=int, default=256,
-                   help="items per stream (pipeline width)")
-    p.add_argument("--slots", type=int, nargs="+", default=[1, 4, 16, 64],
-                   help="concurrent slot counts to sweep")
-    p.add_argument("--workers", type=int, nargs="+", default=[1, 2, 4, 8],
-                   help="worker thread counts to sweep")
-    p.add_argument("--streams", type=int, default=2000,
-                   help="total streams to process (excluding warmup)")
-    p.add_argument("--warmup", type=int, default=200,
-                   help="warmup streams excluded from timing")
+    p.add_argument(
+        "--n", type=int, default=256, help="items per stream (pipeline width)"
+    )
+    p.add_argument(
+        "--slots",
+        type=int,
+        nargs="+",
+        default=[1, 4, 16, 64],
+        help="concurrent slot counts to sweep",
+    )
+    p.add_argument(
+        "--workers",
+        type=int,
+        nargs="+",
+        default=[1, 2, 4, 8],
+        help="worker thread counts to sweep",
+    )
+    p.add_argument(
+        "--streams",
+        type=int,
+        default=2000,
+        help="total streams to process (excluding warmup)",
+    )
+    p.add_argument(
+        "--warmup", type=int, default=200, help="warmup streams excluded from timing"
+    )
     p.add_argument("--results-dir", type=Path, default=HERE / "results")
-    p.add_argument("--csv-out", type=Path, default=None,
-                   help="output CSV path (default: results-dir/pipeline_sweep_heavy.csv)")
-    p.add_argument("--no-clean", dest="clean", action="store_false",
-                   default=True,
-                   help="skip cargo clean before building")
-    p.add_argument("--transform-iters", type=int, default=None,
-                   help="value of TRANSFORM_ITERS compiled into the plugin "
-                        "(tagged in CSV; does not change the binary)")
-    p.add_argument("--measure-rss", action="store_true", default=False,
-                   help="run a short binary probe under /usr/bin/time -v to "
-                        "capture the tomii-core binary's peak RSS; adds "
-                        "peak_rss_kb column to the CSV")
+    p.add_argument(
+        "--csv-out",
+        type=Path,
+        default=None,
+        help="output CSV path (default: results-dir/pipeline_sweep_heavy.csv)",
+    )
+    p.add_argument(
+        "--no-clean",
+        dest="clean",
+        action="store_false",
+        default=True,
+        help="skip cargo clean before building",
+    )
+    p.add_argument(
+        "--transform-iters",
+        type=int,
+        default=None,
+        help="value of TRANSFORM_ITERS compiled into the plugin "
+        "(tagged in CSV; does not change the binary)",
+    )
+    p.add_argument(
+        "--measure-rss",
+        action="store_true",
+        default=False,
+        help="run a short binary probe under /usr/bin/time -v to "
+        "capture the tomii-core binary's peak RSS; adds "
+        "peak_rss_kb column to the CSV",
+    )
     args = p.parse_args()
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
@@ -288,6 +323,7 @@ def main() -> None:
     # Detect transform_iters from lib.rs if not supplied on the CLI.
     if args.transform_iters is None:
         import re as _re
+
         src = (HERE / "src" / "lib.rs").read_text()
         m = _re.search(r"const TRANSFORM_ITERS\s*:\s*usize\s*=\s*(\d+)", src)
         args.transform_iters = int(m.group(1)) if m else 0
@@ -299,15 +335,12 @@ def main() -> None:
 
     if args.clean:
         subprocess.run(
-            ["cargo", "clean",
-             "--manifest-path", str(HERE / "Cargo.toml")],
+            ["cargo", "clean", "--manifest-path", str(HERE / "Cargo.toml")],
             check=True,
         )
 
     subprocess.run(
-        ["cargo", "build",
-         "--manifest-path", str(HERE / "Cargo.toml"),
-         "--release"],
+        ["cargo", "build", "--manifest-path", str(HERE / "Cargo.toml"), "--release"],
         check=True,
         env={**os.environ, "FUNC_PATH": str(HERE / "src" / "lib.rs")},
     )
@@ -334,7 +367,9 @@ def main() -> None:
     csv_path = args.csv_out or (args.results_dir / "pipeline_sweep_heavy.csv")
     rss_col = ",peak_rss_kb" if args.measure_rss else ""
     with open(csv_path, "w") as f:
-        f.write(f"system,n,items_per_stream,slots,workers,streams,ms_per_stream,transform_iters{rss_col}\n")
+        f.write(
+            f"system,n,items_per_stream,slots,workers,streams,ms_per_stream,transform_iters{rss_col}\n"
+        )
 
     # ------------------------------------------------------------------
     # Sweep
@@ -352,7 +387,9 @@ def main() -> None:
                 transform_iters=args.transform_iters,
                 measure_rss=args.measure_rss,
             )
-            rss_field = f",{rss_kb if rss_kb is not None else 0}" if args.measure_rss else ""
+            rss_field = (
+                f",{rss_kb if rss_kb is not None else 0}" if args.measure_rss else ""
+            )
             with open(csv_path, "a") as f:
                 f.write(
                     f"tomii,{args.n},{args.n},{s},{w},"

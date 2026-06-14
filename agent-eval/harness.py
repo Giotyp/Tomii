@@ -14,6 +14,7 @@ Each trial:
   5. After claude exits, runs the harness-controlled verifier with held-out stream counts.
   6. Records: tokens_used, wall_seconds, verify_pass, latency_us, signal_usage, censored.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -42,9 +43,11 @@ TOMII_ORACLE_DIR = Path(os.environ.get("TOMII_ORACLE_DIR", ""))
 
 # SKILL names that count as "used a SKILL" in signal extraction.
 # Derived from SKILLS/*.md (excluding README) so it stays in sync automatically.
-KNOWN_SKILLS: frozenset[str] = frozenset(
-    p.stem for p in SKILLS_DIR.glob("*.md") if p.stem.lower() != "readme"
-) if SKILLS_DIR.exists() else frozenset()
+KNOWN_SKILLS: frozenset[str] = (
+    frozenset(p.stem for p in SKILLS_DIR.glob("*.md") if p.stem.lower() != "readme")
+    if SKILLS_DIR.exists()
+    else frozenset()
+)
 
 # Framework resource blurbs injected into prompts
 FRAMEWORK_RESOURCES: dict[str, dict[str, str]] = {
@@ -87,6 +90,7 @@ HELD_OUT_COUNTS = [(3, 1), (5, 2), (7, 3)]  # (total_streams, exclude_streams)
 
 # ── Data types ────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class TrialResult:
     framework: str
@@ -101,13 +105,13 @@ class TrialResult:
     # Quality
     verify_pass: bool = False
     latency_us: float | None = None
-    reached_q: bool = False          # only meaningful for tier 2
+    reached_q: bool = False  # only meaningful for tier 2
     # Signal usage (Tomii-only)
-    signal_report_reads: int = 0     # times agent read report.json
-    signal_knobs_calls: int = 0      # times agent called --list-knobs
-    signal_skill_reads: int = 0      # times agent invoked a SKILL (Read or Skill tool)
+    signal_report_reads: int = 0  # times agent read report.json
+    signal_knobs_calls: int = 0  # times agent called --list-knobs
+    signal_skill_reads: int = 0  # times agent invoked a SKILL (Read or Skill tool)
     # Status
-    censored: bool = False           # True if agent timed out / hit budget
+    censored: bool = False  # True if agent timed out / hit budget
     error: str = ""
 
     @property
@@ -116,6 +120,7 @@ class TrialResult:
 
 
 # ── Signal extraction ─────────────────────────────────────────────────────────
+
 
 def _parse_events(response_json: str) -> list[dict]:
     """Parse claude --output-format json --verbose output into a list of events.
@@ -175,7 +180,9 @@ def extract_signal_usage(response_json: str) -> dict:
                             counts["report_reads"] += 1
                         # v2 agent-native interface signals
                         if "tomii tune" in inp or "tomii --explain" in inp:
-                            counts["knobs_calls"] += 1  # reuse counter; captures tune/explain usage
+                            counts["knobs_calls"] += (
+                                1  # reuse counter; captures tune/explain usage
+                            )
     except Exception:
         pass
     return counts
@@ -208,15 +215,16 @@ def extract_token_usage(response_json: str) -> tuple[int, int]:
         if ev.get("type") != "assistant":
             continue
         usage = ev.get("message", {}).get("usage", {}) or ev.get("usage", {})
-        c_read   = usage.get("cache_read_input_tokens", 0) or 0
+        c_read = usage.get("cache_read_input_tokens", 0) or 0
         c_create = usage.get("cache_creation_input_tokens", 0) or 0
-        out      = usage.get("output_tokens", 0) or 0
+        out = usage.get("output_tokens", 0) or 0
         max_cache = max(max_cache, c_read + c_create)
         cum_output += out
     return max_cache, cum_output
 
 
 # ── Workspace setup ───────────────────────────────────────────────────────────
+
 
 def setup_workspace(
     framework: str,
@@ -226,16 +234,27 @@ def setup_workspace(
     tmp_dir: Path,
 ) -> Path:
     from adapter import ADAPTERS
+
     adapter = ADAPTERS[framework]
 
     scaffold = adapter.scaffold_dir(task_id, tier)
     workspace = tmp_dir / "workspace"
-    shutil.copytree(scaffold, workspace,
-                    ignore=shutil.ignore_patterns(
-                        "build", "target", ".git", "__pycache__",
-                        "report*.json", "report.json", "_oracle_report.json",
-                        "result.txt", "timing.txt", "out.txt",
-                    ))
+    shutil.copytree(
+        scaffold,
+        workspace,
+        ignore=shutil.ignore_patterns(
+            "build",
+            "target",
+            ".git",
+            "__pycache__",
+            "report*.json",
+            "report.json",
+            "_oracle_report.json",
+            "result.txt",
+            "timing.txt",
+            "out.txt",
+        ),
+    )
     _absolutize_cargo_paths(workspace, scaffold)
 
     # Copy verifier into workspace
@@ -280,6 +299,7 @@ def _absolutize_cargo_paths(workspace: Path, scaffold_src: Path) -> None:
     in scaffold_src and rewritten as an absolute path.
     """
     import re as _re
+
     for cargo_toml in workspace.rglob("Cargo.toml"):
         rel = cargo_toml.relative_to(workspace)
         src_cargo = scaffold_src / rel
@@ -304,9 +324,12 @@ def _absolutize_cargo_paths(workspace: Path, scaffold_src: Path) -> None:
 
 # ── Prompt rendering ──────────────────────────────────────────────────────────
 
+
 def render_prompt(tier: int, framework: str, skills: str, max_iters: int = 10) -> str:
     template = (PROMPTS_DIR / f"tier_{tier}.md").read_text()
-    resources = FRAMEWORK_RESOURCES[framework].get(skills, FRAMEWORK_RESOURCES[framework]["bare"])
+    resources = FRAMEWORK_RESOURCES[framework].get(
+        skills, FRAMEWORK_RESOURCES[framework]["bare"]
+    )
     return template.format(
         framework_name=framework.capitalize(),
         framework_resources=resources,
@@ -315,6 +338,7 @@ def render_prompt(tier: int, framework: str, skills: str, max_iters: int = 10) -
 
 
 # ── Claude invocation ─────────────────────────────────────────────────────────
+
 
 def invoke_claude(
     prompt: str,
@@ -325,13 +349,18 @@ def invoke_claude(
 ) -> tuple[str, float]:
     """Invoke claude agentic mode; return (raw_json_output, wall_seconds)."""
     cmd = [
-        "claude", "-p",
+        "claude",
+        "-p",
         "--dangerously-skip-permissions",
-        "--output-format", "stream-json",
+        "--output-format",
+        "stream-json",
         "--verbose",
-        "--model", model,
-        "--max-budget-usd", str(budget_usd),
-        "--add-dir", str(workspace),
+        "--model",
+        model,
+        "--max-budget-usd",
+        str(budget_usd),
+        "--add-dir",
+        str(workspace),
     ]
     t0 = time.monotonic()
     try:
@@ -352,11 +381,13 @@ def invoke_claude(
             if v is None:
                 return ""
             return v if isinstance(v, str) else v.decode("utf-8", errors="replace")
+
         partial = _decode(e.stdout) + _decode(e.stderr)
         return partial, time.monotonic() - t0
 
 
 # ── Harness validation run ────────────────────────────────────────────────────
+
 
 def harness_verify(
     workspace: Path,
@@ -371,6 +402,7 @@ def harness_verify(
     Uses HELD_OUT_COUNTS to cycle through multiple stream counts — detects hardcoding.
     """
     import nproc_count
+
     workers = nproc_count.physical_cores()
 
     last_run_r = None
@@ -393,10 +425,17 @@ def harness_verify(
         last_run_r = run_r
 
         verify_r = subprocess.run(
-            [sys.executable, "verifier.py",
-             "--streams", str(total_streams),
-             "--exclude", str(exclude_streams)],
-            capture_output=True, text=True, cwd=workspace,
+            [
+                sys.executable,
+                "verifier.py",
+                "--streams",
+                str(total_streams),
+                "--exclude",
+                str(exclude_streams),
+            ],
+            capture_output=True,
+            text=True,
+            cwd=workspace,
         )
 
         if "PASS" not in verify_r.stdout:
@@ -408,6 +447,7 @@ def harness_verify(
 
 # ── Orphan-process cleanup ────────────────────────────────────────────────────
 
+
 def _kill_workspace_orphans(workspace: Path) -> None:
     """SIGTERM any processes that have files open inside the workspace directory.
 
@@ -417,11 +457,14 @@ def _kill_workspace_orphans(workspace: Path) -> None:
     an [Errno 39] crash that swallows the TrialResult.
     """
     import signal as _signal
+
     ws = str(workspace)
     try:
         lsof = subprocess.run(
             ["lsof", "-t", "+D", ws],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         our_pid = os.getpid()
         for pid_str in lsof.stdout.splitlines():
@@ -438,6 +481,7 @@ def _kill_workspace_orphans(workspace: Path) -> None:
 
 # ── Trial runner ──────────────────────────────────────────────────────────────
 
+
 def run_trial(
     framework: str,
     skills: str,
@@ -452,6 +496,7 @@ def run_trial(
     q_threshold: float = 0.80,
 ) -> TrialResult:
     from adapter import ADAPTERS
+
     adapter = ADAPTERS[framework]
 
     result = TrialResult(
@@ -486,14 +531,20 @@ def run_trial(
         prompt = render_prompt(tier, framework, skills)
         (trial_dir / "prompt.md").write_text(prompt)
 
-        print(f"  [trial {trial_idx}] invoking claude (budget=${budget_usd}, timeout={wall_timeout_s}s)")
-        raw_out, wall = invoke_claude(prompt, workspace, model, budget_usd, wall_timeout_s)
+        print(
+            f"  [trial {trial_idx}] invoking claude (budget=${budget_usd}, timeout={wall_timeout_s}s)"
+        )
+        raw_out, wall = invoke_claude(
+            prompt, workspace, model, budget_usd, wall_timeout_s
+        )
         result.wall_seconds = wall
 
         (trial_dir / "claude_output.jsonl").write_text(raw_out)
 
         if not raw_out.strip():
-            result.error = "claude timed out with no output; attempting workspace verify"
+            result.error = (
+                "claude timed out with no output; attempting workspace verify"
+            )
             result.censored = True
             # Fall through to build+verify — agent may have modified workspace
         else:
@@ -522,7 +573,9 @@ def run_trial(
 
             # Harness-controlled verification with held-out stream counts
             print(f"  [trial {trial_idx}] verifying...")
-            pass_, latency = harness_verify(workspace, adapter, oracle_best, q_threshold, tier)
+            pass_, latency = harness_verify(
+                workspace, adapter, oracle_best, q_threshold, tier
+            )
             result.verify_pass = pass_
             result.latency_us = latency
 
@@ -532,7 +585,9 @@ def run_trial(
                 result.reached_q = latency <= oracle_best / q_threshold
 
             lat_str = f" latency={latency:.1f}µs" if latency is not None else ""
-            print(f"  [trial {trial_idx}] {'PASS' if pass_ else 'FAIL'}{lat_str} tokens={result.tokens_total}")
+            print(
+                f"  [trial {trial_idx}] {'PASS' if pass_ else 'FAIL'}{lat_str} tokens={result.tokens_total}"
+            )
         except Exception as exc:
             result.error = f"post-claude step failed: {exc}"
             result.censored = True
@@ -561,6 +616,7 @@ def run_trial(
 
 # ── Oracle measurement ────────────────────────────────────────────────────────
 
+
 def measure_oracle(framework: str, task_id: str, n_runs: int = 5) -> float | None:
     """Run the reference implementation N times and return median latency."""
     import statistics
@@ -582,10 +638,14 @@ def measure_oracle(framework: str, task_id: str, n_runs: int = 5) -> float | Non
                 report_path = TOMII_ORACLE_DIR / "_oracle_report.json"
                 report_path.unlink(missing_ok=True)
                 cmd = [
-                    "python", str(oracle_script),
-                    "--max-streams", "7",
-                    "--exclude-streams", "3",
-                    "--report", str(report_path),
+                    "python",
+                    str(oracle_script),
+                    "--max-streams",
+                    "7",
+                    "--exclude-streams",
+                    "3",
+                    "--report",
+                    str(report_path),
                 ]
                 cwd = str(TOMII_ORACLE_DIR)
             else:
@@ -600,13 +660,19 @@ def measure_oracle(framework: str, task_id: str, n_runs: int = 5) -> float | Non
                 report_path.unlink(missing_ok=True)
                 env["SCRIPT_DIR"] = str(scaffold)
                 cmd = [
-                    "python", str(script),
-                    "--workers", str(workers),
-                    "--batching-size", "64",
+                    "python",
+                    str(script),
+                    "--workers",
+                    str(workers),
+                    "--batching-size",
+                    "64",
                     "--coalesce-barriers",
-                    "--max-streams", "7",
-                    "--exclude-streams", "3",
-                    "--report", str(report_path),
+                    "--max-streams",
+                    "7",
+                    "--exclude-streams",
+                    "3",
+                    "--report",
+                    str(report_path),
                 ]
                 cwd = str(scaffold)
         else:
@@ -629,7 +695,10 @@ def measure_oracle(framework: str, task_id: str, n_runs: int = 5) -> float | Non
         try:
             result = subprocess.run(
                 cmd,
-                capture_output=True, text=True, timeout=300, env=env,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                env=env,
                 cwd=cwd,
             )
         except subprocess.TimeoutExpired as e:
@@ -659,8 +728,10 @@ def measure_oracle(framework: str, task_id: str, n_runs: int = 5) -> float | Non
                     break
         if latency is None:
             stderr_tail = (result.stderr or "")[-300:].strip()
-            print(f"[oracle WARN] run returned no latency "
-                  f"(rc={result.returncode}){': ' + stderr_tail if stderr_tail else ''}")
+            print(
+                f"[oracle WARN] run returned no latency "
+                f"(rc={result.returncode}){': ' + stderr_tail if stderr_tail else ''}"
+            )
         else:
             lats.append(latency)
 
@@ -671,6 +742,7 @@ def measure_oracle(framework: str, task_id: str, n_runs: int = 5) -> float | Non
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+
 
 def main() -> None:
     p = argparse.ArgumentParser(description="agent-eval: single-condition trial runner")
@@ -685,14 +757,23 @@ def main() -> None:
     p.add_argument("--timeout", type=int, default=1800)
     p.add_argument("--output-dir", default="")
     p.add_argument("--q-threshold", type=float, default=0.80)
-    p.add_argument("--skip-oracle", action="store_true",
-                   help="Skip oracle measurement (use None for Q threshold)")
-    p.add_argument("--oracle-latency", type=float, default=None,
-                   help="Use pre-measured oracle latency (µs) instead of running the oracle.")
+    p.add_argument(
+        "--skip-oracle",
+        action="store_true",
+        help="Skip oracle measurement (use None for Q threshold)",
+    )
+    p.add_argument(
+        "--oracle-latency",
+        type=float,
+        default=None,
+        help="Use pre-measured oracle latency (µs) instead of running the oracle.",
+    )
     args = p.parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_label = f"{args.framework}_{args.skills}_tier{args.tier}_{args.task}_{timestamp}"
+    run_label = (
+        f"{args.framework}_{args.skills}_tier{args.tier}_{args.task}_{timestamp}"
+    )
     out_dir = Path(args.output_dir or SCRIPT_DIR / "results" / run_label)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -703,30 +784,41 @@ def main() -> None:
         print(f"[oracle] using pre-measured latency = {oracle_best:.1f}µs")
         print(f"[oracle] Q bar (pass if ≤) = {oracle_best / args.q_threshold:.1f}µs")
     elif args.tier == 2 and not args.skip_oracle:
-        print(f"[oracle] measuring reference latency for {args.framework}/{args.task}...")
+        print(
+            f"[oracle] measuring reference latency for {args.framework}/{args.task}..."
+        )
         oracle_best = measure_oracle(args.framework, args.task)
         if oracle_best:
             print(f"[oracle] median oracle latency = {oracle_best:.1f}µs")
-            print(f"[oracle] Q bar (pass if ≤) = {oracle_best / args.q_threshold:.1f}µs")
+            print(
+                f"[oracle] Q bar (pass if ≤) = {oracle_best / args.q_threshold:.1f}µs"
+            )
 
-    (out_dir / "config.json").write_text(json.dumps({
-        "framework": args.framework,
-        "skills": args.skills,
-        "tier": args.tier,
-        "task": args.task,
-        "model": args.model,
-        "budget_usd": args.budget,
-        "wall_timeout_s": args.timeout,
-        "q_threshold": args.q_threshold,
-        "oracle_best_us": oracle_best,
-        "n_trials": args.n_trials,
-    }, indent=2))
+    (out_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "framework": args.framework,
+                "skills": args.skills,
+                "tier": args.tier,
+                "task": args.task,
+                "model": args.model,
+                "budget_usd": args.budget,
+                "wall_timeout_s": args.timeout,
+                "q_threshold": args.q_threshold,
+                "oracle_best_us": oracle_best,
+                "n_trials": args.n_trials,
+            },
+            indent=2,
+        )
+    )
 
     all_results = []
     try:
         for i in range(args.trial_start, args.trial_start + args.n_trials):
-            print(f"\n[trial {i}/{args.trial_start + args.n_trials - 1}] "
-                  f"{args.framework}/{args.skills}/tier{args.tier}/{args.task}")
+            print(
+                f"\n[trial {i}/{args.trial_start + args.n_trials - 1}] "
+                f"{args.framework}/{args.skills}/tier{args.tier}/{args.task}"
+            )
             r = run_trial(
                 framework=args.framework,
                 skills=args.skills,
@@ -745,11 +837,18 @@ def main() -> None:
             (trial_dir / "result.json").write_text(json.dumps(asdict(r), indent=2))
             try:
                 from rescore import rescore_trial as _rescore
-                _rescore(trial_dir, framework=args.framework,
-                         oracle_best_us=oracle_best, q_threshold=args.q_threshold,
-                         overwrite=True)
+
+                _rescore(
+                    trial_dir,
+                    framework=args.framework,
+                    oracle_best_us=oracle_best,
+                    q_threshold=args.q_threshold,
+                    overwrite=True,
+                )
             except Exception as _re:
-                print(f"  [rescore] warning: enrichment failed for trial_{i:03d}: {_re}")
+                print(
+                    f"  [rescore] warning: enrichment failed for trial_{i:03d}: {_re}"
+                )
     except Exception as exc:
         print(f"\n[ERROR] trial loop crashed: {exc}")
     finally:

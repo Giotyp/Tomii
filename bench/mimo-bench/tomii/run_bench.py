@@ -21,9 +21,9 @@ import tempfile
 import time
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent          # mimo-bench/tomii/
-BENCH_ROOT = HERE.parents[2]                    # workspace root
-DEVELOP_ROOT = BENCH_ROOT                       # same as workspace root on develop
+HERE = Path(__file__).resolve().parent  # mimo-bench/tomii/
+BENCH_ROOT = HERE.parents[2]  # workspace root
+DEVELOP_ROOT = BENCH_ROOT  # same as workspace root on develop
 AGORA_DIR = Path("~/Agora").expanduser().resolve()
 sys.path.insert(0, str(DEVELOP_ROOT))
 
@@ -46,7 +46,9 @@ def _parse_avg_ms(timing_file: Path) -> float:
     return val
 
 
-def _start_sender(sender_config: str, frame_duration: int = 1000) -> "subprocess.Popen[bytes]":
+def _start_sender(
+    sender_config: str, frame_duration: int = 1000
+) -> "subprocess.Popen[bytes]":
     sender_bin = AGORA_DIR / "build" / "sender"
     cmd = [
         str(sender_bin),
@@ -129,9 +131,7 @@ def run_one(
                 sender_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 sender_proc.kill()
-        raise RuntimeError(
-            f"Tomii hung (>{watchdog}s) slots={slots} workers={workers}"
-        )
+        raise RuntimeError(f"Tomii hung (>{watchdog}s) slots={slots} workers={workers}")
     t1 = time.monotonic()
 
     # Clean up sender if it outlasted Tomii (shouldn't happen, but be safe).
@@ -158,29 +158,66 @@ def main() -> None:
     p = argparse.ArgumentParser(
         description="Tomii MIMO 4-node benchmark sweep over slots and workers."
     )
-    p.add_argument("--slots", type=int, nargs="+", default=[1, 4, 16, 64],
-                   help="concurrent slot counts to sweep")
-    p.add_argument("--workers", type=int, nargs="+", default=[1, 2, 4, 8],
-                   help="worker thread counts to sweep")
-    p.add_argument("--system-threads", type=int, default=2,
-                   help="resolution threads")
-    p.add_argument("--receiver-threads", type=int, default=4,
-                   help="dedicated network receiver threads")
-    p.add_argument("--warmup", type=int, default=20,
-                   help="leading streams excluded from timing averages")
-    p.add_argument("--max-runtime", type=int, default=30, dest="max_runtime",
-                   help="per-cell time limit in seconds (sender stops after ~0.5 s; "
-                        "this lets Tomii finish in-flight work then exit cleanly)")
-    p.add_argument("--sender-config", default="files/config/ci/tddconfig-16x16.json",
-                   dest="sender_config",
-                   help="Agora sender --conf_file path (relative to ~/Agora)")
-    p.add_argument("--frame-duration", type=int, default=50000, dest="frame_duration",
-                   help="sender --frame_duration in µs; floored per cell at ceil(48000/slots) "
-                        "to prevent sender from outrunning the receiver")
-    p.add_argument("--graph", type=Path, default=None,
-                   help="graph JSON override (default: build from Python API via build_graph.py)")
-    p.add_argument("--config", default=str(HERE / "graphs" / "tddconfig-16x16.json"),
-                   help="tddconfig JSON path forwarded to build_graph.py")
+    p.add_argument(
+        "--slots",
+        type=int,
+        nargs="+",
+        default=[1, 4, 16, 64],
+        help="concurrent slot counts to sweep",
+    )
+    p.add_argument(
+        "--workers",
+        type=int,
+        nargs="+",
+        default=[1, 2, 4, 8],
+        help="worker thread counts to sweep",
+    )
+    p.add_argument("--system-threads", type=int, default=2, help="resolution threads")
+    p.add_argument(
+        "--receiver-threads",
+        type=int,
+        default=4,
+        help="dedicated network receiver threads",
+    )
+    p.add_argument(
+        "--warmup",
+        type=int,
+        default=20,
+        help="leading streams excluded from timing averages",
+    )
+    p.add_argument(
+        "--max-runtime",
+        type=int,
+        default=30,
+        dest="max_runtime",
+        help="per-cell time limit in seconds (sender stops after ~0.5 s; "
+        "this lets Tomii finish in-flight work then exit cleanly)",
+    )
+    p.add_argument(
+        "--sender-config",
+        default="files/config/ci/tddconfig-16x16.json",
+        dest="sender_config",
+        help="Agora sender --conf_file path (relative to ~/Agora)",
+    )
+    p.add_argument(
+        "--frame-duration",
+        type=int,
+        default=50000,
+        dest="frame_duration",
+        help="sender --frame_duration in µs; floored per cell at ceil(48000/slots) "
+        "to prevent sender from outrunning the receiver",
+    )
+    p.add_argument(
+        "--graph",
+        type=Path,
+        default=None,
+        help="graph JSON override (default: build from Python API via build_graph.py)",
+    )
+    p.add_argument(
+        "--config",
+        default=str(HERE / "graphs" / "tddconfig-16x16.json"),
+        help="tddconfig JSON path forwarded to build_graph.py",
+    )
     p.add_argument("--results-dir", type=Path, default=HERE / "results")
     p.add_argument("--csv-out", type=Path, default=None)
     p.add_argument("--no-clean", dest="clean", action="store_false", default=True)
@@ -197,7 +234,8 @@ def main() -> None:
             kwargs["config_path"] = args.config
         graph = build_mimo_graph(**kwargs)
         _tmp = tempfile.NamedTemporaryFile(
-            prefix="mimo_graph_", suffix=".json", delete=False, mode="w")
+            prefix="mimo_graph_", suffix=".json", delete=False, mode="w"
+        )
         _tmp.write(graph.to_json())
         _tmp.close()
         graph_json = Path(_tmp.name)
@@ -220,8 +258,17 @@ def main() -> None:
     )
     # Build main binary from the bench workspace (needed to register MIMO functions)
     subprocess.run(
-        ["cargo", "build", "--manifest-path", bench_manifest,
-         "-p", "tomii-core", "--bin", "main", "--release"],
+        [
+            "cargo",
+            "build",
+            "--manifest-path",
+            bench_manifest,
+            "-p",
+            "tomii-core",
+            "--bin",
+            "main",
+            "--release",
+        ],
         check=True,
         env=bench_build_env,
     )

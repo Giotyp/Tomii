@@ -19,6 +19,7 @@ Usage:
     python3 scripts/analyze_sched.py schedule_log.csv --system-threads 4
     python3 scripts/analyze_sched.py schedule_log.csv --system-threads 4 --slots 10
 """
+
 import argparse
 import sys
 from collections import defaultdict
@@ -28,6 +29,7 @@ from utils import read_csv, group_by_slot, separate_worker_system_slots, group_b
 # ============================================================================
 # Scheduling latency record detection (mirrors scheduler_visualize.py)
 # ============================================================================
+
 
 def detect_idtype_max(records):
     """Return the estimated IdType::MAX from the maximum task_id in the dataset."""
@@ -56,15 +58,17 @@ def split_scheduling_latency(records, idtype_max):
         if offset > 0 and offset % 3 == 0:
             original_task_id = offset // 3
             if 0 < original_task_id < 1000:
-                latency_recs.append({
-                    "slot":             slot,
-                    "job_id":           job_id,
-                    "spawn_ns":         start_ns,
-                    "exec_ns":          end_ns,
-                    "worker":           worker,
-                    "original_task_id": original_task_id,
-                    "index":            index,
-                })
+                latency_recs.append(
+                    {
+                        "slot": slot,
+                        "job_id": job_id,
+                        "spawn_ns": start_ns,
+                        "exec_ns": end_ns,
+                        "worker": worker,
+                        "original_task_id": original_task_id,
+                        "index": index,
+                    }
+                )
                 continue
 
         execution_recs.append(rec)
@@ -75,6 +79,7 @@ def split_scheduling_latency(records, idtype_max):
 # ============================================================================
 # Validation
 # ============================================================================
+
 
 class SchedulerValidator:
     """Validates per-worker execution records for correctness."""
@@ -155,8 +160,10 @@ class SchedulerValidator:
 # Idle time calculation
 # ============================================================================
 
-def calculate_idle_time(worker_records, global_start_ns, global_end_ns,
-                        gap_threshold_ns=1_000_000):
+
+def calculate_idle_time(
+    worker_records, global_start_ns, global_end_ns, gap_threshold_ns=1_000_000
+):
     """
     Compute busy / idle breakdown for a single worker.
 
@@ -209,20 +216,20 @@ def calculate_idle_time(worker_records, global_start_ns, global_end_ns,
     total_idle = startup_delay + inter_task_idle + scheduling_overhead + tail_idle
 
     return {
-        "num_tasks":              num_tasks,
-        "total_span_ns":          global_end_ns - global_start_ns,
-        "worker_span_ns":         last_end - first_start,
-        "busy_time_ns":           busy_time,
-        "idle_time_ns":           total_idle,
-        "startup_delay_ns":       startup_delay,
-        "inter_task_idle_ns":     inter_task_idle,
-        "tail_idle_ns":           tail_idle,
-        "large_gaps":             large_gaps,
+        "num_tasks": num_tasks,
+        "total_span_ns": global_end_ns - global_start_ns,
+        "worker_span_ns": last_end - first_start,
+        "busy_time_ns": busy_time,
+        "idle_time_ns": total_idle,
+        "startup_delay_ns": startup_delay,
+        "inter_task_idle_ns": inter_task_idle,
+        "tail_idle_ns": tail_idle,
+        "large_gaps": large_gaps,
         "scheduling_overhead_ns": scheduling_overhead,
-        "num_gaps":               len(gaps),
-        "max_gap_ns":             max(gaps) if gaps else 0,
-        "min_gap_ns":             min(gaps) if gaps else 0,
-        "avg_task_duration_ns":   busy_time / num_tasks if num_tasks else 0,
+        "num_gaps": len(gaps),
+        "max_gap_ns": max(gaps) if gaps else 0,
+        "min_gap_ns": min(gaps) if gaps else 0,
+        "avg_task_duration_ns": busy_time / num_tasks if num_tasks else 0,
     }
 
 
@@ -230,17 +237,20 @@ def calculate_idle_time(worker_records, global_start_ns, global_end_ns,
 # Per-type system thread summary
 # ============================================================================
 
-def summarize_system_slots(system_slots, idtype_max, global_start_ns, global_end_ns, scale, unit_label):
+
+def summarize_system_slots(
+    system_slots, idtype_max, global_start_ns, global_end_ns, scale, unit_label
+):
     """Print a breakdown of system thread time by record type (res/prep/wait)."""
-    resolution_task_id  = idtype_max
+    resolution_task_id = idtype_max
     preparation_task_id = idtype_max - 1
-    wait_task_id        = idtype_max - 2
+    wait_task_id = idtype_max - 2
 
     type_records = {
-        "resolution":  [],
+        "resolution": [],
         "preparation": [],
-        "idle-wait":   [],
-        "other":       [],
+        "idle-wait": [],
+        "other": [],
     }
 
     for slot_records in system_slots.values():
@@ -262,15 +272,18 @@ def summarize_system_slots(system_slots, idtype_max, global_start_ns, global_end
         if not recs:
             continue
         busy_ns = sum(r[3] - r[2] for r in recs)
-        count   = len(recs)
-        pct     = busy_ns / total_span * 100 if total_span else 0
-        print(f"  {type_name:12s}: {count:6d} records  "
-              f"{busy_ns / scale:12.2f} {unit_label}  [{pct:6.2f}% of global span]")
+        count = len(recs)
+        pct = busy_ns / total_span * 100 if total_span else 0
+        print(
+            f"  {type_name:12s}: {count:6d} records  "
+            f"{busy_ns / scale:12.2f} {unit_label}  [{pct:6.2f}% of global span]"
+        )
 
 
 # ============================================================================
 # Scheduling latency statistics
 # ============================================================================
+
 
 def print_latency_stats(latency_recs, scale, unit_label):
     """Print per-task scheduling latency statistics."""
@@ -291,26 +304,32 @@ def print_latency_stats(latency_recs, scale, unit_label):
         median = lats[n // 2]
         p95 = lats[int(n * 0.95)]
         p99 = lats[int(n * 0.99)]
-        print(f"  Task {task_id}: n={n}  "
-              f"avg={avg/scale:.2f}  median={median/scale:.2f}  "
-              f"p95={p95/scale:.2f}  p99={p99/scale:.2f}  "
-              f"min={lats[0]/scale:.2f}  max={lats[-1]/scale:.2f}  {unit_label}")
+        print(
+            f"  Task {task_id}: n={n}  "
+            f"avg={avg / scale:.2f}  median={median / scale:.2f}  "
+            f"p95={p95 / scale:.2f}  p99={p99 / scale:.2f}  "
+            f"min={lats[0] / scale:.2f}  max={lats[-1] / scale:.2f}  {unit_label}"
+        )
 
 
 # ============================================================================
 # Main analysis
 # ============================================================================
 
-def analyze_schedule(csv_path, system_threads=0, worker_slots_count=0,
-                     units="us", validate=True):
+
+def analyze_schedule(
+    csv_path, system_threads=0, worker_slots_count=0, units="us", validate=True
+):
     scale, unit_label = {
-        "us": (1e3,  "µs"),
-        "ms": (1e6,  "ms"),
-        "s":  (1e9,  "s"),
+        "us": (1e3, "µs"),
+        "ms": (1e6, "ms"),
+        "s": (1e9, "s"),
     }.get(units, (1.0, "ns"))
 
     print(f"Analyzing schedule: {csv_path}")
-    print(f"System threads: {system_threads}  Worker slots: {worker_slots_count or 'auto'}  Units: {unit_label}")
+    print(
+        f"System threads: {system_threads}  Worker slots: {worker_slots_count or 'auto'}  Units: {unit_label}"
+    )
     print("=" * 80)
 
     records = read_csv(csv_path)
@@ -357,13 +376,19 @@ def analyze_schedule(csv_path, system_threads=0, worker_slots_count=0,
         return
 
     global_end_ns = max(
-        (max(r[3] for r in recs) for recs in [all_worker_recs, all_system_recs, all_receiver_recs] if recs),
+        (
+            max(r[3] for r in recs)
+            for recs in [all_worker_recs, all_system_recs, all_receiver_recs]
+            if recs
+        ),
         default=global_start_ns,
     )
     global_span_ns = global_end_ns - global_start_ns
 
-    print(f"Global span: {global_span_ns / scale:.2f} {unit_label}  "
-          f"(start={global_start_ns}ns  end={global_end_ns}ns)")
+    print(
+        f"Global span: {global_span_ns / scale:.2f} {unit_label}  "
+        f"(start={global_start_ns}ns  end={global_end_ns}ns)"
+    )
     print()
 
     # ---- Validation (worker execution records only) -------------------------
@@ -388,25 +413,49 @@ def analyze_schedule(csv_path, system_threads=0, worker_slots_count=0,
         m = calculate_idle_time(workers[worker_id], global_start_ns, global_end_ns)
         worker_metrics[worker_id] = m
 
-        busy_pct = m["busy_time_ns"] / m["total_span_ns"] * 100 if m["total_span_ns"] else 0
-        idle_pct = m["idle_time_ns"] / m["total_span_ns"] * 100 if m["total_span_ns"] else 0
+        busy_pct = (
+            m["busy_time_ns"] / m["total_span_ns"] * 100 if m["total_span_ns"] else 0
+        )
+        idle_pct = (
+            m["idle_time_ns"] / m["total_span_ns"] * 100 if m["total_span_ns"] else 0
+        )
 
         print(f"Worker {worker_id}:")
         print(f"  Tasks executed:        {m['num_tasks']}")
-        print(f"  Global span:           {m['total_span_ns']     / scale:12.2f} {unit_label}")
-        print(f"  Worker active span:    {m['worker_span_ns']    / scale:12.2f} {unit_label}")
-        print(f"  Busy time:             {m['busy_time_ns']      / scale:12.2f} {unit_label}  [{busy_pct:6.2f}%]")
+        print(
+            f"  Global span:           {m['total_span_ns'] / scale:12.2f} {unit_label}"
+        )
+        print(
+            f"  Worker active span:    {m['worker_span_ns'] / scale:12.2f} {unit_label}"
+        )
+        print(
+            f"  Busy time:             {m['busy_time_ns'] / scale:12.2f} {unit_label}  [{busy_pct:6.2f}%]"
+        )
         print(f"  Idle time breakdown:")
-        print(f"    Startup delay:       {m['startup_delay_ns']       / scale:12.2f} {unit_label}")
-        print(f"    Inter-task idle:     {m['inter_task_idle_ns']     / scale:12.2f} {unit_label}"
-              f"  ({len(m['large_gaps'])} large gaps >1ms)")
-        print(f"    Scheduling overhead: {m['scheduling_overhead_ns'] / scale:12.2f} {unit_label}")
-        print(f"    Tail idle:           {m['tail_idle_ns']           / scale:12.2f} {unit_label}")
-        print(f"    TOTAL IDLE:          {m['idle_time_ns']           / scale:12.2f} {unit_label}  [{idle_pct:6.2f}%]")
+        print(
+            f"    Startup delay:       {m['startup_delay_ns'] / scale:12.2f} {unit_label}"
+        )
+        print(
+            f"    Inter-task idle:     {m['inter_task_idle_ns'] / scale:12.2f} {unit_label}"
+            f"  ({len(m['large_gaps'])} large gaps >1ms)"
+        )
+        print(
+            f"    Scheduling overhead: {m['scheduling_overhead_ns'] / scale:12.2f} {unit_label}"
+        )
+        print(
+            f"    Tail idle:           {m['tail_idle_ns'] / scale:12.2f} {unit_label}"
+        )
+        print(
+            f"    TOTAL IDLE:          {m['idle_time_ns'] / scale:12.2f} {unit_label}  [{idle_pct:6.2f}%]"
+        )
         if m["num_gaps"] > 0:
-            print(f"  Gap stats: min={m['min_gap_ns']/scale:.2f}  max={m['max_gap_ns']/scale:.2f} {unit_label}")
+            print(
+                f"  Gap stats: min={m['min_gap_ns'] / scale:.2f}  max={m['max_gap_ns'] / scale:.2f} {unit_label}"
+            )
         if m["num_tasks"] > 0:
-            print(f"  Avg task duration:     {m['avg_task_duration_ns'] / scale:12.2f} {unit_label}")
+            print(
+                f"  Avg task duration:     {m['avg_task_duration_ns'] / scale:12.2f} {unit_label}"
+            )
         print()
 
     # ---- System thread analysis ---------------------------------------------
@@ -415,7 +464,9 @@ def analyze_schedule(csv_path, system_threads=0, worker_slots_count=0,
         print("SYSTEM THREAD ANALYSIS")
         print("=" * 80)
         print()
-        summarize_system_slots(system_slots, idtype_max, global_start_ns, global_end_ns, scale, unit_label)
+        summarize_system_slots(
+            system_slots, idtype_max, global_start_ns, global_end_ns, scale, unit_label
+        )
         print()
 
     # ---- Receiver thread analysis -------------------------------------------
@@ -426,10 +477,18 @@ def analyze_schedule(csv_path, system_threads=0, worker_slots_count=0,
         print()
         rcv_workers = group_by_worker(all_receiver_recs)
         for worker_id in sorted(rcv_workers.keys()):
-            m = calculate_idle_time(rcv_workers[worker_id], global_start_ns, global_end_ns)
-            busy_pct = m["busy_time_ns"] / m["total_span_ns"] * 100 if m["total_span_ns"] else 0
-            print(f"  Receiver worker {worker_id}: {m['num_tasks']} records  "
-                  f"busy={m['busy_time_ns']/scale:.2f} {unit_label}  [{busy_pct:.2f}%]")
+            m = calculate_idle_time(
+                rcv_workers[worker_id], global_start_ns, global_end_ns
+            )
+            busy_pct = (
+                m["busy_time_ns"] / m["total_span_ns"] * 100
+                if m["total_span_ns"]
+                else 0
+            )
+            print(
+                f"  Receiver worker {worker_id}: {m['num_tasks']} records  "
+                f"busy={m['busy_time_ns'] / scale:.2f} {unit_label}  [{busy_pct:.2f}%]"
+            )
         print()
 
     # ---- Scheduling latency -------------------------------------------------
@@ -446,10 +505,10 @@ def analyze_schedule(csv_path, system_threads=0, worker_slots_count=0,
     print("SUMMARY")
     print("=" * 80)
 
-    total_tasks   = sum(m["num_tasks"]     for m in worker_metrics.values())
-    total_busy_ns = sum(m["busy_time_ns"]  for m in worker_metrics.values())
-    total_idle_ns = sum(m["idle_time_ns"]  for m in worker_metrics.values())
-    n_workers     = len(worker_metrics)
+    total_tasks = sum(m["num_tasks"] for m in worker_metrics.values())
+    total_busy_ns = sum(m["busy_time_ns"] for m in worker_metrics.values())
+    total_idle_ns = sum(m["idle_time_ns"] for m in worker_metrics.values())
+    n_workers = len(worker_metrics)
 
     avg_busy_ns = total_busy_ns / n_workers if n_workers else 0
     avg_idle_ns = total_idle_ns / n_workers if n_workers else 0
@@ -461,11 +520,15 @@ def analyze_schedule(csv_path, system_threads=0, worker_slots_count=0,
 
     print(f"Workers:                {n_workers}")
     print(f"Total tasks executed:   {total_tasks}")
-    print(f"Global execution span:  {global_span_ns     / scale:12.2f} {unit_label}")
-    print(f"Total busy (all):       {total_busy_ns      / scale:12.2f} {unit_label}")
-    print(f"Total idle (all):       {total_idle_ns      / scale:12.2f} {unit_label}")
-    print(f"Avg busy per worker:    {avg_busy_ns        / scale:12.2f} {unit_label}  [{avg_busy_pct:6.2f}%]")
-    print(f"Avg idle per worker:    {avg_idle_ns        / scale:12.2f} {unit_label}  [{avg_idle_pct:6.2f}%]")
+    print(f"Global execution span:  {global_span_ns / scale:12.2f} {unit_label}")
+    print(f"Total busy (all):       {total_busy_ns / scale:12.2f} {unit_label}")
+    print(f"Total idle (all):       {total_idle_ns / scale:12.2f} {unit_label}")
+    print(
+        f"Avg busy per worker:    {avg_busy_ns / scale:12.2f} {unit_label}  [{avg_busy_pct:6.2f}%]"
+    )
+    print(
+        f"Avg idle per worker:    {avg_idle_ns / scale:12.2f} {unit_label}  [{avg_idle_pct:6.2f}%]"
+    )
     print(f"Scheduler efficiency:   {efficiency:6.2f}%")
     print()
 
@@ -497,7 +560,7 @@ def analyze_schedule(csv_path, system_threads=0, worker_slots_count=0,
         all_lats = [r["exec_ns"] - r["spawn_ns"] for r in latency_recs]
         p99 = sorted(all_lats)[int(len(all_lats) * 0.99)]
         if p99 / scale > 100:  # >100 units (us=100µs, ms=100ms)
-            print(f"  High P99 scheduling latency: {p99/scale:.2f} {unit_label}")
+            print(f"  High P99 scheduling latency: {p99 / scale:.2f} {unit_label}")
             print("   - Consider tuning batch_timeout_us or batch_size")
     print()
 
@@ -508,19 +571,26 @@ def main():
     )
     parser.add_argument("csv", help="Path to CSV file with schedule data")
     parser.add_argument(
-        "--system-threads", type=int, default=0,
+        "--system-threads",
+        type=int,
+        default=0,
         help="Number of system threads (default: auto-detect)",
     )
     parser.add_argument(
-        "--slots", type=int, default=0,
+        "--slots",
+        type=int,
+        default=0,
         help="Number of worker slots (default: auto-detect)",
     )
     parser.add_argument(
-        "--units", choices=["ns", "us", "ms", "s"], default="us",
+        "--units",
+        choices=["ns", "us", "ms", "s"],
+        default="us",
         help="Time units for display (default: us)",
     )
     parser.add_argument(
-        "--no-validate", action="store_true",
+        "--no-validate",
+        action="store_true",
         help="Skip validation checks",
     )
 
@@ -537,6 +607,7 @@ def main():
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

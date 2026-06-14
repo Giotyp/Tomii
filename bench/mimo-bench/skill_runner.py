@@ -31,7 +31,13 @@ class TrialEntry:
     error: bool = False
 
 
-def _run(run_benchmark: Callable, cfg: dict, run_script: str, report_path: str, timeout_s: int) -> float | None:
+def _run(
+    run_benchmark: Callable,
+    cfg: dict,
+    run_script: str,
+    report_path: str,
+    timeout_s: int,
+) -> float | None:
     ok = run_benchmark(cfg, run_script, report_path, timeout_s)
     if not ok:
         return None
@@ -56,8 +62,13 @@ def run_phase_a(
     # Load baseline latency by running base_cfg once
     iter_dir = run_dir / "iter0_baseline"
     iter_dir.mkdir(exist_ok=True)
-    baseline_latency = _run(run_benchmark, best_cfg, opt.run_script,
-                            str(iter_dir / "report.json"), opt.run_timeout_s)
+    baseline_latency = _run(
+        run_benchmark,
+        best_cfg,
+        opt.run_script,
+        str(iter_dir / "report.json"),
+        opt.run_timeout_s,
+    )
     if baseline_latency is None:
         print("[WARN] Baseline run failed in Phase A — using inf as baseline")
         baseline_latency = float("inf")
@@ -78,9 +89,17 @@ def run_phase_a(
         trial_cfg[knob] = val
         d = iter1_dir / knob
         d.mkdir(parents=True, exist_ok=True)
-        lat = _run(run_benchmark, trial_cfg, opt.run_script, str(d / "report.json"), opt.run_timeout_s)
+        lat = _run(
+            run_benchmark,
+            trial_cfg,
+            opt.run_script,
+            str(d / "report.json"),
+            opt.run_timeout_s,
+        )
         if lat is None:
-            trial_log.append(TrialEntry("iter1", knob, val, float("inf"), float("nan"), error=True))
+            trial_log.append(
+                TrialEntry("iter1", knob, val, float("inf"), float("nan"), error=True)
+            )
             continue
         delta_pct = (lat - best_latency) / best_latency * 100
         trial_log.append(TrialEntry("iter1", knob, val, lat, delta_pct))
@@ -97,9 +116,15 @@ def run_phase_a(
     bs_candidates = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
     bs_results: list[tuple[int, float]] = []
     for bs in bs_candidates:
-        trial_cfg = dict(best_cfg); trial_cfg["batching_size"] = bs
-        lat = _run(run_benchmark, trial_cfg, opt.run_script,
-                   str(iter2_dir / f"bs_{bs}.json"), opt.run_timeout_s) or float("inf")
+        trial_cfg = dict(best_cfg)
+        trial_cfg["batching_size"] = bs
+        lat = _run(
+            run_benchmark,
+            trial_cfg,
+            opt.run_script,
+            str(iter2_dir / f"bs_{bs}.json"),
+            opt.run_timeout_s,
+        ) or float("inf")
         delta_pct = (lat - best_latency) / best_latency * 100
         trial_log.append(TrialEntry("iter2", "batching_size", bs, lat, delta_pct))
         bs_results.append((bs, lat))
@@ -117,9 +142,15 @@ def run_phase_a(
     bl_candidates = [1, 2, 4, 10]
     bl_results: list[tuple[int, float]] = []
     for bl in bl_candidates:
-        trial_cfg = dict(best_cfg); trial_cfg["batching_limit"] = bl
-        lat = _run(run_benchmark, trial_cfg, opt.run_script,
-                   str(iter3_dir / f"bl_{bl}.json"), opt.run_timeout_s) or float("inf")
+        trial_cfg = dict(best_cfg)
+        trial_cfg["batching_limit"] = bl
+        lat = _run(
+            run_benchmark,
+            trial_cfg,
+            opt.run_script,
+            str(iter3_dir / f"bl_{bl}.json"),
+            opt.run_timeout_s,
+        ) or float("inf")
         delta_pct = (lat - best_latency) / best_latency * 100
         trial_log.append(TrialEntry("iter3", "batching_limit", bl, lat, delta_pct))
         bl_results.append((bl, lat))
@@ -140,29 +171,43 @@ def run_phase_a(
         lats = []
         for t in range(3):
             trial_cfg = dict(verify_cfg)
-            lat = _run(run_benchmark, trial_cfg, opt.run_script,
-                       str(iter4_dir / f"trial_{t}_streams{verify_streams}.json"),
-                       opt.run_timeout_s * 2)
+            lat = _run(
+                run_benchmark,
+                trial_cfg,
+                opt.run_script,
+                str(iter4_dir / f"trial_{t}_streams{verify_streams}.json"),
+                opt.run_timeout_s * 2,
+            )
             if lat is not None:
                 lats.append(lat)
         if not lats:
             break
         mean_lat = statistics.mean(lats)
         std_lat = statistics.stdev(lats) if len(lats) > 1 else 0.0
-        print(f"  verify: mean={mean_lat:.1f} std={std_lat:.1f} (streams={verify_streams})")
+        print(
+            f"  verify: mean={mean_lat:.1f} std={std_lat:.1f} (streams={verify_streams})"
+        )
         if std_lat <= 0.1 * mean_lat or verify_streams >= 50:
             if mean_lat < best_latency:
                 best_latency = mean_lat
             break
         verify_streams = max(50, verify_streams)
-        print(f"  high variance ({std_lat:.1f} > 10% of mean) — escalating to {verify_streams} streams")
+        print(
+            f"  high variance ({std_lat:.1f} > 10% of mean) — escalating to {verify_streams} streams"
+        )
 
     (iter4_dir / "config.json").write_text(json.dumps(best_cfg, indent=2))
     (run_dir / "best_config.json").write_text(json.dumps(best_cfg, indent=2))
 
     trial_log_data = [
-        {"phase": e.phase, "knob": e.knob, "value": e.value,
-         "avg_latency_us": e.avg_latency_us, "delta_pct": e.delta_pct, "error": e.error}
+        {
+            "phase": e.phase,
+            "knob": e.knob,
+            "value": e.value,
+            "avg_latency_us": e.avg_latency_us,
+            "delta_pct": e.delta_pct,
+            "error": e.error,
+        }
         for e in trial_log
     ]
     (run_dir / "trial_log.json").write_text(json.dumps(trial_log_data, indent=2))

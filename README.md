@@ -3,37 +3,21 @@
 **Task-graph framework for streaming pipelines, MIMO workloads, and agent-tuneable applications.**
 
 Tomii is *not* a general-purpose Taskflow or TBB replacement. For pure single-stream
-micro-task DAGs where dispatch overhead dominates, Taskflow is faster (see the benchmark
-matrix below). Tomii's advantage is in workloads that benefit from concurrent streams,
-generational slot reuse, and structured graph surfaces — particularly MIMO-class
-packet-driven pipelines and agent-driven automated optimisation loops.
+micro-task DAGs where dispatch overhead dominates, Taskflow is faster. Tomii's advantage
+is in workloads that benefit from concurrent streams, generational slot reuse, and
+structured graph surfaces — particularly MIMO-class packet-driven pipelines and
+agent-driven automated optimisation loops.
 
----
-
-## Performance highlights
-
-| Workload | Tomii vs comparator | Notes |
-|---|---|---|
-| Public 4×4 MIMO uplink (S=4, W=4) | **1.26× faster than Taskflow** | Packet-overlap advantage; `bench/mimo-bench/` |
-| Multi-stream pipeline throughput (S=16, W=4) | **1.33× slower than Taskflow** | Gap closes from 2.45× at S=1; `bench/pipeline-bench/` |
-| Per-slot RSS growth rate (S=1→64, W=4) | **1.6× lower than Taskflow** | Tomii +81 kB/slot vs Taskflow +132 kB/slot; measured via `bench/pipeline-bench/scripts/memory_measure.sh` |
-| Anti-diagonal wavefront (single stream) | **~2.4× slower than TBB/Taskflow** | Intrinsic cost of tripartite decoupling |
-
-Every row above is verifier-gated and reproducible from this repository — run the
-script under the named `bench/<name>/` directory; see `bench/*/README.md` for
-methodology and hardware. (Result CSVs are regenerated outputs and are not committed;
-a small regression baseline ships under each bench's `results/post_r1/`.)
-
-Tomii's generational slot reuse also completes a stream in O(1) (bump a generation
-counter, mark the slot free) where an eager comparator rebuilds the graph per stream —
-measured at **151× faster than Taskflow eager** at N=16,384 in the paper
-(`5-evaluation.tex`); this repo does not ship a standalone slot-reuse microbenchmark.
+Each benchmark under `bench/<name>/` is verifier-gated and reproducible from this
+repository — run the script in its directory; see `bench/*/README.md` for the topology,
+metric definition, and run instructions. Measured comparison numbers are published in
+the project documentation, not in these READMEs.
 
 ---
 
 ## Flagship examples
 
-### Perf #1 — Public 4×4 MIMO uplink benchmark
+### Example #1 — Public 4×4 MIMO uplink benchmark
 
 ```bash
 cd bench/mimo-bench
@@ -43,10 +27,10 @@ python taskflow/run_bench.py --workers 4 --slots 4 --streams 200
 ```
 
 Tomii dispatches FFT tasks as each UDP packet arrives; Taskflow must collect all packets
-before submitting the full DAG. At ~17.9 µs/packet spacing over a ~1 ms frame, this
-recovers 280–360 µs that Taskflow cannot — a structural advantage, not a tuning accident.
+before submitting the full DAG. This packet-overlap is the structural advantage the
+benchmark measures. See `bench/mimo-bench/README.md` for topology and metric.
 
-### Perf #2 — Multi-stream pipeline S-scaling
+### Example #2 — Multi-stream pipeline S-scaling
 
 ```bash
 cd bench/pipeline-bench
@@ -54,11 +38,11 @@ python tomii/run_bench.py --workers 4 --slots 16 --streams 200
 python taskflow/run_bench.py --workers 4 --slots 16 --streams 200
 ```
 
-Gap closes from 2.45× (S=1) to 1.33× (S=16) as multi-slot amortisation takes effect.
-Per-slot RSS growth is 1.6× lower than Taskflow (+83 vs +131 kB/slot). The committed
-regression baseline for the full S×W sweep is under
-`bench/pipeline-bench/tomii/results/post_r1/`; re-run `run_bench.py` to regenerate the
-live sweep CSV.
+Sweeps concurrent-slot count (S) to show how per-stream scheduling overhead amortises
+as multi-slot reuse takes effect. The committed regression baseline for the full S×W
+sweep is under `bench/pipeline-bench/tomii/results/post_r1/`; re-run `run_bench.py` to
+regenerate the live sweep CSV. See `bench/pipeline-bench/README.md` for the topology and
+metric.
 
 Tomii runs use `--custom --coalesce-barriers --inline-continuation` (hardcoded in `run_bench.py`);
 these are the recommended flags for streaming workloads. Taskflow uses default `tf::Executor`.
@@ -70,11 +54,10 @@ cd examples/agent-tuning
 bash run_all.sh 50   # runs all 4 arms (random, Bayesian, grid, Claude)
 ```
 
-Four optimisation arms compete over the stream-analytics knob space with the same budget
-(50 iterations) and verifier. Measured result: all arms 50/50 verifier-passing; agent mean
-latency 0.33 ms vs random mean 14.5 ms — the agent converges efficiently without being
-given source code or documentation. An edit that drops a barrier or removes a `$dep` edge
-fails the verifier and is rejected. See `examples/agent-tuning/README.md`.
+Four optimisation arms (random, Bayesian, grid, Claude) compete over the stream-analytics
+knob space with the same budget (50 iterations) and verifier. The agent converges without
+being given source code or documentation; an edit that drops a barrier or removes a `$dep`
+edge fails the verifier and is rejected. See `examples/agent-tuning/README.md`.
 
 ### Ergonomics #2 — Polyglot plugin showcase
 
@@ -311,12 +294,6 @@ make schema   # regenerate Python bindings after changing json_structs.rs
 - `WRAP_PATH` / `REG_PATH` — wrapper/registry files (optional, auto-generated)
 
 ---
-
-## Roadmap
-
-See [ROADMAP.md](ROADMAP.md). v1.1 planned items include frozen-graph specialisation (M1),
-successor table flattening (A2), agent-tuning expansion to MIMO and pipeline workloads, and
-a formal attempt to reduce `remaining_deps` SeqCst → AcqRel.
 
 ## License
 

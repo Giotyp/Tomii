@@ -9,6 +9,7 @@ Usage:
     python rescore.py results/smoke_v2_t1 --glob trial_000 --overwrite
     python rescore.py results/ --glob 'smoke_*/trial_*' --overwrite
 """
+
 from __future__ import annotations
 
 import argparse
@@ -20,15 +21,15 @@ from pathlib import Path
 from typing import Iterator
 
 RESCORE_VERSION = "1.0"
-LATENCY_FLOOR_US = 200.0   # below this = degenerate (mirrors verifier.py)
+LATENCY_FLOOR_US = 200.0  # below this = degenerate (mirrors verifier.py)
 
 
 # ── Regex catalogue ───────────────────────────────────────────────────────────
 
 # Latency extraction — ordered: most specific first
 _LAT_RE = [
-    re.compile(r"\bavg=(\d+(?:\.\d+)?)\s*(?:µs|us)\b"),           # Tomii explain/tune
-    re.compile(r"avg_latency_us[\"'\s:=]+(\d+(?:\.\d+)?)"),        # report.json / TF stdout
+    re.compile(r"\bavg=(\d+(?:\.\d+)?)\s*(?:µs|us)\b"),  # Tomii explain/tune
+    re.compile(r"avg_latency_us[\"'\s:=]+(\d+(?:\.\d+)?)"),  # report.json / TF stdout
 ]
 
 # Build failures
@@ -37,8 +38,8 @@ _BUILD_ERR_TOMII = re.compile(
     r"|error: could not compile"
     r"|cargo.*(?:failed|error)"
     r"|run_bench\.py: error: unrecognized"
-    r"|No such file or directory.*\.so"
-    , re.I
+    r"|No such file or directory.*\.so",
+    re.I,
 )
 _BUILD_ERR_TASKFLOW = re.compile(
     r"\berror:"
@@ -46,8 +47,8 @@ _BUILD_ERR_TASKFLOW = re.compile(
     r"|ld returned \d+ exit status"
     r"|CMake Error"
     r"|make.*\*\*\* \[.*\] Error"
-    r"|ninja: error"
-    , re.I
+    r"|ninja: error",
+    re.I,
 )
 
 # Runtime failures (framework-neutral)
@@ -58,8 +59,8 @@ _RUNTIME_ERR = re.compile(
     r"|\baborted\b.*core dumped"
     r"|double free or corruption"
     r"|AddressSanitizer"
-    r"|Python.*Traceback \(most recent"
-    , re.I
+    r"|Python.*Traceback \(most recent",
+    re.I,
 )
 
 # tomii tune parse-time / validation rejections
@@ -67,8 +68,8 @@ _TUNE_REJECT = re.compile(
     r"\[reject\]"
     r"|\[error\] Knob [\"'].*[\"'] is not tunable"
     r"|\[error\] Could not find --.* in run_bench\.py"
-    r"|\[validate\] FAIL"
-    , re.M
+    r"|\[validate\] FAIL",
+    re.M,
 )
 
 # Optimization run commands (tool_use input.command)
@@ -87,6 +88,7 @@ _BUILD_CMD = re.compile(
 
 
 # ── Event helpers ─────────────────────────────────────────────────────────────
+
 
 def _parse_events(path: Path) -> list[dict]:
     events: list[dict] = []
@@ -133,6 +135,7 @@ def _build_tool_use_index(events: list[dict]) -> dict[str, dict]:
 
 # ── Token accounting ──────────────────────────────────────────────────────────
 
+
 def _build_token_axis(events: list[dict]) -> tuple[list[int], bool]:
     """Return (tokens_at_turn_k, axis_is_tokens).
 
@@ -151,7 +154,9 @@ def _build_token_axis(events: list[dict]) -> tuple[list[int], bool]:
             else:
                 turns.append({})
 
-    if not any(t.get("cache_read_input_tokens") or t.get("output_tokens") for t in turns):
+    if not any(
+        t.get("cache_read_input_tokens") or t.get("output_tokens") for t in turns
+    ):
         return list(range(len(turns))), False
 
     tokens: list[int] = []
@@ -169,6 +174,7 @@ def _build_token_axis(events: list[dict]) -> tuple[list[int], bool]:
 
 
 # ── Latency extraction ────────────────────────────────────────────────────────
+
 
 @dataclass
 class LatencySample:
@@ -231,18 +237,25 @@ def extract_latencies(
                 tu = tool_uses.get(tid, {})
                 cmd = tu.get("input", {}).get("command", "")
                 source = _tag_source(text, tu.get("name", ""), cmd)
-                tokens = token_axis[min(asst_turn, len(token_axis) - 1)] if token_axis else asst_turn
-                samples.append(LatencySample(
-                    turn_idx=asst_turn,
-                    tokens_so_far=tokens,
-                    latency_us=lat,
-                    source=source,
-                ))
+                tokens = (
+                    token_axis[min(asst_turn, len(token_axis) - 1)]
+                    if token_axis
+                    else asst_turn
+                )
+                samples.append(
+                    LatencySample(
+                        turn_idx=asst_turn,
+                        tokens_so_far=tokens,
+                        latency_us=lat,
+                        source=source,
+                    )
+                )
 
     return samples
 
 
 # ── Failure extraction ────────────────────────────────────────────────────────
+
 
 @dataclass
 class FailureCounts:
@@ -293,7 +306,11 @@ def extract_failures(events: list[dict], framework: str) -> FailureCounts:
                 if name == "Bash" and _BUILD_CMD.search(cmd):
                     fc.build_failures_agent += 1
                 # Inspected = Read/cat of an existing log
-                elif name in ("Read", "ReadFile") or (name == "Bash" and "cat " in cmd and "build" in (cmd + file_path).lower()):
+                elif name in ("Read", "ReadFile") or (
+                    name == "Bash"
+                    and "cat " in cmd
+                    and "build" in (cmd + file_path).lower()
+                ):
                     fc.build_failures_inspected += 1
                 else:
                     # Unclassified but still a build error text
@@ -303,6 +320,7 @@ def extract_failures(events: list[dict], framework: str) -> FailureCounts:
 
 
 # ── Optimization iteration count ──────────────────────────────────────────────
+
 
 def extract_optimization_iterations(events: list[dict], framework: str) -> int:
     opt_re = _OPT_CMD_TOMII if framework == "tomii" else _OPT_CMD_TASKFLOW
@@ -318,8 +336,17 @@ def extract_optimization_iterations(events: list[dict], framework: str) -> int:
                 continue
             cmd = block.get("input", {}).get("command", "")
             # Exclude introspection-only invocations
-            if any(x in cmd for x in ("--build-only", "--help", "--list-knobs", "--schema",
-                                       "--explain", "tune --help")):
+            if any(
+                x in cmd
+                for x in (
+                    "--build-only",
+                    "--help",
+                    "--list-knobs",
+                    "--schema",
+                    "--explain",
+                    "tune --help",
+                )
+            ):
                 continue
             if opt_re.search(cmd):
                 count += 1
@@ -327,6 +354,7 @@ def extract_optimization_iterations(events: list[dict], framework: str) -> int:
 
 
 # ── Misc counters ─────────────────────────────────────────────────────────────
+
 
 def _count_tool_calls(events: list[dict]) -> int:
     n = 0
@@ -364,6 +392,7 @@ def _num_turns_from_result(events: list[dict]) -> int | None:
 
 
 # ── Core rescorer ─────────────────────────────────────────────────────────────
+
 
 def rescore_trial(
     trial_dir: Path,
@@ -463,7 +492,6 @@ def rescore_trial(
         "skills": result_json.get("skills") or config.get("skills"),
         "task_id": result_json.get("task_id") or config.get("task"),
         "tier": result_json.get("tier") or config.get("tier"),
-
         "trajectory_axis": "tokens" if tokens_axis_valid else "turn_idx",
         "latency_trajectory": [
             {
@@ -474,26 +502,21 @@ def rescore_trial(
             }
             for s in samples
         ],
-
         "baseline_latency_us": baseline_latency,
         "final_latency_us": final_latency,
         "tokens_to_first_working_latency": tokens_to_first_working,
         "tokens_to_q": tokens_to_q,
         "first_action_improvement": first_action_improvement,
-
         "build_failures_agent": fc.build_failures_agent,
         "build_failures_inspected": fc.build_failures_inspected,
         "runtime_failures": fc.runtime_failures,
         "invalid_tune_rejections": fc.invalid_tune_rejections,
         "bash_nonzero_exits": fc.bash_nonzero_exits,
-
         "optimization_iterations": opt_iters,
-
         "num_assistant_turns": num_asst,
         "num_tool_calls": num_tool_calls,
         "tool_result_count": num_tool_results,
         "num_turns_reported_by_result": num_turns_result,
-
         "per_turn_usage_available": tokens_axis_valid,
         "rescore_version": RESCORE_VERSION,
         "rescore_schema_warnings": warnings,
@@ -505,16 +528,40 @@ def rescore_trial(
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+
 def main() -> None:
-    p = argparse.ArgumentParser(description="Post-hoc metric enrichment for agent-eval trials")
-    p.add_argument("results_dir", help="Directory containing trial_XXX subdirs (or a parent containing multiple run dirs)")
-    p.add_argument("--glob", default="trial_*", help="Glob pattern for trial dirs relative to results_dir (default: trial_*)")
-    p.add_argument("--overwrite", action="store_true", help="Overwrite existing result_enriched.json")
-    p.add_argument("--framework", default="tomii", help="Framework fallback if config.json absent")
+    p = argparse.ArgumentParser(
+        description="Post-hoc metric enrichment for agent-eval trials"
+    )
+    p.add_argument(
+        "results_dir",
+        help="Directory containing trial_XXX subdirs (or a parent containing multiple run dirs)",
+    )
+    p.add_argument(
+        "--glob",
+        default="trial_*",
+        help="Glob pattern for trial dirs relative to results_dir (default: trial_*)",
+    )
+    p.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing result_enriched.json",
+    )
+    p.add_argument(
+        "--framework", default="tomii", help="Framework fallback if config.json absent"
+    )
     p.add_argument("--oracle-latency", type=float, default=None)
     p.add_argument("--q-threshold", type=float, default=0.80)
-    p.add_argument("--dry-run", action="store_true", help="Parse and print metrics; don't write files")
-    p.add_argument("--summary", action="store_true", help="Print one-line summary per trial after rescoring")
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Parse and print metrics; don't write files",
+    )
+    p.add_argument(
+        "--summary",
+        action="store_true",
+        help="Print one-line summary per trial after rescoring",
+    )
     args = p.parse_args()
 
     root = Path(args.results_dir)
@@ -524,7 +571,10 @@ def main() -> None:
         trial_dirs = sorted(root.glob(f"*/{args.glob}"))
 
     if not trial_dirs:
-        print(f"No trial dirs found under {root} with pattern '{args.glob}'", file=sys.stderr)
+        print(
+            f"No trial dirs found under {root} with pattern '{args.glob}'",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     ok = failed = 0

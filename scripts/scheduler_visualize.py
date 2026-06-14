@@ -37,6 +37,7 @@ Args:
     --no-rcv: Use earliest worker task as time zero instead of earliest packet.
     --slot: Plot only the specified slot (useful when using --record-stream).
 """
+
 import argparse
 from collections import defaultdict
 from utils import read_csv, group_by_slot, separate_worker_system_slots

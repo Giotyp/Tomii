@@ -42,6 +42,7 @@ STATIC_PROMPT_PATH = SCRIPT_DIR / "prompts" / "optimize_mimo.md"
 
 # ── Report parsing ────────────────────────────────────────────────────────────
 
+
 def load_report(path: str) -> dict:
     with open(path) as f:
         return json.load(f)
@@ -63,6 +64,7 @@ def extract_key_metrics(report: dict) -> dict:
 
 
 # ── Prompt building ───────────────────────────────────────────────────────────
+
 
 def build_prompt(
     static_prompt: str,
@@ -92,8 +94,12 @@ def build_prompt(
         parts.append("## Bottleneck Diagnosis")
         parts.append(f"Bottleneck class: **{diag['bottleneck_class']}**")
         parts.append(f"- overhead_pct={diag['overhead_pct']:.1f}%")
-        parts.append(f"- worker_busy: min={diag['worker_busy_min']:.1f}% max={diag['worker_busy_max']:.1f}% spread={diag['worker_busy_spread']:.1f}pp")
-        parts.append(f"- critical_path: {diag['critical_path_nodes']} nodes, {diag['critical_path_latency_us']:.1f}µs")
+        parts.append(
+            f"- worker_busy: min={diag['worker_busy_min']:.1f}% max={diag['worker_busy_max']:.1f}% spread={diag['worker_busy_spread']:.1f}pp"
+        )
+        parts.append(
+            f"- critical_path: {diag['critical_path_nodes']} nodes, {diag['critical_path_latency_us']:.1f}µs"
+        )
         parts.append("Actions suggested:")
         for a in diag["actions"]:
             parts.append(f"  - {a}")
@@ -121,9 +127,12 @@ def build_prompt(
 
 # ── Claude invocation ─────────────────────────────────────────────────────────
 
+
 def invoke_claude(prompt: str, model: str, budget_usd: float) -> str:
     cmd = ["claude", "-p", "--model", model, "--max-budget-usd", str(budget_usd)]
-    result = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=300)
+    result = subprocess.run(
+        cmd, input=prompt, capture_output=True, text=True, timeout=300
+    )
     if result.returncode != 0:
         print(f"[WARN] claude exited {result.returncode}: {result.stderr[:200]}")
     return result.stdout
@@ -134,15 +143,15 @@ def extract_json_config(text: str) -> dict | None:
     depth = 0
     start = None
     for i, ch in enumerate(text):
-        if ch == '{':
+        if ch == "{":
             if depth == 0:
                 start = i
             depth += 1
-        elif ch == '}':
+        elif ch == "}":
             depth -= 1
             if depth == 0 and start is not None:
                 try:
-                    return json.loads(text[start:i + 1])
+                    return json.loads(text[start : i + 1])
                 except json.JSONDecodeError:
                     start = None
     return None
@@ -163,12 +172,14 @@ def validate_config(cfg: dict, opt_config: MimoOptConfig) -> dict:
 
 # ── Benchmark execution ───────────────────────────────────────────────────────
 
+
 def _kill_port(port: int) -> None:
     """Kill any process holding the given UDP port to prevent EADDRINUSE."""
     try:
         result = subprocess.run(
             ["fuser", f"{port}/udp"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         pids = result.stdout.split()
         for pid in pids:
@@ -245,7 +256,10 @@ def run_benchmark(
 
 # ── Verify phase ──────────────────────────────────────────────────────────────
 
-def run_verify(best_cfg: dict, opt: MimoOptConfig, verify_dir: Path, n_trials: int) -> dict:
+
+def run_verify(
+    best_cfg: dict, opt: MimoOptConfig, verify_dir: Path, n_trials: int
+) -> dict:
     verify_dir.mkdir(parents=True, exist_ok=True)
     lats = []
     for t in range(n_trials):
@@ -259,13 +273,22 @@ def run_verify(best_cfg: dict, opt: MimoOptConfig, verify_dir: Path, n_trials: i
         return {"trials": n_trials, "success": 0, "mean": None, "std": None}
     mean_lat = statistics.mean(lats)
     std_lat = statistics.stdev(lats) if len(lats) > 1 else 0.0
-    stats = {"trials": n_trials, "success": len(lats), "mean": mean_lat, "std": std_lat, "values": lats}
+    stats = {
+        "trials": n_trials,
+        "success": len(lats),
+        "mean": mean_lat,
+        "std": std_lat,
+        "values": lats,
+    }
     (verify_dir / "stats.json").write_text(json.dumps(stats, indent=2))
-    print(f"[Verify] mean={mean_lat:.1f} µs  std={std_lat:.1f} µs  ({len(lats)}/{n_trials} succeeded)")
+    print(
+        f"[Verify] mean={mean_lat:.1f} µs  std={std_lat:.1f} µs  ({len(lats)}/{n_trials} succeeded)"
+    )
     return stats
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+
 
 def main():
     parser = argparse.ArgumentParser(description="MIMO two-phase optimization harness")
@@ -308,27 +331,29 @@ def main():
     static_prompt = STATIC_PROMPT_PATH.read_text()
 
     default_config = {
-        "workers":               opt.workers,
-        "system_threads":        opt.system_threads,
-        "receiver_threads":      opt.receiver_threads,
-        "batching_size":         opt.batching_size,
-        "batching_limit":        opt.batching_limit,
+        "workers": opt.workers,
+        "system_threads": opt.system_threads,
+        "receiver_threads": opt.receiver_threads,
+        "batching_size": opt.batching_size,
+        "batching_limit": opt.batching_limit,
         "sched_flush_threshold": opt.sched_flush_threshold,
-        "spin_iterations":       opt.spin_iterations,
-        "spin_wait_spin_iters":  opt.spin_wait_spin_iters,
+        "spin_iterations": opt.spin_iterations,
+        "spin_wait_spin_iters": opt.spin_wait_spin_iters,
         "spin_wait_yield_iters": opt.spin_wait_yield_iters,
-        "spin_wait_park_ns":     opt.spin_wait_park_ns,
+        "spin_wait_park_ns": opt.spin_wait_park_ns,
     }
 
     # ── Phase A: structured knob-search ──────────────────────────────────────
     phase_a_best = dict(default_config)
     if not args.skip_phase_a:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print("[Phase A] Starting structured knob-search (SKILLS/knob-search.md)")
         phase_a_dir = output_dir / "phase_a"
+
         # Adapt run_benchmark signature for skill_runner (script path baked in opt)
         def _run_bench(cfg, script, report_path, timeout_s):
             return run_benchmark(cfg, script, report_path, timeout_s)
+
         phase_a_best, _ = run_phase_a(_run_bench, default_config, phase_a_dir, opt)
         print(f"[Phase A] Best config: {phase_a_best}")
     else:
@@ -339,7 +364,7 @@ def main():
         return
 
     # ── Phase B: LLM-guided loop ──────────────────────────────────────────────
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"[Phase B] Starting LLM loop ({args.llm_iters} iters, model={opt.model})")
 
     phase_b_dir = output_dir / "phase_b"
@@ -353,7 +378,7 @@ def main():
     consecutive_high_overhead = 0
 
     for iteration in range(args.llm_iters):
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"[Phase B] Iteration {iteration + 1} / {args.llm_iters}")
 
         iter_dir = phase_b_dir / f"iter_{iteration}"
@@ -365,7 +390,9 @@ def main():
         tmp.write_text(json.dumps(report_for_diag))
         diag = diagnose(str(tmp))
         (iter_dir / "diagnosis.json").write_text(json.dumps(diag, indent=2))
-        print(f"[Phase B] Bottleneck: {diag['bottleneck_class']}  overhead={diag['overhead_pct']:.1f}%")
+        print(
+            f"[Phase B] Bottleneck: {diag['bottleneck_class']}  overhead={diag['overhead_pct']:.1f}%"
+        )
 
         if diag["overhead_pct"] > 60.0:
             consecutive_high_overhead += 1
@@ -373,18 +400,31 @@ def main():
             consecutive_high_overhead = 0
 
         if consecutive_high_overhead >= 2:
-            print("[Phase B] overhead_pct > 60% for 2 consecutive iters — writing needs_coarsen.json")
-            (output_dir / "needs_coarsen.json").write_text(json.dumps({
-                "reason": "overhead_pct > 60% for 2 consecutive Phase B iterations",
-                "last_overhead_pct": diag["overhead_pct"],
-                "last_config": current_config,
-                "action": "Run SKILLS/graph-coarsen.md on examples/mimolib/graphs/graph_per_symbol.json",
-            }, indent=2))
+            print(
+                "[Phase B] overhead_pct > 60% for 2 consecutive iters — writing needs_coarsen.json"
+            )
+            (output_dir / "needs_coarsen.json").write_text(
+                json.dumps(
+                    {
+                        "reason": "overhead_pct > 60% for 2 consecutive Phase B iterations",
+                        "last_overhead_pct": diag["overhead_pct"],
+                        "last_config": current_config,
+                        "action": "Run SKILLS/graph-coarsen.md on examples/mimolib/graphs/graph_per_symbol.json",
+                    },
+                    indent=2,
+                )
+            )
             print("[Phase B] Exiting early — graph-coarsen required.")
             break
 
-        prompt = build_prompt(static_prompt, reference_report, current_report,
-                               history, current_config, diag)
+        prompt = build_prompt(
+            static_prompt,
+            reference_report,
+            current_report,
+            history,
+            current_config,
+            diag,
+        )
         (iter_dir / "prompt.md").write_text(prompt)
 
         print("[Phase B] Invoking Claude...")
@@ -402,29 +442,43 @@ def main():
 
         report_path = str(iter_dir / "report.json")
         print("[Phase B] Running benchmark...")
-        success = run_benchmark(next_cfg, opt.run_script, report_path, opt.run_timeout_s)
+        success = run_benchmark(
+            next_cfg, opt.run_script, report_path, opt.run_timeout_s
+        )
 
         if not success:
             print("[WARN] Benchmark did not complete")
-            history.append({"config": next_cfg, "avg_latency_us": float("inf"), "error": True})
+            history.append(
+                {"config": next_cfg, "avg_latency_us": float("inf"), "error": True}
+            )
             continue
 
         iter_report = load_report(report_path)
         iter_latency = iter_report["summary"]["avg_latency_us"]
         iter_p99 = iter_report["summary"].get("p99_latency_us", 0)
-        overhead = iter_report["summary"].get("scheduling_overhead_diagnostic", {}).get("overhead_pct", 0)
+        overhead = (
+            iter_report["summary"]
+            .get("scheduling_overhead_diagnostic", {})
+            .get("overhead_pct", 0)
+        )
 
-        print(f"[Phase B] avg={iter_latency:.1f} µs  p99={iter_p99:.1f} µs  overhead={overhead:.1f}%")
-        print(f"  vs baseline: {ref_latency:.1f} µs  "
-              f"({'↓' if iter_latency < ref_latency else '↑'}"
-              f" {abs(iter_latency - ref_latency) / ref_latency * 100:.1f}%)")
+        print(
+            f"[Phase B] avg={iter_latency:.1f} µs  p99={iter_p99:.1f} µs  overhead={overhead:.1f}%"
+        )
+        print(
+            f"  vs baseline: {ref_latency:.1f} µs  "
+            f"({'↓' if iter_latency < ref_latency else '↑'}"
+            f" {abs(iter_latency - ref_latency) / ref_latency * 100:.1f}%)"
+        )
 
-        history.append({
-            "config": next_cfg,
-            "avg_latency_us": iter_latency,
-            "p99_latency_us": iter_p99,
-            "overhead_pct": overhead,
-        })
+        history.append(
+            {
+                "config": next_cfg,
+                "avg_latency_us": iter_latency,
+                "p99_latency_us": iter_p99,
+                "overhead_pct": overhead,
+            }
+        )
 
         if iter_latency < best_latency:
             best_latency = iter_latency
@@ -435,23 +489,29 @@ def main():
         current_report = iter_report
 
     # ── Verify ────────────────────────────────────────────────────────────────
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"[Verify] Running {args.verify_trials} verification trials on best config")
-    verify_stats = run_verify(best_config, opt, output_dir / "verify", args.verify_trials)
+    verify_stats = run_verify(
+        best_config, opt, output_dir / "verify", args.verify_trials
+    )
 
     # Load prior-round best for comparison (best-effort: most recent summary.json)
     prior_best = None
     prior_results = SCRIPT_DIR / "results"
     if prior_results.exists():
-        summaries = sorted(prior_results.glob("**/summary.json"), key=lambda p: p.stat().st_mtime)
+        summaries = sorted(
+            prior_results.glob("**/summary.json"), key=lambda p: p.stat().st_mtime
+        )
         if summaries:
             try:
-                prior_best = json.loads(summaries[-1].read_text()).get("best_latency_us")
+                prior_best = json.loads(summaries[-1].read_text()).get(
+                    "best_latency_us"
+                )
             except Exception:
                 pass
 
     # ── Summary ───────────────────────────────────────────────────────────────
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"[DONE] Optimization complete")
     print(f"  Baseline:        {ref_latency:.1f} µs")
     print(f"  Phase B best:    {best_latency:.1f} µs")
@@ -463,7 +523,11 @@ def main():
     print(f"  Best config:     {best_config}")
 
     phase_a_best_path = output_dir / "phase_a" / "best_config.json"
-    phase_a_final = json.loads(phase_a_best_path.read_text()) if phase_a_best_path.exists() else phase_a_best
+    phase_a_final = (
+        json.loads(phase_a_best_path.read_text())
+        if phase_a_best_path.exists()
+        else phase_a_best
+    )
 
     summary = {
         "workload": workload_label,

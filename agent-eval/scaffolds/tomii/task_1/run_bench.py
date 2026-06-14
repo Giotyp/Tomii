@@ -3,6 +3,7 @@
 See TASK.md for the full computation spec.
 Run: python run_bench.py [--workers N] [--max-streams N] [--exclude-streams N]
 """
+
 from __future__ import annotations
 import argparse
 from pathlib import Path
@@ -14,15 +15,15 @@ HERE = Path(__file__).resolve().parent
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--workers",         type=int, default=2)
-    p.add_argument("--slots",           type=int, default=2)
-    p.add_argument("--max-streams",     type=int, default=5)
+    p.add_argument("--workers", type=int, default=2)
+    p.add_argument("--slots", type=int, default=2)
+    p.add_argument("--max-streams", type=int, default=5)
     p.add_argument("--exclude-streams", type=int, default=2)
-    p.add_argument("--batching-size",   type=int, default=1)
+    p.add_argument("--batching-size", type=int, default=1)
     p.add_argument("--no-clean", dest="clean", action="store_false", default=True)
-    p.add_argument("--build-only",      action="store_true", default=False)
-    p.add_argument("--report",          default="report.json")
-    p.add_argument("--timing",          default="timing.txt")
+    p.add_argument("--build-only", action="store_true", default=False)
+    p.add_argument("--report", default="report.json")
+    p.add_argument("--timing", default="timing.txt")
     return p.parse_args()
 
 

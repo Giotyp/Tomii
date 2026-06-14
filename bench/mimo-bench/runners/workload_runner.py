@@ -27,7 +27,9 @@ HARNESS = SCRIPT_DIR.parent / "harness.py"
 MIMOLIB_DIR = SCRIPT_DIR.parent.parent / "examples" / "mimolib"
 BENCH_RESULTS = SCRIPT_DIR.parent / "results"
 
-PRIOR_RESULTS_ROOT = Path(__file__).parents[4] / "synstream-sosp" / "mimo-bench" / "results"
+PRIOR_RESULTS_ROOT = (
+    Path(__file__).parents[4] / "synstream-sosp" / "mimo-bench" / "results"
+)
 
 WORKLOAD_NAMES = ["8x8", "16x16", "64x8", "64x16"]
 
@@ -46,26 +48,34 @@ def find_reference_report(workload: str) -> Path | None:
 
 
 def run_workload(workload: str, args: argparse.Namespace) -> dict:
-    print(f"\n{'#'*70}")
+    print(f"\n{'#' * 70}")
     print(f"# Workload: {workload}")
-    print(f"{'#'*70}")
+    print(f"{'#' * 70}")
 
     ref_report = find_reference_report(workload)
     if ref_report is None:
         # Fall back to current mimolib report.json (requires a fresh baseline run first)
         ref_report = MIMOLIB_DIR / "report.json"
         if not ref_report.exists():
-            print(f"[ERROR] No reference report for workload {workload}. Run examples/mimolib/scripts/run_mimo.sh first.")
+            print(
+                f"[ERROR] No reference report for workload {workload}. Run examples/mimolib/scripts/run_mimo.sh first."
+            )
             return {"workload": workload, "error": "no_reference_report"}
     print(f"[INFO] Reference report: {ref_report}")
 
     cmd = [
-        sys.executable, str(HARNESS),
-        "--reference-report", str(ref_report),
-        "--workload", workload,
-        "--output-dir", str(BENCH_RESULTS),
-        "--llm-iters", str(args.llm_iters),
-        "--verify-trials", str(args.verify_trials),
+        sys.executable,
+        str(HARNESS),
+        "--reference-report",
+        str(ref_report),
+        "--workload",
+        workload,
+        "--output-dir",
+        str(BENCH_RESULTS),
+        "--llm-iters",
+        str(args.llm_iters),
+        "--verify-trials",
+        str(args.verify_trials),
     ]
     if args.model:
         cmd += ["--model", args.model]
@@ -82,10 +92,17 @@ def run_workload(workload: str, args: argparse.Namespace) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run MIMO optimization rounds across workloads")
-    parser.add_argument("--workloads", nargs="+", choices=WORKLOAD_NAMES + ["all"],
-                        default=["all"], metavar="WL",
-                        help="Workloads to run (8x8 16x16 64x8 64x16 or 'all')")
+    parser = argparse.ArgumentParser(
+        description="Run MIMO optimization rounds across workloads"
+    )
+    parser.add_argument(
+        "--workloads",
+        nargs="+",
+        choices=WORKLOAD_NAMES + ["all"],
+        default=["all"],
+        metavar="WL",
+        help="Workloads to run (8x8 16x16 64x8 64x16 or 'all')",
+    )
     parser.add_argument("--llm-iters", type=int, default=15)
     parser.add_argument("--verify-trials", type=int, default=3)
     parser.add_argument("--model", default="")
@@ -102,10 +119,14 @@ def main():
         outcome = run_workload(wl, args)
         outcomes.append(outcome)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("[DONE] All workloads complete")
     for o in outcomes:
-        status = "OK" if o.get("returncode") == 0 else f"FAIL({o.get('returncode') or o.get('error')})"
+        status = (
+            "OK"
+            if o.get("returncode") == 0
+            else f"FAIL({o.get('returncode') or o.get('error')})"
+        )
         print(f"  {o['workload']:8s} {status}")
 
 
