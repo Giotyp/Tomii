@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "tomii-macro"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -213,7 +213,7 @@ dependencies = [
 
 [[package]]
 name = "tomii-types"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "lazy_static",
  "num-complex",

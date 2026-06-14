@@ -309,7 +309,7 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "tomii-python-bridge"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "parking_lot",
  "pyo3",
@@ -319,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "tomii-types"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "lazy_static",
  "num-complex",
