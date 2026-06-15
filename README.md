@@ -39,10 +39,9 @@ python taskflow/run_bench.py --workers 4 --slots 16 --streams 200
 ```
 
 Sweeps concurrent-slot count (S) to show how per-stream scheduling overhead amortises
-as multi-slot reuse takes effect. The committed regression baseline for the full S×W
-sweep is under `bench/pipeline-bench/tomii/results/post_r1/`; re-run `run_bench.py` to
-regenerate the live sweep CSV. See `bench/pipeline-bench/README.md` for the topology and
-metric.
+as multi-slot reuse takes effect. Run `run_bench.py` to generate the sweep CSV locally
+(run outputs are not committed). See `bench/pipeline-bench/README.md` for the topology
+and metric.
 
 Tomii runs use `--custom --coalesce-barriers --inline-continuation` (hardcoded in `run_bench.py`);
 these are the recommended flags for streaming workloads. Taskflow uses default `tf::Executor`.

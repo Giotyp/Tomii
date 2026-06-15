@@ -17,6 +17,11 @@ shared/**
 examples/**
 tomii.egg-info/*
 
+# Benchmark and example run outputs — regenerate locally, never commit.
+# Only the empty-dir placeholders are tracked.
+**/results/**
+!**/results/.gitkeep
+
 .*
 !.github/
 !.github/workflows/

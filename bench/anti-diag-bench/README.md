@@ -53,7 +53,7 @@ Results are written to `tomii/results/`.
 
 ## Role in CI / Regression Gate
 
-`results/post_r1/` contains the post-R1 baseline (ResolutionStrategy refactor, May 2026).
-Before merging changes to the resolution loop or batch-processing path, re-run and
-compare against this baseline. Max acceptable regression: **+2%** across any (N, W, variant)
-cell. Improvements are expected for resolution-path optimisations.
+Before merging changes to the resolution loop or batch-processing path, capture a
+baseline run, apply your change, re-run, and compare. Max acceptable regression: **+2%**
+across any (N, W, variant) cell; improvements are expected for resolution-path
+optimisations. Run outputs are generated locally and are not committed.

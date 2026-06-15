@@ -72,9 +72,9 @@ S=1 vs S=64). Comparison numbers are published in the project documentation.
 
 ## Reproducibility note
 
-Result CSVs are regenerated outputs and are **not committed** (git-ignored under
-`results/` and `build/`). A committed regression baseline ships under
-`tomii/results/post_r1/`. Re-run the scripts above to regenerate the live sweep.
+Run outputs (CSVs and per-cell logs) are regenerated locally and are **not committed**
+(git-ignored under `results/` and `build/`). Re-run the scripts above to generate the
+sweep on your own machine.
 
 See `pipeline-bench-desc.md` for full methodology, the metric-mismatch history, and
 honest caveats.
