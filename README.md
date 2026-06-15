@@ -2,6 +2,9 @@
 
 **Task-graph framework for streaming pipelines, MIMO workloads, and agent-tuneable applications.**
 
+Tomii implements **Tripartite Decoupling** separating the three following artifacts: 1) Computation structure, 2) Kernel Implementation, 3) Runtime. 
+Each artifact can be modified independently and Tomii is responsible for combining them at compile (transform kernels into tomii-suitable format) or execution time (parse computation structure description).
+
 Tomii is *not* a general-purpose Taskflow or TBB replacement. For pure single-stream
 micro-task DAGs where dispatch overhead dominates, Taskflow is faster. Tomii's advantage
 is in workloads that benefit from concurrent streams, generational slot reuse, and
@@ -12,64 +15,6 @@ Each benchmark under `bench/<name>/` is verifier-gated and reproducible from thi
 repository — run the script in its directory; see `bench/*/README.md` for the topology,
 metric definition, and run instructions. Measured comparison numbers are published in
 the project documentation, not in these READMEs.
-
----
-
-## Flagship examples
-
-### Example #1 — Public 4×4 MIMO uplink benchmark
-
-```bash
-cd bench/mimo-bench
-# requires Intel MKL, Agora sender (see README)
-python tomii/run_bench.py --workers 4 --slots 4 --streams 200
-python taskflow/run_bench.py --workers 4 --slots 4 --streams 200
-```
-
-Tomii dispatches FFT tasks as each UDP packet arrives; Taskflow must collect all packets
-before submitting the full DAG. This packet-overlap is the structural advantage the
-benchmark measures. See `bench/mimo-bench/README.md` for topology and metric.
-
-### Example #2 — Multi-stream pipeline S-scaling
-
-```bash
-cd bench/pipeline-bench
-python tomii/run_bench.py --workers 4 --slots 16 --streams 200
-python taskflow/run_bench.py --workers 4 --slots 16 --streams 200
-```
-
-Sweeps concurrent-slot count (S) to show how per-stream scheduling overhead amortises
-as multi-slot reuse takes effect. Run `run_bench.py` to generate the sweep CSV locally
-(run outputs are not committed). See `bench/pipeline-bench/README.md` for the topology
-and metric.
-
-Tomii runs use `--custom --coalesce-barriers --inline-continuation` (hardcoded in `run_bench.py`);
-these are the recommended flags for streaming workloads. Taskflow uses default `tf::Executor`.
-
-### Ergonomics #1 — Agent-native graph tuning
-
-```bash
-cd examples/agent-tuning
-bash run_all.sh 50   # runs all 4 arms (random, Bayesian, grid, Claude)
-```
-
-Four optimisation arms (random, Bayesian, grid, Claude) compete over the stream-analytics
-knob space with the same budget (50 iterations) and verifier. The agent converges without
-being given source code or documentation; an edit that drops a barrier or removes a `$dep`
-edge fails the verifier and is rejected. See `examples/agent-tuning/README.md`.
-
-### Ergonomics #2 — Polyglot plugin showcase
-
-The same DAG (FFT + matrix compute) runs with Rust, C, and Python kernels:
-
-```bash
-python examples/matrix-compute/run_bench.py --workers 4
-python examples/matrix-compute-C/run_bench.py --workers 4
-python examples/matrix-compute-python/run_bench.py --workers 4
-```
-
-No source changes to the runtime — the plugin boundary is a C ABI, language-agnostic by
-design. See `examples/README.md` for the full capability matrix.
 
 ---
 
@@ -243,6 +188,64 @@ cargo run -p tomii-core --bin main -- \
 
 See `examples/scheduler-plugin/` for a minimal FIFO example and
 `tomii-core/PLUGIN_SCHEDULER_API.md` for the stability contract.
+
+---
+
+## Flagship examples
+
+### Example #1 — Public 4×4 MIMO uplink benchmark
+
+```bash
+cd bench/mimo-bench
+# requires Intel MKL, Agora sender (see README)
+python tomii/run_bench.py --workers 4 --slots 4 --streams 200
+python taskflow/run_bench.py --workers 4 --slots 4 --streams 200
+```
+
+Tomii dispatches FFT tasks as each UDP packet arrives; Taskflow must collect all packets
+before submitting the full DAG. This packet-overlap is the structural advantage the
+benchmark measures. See `bench/mimo-bench/README.md` for topology and metric.
+
+### Example #2 — Multi-stream pipeline S-scaling
+
+```bash
+cd bench/pipeline-bench
+python tomii/run_bench.py --workers 4 --slots 16 --streams 200
+python taskflow/run_bench.py --workers 4 --slots 16 --streams 200
+```
+
+Sweeps concurrent-slot count (S) to show how per-stream scheduling overhead amortises
+as multi-slot reuse takes effect. Run `run_bench.py` to generate the sweep CSV locally
+(run outputs are not committed). See `bench/pipeline-bench/README.md` for the topology
+and metric.
+
+Tomii runs use `--custom --coalesce-barriers --inline-continuation` (hardcoded in `run_bench.py`);
+these are the recommended flags for streaming workloads. Taskflow uses default `tf::Executor`.
+
+### Ergonomics #1 — Agent-native graph tuning
+
+```bash
+cd examples/agent-tuning
+bash run_all.sh 50   # runs all 4 arms (random, Bayesian, grid, Claude)
+```
+
+Four optimisation arms (random, Bayesian, grid, Claude) compete over the stream-analytics
+knob space with the same budget (50 iterations) and verifier. The agent converges without
+being given source code or documentation; an edit that drops a barrier or removes a `$dep`
+edge fails the verifier and is rejected. See `examples/agent-tuning/README.md`.
+
+### Ergonomics #2 — Polyglot plugin showcase
+
+The same DAG (FFT + matrix compute) runs with Rust, C, and Python kernels:
+
+```bash
+python examples/matrix-compute/run_bench.py --workers 4
+python examples/matrix-compute-C/run_bench.py --workers 4
+python examples/matrix-compute-python/run_bench.py --workers 4
+```
+
+No source changes to the runtime — the plugin boundary is a C ABI, language-agnostic by
+design. See `examples/README.md` for the full capability matrix.
 
 ---
 
