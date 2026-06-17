@@ -3,6 +3,9 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Allows re-running the PyPI publish without re-tagging (e.g. after trimming the
+  # wheel matrix) and without re-triggering the crates.io workflow.
+  workflow_dispatch: {}
 
 # OIDC token needed for PyPI trusted publishing (no stored API key required).
 permissions:
@@ -29,14 +32,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # NOTE: 1.0.0 ships Linux x86_64 only. Other targets are deferred:
+      #  - macOS / Windows / ARM (aarch64): blocked by tomii-core/src/utils_rdtsc.rs,
+      #    which compiles x86-only `rdtscp` inline asm + POSIX clock_gettime
+      #    unconditionally. Re-add these rows once that module is arch/OS-gated.
+      #  - Free-threaded "3.13t": needs pyo3 >= 0.23 (bridge + tomii-core are on
+      #    0.22, which rejects a GIL-disabled interpreter). Re-add after the bump.
       matrix:
         os:
           - ubuntu-22.04
-          - ubuntu-22.04-arm
-          - macos-13
-          - macos-14
-          - windows-2022
-        python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.13t"]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
