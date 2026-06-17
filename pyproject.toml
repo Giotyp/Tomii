@@ -3,7 +3,9 @@ requires = ["maturin>=1.7,<2"]
 build-backend = "maturin"
 
 [project]
-name = "tomii"
+# Distribution name on PyPI ("tomii" was rejected as too similar to "tobii").
+# The import name is unaffected — users still `import tomii`.
+name = "tomii-rt"
 version = "1.0.0"
 description = "Python API for the Τομί task-graph framework"
 requires-python = ">=3.9"
