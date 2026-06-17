@@ -41,9 +41,18 @@ app.run(workers=4, slots=2, timing="timing.csv")
 ### Install
 
 ```bash
+# From PyPI — the distribution is named `tomii-rt`; the import name is `tomii`.
+# 1.0.0 ships Linux x86_64 wheels for CPython 3.9–3.13.
+# (macOS / Windows / ARM wheels are planned for a later release.)
+pip install tomii-rt          # then:  import tomii
+
+# From source (for development)
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ```
+
+The Rust crates are published on crates.io: `tomii-core`, `tomii-types`,
+`tomii-macro`, `tomii-converter` (`cargo add tomii-core`).
 
 ### Graph API
 

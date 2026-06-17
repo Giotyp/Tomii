@@ -51,8 +51,21 @@ at S=8, W=4 to confirm (or update) the 2.8× memory headline.
 **`tomii-core/PLUGIN_SCHEDULER_API.md`** — stability contract, integration snippet, per-method
 reference, thread-safety requirements, version field convention, semver expectations.
 
+### Distribution
+
+First public release on both registries:
+
+- **PyPI** — `tomii-rt` (import name `tomii`): Linux x86_64 wheels for CPython
+  3.9–3.13, plus sdist. macOS / Windows / ARM and free-threaded (3.13t) builds are
+  deferred (x86-only `utils_rdtsc` and `pyo3 0.22` respectively).
+- **crates.io** — `tomii-core`, `tomii-types`, `tomii-macro`, `tomii-converter`.
+
 ### Bug fixes / internal changes
 
+- `WorkerMetrics` is now sized to the actual worker-pool thread count (not the
+  requested `--workers`) and the per-task hooks bounds-check the worker index,
+  fixing an intermittent `index out of bounds` panic in the scheduler when the
+  core allocator grew the pool beyond the requested width.
 - Loom test extended to cover `DependencyCounter` concurrent slot completion interleaving.
 - Pre-existing clippy lints in `bin/main.rs` fixed (`redundant use`, `last()` → `next_back()`).
 - `SchedCtx` borrow bundle lifted to `pub` visibility for strategy implementors.
