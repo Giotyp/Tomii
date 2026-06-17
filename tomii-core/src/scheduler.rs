@@ -163,6 +163,11 @@ impl WorkerMetrics {
     }
 
     fn record_task_start(&self, worker_idx: usize) {
+        // Best-effort telemetry — skip out-of-range indices (a task may run on a
+        // system/resolution thread whose index exceeds the worker pool).
+        if worker_idx >= self.last_idle_timestamp.len() {
+            return;
+        }
         // Worker transitioning from idle to busy
         if let Some(idle_start) = self.last_idle_timestamp[worker_idx].lock().take() {
             let idle_duration = idle_start.elapsed().as_nanos() as usize;
@@ -171,6 +176,10 @@ impl WorkerMetrics {
     }
 
     fn record_task_complete(&self, worker_idx: usize) {
+        // Best-effort telemetry — skip out-of-range indices (see record_task_start).
+        if worker_idx >= self.tasks_per_worker.len() {
+            return;
+        }
         self.tasks_per_worker[worker_idx].fetch_add(1, Ordering::Relaxed);
         // Worker now idle
         *self.last_idle_timestamp[worker_idx].lock() = Some(Instant::now());
@@ -263,9 +272,16 @@ impl SchedulerBase {
             async_recorder.clone(),
         );
 
-        // Phase 4: Initialize worker metrics (only when recording enabled)
+        // Phase 4: Initialize worker metrics (only when recording enabled).
+        // Size to the ACTUAL pool thread count: the core-allocation algorithm
+        // may grow the pool beyond the requested `workers`, and the rayon
+        // start_handler sets WORKER_INDEX in 0..actual_workers. Sizing to the
+        // requested `workers` caused an out-of-bounds panic in record_task_*
+        // when actual_workers > workers (scheduler.rs:167).
         let worker_metrics = if record {
-            Some(Arc::new(WorkerMetrics::new(workers)))
+            Some(Arc::new(WorkerMetrics::new(
+                tp.threadpool.current_num_threads(),
+            )))
         } else {
             None
         };
@@ -960,5 +976,27 @@ pub fn create_scheduler(cfg: SchedulerConfig) -> SchedulerImpl {
             }
             SchedulerImpl::Custom(builder.build())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: a task may execute on a thread whose WORKER_INDEX exceeds the
+    /// metrics length (the core allocator can grow the pool beyond the requested
+    /// `workers`, and system/resolution threads can run tasks directly). The
+    /// per-task hooks must not panic on an out-of-range index — they previously
+    /// indexed straight into a length-`workers` Vec (scheduler.rs:167).
+    #[test]
+    fn worker_metrics_tolerates_out_of_range_index() {
+        let m = WorkerMetrics::new(2); // valid indices: 0, 1
+        m.record_task_start(2); // out of range — must be a no-op, not a panic
+        m.record_task_complete(2);
+        m.record_task_start(usize::MAX);
+        m.record_task_complete(usize::MAX);
+        // In-range calls still work.
+        m.record_task_complete(1);
+        assert_eq!(m.tasks_per_worker[1].load(Ordering::Relaxed), 1);
     }
 }
