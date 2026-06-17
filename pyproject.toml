@@ -53,6 +53,7 @@ python-source = "."
 include = [
     { path = "tomii/_bin/main", format = ["wheel"] },
     { path = "tomii/_bin/main.exe", format = ["wheel"] },
+    "LICENSE",
 ]
 # Exclude Rust sources and build artefacts that are not Python runtime deps
 exclude = [

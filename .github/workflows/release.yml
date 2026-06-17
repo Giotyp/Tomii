@@ -143,3 +143,6 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+          # Idempotent re-runs: skip files already on PyPI (e.g. wheels published
+          # in a prior run) and upload only what's new, instead of 400-failing.
+          skip-existing: true
