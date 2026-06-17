@@ -45,8 +45,15 @@ manifest-path = "tomii/_python_bridge/Cargo.toml"
 module-name = "tomii._lib.tomii_python_bridge"
 # Python sources live in the project root alongside Cargo.toml
 python-source = "."
-# Bundle the pre-built tomii binary (copied by the `wheel` Makefile target)
-include = [{ path = "tomii/_bin/**", format = ["wheel"] }]
+# Bundle the pre-built tomii binary (copied by the `wheel` Makefile target /
+# release.yml). Use EXPLICIT paths, not a `**` glob: maturin's include glob is
+# filtered by .gitignore (which lists _bin/main and _bin/main.exe), so the glob
+# silently drops the prebuilt binary from the wheel. Explicit include paths
+# override .gitignore; the platform's absent binary is skipped without error.
+include = [
+    { path = "tomii/_bin/main", format = ["wheel"] },
+    { path = "tomii/_bin/main.exe", format = ["wheel"] },
+]
 # Exclude Rust sources and build artefacts that are not Python runtime deps
 exclude = [
     "tomii/_python_bridge/**",
