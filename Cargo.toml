@@ -21,6 +21,14 @@ exclude = [
 ]
 resolver = "3"
 
+# Shared metadata inherited by the publishable crates via `field.workspace = true`.
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Τομί Team"]
+repository = "https://github.com/Giotyp/Tomii"
+
 [profile.release]
 opt-level = 3
 debug = false 

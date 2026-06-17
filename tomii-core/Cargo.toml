@@ -1,11 +1,14 @@
 [package]
 name = "tomii-core"
-version = "1.0.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Low-latency streaming task-graph runtime for MIMO consumer-producer pipelines"
-license = "MIT OR Apache-2.0"
 keywords = ["streaming", "task-graph", "runtime", "scheduling", "low-latency"]
 categories = ["concurrency", "science", "network-programming"]
+readme = "README.md"
 
 [[bin]]
 name = "main"
@@ -52,7 +55,7 @@ flume = "0.11"
 crossbeam-channel = "0.5"
 libloading = "0.8"
 clap = { version = "4.5.39", features = ["derive"], optional = true }
-tomii-types = { path = "../tomii-types" }
+tomii-types = { path = "../tomii-types", version = "1.0.0" }
 gag = { version = "1.0.0", optional = true }
 # Required by embed-python feature: initializes the embedded Python interpreter
 # and links libpython into the tomii-core binary.
@@ -70,4 +73,4 @@ loom = { version = "0.7", features = ["checkpoint"] }
 
 [build-dependencies]
 build-print = "0.1.1"
-tomii-converter = { path = "../tomii-converter" }
+tomii-converter = { path = "../tomii-converter", version = "1.0.0" }

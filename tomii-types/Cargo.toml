@@ -1,7 +1,14 @@
 [package]
 name = "tomii-types"
-version = "1.0.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Type-erased value types (CmTypes) shared across Tomii plugins and runtime"
+keywords = ["tomii", "streaming", "task-graph", "types"]
+categories = ["data-structures", "concurrency"]
+readme = "README.md"
 
 [dependencies]
 lazy_static = "1.5.0"

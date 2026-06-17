@@ -1,7 +1,14 @@
 [package]
 name = "tomii-converter"
-version = "1.0.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Build-time tool that converts Rust/C plugin headers into Tomii wrapper and registry files"
+keywords = ["tomii", "codegen", "plugin", "ffi", "build-tool"]
+categories = ["development-tools::build-utils", "parsing"]
+readme = "README.md"
 
 [lib]
 name = "tomii_converter"

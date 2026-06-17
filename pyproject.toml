@@ -7,7 +7,23 @@ name = "tomii"
 version = "1.0.0"
 description = "Python API for the Τομί task-graph framework"
 requires-python = ">=3.9"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{ name = "Τομί Team" }]
+keywords = ["task-graph", "streaming", "mimo", "scheduling", "low-latency"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: System :: Distributed Computing",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+]
 dependencies = ["pydantic>=2.0", "matplotlib>=3.0"]
+
+[project.urls]
+Homepage = "https://github.com/Giotyp/Tomii"
+Repository = "https://github.com/Giotyp/Tomii"
+Changelog = "https://github.com/Giotyp/Tomii/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [

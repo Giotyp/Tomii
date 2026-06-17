@@ -2,6 +2,8 @@
 name = "tomii-python-bridge"
 version = "1.0.0"
 edition = "2021"
+# Internal PyO3 bridge built into the PyPI wheel by maturin; never published to crates.io.
+publish = false
 
 [lib]
 name = "tomii_python_bridge"

@@ -1,0 +1,51 @@
+name: Release crates
+
+# Publishes the Tomii Rust crates to crates.io on a version tag, in dependency
+# order. Runs alongside release.yml (which handles the PyPI wheel/sdist).
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish-crates:
+    name: Publish to crates.io
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Publish leaf crates first, then tomii-core which depends on tomii-types
+      # (normal dep) and tomii-converter (build dep). `cargo publish` waits for
+      # each crate to appear in the index before returning, so the next crate in
+      # the loop can resolve it. A retry guards against occasional index lag.
+      #
+      # tomii-core's build.rs writes no-op stubs when FUNC_PATH/WRAP_PATH/REG_PATH
+      # are unset, so the publish-verify build succeeds with no plugin present.
+      - name: Publish in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          publish() {
+            local crate="$1"
+            for attempt in 1 2 3; do
+              echo "::group::publish $crate (attempt $attempt)"
+              if cargo publish -p "$crate"; then
+                echo "::endgroup::"
+                return 0
+              fi
+              echo "::endgroup::"
+              echo "publish of $crate failed; retrying in 30s..."
+              sleep 30
+            done
+            echo "ERROR: failed to publish $crate after 3 attempts" >&2
+            return 1
+          }
+          for crate in tomii-types tomii-macro tomii-converter tomii-core; do
+            publish "$crate"
+          done

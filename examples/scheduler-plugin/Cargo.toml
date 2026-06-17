@@ -3,6 +3,7 @@ name = "scheduler-plugin-example"
 version = "0.1.0"
 edition = "2021"
 description = "Example external scheduler plugin for Tomii using the stable TaskScheduler trait."
+publish = false
 
 [dependencies]
 tomii-core = { path = "../../tomii-core", features = [] }
