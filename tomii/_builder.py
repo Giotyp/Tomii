@@ -221,21 +221,23 @@ def _find_binary(release: bool = True) -> str:
     """Locate the tomii main binary from any supported location.
 
     Search order:
-    1. Bundled binary packaged with the wheel (``tomii/_bin/main``).
-    2. Workspace ``target/<profile>/main`` for development builds.
+    1. Workspace ``target/<profile>/main`` for development builds — a source
+       checkout always wins so freshly built binaries (with the checkout's
+       plugin registry) are never shadowed by the wheel-bundled binary.
+    2. Bundled binary packaged with the wheel (``tomii/_bin/main``).
 
     Raises BuildError if neither is found.
     """
-    bundled = _bundled_binary()
-    if bundled:
-        return bundled
-
     workspace = _try_workspace_root()
     if workspace:
         profile = "release" if release else "debug"
         binary = workspace / "target" / profile / "main"
         if binary.exists():
             return str(binary.resolve())
+
+    bundled = _bundled_binary()
+    if bundled:
+        return bundled
 
     raise RuntimeError(
         "tomii binary not found. Either:\n"

@@ -27,7 +27,7 @@ DEVELOP_ROOT = BENCH_ROOT  # same as workspace root on develop
 AGORA_DIR = Path("~/Agora").expanduser().resolve()
 sys.path.insert(0, str(DEVELOP_ROOT))
 
-from tomii._runner import build_command, _find_binary
+from tomii._runner import build_command
 from build_graph import build_mimo_graph
 
 
@@ -76,7 +76,7 @@ def run_one(
     results_dir: Path,
     dylib: str,
     binary: str,
-    sender_delay: int = 5,
+    sender_delay: int = 10,
 ) -> float:
     timing_file = results_dir / f"tomii_mimo_s{slots}_w{workers}.txt"
     print(f"\n=== Tomii MIMO | slots={slots}  workers={workers} ===", flush=True)
@@ -188,7 +188,7 @@ def main() -> None:
     p.add_argument(
         "--max-runtime",
         type=int,
-        default=30,
+        default=60,
         dest="max_runtime",
         help="per-cell time limit in seconds (sender stops after ~0.5 s; "
         "this lets Tomii finish in-flight work then exit cleanly)",
