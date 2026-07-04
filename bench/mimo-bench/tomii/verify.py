@@ -24,6 +24,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -96,6 +97,7 @@ def _run_pass(
     max_streams: int,
     max_runtime: int,
     workers: int,
+    num_frames: int,
 ) -> Path:
     timing_file = output_dir / f"verify_pass{pass_id}.txt"
     demod_file = output_dir / f"verify_pass{pass_id}_demul.bin"
@@ -156,14 +158,37 @@ def _run_pass(
         tomii_proc.kill()
         raise RuntimeError(f"Tomii hung during verify pass {pass_id}")
     finally:
+        # Kill hard and wait for full exit: the Agora sender ignores SIGTERM and
+        # would keep spraying frames into the NEXT pass's freshly-bound socket,
+        # poisoning its stream counter (stale frame N >> counter -> rejected;
+        # stale replays wedge admission ordering).
         if sender_proc is not None and sender_proc.poll() is None:
-            sender_proc.terminate()
-            try:
-                sender_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                sender_proc.kill()
+            sender_proc.kill()
+            sender_proc.wait()
+    # Let in-flight UDP drain before the next pass binds the socket.
+    time.sleep(2)
+
+    # Precondition: the dump is only deterministic if the pass reached steady
+    # state (all frames processed, last completed frame == num_frames - 1).
+    # A starved pass (packet loss / mispacing / stale-sender contamination)
+    # must be reported as a harness failure, NOT compared by hash.
+    streams_done = _parse_streams_processed(timing_file)
+    if streams_done != num_frames:
+        raise RuntimeError(
+            f"pass {pass_id} HARNESS FAILURE: processed {streams_done} of "
+            f"{num_frames} streams — run is starved (check sender pacing >= 2x "
+            f"per-frame processing time and sender-delay); hash would be "
+            f"meaningless"
+        )
 
     return demod_file
+
+
+def _parse_streams_processed(timing_file: Path) -> int:
+    if not timing_file.exists():
+        return 0
+    m = re.search(r"Total Streams Processed:\s+(\d+)", timing_file.read_text())
+    return int(m.group(1)) if m else 0
 
 
 def sha256(path: Path) -> str:
@@ -206,23 +231,30 @@ def main() -> None:
     p.add_argument(
         "--sender-delay",
         type=int,
-        default=5,
-        help="seconds to wait after starting Tomii before starting sender (default: 5)",
+        default=10,
+        help="seconds to wait after starting Tomii before starting sender "
+        "(default: 10; shorter delays lose startup frames on this machine)",
     )
     p.add_argument(
         "--frame-duration",
         type=int,
-        default=1000,
+        default=120000,
         dest="frame_duration",
-        help="sender --frame_duration in µs (default: 1000)",
+        help="sender --frame_duration in µs (default: 120000 ~ 2x the ~53ms "
+        "per-frame processing time; with slots=1, pacing below the processing "
+        "time makes the runtime reject out-of-range frames and starves the run)",
     )
     p.add_argument(
         "--inter-frame-delay",
         type=int,
-        default=0,
+        default=60000,
         dest="inter_frame_delay",
-        help="sender --inter_frame_delay in µs; spaces the per-frame packet "
-        "burst so the receiver can drain (default: 0)",
+        help="sender --inter_frame_delay in µs; silence gap after each frame's "
+        "packets so the completion counter catches up before the next frame's "
+        "head packets arrive. With slots=1 the admission window is "
+        "[0, counter+1): a gap of 0 makes frame N+1's first packets race "
+        "stream N's completion and get dropped permanently, wedging the run "
+        "(default: 60000)",
     )
     p.add_argument(
         "--num-frames",
@@ -321,13 +353,15 @@ def main() -> None:
             max_streams=args.max_streams,
             max_runtime=args.max_runtime,
             workers=args.workers,
+            num_frames=args.num_frames,
         )
         h = sha256(out_file)
         hashes.append(h)
         print(f"  pass {i} hash: {h[:16]}...", flush=True)
 
     all_match = len(set(hashes)) == 1
-    any_nonzero = any(h != "e3b0c44298fc1c149afb" for h in hashes)
+    empty_sha256 = hashlib.sha256(b"").hexdigest()
+    any_nonzero = any(h != empty_sha256 for h in hashes)
 
     if all_match and any_nonzero:
         print("\nPASS: all passes produced identical non-empty output")
