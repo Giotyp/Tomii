@@ -1,15 +1,20 @@
-//! Successor enumeration and dependency resolution helpers shared by the batch and worker paths.
+//! Successor dependency-resolution helpers shared by the batch and worker paths.
 //!
-//! The three main helpers (`collect_successors_for_node_into`, `decrement_and_collect_ready`,
-//! `push_ready_chunked`) are called from both `batch_resolution::process_batch_inner` (system
-//! thread) and `task_execution::worker_resolve_successors` (worker thread).  Keeping them here
-//! avoids duplicating the logic and ensures both paths share identical dispatch semantics.
+//! The main helpers (`decrement_and_collect_ready`, `push_ready_chunked`) are called from
+//! both `batch_resolution::process_batch_inner` (system thread) and
+//! `task_execution::worker_resolve_successors` (worker thread).  Keeping them here avoids
+//! duplicating the logic and ensures both paths share identical dispatch semantics.
+//!
+//! Successor *enumeration* is a plain slice iteration over
+//! [`super::successor_arena::SuccessorArena::edges_for`] — each [`SuccEdge`] carries the
+//! pre-joined filter/group/1:1 routing data, so no collection step is needed.
 //!
 //! This module does **not** update any per-slot counters directly; that is `batch_resolution`
-//! and `task_execution`.  It only reads `GraphCache` and delegates counter decrements to
+//! and `task_execution`.  It only delegates counter decrements to
 //! `resolution_state::decrease_and_get_ready_into`.
 
 use super::shared_data::SharedData;
+use super::successor_arena::SuccEdge;
 use crate::{buffers::*, IdType};
 use std::sync::Arc;
 
@@ -218,164 +223,42 @@ mod tests {
     }
 }
 
-/// Compute the specific successor-instance index for 1:1 non-barrier predecessor→successor
-/// dependencies.
+/// Decrement the dependency counter of the successor behind `edge` and collect any
+/// now-ready instance indices into `ready` (cleared by the callee first).
 ///
-/// When a predecessor and its successor have the same factor and the dependency is not a
-/// barrier, each predecessor instance `i` should fire exactly one specific successor instance
-/// `j` (where `j = (i - offset).rem_euclid(factor)`).  This guarantees the successor's result
-/// is already stored when the successor runs its `$res` argument fetch, removing the need for
-/// a `spin_wait`.
-///
-/// Returns `Some(j)` when the 1:1 mapping applies; `None` for fanout / barrier dependencies.
-#[inline]
-pub(super) fn compute_1to1_succ_idx(
-    cache: &super::shared_data::GraphCache,
-    pred_node_id: IdType,
-    pred_index: usize,
-    succ_node_id: usize,
-) -> Option<usize> {
-    cache
-        .pred_succ_1to1_offset
-        .get(succ_node_id)
-        .and_then(|v| v.get(pred_node_id as usize))
-        .and_then(|o| *o)
-        .map(|k| {
-            let f = cache.node_cache[succ_node_id].factor;
-            ((pred_index as isize - k).rem_euclid(f as isize)) as usize
-        })
-}
-
-/// Decrement the dependency counter of `succ_node_id` and collect any now-ready instance
-/// indices into `ready`.
-///
-/// Combines `compute_1to1_succ_idx` with `decrease_and_get_ready_into` so both the
-/// batch-resolution path and the worker-resolution path share the same decrement semantics.
+/// The edge carries the pre-joined routing data (group divisor, 1:1 offset, factor), so
+/// this is a pure counter operation — no table lookups.  Both the batch-resolution path
+/// and the worker-resolution path call this, sharing identical decrement semantics.
 /// The `bulk_count` parameter distinguishes the two callers:
 /// - Batch path: always `1` (one completion per node in the batch).
 /// - Worker path: `node_info.bulk_count` (bulk tasks complete N instances in one call).
 #[inline]
-#[allow(clippy::too_many_arguments)]
 pub(super) fn decrement_and_collect_ready(
     ctx: &super::shared_data::ResolveCtx<'_>,
     slot: usize,
-    pred_node_id: IdType,
     pred_index: usize,
-    succ_node_id: usize,
-    pred_group: Option<usize>,
+    edge: &SuccEdge,
     bulk_count: usize,
     slot_gen: u32,
     ready: &mut Vec<usize>,
 ) {
     // When bulk_count > 1 the completing task represents N instances in one shot.
-    // compute_1to1_succ_idx uses pred_index=0 (the bulk start), which would fire only
-    // successor[0] — skipping [1..N-1].  Suppress 1:1 dispatch for bulk completions;
-    // the full threshold scan in decrease_and_get_ready_into handles it correctly.
+    // The 1:1 mapping uses pred_index (the bulk start), which would fire only
+    // successor[start] — skipping the rest of the range.  Suppress 1:1 dispatch for
+    // bulk completions; the full threshold scan in decrease_and_get_ready_into
+    // handles it correctly.
     let specific_succ_idx = if bulk_count > 1 {
         None
     } else {
-        compute_1to1_succ_idx(ctx.cache, pred_node_id, pred_index, succ_node_id)
+        edge.one_to_one_succ_idx(pred_index)
     };
     ctx.exec.resolution_state.decrease_and_get_ready_into(
         slot,
-        succ_node_id,
+        edge.succ_id as usize,
         slot_gen,
-        pred_group,
+        edge.pred_group(pred_index),
         bulk_count,
         specific_succ_idx,
         ready,
     );
-}
-
-/// Collect successor descriptors for `node_info`, appending into `out` (cleared first).
-/// Avoids a heap allocation on the hot path when the caller supplies a reusable buffer.
-#[inline]
-pub(super) fn collect_successors_for_node_into(
-    graph: &crate::graph::Graph,
-    cache: &super::shared_data::GraphCache,
-    node_info: &NodeInfo,
-    out: &mut Vec<(NodeInfo, bool, IdType, Option<usize>)>,
-) {
-    out.clear();
-
-    let node_id_usize = node_info.id as usize;
-
-    // Get successor list for this node (immutable, pre-computed)
-    let successors: &Vec<IdType> = {
-        if node_id_usize >= graph.successors.len() {
-            &Vec::new()
-        } else {
-            &graph.successors[node_id_usize]
-        }
-    };
-
-    // Collect info for each successor without locks
-    for succ_id in successors {
-        let succ_id = *succ_id;
-        let succ_id_usize = succ_id as usize;
-
-        // Predecessor index range filter: skip if this predecessor instance is outside
-        // the declared index range for this successor
-        if let Some(Some((start, end))) = cache
-            .pred_index_filter
-            .get(succ_id_usize)
-            .and_then(|v| v.get(node_id_usize))
-        {
-            if node_info.index < *start || node_info.index >= *end {
-                crate::debug::print_debug(|| {
-                    format!(
-                        "SUCC_FILTER: pred={} index={} succ={} FILTERED (range {}-{})",
-                        node_info.id, node_info.index, succ_id, start, end
-                    )
-                });
-                continue; // Predecessor instance outside declared range
-            }
-        }
-
-        let succ_cache = &cache.node_cache[succ_id_usize];
-
-        // Use pre-computed flag for lock-free check
-        let has_condition = succ_cache.is_condition;
-
-        // Compute predecessor group for group_by barriers
-        let pred_group: Option<usize> = {
-            if let Some(Some(gb)) = cache
-                .pred_group_by
-                .get(succ_id_usize)
-                .and_then(|v| v.get(node_id_usize))
-            {
-                // Compute relative index within the declared range
-                let range_start = cache
-                    .pred_index_filter
-                    .get(succ_id_usize)
-                    .and_then(|v| v.get(node_id_usize))
-                    .and_then(|f| f.map(|(s, _)| s))
-                    .unwrap_or(0);
-                let relative_idx = node_info.index - range_start;
-                Some(relative_idx / gb)
-            } else {
-                None // No group_by → global decrement
-            }
-        };
-
-        // Determine which indices of the successor to create.
-        let succ_indexes = {
-            if pred_group.is_some() {
-                // Group-based dependency: placeholder entry (index 0) for decrement
-                vec![0]
-            } else if node_info.id == 0 {
-                // $network node: 1:1 index mapping for pred_index_filter routing
-                vec![node_info.index]
-            } else {
-                // Single entry per (successor, pred_group) pair
-                vec![0]
-            }
-        };
-
-        // Add successor node info for each instance
-        for succ_index in succ_indexes {
-            let succ_info = NodeInfo::new(succ_id, node_info.slot, succ_index, node_info.index);
-            out.push((succ_info, has_condition, succ_id, pred_group));
-        }
-    }
 }

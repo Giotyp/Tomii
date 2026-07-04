@@ -39,6 +39,8 @@ mod shared_data;
 mod slot_lifecycle;
 mod slot_management;
 mod successor;
+/// Flattened successor-edge arena consumed by the Phase-3 hot loops.
+pub(crate) mod successor_arena;
 mod task_execution;
 mod thread_locals;
 mod threading;
@@ -53,6 +55,7 @@ pub(crate) use node_cache::NodeCacheEntry;
 use parking_lot::RwLock;
 #[cfg(feature = "network")]
 pub(crate) use shared_data::NetworkInfra;
+pub(crate) use successor_arena::SuccessorArena;
 // SharedData is crate-internal; only BatchConfig, SpinWaitConfig, and RuntimeConfig are public.
 pub use resolution_strategy::{BatchOutcome, MultiSlotBatchStrategy, ResolutionStrategy};
 pub use shared_data::SchedCtx;
@@ -285,6 +288,7 @@ impl TomiiRtBuilder {
         let GraphCompiled {
             graph,
             node_cache,
+            successor_arena,
             pred_index_filter,
             pred_group_by,
             pred_succ_1to1_offset,
@@ -386,6 +390,7 @@ impl TomiiRtBuilder {
             graph,
             graph_cache: GraphCache {
                 node_cache,
+                successor_arena,
                 pred_index_filter: Arc::new(pred_index_filter),
                 pred_group_by: Arc::new(pred_group_by),
                 pred_succ_1to1_offset: Arc::new(pred_succ_1to1_offset),

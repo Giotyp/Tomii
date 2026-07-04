@@ -131,10 +131,18 @@ Decrement `pending_cond_tasks[slot]` for condition nodes, or
 operation that races with `check_slots` completion detection.
 
 **Phase 3 — Dispatch successors**
-Call `collect_successors_for_node_into`, then `decrement_and_collect_ready` for
-each successor. Any now-ready successor `NodeInfo`s are accumulated in
-`batch_sched` and flushed to workers via `dispatch_nodes`. This phase is
-protected by `processing_count > 0` (set before the batch loop in Phase 0).
+Iterate `successor_arena.edges_for(node_id)` — a contiguous, precomputed
+`&[SuccEdge]` slice — and call `decrement_and_collect_ready` for each edge that
+passes its index filter. Each `SuccEdge` carries the pre-joined routing data
+(index filter, `group_by` divisor, 1:1 offset, successor factor/flags), so the
+loop performs no graph or table lookups (see `successor_arena.rs`). Any
+now-ready successor `NodeInfo`s are accumulated in `batch_sched` and flushed to
+workers via `dispatch_nodes`. This phase is protected by `processing_count > 0`
+(set before the batch loop in Phase 0).
+
+The worker fast path (`worker_resolve_successors` in `task_execution.rs`) walks
+the same arena with the same `decrement_and_collect_ready` helper, so both
+completion paths share identical dispatch semantics by construction.
 
 **Phase 4 — Decrement `processing_count`** (outer, after `process_batch_inner` returns)
 The `processing_count` decrement happens in `process_batch_resolution` after
@@ -335,6 +343,13 @@ Add the field to `graph_struct.rs::Node`. If it needs a fast-path lookup,
 mirror it into `node_cache.rs::NodeCacheEntry` and populate it in
 `init.rs::build_node_cache`. If it affects dependency routing, update
 `init.rs::build_predecessor_tables`.
+
+**New per-edge routing data (predecessor→successor)**
+Add the field to `successor_arena.rs::SuccEdge` with an accessor method that
+names its semantics, and populate it in `SuccessorArena::build` (called from
+`graph_gen.rs::GraphSpec::compile`). Both Phase-3 hot loops (batch and worker)
+read edges from the arena, so a single change covers both paths. Keep the
+`SuccEdge` compact — it is copied per edge iteration on the hot path.
 
 ---
 

@@ -41,6 +41,13 @@ pub enum SlotState {
 /// Precomputed node cache and predecessor routing tables.
 pub struct GraphCache {
     pub node_cache: Vec<super::node_cache::NodeCacheEntry>,
+    /// Flattened successor edges — the Phase-3 hot-loop layout.  Joins the three
+    /// N×N tables below (plus per-successor node-cache flags) into one contiguous
+    /// slice per predecessor; see `successor_arena.rs` for the full rationale.
+    pub successor_arena: super::successor_arena::SuccessorArena,
+    /// N×N routing tables — retained for the cold `arg_resolution.rs` reads
+    /// (indexed by `(node, pred)` pairs, a different access axis than the arena).
+    /// The Phase-3 hot loops read `successor_arena` instead.
     #[allow(clippy::type_complexity)]
     pub pred_index_filter: Arc<Vec<Vec<Option<(usize, usize)>>>>,
     pub pred_group_by: Arc<Vec<Vec<Option<usize>>>>,

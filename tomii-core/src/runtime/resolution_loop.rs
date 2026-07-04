@@ -217,7 +217,6 @@ pub(crate) fn process_batch_resolution(
     BATCH_INNER_BUFS.with(|bufs| {
         let mut bufs = bufs.borrow_mut();
         let BatchInnerBuffers {
-            succ_updates,
             schedule,
             ready,
             batch_sched,
@@ -230,7 +229,6 @@ pub(crate) fn process_batch_resolution(
             thread_slot,
             cond_indexes,
             stream_slot_activity,
-            succ_updates,
             schedule,
             ready,
             batch_sched,
@@ -423,7 +421,9 @@ fn drain_and_process_batch_queue(
                 })
                 .map(|n| (n, None)),
         );
-        process_batch_resolution(
+        // Route through the pluggable resolution strategy (the batch-protocol seam).
+        // The default MultiSlotBatchStrategy delegates to process_batch_resolution.
+        let _ = shared.exec.resolution_strategy.drive_batch(
             shared,
             &mut comp_batch,
             thread_core,

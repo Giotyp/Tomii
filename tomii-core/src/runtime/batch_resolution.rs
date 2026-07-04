@@ -12,10 +12,7 @@
 
 /// Batch resolution inner loop: dependency propagation and successor scheduling.
 use super::shared_data::SharedData;
-use super::successor::{
-    collect_successors_for_node_into, conditions_met, decrement_and_collect_ready,
-    evaluate_node_condition,
-};
+use super::successor::{conditions_met, decrement_and_collect_ready, evaluate_node_condition};
 use crate::buffers::*;
 use crate::debug::print_debug;
 use crate::IdType;
@@ -46,7 +43,6 @@ pub(super) fn process_batch_inner(
     thread_slot: usize,
     cond_indexes: &[Vec<usize>],
     stream_slot_activity: &mut HashMap<usize, bool>,
-    succ_buf: &mut Vec<(NodeInfo, bool, IdType, Option<usize>)>,
     sched: &mut Vec<NodeInfo>,
     ready: &mut Vec<usize>,
     batch_sched: &mut Vec<NodeInfo>,
@@ -95,26 +91,38 @@ pub(super) fn process_batch_inner(
             let _ = rctx.slots.pending_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
         }
 
-        // Phase 3: Collect successors and process them (no allocations)
-        collect_successors_for_node_into(&shared.graph, rctx.cache, &node_info, succ_buf);
+        // Phase 3: Walk the flattened successor edges (no lookups, no allocations)
         sched.clear();
 
         // Load slot generation once per node (all successors share same slot)
         let slot_gen = rctx.slots.generation[node_info.slot].load(Ordering::SeqCst) as u32;
 
-        for (_succ_info, has_cond, succ_id, pred_group) in succ_buf.iter() {
-            let succ_node_id = *succ_id as usize;
+        for edge in rctx.cache.successor_arena.edges_for(node_id_usize) {
+            // Predecessor index range filter: skip if this predecessor instance is
+            // outside the declared index range for this successor.
+            if !edge.passes_filter(node_info.index) {
+                print_debug(|| {
+                    format!(
+                        "SUCC_FILTER: pred={} index={} succ={} FILTERED",
+                        node_info.id, node_info.index, edge.succ_id
+                    )
+                });
+                continue;
+            }
+
+            let succ_node_id = edge.succ_id as usize;
+            let has_cond = edge.has_condition;
 
             // Skip condition evaluation if all instances already spawned.
             // Use generational lazy check: if stored gen != slot_gen, treat as full factor.
-            if *has_cond {
+            if has_cond {
                 let packed = rctx.slots.cond_instances_to_spawn[node_info.slot][succ_node_id]
                     .load(Ordering::SeqCst);
                 let stored_gen = gen_unpack_gen(packed);
                 let remaining_spawns = if stored_gen == slot_gen {
                     gen_unpack_val(packed)
                 } else {
-                    rctx.cache.node_cache[succ_node_id].factor as u32 // stale gen → full factor
+                    edge.succ_factor() as u32 // stale gen → full factor
                 };
                 print_debug(|| {
                     format!(
@@ -135,10 +143,8 @@ pub(super) fn process_batch_inner(
             decrement_and_collect_ready(
                 &rctx,
                 node_info.slot,
-                node_info.id,
                 node_info.index,
-                succ_node_id,
-                *pred_group,
+                edge,
                 1,
                 slot_gen,
                 ready,
@@ -157,9 +163,8 @@ pub(super) fn process_batch_inner(
 
             // Fanout-bulk: accumulate arrivals for 1:1 bulk dispatch (Upgrade 5).
             // Only applies to non-condition successors (is_fanout_bulk requires !is_condition).
-            let succ_entry = &rctx.cache.node_cache[succ_node_id];
             let fanout_bulk_eligible = !has_cond
-                && succ_entry.is_fanout_bulk
+                && edge.is_fanout_bulk
                 && !shared.config.no_fanout_bulk
                 && (!shared.config.inline_continuation || shared.config.workers == 1);
             if fanout_bulk_eligible && !ready.is_empty() {
@@ -168,8 +173,8 @@ pub(super) fn process_batch_inner(
                     slot_gen,
                     ready.len(),
                 );
-                if new_arrived >= succ_entry.factor {
-                    let factor = succ_entry.factor;
+                if new_arrived >= edge.succ_factor() {
+                    let factor = edge.succ_factor();
                     let n_chunks = shared.config.workers.min(factor).max(1);
                     let base = factor / n_chunks;
                     let extra = factor % n_chunks;

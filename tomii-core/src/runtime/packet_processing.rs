@@ -122,7 +122,8 @@ pub(super) fn poll_and_process_network_packets(
     if !active_packet_batch.is_empty() {
         let start_ns_batch = shared.telemetry.base_instant.elapsed().as_nanos();
         let start_proc = shared.telemetry.measure_start();
-        super::resolution_loop::process_batch_resolution(
+        // Route through the pluggable resolution strategy (the batch-protocol seam).
+        let _ = shared.exec.resolution_strategy.drive_batch(
             shared,
             &mut active_packet_batch,
             thread_core,
