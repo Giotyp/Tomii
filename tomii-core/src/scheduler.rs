@@ -649,6 +649,44 @@ impl SchedulerImpl {
             p => p.spawn_task_with_priority(sched_priority, Box::new(task)))
     }
 
+    /// Whether this scheduler has a typed zero-alloc node spawn path.
+    ///
+    /// Callers hoist this check out of dispatch loops: when `true`, hot-path
+    /// node tasks go through [`Self::spawn_node`] (no per-task `Box`, no
+    /// `Arc<SharedData>` clone); when `false` (Rayon/Plugin), they take the
+    /// boxed-closure path.
+    #[inline]
+    pub fn has_typed_spawn(&self) -> bool {
+        matches!(self, SchedulerImpl::Custom(_))
+    }
+
+    /// Typed zero-alloc spawn of a graph-node task (P2).
+    ///
+    /// Only valid when [`Self::has_typed_spawn`] returns `true`; the runtime
+    /// must have installed the executor via [`Self::set_node_executor`] first.
+    #[inline]
+    pub fn spawn_node(
+        &self,
+        group_id: usize,
+        priority: crate::custom_scheduler::Priority,
+        desc: crate::custom_scheduler::NodeTaskDesc,
+    ) {
+        match self {
+            SchedulerImpl::Custom(s) => s.spawn_node(group_id, priority, desc),
+            _ => unreachable!("spawn_node requires has_typed_spawn() == true"),
+        }
+    }
+
+    /// Install the typed node-task executor (Custom scheduler only; no-op otherwise).
+    pub fn set_node_executor(
+        &self,
+        exec: Box<dyn Fn(crate::custom_scheduler::NodeTaskDesc) + Send + Sync>,
+    ) {
+        if let SchedulerImpl::Custom(s) = self {
+            s.set_node_executor(exec);
+        }
+    }
+
     /// Spawn a task to a specific worker affinity group.
     /// Custom scheduler only; Rayon and Plugin fall back to normal spawn.
     pub fn spawn_to_group_with_meta<F>(

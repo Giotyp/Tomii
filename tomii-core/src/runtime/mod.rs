@@ -452,6 +452,23 @@ impl TomiiRtBuilder {
             },
         });
 
+        // Typed spawn path (P2): install the node-task executor on the Custom
+        // scheduler. The hook holds a Weak — the scheduler is owned by
+        // SharedData.exec, so an Arc here would form a reference cycle that
+        // leaks the worker pool. Tasks arriving after SharedData teardown fail
+        // the upgrade and are dropped (their slot generation is stale anyway).
+        if shared.exec.scheduler.has_typed_spawn() {
+            let weak = Arc::downgrade(&shared);
+            shared
+                .exec
+                .scheduler
+                .set_node_executor(Box::new(move |desc| {
+                    if let Some(shared) = weak.upgrade() {
+                        scheduling::run_node_desc(&shared, desc);
+                    }
+                }));
+        }
+
         Ok(TomiiRt { shared })
     }
 }

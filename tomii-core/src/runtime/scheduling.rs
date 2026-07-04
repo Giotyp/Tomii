@@ -25,13 +25,19 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tomii_types::*;
 
-/// Submit `nodes_to_schedule` to the scheduler, one Rayon task per node.
+/// Submit `nodes_to_schedule` to the scheduler, one task per node.
 ///
-/// Each task is a trampoline loop that runs `execute_task` and, if an inline continuation is
-/// returned, immediately executes the next node on the same worker thread without re-entering
-/// the scheduler.  Post-nodes take a cold path (function and priority looked up from
-/// `graph.post_nodes`) because they are rare end-of-run events and their metadata is not
-/// mirrored in `node_cache`.
+/// **Typed fast path (P2)**: on the Custom scheduler, regular nodes are spawned as POD
+/// [`crate::custom_scheduler::NodeTaskDesc`] values — no per-task `Box`, closure capture,
+/// or `Arc<SharedData>` clone. Workers execute them via [`run_node_desc`] through the
+/// node-executor hook installed at runtime init (see `TomiiRtBuilder::build`).
+///
+/// **Boxed fallback**: Rayon/Plugin schedulers, post-nodes, custom-func nodes, and nodes
+/// with pre-built args take the closure path. Each boxed task is a trampoline loop that
+/// runs `execute_task` and, if an inline continuation is returned, immediately executes
+/// the next node on the same worker thread without re-entering the scheduler. Post-nodes
+/// are cold (function and priority looked up from `graph.post_nodes`) because they are
+/// rare end-of-run events and their metadata is not mirrored in `node_cache`.
 ///
 /// `gen` is stamped onto each `NodeInfo` clone here so stale tasks can be detected cheaply
 /// inside `execute_task` without a shared-state read at stamp time.
@@ -43,6 +49,9 @@ pub(super) fn send_to_scheduler(
     pre_built_args_vec: &[Option<Vec<CmTypes>>],
     custom_func_vec: Option<&[Option<CmPtr>]>,
 ) {
+    // Hoisted out of the loop: one variant check per batch, not per task.
+    let typed_spawn = sctx.exec.scheduler.has_typed_spawn();
+
     for (i, node_info) in nodes_to_schedule.iter().enumerate() {
         // Look up func_ptr, priority, and affinity from pre-computed cache.
         // Post-nodes use the cold path since they're rare (end-of-run only).
@@ -82,24 +91,48 @@ pub(super) fn send_to_scheduler(
             (func, cache.priority, cache.affinity_group)
         };
 
-        let shared_clone = Arc::clone(shared);
         let should_record = should_record_slot(sctx.cfg, sctx.slots, node_info.slot);
-        let meta_data = crate::TaskMeta {
-            task_id: node_info.id,
-            slot: node_info.slot,
-            index: node_info.index,
-            should_record,
-        };
         let mut node_info = node_info.clone();
         // Stamp the current slot generation so execute_task can detect stale tasks.
         // Post-nodes are exempt: they run after all streams complete and have no generation risk.
         if !node_info.post_node {
             node_info.gen = sctx.slots.generation[node_info.slot].load(Ordering::Acquire) as u32;
         }
-        let pre_built_args = pre_built_args_vec[i].clone();
 
         // Per-task spawn timestamp for accurate scheduling latency measurement.
         let spawn_ns = sctx.telemetry.base_instant.elapsed().as_nanos();
+
+        // Typed fast path: POD descriptor through the Custom scheduler's queue.
+        // Post-nodes, custom-func nodes, and pre-built-args nodes stay boxed —
+        // run_node_desc always resolves the function from node_cache and builds
+        // args from the arg cache, which only holds for regular nodes.
+        if typed_spawn
+            && !node_info.post_node
+            && custom_func.is_none()
+            && pre_built_args_vec[i].is_none()
+        {
+            sctx.exec.scheduler.spawn_node(
+                affinity_group,
+                task_priority,
+                crate::custom_scheduler::NodeTaskDesc {
+                    node: node_info,
+                    func: func_ptr,
+                    spawn_ns,
+                    job_id: 0, // assigned by spawn_node
+                    should_record,
+                },
+            );
+            continue;
+        }
+
+        let shared_clone = Arc::clone(shared);
+        let meta_data = crate::TaskMeta {
+            task_id: node_info.id,
+            slot: node_info.slot,
+            index: node_info.index,
+            should_record,
+        };
+        let pre_built_args = pre_built_args_vec[i].clone();
         let task = move || {
             // Build sctx once per task — it's just field borrows from the Arc.
             let sctx = shared_clone.sched_ctx();
@@ -131,6 +164,26 @@ pub(super) fn send_to_scheduler(
                 .scheduler
                 .spawn_task_with_meta_priority(task_priority, Some(meta_data), task);
         }
+    }
+}
+
+/// Execute a typed node task from the Custom scheduler's zero-alloc queue.
+///
+/// Body is identical to the boxed-task trampoline in [`send_to_scheduler`]: run the
+/// node, then follow inline continuations on this worker thread without re-entering
+/// the scheduler. Called via the node-executor hook installed in `TomiiRtBuilder::build`;
+/// the hook upgrades a `Weak<SharedData>` before calling here, so `shared` is alive for
+/// the whole trampoline.
+pub(super) fn run_node_desc(shared: &Arc<SharedData>, desc: crate::custom_scheduler::NodeTaskDesc) {
+    // Build sctx once per task — it's just field borrows from the Arc.
+    let sctx = shared.sched_ctx();
+    let mut current = desc.node;
+    let mut current_func = desc.func;
+    // Typed spawns never carry pre-built args (post-nodes stay on the boxed path).
+    while let Some(next) = execute_task(shared, &sctx, current_func, &current, None, desc.spawn_ns)
+    {
+        current_func = sctx.cache.node_cache[next.id as usize].func_ptr;
+        current = next;
     }
 }
 

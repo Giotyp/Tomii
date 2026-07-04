@@ -88,12 +88,36 @@ without touching `batch_queue`. This path:
 
 1. Increments `processing_count` to prevent premature completion detection.
 2. Decrements `pending_tasks` or `pending_cond_tasks`.
-3. Calls `collect_successors_for_node_into` + `decrement_and_collect_ready`.
+3. Iterates the node's `SuccessorArena` edge slice, calling
+   `decrement_and_collect_ready` per edge.
 4. Dispatches ready successors via `send_to_scheduler`.
 5. Decrements `processing_count` after all successor dispatch is complete.
 
 This is the fast path because it eliminates a `batch_queue` round-trip and a
 context switch to the resolution thread.
+
+### Task dispatch: typed and boxed spawn paths
+
+`send_to_scheduler` (scheduling.rs) is the single choke-point for submitting
+ready nodes. It has two arms:
+
+- **Typed spawn (Custom scheduler, hot path).** Regular nodes are sent as POD
+  `NodeTaskDesc` values (node identity + gen, `CmPtr`, spawn timestamp,
+  recording flags) directly through the scheduler's crossbeam channels — no
+  per-task `Box`, closure capture, or `Arc<SharedData>` clone. Workers execute
+  the descriptor via a node-executor hook installed once in
+  `TomiiRtBuilder::build`; the hook holds a `Weak<SharedData>` (an `Arc` would
+  form a cycle — the scheduler is owned by `SharedData.exec` — and leak the
+  worker pool) and upgrades it per task, running the same trampoline loop
+  (`run_node_desc`) as the boxed path: execute, then follow inline
+  continuations on the same worker.
+- **Boxed spawn (everything else).** Rayon/Plugin schedulers, post-nodes,
+  custom-func nodes, and nodes with pre-built args are spawned as
+  `Box<dyn FnOnce()>` closures, preserving the plugin-scheduler ABI.
+
+The two arms must stay behaviorally identical: gen is stamped before spawn in
+both, and the worker-side recording semantics (one `Record` spanning the whole
+trampoline, keyed by the spawn-assigned job id) match.
 
 ### 2. Batch-queue path (slow path)
 
@@ -398,11 +422,14 @@ operations must be `SeqCst` (see invariants above).  At W workers and S concurre
 slots this produces W×S SeqCst RMWs competing on the same cache line per node,
 which becomes the dominant cost for fan-in nodes with large K.
 
-**Type-erased dispatch (~40–85 ns/call).** Task functions are stored as
-`Box<dyn FnOnce()>` (Rayon path) or raw `fn` pointers (inline-continuation path).
-The inline-continuation path eliminates the box allocation but retains one indirect
-call per task.  Sub-µs workloads where per-task work is comparable to this overhead
-will not amortise it.
+**Type-erased dispatch (~40–85 ns/call).** On the Custom scheduler, regular
+nodes travel as POD `NodeTaskDesc` values (typed spawn path) — no per-task box
+or `Arc` clone; one indirect call through the node-executor hook plus one
+`Weak::upgrade` per task remain.  The Rayon/Plugin paths and post/custom-func
+nodes still box a `Box<dyn FnOnce()>` per task.  The inline-continuation path
+eliminates even the queue round-trip but retains one indirect call per task.
+Sub-µs workloads where per-task work is comparable to this overhead will not
+amortise it.
 
 **Resolution-thread state machine.**  By default a single resolution thread runs
 the four-phase batch protocol (batch drain → completion detection → successor

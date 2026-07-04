@@ -327,6 +327,7 @@ pub(super) fn create_channels_and_state(
         async_recorder,
         base_instant: Arc::new(base_instant),
         system_core_offset,
+        node_exec: std::sync::OnceLock::new(),
     });
 
     (shared, group_channels)
