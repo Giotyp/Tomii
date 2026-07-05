@@ -1,7 +1,9 @@
 """Machine-readable schema for Τομί graph construction parameters."""
 
+from typing import Any
 
-def graph_schema() -> dict:
+
+def graph_schema() -> "dict[str, Any]":
     """Return a JSON-serializable schema describing the graph Python API."""
     return {
         "overview": (

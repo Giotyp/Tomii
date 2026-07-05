@@ -45,6 +45,7 @@ _STR_FLAGS: Dict[str, str] = {
     "output": "--output",
     "timing": "--timing",
     "report": "--report",
+    "dump_state": "--dump-state",
 }
 
 _KNOB_DESCRIPTIONS: Dict[str, str] = {
@@ -72,6 +73,8 @@ _KNOB_DESCRIPTIONS: Dict[str, str] = {
     "inline_continuation": "Run single-successor tasks inline (reduces scheduling overhead)",
     # Str flags
     "output": "Path for raw timing output file",
+    "dump_state": "Path for a runtime state snapshot (JSON) written at shutdown; "
+    "SIGUSR1 writes numbered live snapshots (wedged-run debugging)",
     "timing": "Path for per-node timing CSV",
     "report": "Path for JSON summary report (avg/p99 latency, bottleneck hints)",
 }
@@ -106,6 +109,7 @@ _KNOB_ROLES: Dict[str, str] = {
     "output": "io",
     "timing": "io",
     "report": "io",
+    "dump_state": "io",
 }
 
 # Value domains for searchable knobs.  "pow2" means the sensible search points
@@ -168,7 +172,7 @@ def _resolved_domain(key: str) -> Optional[Dict[str, Any]]:
     return domain
 
 
-def list_knobs_json() -> dict:
+def list_knobs_json() -> "dict[str, Any]":
     """Return a machine-readable dict of all graph.run() options.
 
     Each knob carries: name, type, cli flag, role (perf/measurement/io/env),
@@ -256,7 +260,7 @@ def run(
     release: bool = True,
     env: Optional[Dict[str, str]] = None,
     **kwargs: Any,
-) -> subprocess.CompletedProcess:
+) -> "subprocess.CompletedProcess[bytes]":
     """Write graph JSON to a temp file and invoke the Τομί binary.
 
     Args:

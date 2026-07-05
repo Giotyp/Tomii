@@ -22,7 +22,7 @@ class TomiiExportError(ValueError):
 
 @dataclass
 class ExportMeta:
-    fn: Callable
+    fn: Callable[..., Any]
     qualname: str  # registry key, e.g. "matcomp.generate_vector"
     module: str  # e.g. "matcomp"
     fn_name: str  # e.g. "generate_vector"
@@ -35,7 +35,10 @@ _TOMII_REGISTRY: dict[str, ExportMeta] = {}
 
 
 def export(
-    fn: Optional[Callable] = None, *, variadic: bool = False, name: Optional[str] = None
+    fn: Optional[Callable[..., Any]] = None,
+    *,
+    variadic: bool = False,
+    name: Optional[str] = None,
 ) -> Any:
     """Mark a Python function as a Tomii-callable node body.
 
@@ -70,7 +73,7 @@ def export(
         function; move it to an importable ``.py`` module instead.
     """
 
-    def _wrap(f: Callable) -> Callable:
+    def _wrap(f: Callable[..., Any]) -> Callable[..., Any]:
         mod = f.__module__
 
         if mod == "__main__":

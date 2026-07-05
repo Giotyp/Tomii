@@ -21,7 +21,7 @@ class Graph:
         self._nodes: List[Node] = []
         self._post_nodes: List[Node] = []
         self._network: Dict[str, Any] = {}
-        self._names: set = set()
+        self._names: set[str] = set()
         self._build_result: Optional[Any] = None  # BuildResult, set after build()
         self._py_callable_vars: Dict[str, Var] = {}  # qualname → Var for dedup
         self._py_module_dirs: List[str] = []  # dirs to prepend to PYTHONPATH at run()
@@ -159,14 +159,15 @@ class Graph:
                         importlib.import_module(parts[0])
                     except ImportError:
                         pass
-            meta = _TOMII_REGISTRY.get(fn)
-            if meta is None:
+            meta_opt = _TOMII_REGISTRY.get(fn)
+            if meta_opt is None:
                 raise ValueError(
                     f"py_node: '{fn}' not found in @tomii.export registry. "
                     "Is the function decorated with @tomii.export?"
                 )
+            meta: ExportMeta = meta_opt
         elif hasattr(fn, "__tomii_export__"):
-            meta: ExportMeta = fn.__tomii_export__
+            meta = fn.__tomii_export__
         else:
             raise ValueError(
                 f"py_node: {fn!r} is not decorated with @tomii.export. "
@@ -177,8 +178,9 @@ class Graph:
         import sys as _sys
 
         module_obj = _sys.modules.get(meta.module)
-        if module_obj and getattr(module_obj, "__file__", None):
-            module_dir = str(Path(module_obj.__file__).resolve().parent)
+        module_file = getattr(module_obj, "__file__", None) if module_obj else None
+        if module_file:
+            module_dir = str(Path(module_file).resolve().parent)
             if module_dir not in self._py_module_dirs:
                 self._py_module_dirs.append(module_dir)
 
@@ -318,7 +320,7 @@ class Graph:
         script_dir = (
             _os.path.dirname(_os.path.abspath(_sys.argv[0])) if _sys.argv else ""
         )
-        extra_parts: list = list(self._py_module_dirs)
+        extra_parts: list[str] = list(self._py_module_dirs)
         extra_parts += [p for p in _sys.path if p and p != script_dir]
         extra_parts += [
             p

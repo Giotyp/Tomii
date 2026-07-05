@@ -6,7 +6,7 @@ import textwrap
 from typing import Any, Optional
 
 
-def generate_python(graph_data: dict) -> str:
+def generate_python(graph_data: "dict[str, Any]") -> str:
     """Produce a build_graph() function string from a GraphFile dict.
 
     Parameters
@@ -125,7 +125,7 @@ def _factor_expr(factor: Any, var_names: set[str]) -> str:
     return str(factor)
 
 
-def _parse_init_value(arg: dict) -> str:
+def _parse_init_value(arg: "dict[str, Any]") -> str:
     """Convert an ArgInit dict to a Python literal expression."""
     type_ = arg.get("type", "usize")
     value = arg.get("value", "")
@@ -139,7 +139,7 @@ def _parse_init_value(arg: dict) -> str:
     if type_.startswith("i") or type_.startswith("u"):
         # Integer types: plain int unless it needs a wrapper
         if type_ == "usize":
-            return value  # plain int, infer_type handles it
+            return str(value)  # plain int renders identically in generated code
         return f"tm.{type_}({value})"
     if type_ == "String":
         return f"tm.String({value!r})"
@@ -151,7 +151,7 @@ def _parse_init_value(arg: dict) -> str:
     return repr(value)
 
 
-def _encode_init_args(args: list[dict], var_names: set[str]) -> str:
+def _encode_init_args(args: "list[dict[str, Any]]", var_names: set[str]) -> str:
     """Encode a list of ArgInit dicts as a comma-separated Python expression string."""
     parts: list[str] = []
     for a in args:
@@ -165,7 +165,7 @@ def _encode_init_args(args: list[dict], var_names: set[str]) -> str:
 
 
 def _encode_arg(
-    arg: dict, node_pynames: dict[str, str], var_names: set[str]
+    arg: "dict[str, Any]", node_pynames: dict[str, str], var_names: set[str]
 ) -> Optional[str]:
     """Encode a single ArgJson dict as a Python expression. Returns None to skip."""
     type_ = arg.get("type", "")
@@ -227,7 +227,7 @@ def _format_indexes(indexes: str, var_names: set[str]) -> str:
 
 
 def _encode_condition(
-    cond: dict, node_pynames: dict[str, str], var_names: set[str]
+    cond: "dict[str, Any]", node_pynames: dict[str, str], var_names: set[str]
 ) -> str:
     """Encode a NodeConditionJson dict as a Condition(...) expression."""
     op = cond.get("operation", "Eq")
@@ -259,7 +259,7 @@ def _encode_condition(
     )
 
 
-def _encode_loop(loop: dict, var_names: set[str]) -> str:
+def _encode_loop(loop: "dict[str, Any]", var_names: set[str]) -> str:
     """Encode a LoopJson dict as a Loop(...) expression."""
     name = loop.get("name", "")
     factor = loop.get("factor")
@@ -269,7 +269,7 @@ def _encode_loop(loop: dict, var_names: set[str]) -> str:
 
 def _append_node(
     lines: list[str],
-    n: dict,
+    n: "dict[str, Any]",
     node_pynames: dict[str, str],
     var_names: set[str],
     is_post: bool,

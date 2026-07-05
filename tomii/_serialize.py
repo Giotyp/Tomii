@@ -55,7 +55,7 @@ def _indexes(start: Any, end: Any) -> str:
 def _arg(a: Any) -> ArgJson:
     """Convert a node argument to an ArgJson model."""
     if isinstance(a, Var):
-        return ArgJson(type_="$ref", value=a.name)
+        return ArgJson(type="$ref", value=a.name)
 
     if isinstance(a, NodeDep):
         pred = PredJson(
@@ -63,7 +63,7 @@ def _arg(a: Any) -> ArgJson:
             indexes=_indexes(a.start, a.end),
             group_by=_factor(a.group_by),
         )
-        return ArgJson(type_="$dep", predecessor=pred)
+        return ArgJson(type="$dep", predecessor=pred)
 
     if isinstance(a, NodeOutput):
         pred = PredJson(
@@ -71,7 +71,7 @@ def _arg(a: Any) -> ArgJson:
             indexes=_indexes(a.start, a.end),
             group_by=_factor(a.group_by),
         )
-        return ArgJson(type_="$res", predecessor=pred)
+        return ArgJson(type="$res", predecessor=pred)
 
     if isinstance(a, NodeBarrier):
         pred = PredJson(
@@ -79,13 +79,13 @@ def _arg(a: Any) -> ArgJson:
             indexes=_indexes(a.start, a.end),
             group_by=_factor(a.group_by),
         )
-        return ArgJson(type_="$barrier", predecessor=pred)
+        return ArgJson(type="$barrier", predecessor=pred)
 
     if isinstance(a, TypedValue):
-        return ArgJson(type_=a.type_name, value=a.value_str)
+        return ArgJson(type=a.type_name, value=a.value_str)
 
     tv = infer_type(a)
-    return ArgJson(type_=tv.type_name, value=tv.value_str)
+    return ArgJson(type=tv.type_name, value=tv.value_str)
 
 
 def _arg_init(a: Any) -> ArgInit:
@@ -94,11 +94,11 @@ def _arg_init(a: Any) -> ArgInit:
     Init args always have a required value — no predecessors allowed.
     """
     if isinstance(a, Var):
-        return ArgInit(type_="$ref", value=a.name)
+        return ArgInit(type="$ref", value=a.name)
     if isinstance(a, TypedValue):
-        return ArgInit(type_=a.type_name, value=a.value_str)
+        return ArgInit(type=a.type_name, value=a.value_str)
     tv = infer_type(a)
-    return ArgInit(type_=tv.type_name, value=tv.value_str)
+    return ArgInit(type=tv.type_name, value=tv.value_str)
 
 
 def _condition_value(v: Any) -> str:
@@ -132,7 +132,7 @@ def _node(n: Node) -> NodeJson:
         name=n.name,
         factor=_factor(n.factor),
         function=n.func,
-        loop_=loop,
+        loop=loop,
         loop_args=[_arg(a) for a in n.loop_args] if n.loop_args else None,
         args=[_arg(a) for a in n.args],
         group_size=_factor(n.group_size) if n.group_size is not None else None,
@@ -158,21 +158,26 @@ def _init(v: Var) -> InitJson:
     )
 
 
-def _network(config: dict) -> NetworkConfigJson:
+def _network(config: "dict[str, Any]") -> NetworkConfigJson:
     """Convert the network config dict to a NetworkConfigJson model."""
+    # index_function is REQUIRED by the runtime (json_structs.rs declares it
+    # non-optional) — fail here with a clear message rather than at Rust parse.
     index_func_cfg = config.get("index_function")
-    index_function: Optional[IndexFunctionJson] = None
-    if index_func_cfg is not None:
-        if isinstance(index_func_cfg, IndexFunc):
-            index_function = IndexFunctionJson(
-                function=index_func_cfg.function,
-                args=[_arg(a) for a in index_func_cfg.args],
-            )
-        elif isinstance(index_func_cfg, dict):
-            index_function = IndexFunctionJson(
-                function=index_func_cfg["function"],
-                args=[_arg(a) for a in index_func_cfg.get("args", [])],
-            )
+    if isinstance(index_func_cfg, IndexFunc):
+        index_function = IndexFunctionJson(
+            function=index_func_cfg.function,
+            args=[_arg(a) for a in index_func_cfg.args],
+        )
+    elif isinstance(index_func_cfg, dict):
+        index_function = IndexFunctionJson(
+            function=index_func_cfg["function"],
+            args=[_arg(a) for a in index_func_cfg.get("args", [])],
+        )
+    else:
+        raise ValueError(
+            "network config requires 'index_function' (an IndexFunc or dict); "
+            f"got {index_func_cfg!r}"
+        )
 
     def _factor_net(v: Any) -> Any:
         """Network config values: Var → name string, else pass-through."""
@@ -197,22 +202,22 @@ def _network(config: dict) -> NetworkConfigJson:
 # --------------------------------------------------------------------------- #
 
 
-def serialize_arg(arg: Any) -> dict:
+def serialize_arg(arg: Any) -> "dict[str, Any]":
     """Convert a single argument to its JSON DSL dict representation."""
     return _arg(arg).model_dump(by_alias=True, exclude_none=True)
 
 
-def serialize_var(var: Var) -> dict:
+def serialize_var(var: Var) -> "dict[str, Any]":
     """Convert a Var to an initialization entry dict."""
     return _init(var).model_dump(by_alias=True, exclude_none=True)
 
 
-def serialize_node(node: Node) -> dict:
+def serialize_node(node: Node) -> "dict[str, Any]":
     """Convert a Node to a node entry dict."""
     return _node(node).model_dump(by_alias=True, exclude_none=True)
 
 
-def serialize_graph(graph: Any) -> dict:
+def serialize_graph(graph: Any) -> "dict[str, Any]":
     """Convert a Graph object to the full JSON DSL dict."""
     return GraphFile(
         initializations=[_init(v) for v in graph._vars],

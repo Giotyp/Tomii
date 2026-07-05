@@ -10,6 +10,8 @@ For explicit control use the wrapper functions: ss.i32(-5), ss.String("hello"), 
 
 from __future__ import annotations
 
+from typing import Any, Callable
+
 
 class TypedValue:
     """A value with an explicit Τομί type name."""
@@ -27,8 +29,8 @@ class TypedValue:
 # --------------------------------------------------------------------------- #
 
 
-def _scalar(type_name: str):
-    def factory(value) -> TypedValue:
+def _scalar(type_name: str) -> "Callable[[Any], TypedValue]":
+    def factory(value: Any) -> TypedValue:
         return TypedValue(type_name, str(value))
 
     factory.__name__ = type_name
@@ -84,7 +86,7 @@ def Complex64(real: float, imag: float) -> TypedValue:
 # --------------------------------------------------------------------------- #
 
 
-def Vec(element_type: str, values: list) -> TypedValue:  # noqa: N802
+def Vec(element_type: str, values: "list[Any]") -> TypedValue:  # noqa: N802
     return TypedValue(f"Vec<{element_type}>", ",".join(str(v) for v in values))
 
 
@@ -93,7 +95,7 @@ def Vec(element_type: str, values: list) -> TypedValue:  # noqa: N802
 # --------------------------------------------------------------------------- #
 
 
-def infer_type(value) -> TypedValue:
+def infer_type(value: Any) -> TypedValue:
     """Convert a plain Python value to a TypedValue using auto-inference rules."""
     if isinstance(value, bool):
         # Must check bool before int — bool is a subclass of int in Python

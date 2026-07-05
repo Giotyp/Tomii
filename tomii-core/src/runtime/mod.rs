@@ -18,6 +18,7 @@
 mod arg_resolution;
 mod batch_resolution;
 mod consts;
+mod dump;
 mod init;
 #[cfg(feature = "network")]
 mod network_init;
@@ -57,6 +58,7 @@ use parking_lot::RwLock;
 pub(crate) use shared_data::NetworkInfra;
 pub(crate) use successor_arena::SuccessorArena;
 // SharedData is crate-internal; only BatchConfig, SpinWaitConfig, and RuntimeConfig are public.
+pub use dump::StateDumper;
 pub use resolution_strategy::{BatchOutcome, MultiSlotBatchStrategy, ResolutionStrategy};
 pub use shared_data::SchedCtx;
 pub(crate) use shared_data::SharedData;
@@ -501,6 +503,14 @@ pub struct RunProgress {
 impl TomiiRt {
     pub fn base_instant(&self) -> Instant {
         *self.shared.telemetry.base_instant
+    }
+
+    /// Cloneable handle for snapshotting runtime state from any thread —
+    /// including while `run()` is blocked (the wedged-run debugging case).
+    pub fn state_dumper(&self) -> StateDumper {
+        StateDumper {
+            shared: Arc::clone(&self.shared),
+        }
     }
 
     /// Spawn all threads and run the graph to completion (or until max_runtime).

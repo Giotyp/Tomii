@@ -71,6 +71,15 @@ struct Args {
     max_streams: usize,
     #[clap(long, value_name = "FILE", required = false, help = "Enable timing")]
     timing: Option<String>,
+    #[clap(
+        long,
+        value_name = "FILE",
+        required = false,
+        help = "Write a runtime state snapshot (JSON) to FILE at shutdown; on Unix, \
+                SIGUSR1 additionally writes numbered snapshots (FILE.1, FILE.2, ...) \
+                while the run is live — useful for diagnosing wedged runs"
+    )]
+    dump_state: Option<String>,
     #[clap(long, help = "Enable scheduler recording", required = false)]
     record: bool,
     #[clap(
@@ -341,6 +350,7 @@ fn main() {
         timing_enabled,
         args.batch_queue_capacity,
         args.socket_recv_buf_bytes,
+        args.dump_state.clone(),
     );
 
     let time_file = args.timing;
@@ -375,6 +385,7 @@ pub fn run_graph(
     timing_enabled: bool,
     batch_queue_capacity: usize,
     socket_recv_buf_bytes: usize,
+    dump_state: Option<String>,
 ) -> TomiiRt {
     // Guard: network receiver threads only apply when a network config is present.
     if spec.graph.network_config().is_none() {
@@ -475,11 +486,60 @@ pub fn run_graph(
             std::process::exit(1);
         });
 
+    if let Some(path) = &dump_state {
+        spawn_state_dump_watcher(synrt.state_dumper(), path.clone());
+    }
+
     synrt.run().unwrap_or_else(|e| {
         eprintln!("Runtime error: {e}");
         std::process::exit(1);
     });
+
+    // Final snapshot at shutdown — the post-mortem view of the completed run.
+    if let Some(path) = &dump_state {
+        match std::fs::write(path, synrt.state_dumper().dump()) {
+            Ok(()) => tracing::info!(path, "runtime state dumped"),
+            Err(e) => eprintln!("state dump to {path} failed: {e}"),
+        }
+    }
     synrt
+}
+
+/// SIGUSR1 sets this flag; the watcher thread turns it into a snapshot file.
+/// The handler itself only stores an atomic — async-signal-safe.
+static DUMP_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn on_sigusr1(_sig: libc::c_int) {
+    DUMP_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Register SIGUSR1 (Unix) and spawn a watcher thread that writes numbered
+/// snapshots (`<path>.1`, `<path>.2`, ...) whenever the signal arrives.
+/// The thread lives for the rest of the process; snapshots never touch the
+/// hot path beyond atomic reads and short read-lock acquisitions.
+fn spawn_state_dump_watcher(dumper: tomii_core::runtime::StateDumper, path: String) {
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGUSR1, on_sigusr1 as libc::sighandler_t);
+    }
+    std::thread::Builder::new()
+        .name("state-dump".into())
+        .spawn(move || {
+            let mut seq = 0usize;
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if DUMP_REQUESTED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    seq += 1;
+                    let snap_path = format!("{path}.{seq}");
+                    match std::fs::write(&snap_path, dumper.dump()) {
+                        Ok(()) => eprintln!("[tomii] state snapshot written to {snap_path}"),
+                        Err(e) => eprintln!("[tomii] state snapshot failed: {e}"),
+                    }
+                }
+            }
+        })
+        .expect("failed to spawn state-dump watcher");
 }
 
 /// Load the dylib, look for the `tomii_python_bridge_abi` symbol, and abort
