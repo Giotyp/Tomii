@@ -16,7 +16,7 @@ use super::ordering::{slot_gen_load, slot_gen_rmw};
 use super::scheduling::send_to_scheduler;
 use super::shared_data::{SchedCtx, SharedData};
 use super::successor::{decrement_and_collect_ready, push_ready_chunked};
-use super::thread_locals::{WorkerResolutionBuffers, ARG_BUF, WORKER_BUFS};
+use super::thread_locals::{WorkerResolutionBuffers, ARG_BUF, NODE_ARG_TEMPLATES, WORKER_BUFS};
 use crate::buffers::*;
 use crate::debug::print_debug;
 use std::sync::Arc;
@@ -417,28 +417,65 @@ fn execute_single_task(
         func(args)
     } else {
         let node_cache = &sctx.cache.node_cache[node_info.id as usize];
-        let result_opt = ARG_BUF.with(|buf_cell| {
-            let mut buf = buf_cell.borrow_mut();
-            buf.clear();
-            let stale = populate_cached_args_into(
-                &mut buf,
-                shared,
-                &node_cache.arg_cache,
-                node_info.id,
-                node_info.index,
-                node_info.slot,
-                node_info.pred_index,
-                exec_slot,
-                exec_gen,
-            );
-            if stale {
+        let result_opt = if node_cache.template_stable {
+            // P3 Phase A: persistent per-(thread, node) template — clone the
+            // static args once, then patch only the dynamic slots per task.
+            NODE_ARG_TEMPLATES.with(|tpls| {
+                let mut tpls = tpls.borrow_mut();
+                let id = node_info.id as usize;
+                if tpls.len() <= id {
+                    tpls.resize_with(id + 1, || None);
+                }
+                let buf = tpls[id].get_or_insert_with(|| node_cache.arg_cache.args.clone());
+                let args_cache = &node_cache.arg_cache;
+                let workers = if !args_cache.rt_workers_indexes.is_empty() {
+                    shared.config.workers
+                } else {
+                    0
+                };
+                // template_stable guarantees every $res is width-1, so the
+                // splice arm inside populate_dynamic_args_into is unreachable
+                // and the buffer length stays constant across tasks.
+                let stale = populate_dynamic_args_into(
+                    buf,
+                    shared,
+                    args_cache,
+                    node_info.index,
+                    node_info.slot,
+                    node_info.pred_index,
+                    exec_slot,
+                    exec_gen,
+                    workers,
+                );
+                if stale {
+                    return None::<CmTypes>;
+                }
+                Some(func(buf))
+            })
+        } else {
+            ARG_BUF.with(|buf_cell| {
+                let mut buf = buf_cell.borrow_mut();
                 buf.clear();
-                return None::<CmTypes>;
-            }
-            let r = func(&buf);
-            buf.clear();
-            Some(r)
-        });
+                let stale = populate_cached_args_into(
+                    &mut buf,
+                    shared,
+                    &node_cache.arg_cache,
+                    node_info.id,
+                    node_info.index,
+                    node_info.slot,
+                    node_info.pred_index,
+                    exec_slot,
+                    exec_gen,
+                );
+                if stale {
+                    buf.clear();
+                    return None::<CmTypes>;
+                }
+                let r = func(&buf);
+                buf.clear();
+                Some(r)
+            })
+        };
         match result_opt {
             Some(r) => r,
             None => {

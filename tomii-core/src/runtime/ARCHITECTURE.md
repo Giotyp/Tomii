@@ -119,6 +119,22 @@ The two arms must stay behaviorally identical: gen is stamped before spawn in
 both, and the worker-side recording semantics (one `Record` spanning the whole
 trampoline, keyed by the spawn-assigned job id) match.
 
+### Argument materialisation: persistent per-node templates
+
+For `template_stable` nodes (every `$res`/`$dep` arg resolves to exactly one
+value, so the arg vector's length is a build-time constant — computed in
+`build_node_cache`), `execute_single_task` keeps a persistent per-(thread,
+node) arg buffer (`NODE_ARG_TEMPLATES` thread-local): the static template is
+cloned once on first execution, and each task rewrites only the dynamic slots
+(buffer refs, `$ref::index`/`$ref::worker`, `$res` results) via
+`populate_dynamic_args_into` — the same patch function the bulk path uses on
+its hoisted template. This eliminates the per-task template clone and the
+matching per-task drops (each static `Any` arc previously cost an atomic
+inc+dec per task). Non-stable nodes (collect-all `$res` args whose splice
+changes the buffer length) fall back to the rebuild-per-task `ARG_BUF` path.
+Invariant: every dynamic slot is unconditionally rewritten before each kernel
+call, so values left behind by a stale-task abort can never be observed.
+
 ### 2. Batch-queue path (slow path)
 
 Condition: any successor of this node is a condition node (`is_condition == true`).

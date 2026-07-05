@@ -238,6 +238,7 @@ mod tests {
             needs_result_store: false,
             bulk_func: None,
             is_fanout_bulk,
+            template_stable: false,
         }
     }
 

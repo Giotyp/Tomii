@@ -56,6 +56,24 @@ thread_local! {
     pub(super) static ARG_BUF: RefCell<Vec<CmTypes>> =
         RefCell::new(Vec::with_capacity(16));
 
+    /// Persistent per-node arg templates (P3 Phase A), indexed by node id.
+    ///
+    /// For `template_stable` nodes, the static arg template is cloned once per
+    /// (thread, node) on first execution and only the dynamic slots (buffer
+    /// refs, runtime indices, `$res` results) are rewritten per task — no
+    /// per-task template clone, no per-task drop of the static `CmTypes`
+    /// (each static `Any` arc costs an atomic inc+dec per task on the legacy
+    /// path).
+    ///
+    /// Written and read by: worker threads in `execute_single_task` only.
+    /// Lifecycle: lives for the thread's lifetime. A slot may briefly retain
+    /// the previous task's `$res` value until the next task of the same node
+    /// overwrites it — bounded by (nodes × threads) values. After a stale-task
+    /// abort, partially patched slots are harmless: every dynamic slot is
+    /// unconditionally rewritten before the next kernel call.
+    pub(super) static NODE_ARG_TEMPLATES: RefCell<Vec<Option<Vec<CmTypes>>>> =
+        const { RefCell::new(Vec::new()) };
+
     /// Worker-side dependency resolution buffers — all four in one allocation.
     ///
     /// Written and read by: worker threads in `worker_resolve_successors`.

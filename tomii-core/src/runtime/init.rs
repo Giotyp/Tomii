@@ -186,6 +186,26 @@ pub(crate) fn build_node_cache(
         }
     }
 
+    // template_stable — P3 Phase A eligibility: the arg vector's length is a
+    // build-time constant iff every $res/$dep arg resolves to exactly one value.
+    // Mirrors the width logic in `fetch_res_results`: width is 1 for $dep, empty
+    // or single index, and the 1:1 mapping (indexes.len() == node_factor); only
+    // the collect-all path (multi-index, != node_factor) splices >1 values and
+    // would grow a persistent template unboundedly.
+    // Escape hatch for A/B measurement and field debugging: disables the
+    // persistent-template path at runtime without a rebuild (same binary, so
+    // comparisons are not confounded by code-layout changes).
+    let templates_disabled = std::env::var_os("TOMII_DISABLE_ARG_TEMPLATES").is_some();
+    for cache_entry in cache.iter_mut() {
+        let all_width_one = cache_entry
+            .arg_cache
+            .res_predecessors
+            .iter()
+            .all(|rp| rp.is_dep || rp.indexes.len() <= 1 || rp.indexes.len() == rp.node_factor);
+        cache_entry.template_stable =
+            !templates_disabled && all_width_one && cache_entry.name != "$network";
+    }
+
     cache
 }
 
