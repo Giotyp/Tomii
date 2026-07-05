@@ -11,8 +11,14 @@ fn main() {
 
     // Declare Py_GIL_DISABLED as a valid cfg key so that code gated with
     // #[cfg(Py_GIL_DISABLED)] in tomii-core compiles without warnings.
-    // The actual flag is emitted by pyo3's build script when embed-python is active.
     println!("cargo::rustc-check-cfg=cfg(Py_GIL_DISABLED)");
+
+    // pyo3's interpreter cfgs (Py_3_x, Py_GIL_DISABLED, ...) are emitted only for
+    // pyo3's own compilation; downstream crates must re-emit them explicitly.
+    // Without this, cfg!(Py_GIL_DISABLED) is always false in tomii-core and the
+    // bridge ABI check spuriously rejects free-threaded (3.13t+) interpreters.
+    #[cfg(feature = "embed-python")]
+    pyo3_build_config::use_pyo3_cfgs();
 
     // Re-run the build script whenever the wrapper/registry/func env vars change
     // so that cargo detects the new paths and recompiles with the correct functions.

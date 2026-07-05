@@ -243,7 +243,7 @@ fn main() {
     {
         // Initialize the embedded Python interpreter before loading the bridge
         // dylib so that libpython symbols are globally visible when dlopen runs.
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         check_python_bridge_abi(&args.dylib);
     }
 
@@ -493,8 +493,8 @@ fn check_python_bridge_abi(dylib_path: &str) {
     use libloading::{Library, Symbol};
 
     // Build the expected ABI from the live interpreter. Python is already
-    // initialized by prepare_freethreaded_python() in the caller.
-    let expected_abi: u32 = pyo3::Python::with_gil(|py| {
+    // initialized by Python::initialize() in the caller.
+    let expected_abi: u32 = pyo3::Python::attach(|py| {
         let vi = py.version_info();
         let gil_disabled: u32 = if cfg!(Py_GIL_DISABLED) { 1 } else { 0 };
         ((vi.major as u32) << 24) | ((vi.minor as u32) << 16) | (gil_disabled << 15)

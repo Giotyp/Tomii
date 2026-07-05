@@ -32,16 +32,27 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      # NOTE: 1.0.0 ships Linux x86_64 only. Other targets are deferred:
-      #  - macOS / Windows / ARM (aarch64): blocked by tomii-core/src/utils_rdtsc.rs,
-      #    which compiles x86-only `rdtscp` inline asm + POSIX clock_gettime
-      #    unconditionally. Re-add these rows once that module is arch/OS-gated.
-      #  - Free-threaded "3.13t": needs pyo3 >= 0.23 (bridge + tomii-core are on
-      #    0.22, which rejects a GIL-disabled interpreter). Re-add after the bump.
+      # Each wheel is built natively on its runner (no cross-compilation) so the
+      # bundled tomii-core binary and the bridge dylib always match the platform:
+      #  - ubuntu-22.04       → linux x86_64
+      #  - ubuntu-22.04-arm   → linux aarch64
+      #  - macos-15-intel     → macOS x86_64
+      #  - macos-14           → macOS arm64 (Apple Silicon)
+      # Free-threaded rows ("3.13t"/"3.14t", PEP 703) are first-class: pyo3 0.26
+      # supports GIL-disabled interpreters and the bridge declares gil_used=false.
       matrix:
         os:
           - ubuntu-22.04
-        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+          - ubuntu-22.04-arm
+          - macos-15-intel
+          - macos-14
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.13t", "3.14", "3.14t"]
+        exclude:
+          # setup-python has no arm64 CPython 3.9 builds for these runners.
+          - os: ubuntu-22.04-arm
+            python: "3.9"
+          - os: macos-14
+            python: "3.9"
 
     steps:
       - uses: actions/checkout@v4

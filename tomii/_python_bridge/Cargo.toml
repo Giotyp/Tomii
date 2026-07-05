@@ -15,8 +15,8 @@ crate-type = ["cdylib"]
 tomii-types = { path = "../../tomii-types" }
 # extension-module: tells PyO3 NOT to link libpython — symbols come from
 # the already-loaded libpython in the embedding tomii-core binary.
-pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3 = { version = "0.26", features = ["extension-module"] }
 parking_lot = "0.12"
 
 [build-dependencies]
-pyo3-build-config = { version = "0.22", features = ["resolve-config"] }
+pyo3-build-config = { version = "0.26", features = ["resolve-config"] }
