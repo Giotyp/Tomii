@@ -44,23 +44,36 @@ FUNC_PATH=$(pwd)/examples/stream-analytics/src/lib.rs \
 
 ```bash
 cd examples/agent-tuning
-bash run_all.sh 50   # run all 4 arms with 50 iterations each
+bash run_all.sh 50                            # all 4 arms, stream-analytics
+bash run_all.sh 50 pipeline                   # all 4 arms, pipeline-bench
+bash run_all.sh 30 mimo --streams 200 --warmup 20   # all 4 arms, mimo-bench
 ```
 
 Each arm writes a `.jsonl` trial log to the results directory.
+
+## Workloads
+
+Every arm takes `--workload {stream-analytics,pipeline,mimo}` (see `workloads.py`);
+the search loop is workload-agnostic and the knob space is always generated
+(`tomii.knob_space`) from the workload's graph.
+
+| Workload | Source | Correctness gate | Metric | Notes |
+|---|---|---|---|---|
+| `stream-analytics` | `examples/stream-analytics` | golden-file `verify.py` per trial | avg latency ms/stream (`report.json`) | self-contained |
+| `pipeline` | `bench/pipeline-bench` | knob-aware verify pass per trial (emit-to-file graph run with the trial's knobs + graph edits, numeric checks vs Python reference) | `Avg Time Per Stream` from timing file | self-contained, heavy kernel |
+| `mimo` | `bench/mimo-bench` | keep-up gate: `Total Streams Processed == frames sent` (a config cannot look fast by dropping frames) | `Avg Time Per Stream` (ms/slot) from timing file | needs Agora sender + MKL; graph knobs disabled (no per-trial output verification for edited MIMO graphs); `--streams` = sender frame budget; ~25-40 s/trial |
 
 ## Methodology
 
 | Property | Value |
 |---|---|
 | Budget per arm | `--iterations` (default 50) |
-| Streams per eval | 500 (50 warmup excluded) |
-| Correctness gate | `examples/stream-analytics/verify.py` |
-| Metric | `ms_per_stream` (from `report.json` summary) |
-| Rejected trial | `verifier_ok=False` — not counted toward best |
+| Trial size | `--streams` / `--warmup` (defaults 500/50; mimo interprets streams as sender frames) |
+| Correctness gate | per workload (table above) — gates every trial |
+| Rejected trial | `verifier_ok=False` — logged with reason, not counted toward best |
 
-All four arms use identical budget, threshold, and verifier. A trial is valid only if
-the verifier passes for the full stream count.
+All four arms use identical budget, fixtures, and verifier per workload. A trial is
+valid only if the workload's gate passes for the full trial.
 
 ## Arms
 

@@ -20,10 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from harness import (  # noqa: E402
     TrialRecord,
+    add_common_args,
     establish_baseline,
-    evaluate,
-    load_knob_space,
     log_trial,
+    setup_arm,
 )
 
 from tomii import knobs as tomii_knobs  # noqa: E402
@@ -34,7 +34,7 @@ _TIMEOUT_S = 60  # max wall time for one claude call
 _PROMPT_TEMPLATE = """\
 You are an expert performance-tuning assistant for the Tomii task-graph framework.
 
-Your task: suggest runtime knob configurations for the stream-analytics workload \
+Your task: suggest runtime knob configurations for the {workload} workload \
 to minimise ms_per_stream while keeping the verifier passing.
 
 {knob_space_block}
@@ -114,6 +114,7 @@ def _ask_claude(
     n_shown = min(5, len(trial_log))
     best_str = f"{best_ms:.4f}" if best_ms < float("inf") else "none yet"
     prompt = _PROMPT_TEMPLATE.format(
+        workload=space.get("workload") or "target",
         knob_space_block=tomii_knobs.render_prompt(space),
         iteration=iteration,
         baseline_ms=baseline_ms,
@@ -185,22 +186,21 @@ def main() -> None:
     p = argparse.ArgumentParser(
         description="Claude-agent search over stream-analytics knobs"
     )
-    p.add_argument("--iterations", type=int, default=50)
-    p.add_argument("--streams", type=int, default=500)
-    p.add_argument("--warmup", type=int, default=50)
-    p.add_argument("--results-dir", type=Path, default=Path("results"))
+    add_common_args(p)
     args = p.parse_args()
 
-    args.results_dir.mkdir(parents=True, exist_ok=True)
-    log_file = args.results_dir / "agent_trials.jsonl"
-
-    space = load_knob_space()
-    print(f"[agent] knob space: {len(space['knobs'])} knobs", flush=True)
+    workload, space, results_dir = setup_arm(args)
+    log_file = results_dir / "agent_trials.jsonl"
+    print(
+        f"[agent] workload={workload.name} knob space: {len(space['knobs'])} knobs",
+        flush=True,
+    )
 
     baseline = establish_baseline(
         streams=args.streams,
         warmup=args.warmup,
-        results_dir=args.results_dir,
+        results_dir=results_dir,
+        workload=workload,
     )
     best_ms = baseline if baseline > 0.0 else float("inf")
 
@@ -222,7 +222,9 @@ def main() -> None:
             print(f"[agent {i}] skipped — Claude response could not be parsed", flush=True)
             continue
 
-        result = evaluate(knobs, streams=args.streams, warmup=args.warmup, space=space)
+        result = workload.evaluate(
+            knobs, streams=args.streams, warmup=args.warmup, space=space
+        )
         record = TrialRecord(
             iteration=i,
             knobs=knobs,

@@ -18,10 +18,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from harness import (  # noqa: E402
     TrialRecord,
+    add_common_args,
     establish_baseline,
-    evaluate,
-    load_knob_space,
     log_trial,
+    setup_arm,
 )
 
 from tomii import knobs as tomii_knobs  # noqa: E402
@@ -29,37 +29,31 @@ from tomii import knobs as tomii_knobs  # noqa: E402
 
 def main() -> None:
     p = argparse.ArgumentParser(description="random search over the knob space")
-    p.add_argument("--iterations", type=int, default=50)
+    add_common_args(p)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--streams", type=int, default=500)
-    p.add_argument("--warmup", type=int, default=50)
-    p.add_argument("--results-dir", type=Path, default=Path("results"))
-    p.add_argument(
-        "--no-graph-knobs",
-        action="store_true",
-        help="restrict the search to runtime (CLI) knobs",
-    )
     args = p.parse_args()
 
     rng = random.Random(args.seed)
-    args.results_dir.mkdir(parents=True, exist_ok=True)
-    log_file = args.results_dir / "random_trials.jsonl"
-
-    space = load_knob_space()
-    if args.no_graph_knobs:
-        space = {**space, "knobs": [k for k in space["knobs"] if k["kind"] == "cli"]}
-    print(f"[random] knob space: {len(space['knobs'])} knobs", flush=True)
+    workload, space, results_dir = setup_arm(args)
+    log_file = results_dir / "random_trials.jsonl"
+    print(
+        f"[random] workload={workload.name} knob space: {len(space['knobs'])} knobs",
+        flush=True,
+    )
 
     baseline = establish_baseline(
         streams=args.streams,
         warmup=args.warmup,
-        results_dir=args.results_dir,
+        results_dir=results_dir,
+        workload=workload,
     )
     best_ms = baseline if baseline > 0.0 else float("inf")
 
     for i in range(args.iterations):
         knobs = tomii_knobs.sample(space, rng)
-        result = evaluate(knobs, streams=args.streams, warmup=args.warmup, space=space)
+        result = workload.evaluate(
+            knobs, streams=args.streams, warmup=args.warmup, space=space
+        )
         record = TrialRecord(iteration=i, knobs=knobs, result=result, arm="random")
         log_trial(record, log_file)
 

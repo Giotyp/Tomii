@@ -16,10 +16,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from harness import (  # noqa: E402
     TrialRecord,
+    add_common_args,
     establish_baseline,
-    evaluate,
-    load_knob_space,
     log_trial,
+    setup_arm,
 )
 
 from tomii import knobs as tomii_knobs  # noqa: E402
@@ -29,33 +29,17 @@ def main() -> None:
     p = argparse.ArgumentParser(
         description="grid search over the knob space (budget-capped)"
     )
-    p.add_argument(
-        "--iterations",
-        type=int,
-        default=50,
-        help="maximum grid cells to evaluate",
-    )
-    p.add_argument("--streams", type=int, default=500)
-    p.add_argument("--warmup", type=int, default=50)
-    p.add_argument("--results-dir", type=Path, default=Path("results"))
-    p.add_argument(
-        "--no-graph-knobs",
-        action="store_true",
-        help="restrict the search to runtime (CLI) knobs",
-    )
+    add_common_args(p)
     args = p.parse_args()
 
-    args.results_dir.mkdir(parents=True, exist_ok=True)
-    log_file = args.results_dir / "grid_trials.jsonl"
-
-    space = load_knob_space()
-    if args.no_graph_knobs:
-        space = {**space, "knobs": [k for k in space["knobs"] if k["kind"] == "cli"]}
+    workload, space, results_dir = setup_arm(args)
+    log_file = results_dir / "grid_trials.jsonl"
 
     baseline = establish_baseline(
         streams=args.streams,
         warmup=args.warmup,
-        results_dir=args.results_dir,
+        results_dir=results_dir,
+        workload=workload,
     )
     best_ms = baseline if baseline > 0.0 else float("inf")
 
@@ -64,13 +48,15 @@ def main() -> None:
     cells = list(itertools.islice(tomii_knobs.grid_cells(space), budget))
 
     print(
-        f"[grid] full grid = {total_grid} cells; evaluating {budget} cells "
-        f"({budget / total_grid * 100:.1f}% coverage)",
+        f"[grid] workload={workload.name} full grid = {total_grid} cells; "
+        f"evaluating {budget} cells ({budget / total_grid * 100:.1f}% coverage)",
         flush=True,
     )
 
     for i, knobs in enumerate(cells):
-        result = evaluate(knobs, streams=args.streams, warmup=args.warmup, space=space)
+        result = workload.evaluate(
+            knobs, streams=args.streams, warmup=args.warmup, space=space
+        )
         record = TrialRecord(iteration=i, knobs=knobs, result=result, arm="grid")
         log_trial(record, log_file)
 
