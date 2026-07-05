@@ -3,6 +3,9 @@
 Usage:
     python -m tomii --list-knobs         # human-readable list of graph.run() options
     python -m tomii --list-knobs-json    # machine-readable JSON of graph.run() options
+    python -m tomii --knob-space [graph.json] [--workload NAME]
+                                         # generated tuning search space (CLI +
+                                         # per-graph knobs when a graph is given)
     python -m tomii --schema             # JSON schema for graph construction parameters
     python -m tomii --help               # same as --list-knobs
 
@@ -26,6 +29,8 @@ def main() -> None:
         print(list_knobs())
     elif "--list-knobs-json" in args:
         print(json.dumps(list_knobs_json(), indent=2))
+    elif "--knob-space" in args:
+        _cmd_knob_space(args)
     elif "--schema" in args:
         from ._schema import graph_schema
 
@@ -35,9 +40,26 @@ def main() -> None:
     else:
         print(f"Unknown argument(s): {args}")
         print(
-            "Usage: python -m tomii [--list-knobs | --list-knobs-json | --schema | --visualize <graph.json> | --help]"
+            "Usage: python -m tomii [--list-knobs | --list-knobs-json | --knob-space [graph.json] | --schema | --visualize <graph.json> | --help]"
         )
         sys.exit(1)
+
+
+def _cmd_knob_space(args: "list[str]") -> None:
+    from ._knobs import knob_space
+
+    idx = args.index("--knob-space")
+    graph_path = None
+    if idx + 1 < len(args) and not args[idx + 1].startswith("--"):
+        graph_path = args[idx + 1]
+
+    workload = None
+    if "--workload" in args:
+        i = args.index("--workload")
+        if i + 1 < len(args):
+            workload = args[i + 1]
+
+    print(json.dumps(knob_space(graph_path, workload=workload), indent=2))
 
 
 def _cmd_visualize(args: list) -> None:

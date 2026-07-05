@@ -11,7 +11,8 @@ Tomii's JSON-defined computation graphs make the tuning surface machine-readable
 optimizer — random, Bayesian, grid, or a language model — can enumerate candidate
 configurations, run the verifier, and iterate. The four arms here share:
 
-- the same `KnobConfig` search space (`knob_space.json`)
+- the same generated search space (`tomii.knob_space` from the runtime knob
+  catalog + `graph.json` — no hand-written per-workload spec)
 - the same evaluation budget (`--iterations N`)
 - the same correctness gate (`verify.py` from stream-analytics)
 - the same metric (`ms_per_stream` from the runtime report)
@@ -103,9 +104,20 @@ A `baseline.json` file is written at the start of each run.
 
 ## Allowed edits
 
-See `knob_space.json` for the full list of tunable CLI flags and what is forbidden.
-The forbidden list protects correctness: `$barrier`, `$dep`, and `$res` arguments
-encode data-dependency semantics that must not be removed.
+The search space is generated — inspect it with:
+
+```bash
+python -m tomii --knob-space examples/stream-analytics/graph.json --workload stream-analytics
+```
+
+It contains the runtime (CLI) knobs whose catalog role is `perf`, plus graph
+knobs extracted from `graph.json` (shared factor variables, literal node
+factors, `group_by` widths).  Graph knobs may violate workload invariants the
+generator cannot know — such trials are rejected by the verifier and logged,
+which is the point of a verifier-gated search.  The space's `forbidden` list
+protects correctness: `$barrier`, `$dep`, and `$res` arguments encode
+data-dependency semantics that must not be removed.  Pass `--no-graph-knobs`
+to any arm to restrict the search to runtime knobs.
 
 ## Results
 

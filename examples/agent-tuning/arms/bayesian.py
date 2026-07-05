@@ -1,6 +1,8 @@
-"""Arm 2: Bayesian optimisation over the stream-analytics knob space.
+"""Arm 2: Bayesian optimisation over the generated knob space.
 
-Uses Optuna's TPE (Tree-structured Parzen Estimator) sampler.
+Uses Optuna's TPE (Tree-structured Parzen Estimator) sampler; the search
+space comes entirely from `tomii.knob_space` via harness.load_knob_space —
+no hand-written option lists.
 Requires: pip install optuna
 """
 
@@ -24,27 +26,39 @@ except ImportError:
     sys.exit(1)
 
 from harness import (  # noqa: E402
-    KnobConfig,
     TrialRecord,
     establish_baseline,
     evaluate,
+    load_knob_space,
     log_trial,
 )
+
+from tomii import knobs as tomii_knobs  # noqa: E402
 
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="Bayesian (Optuna TPE) search over stream-analytics knobs"
+        description="Bayesian (Optuna TPE) search over the knob space"
     )
     p.add_argument("--iterations", type=int, default=50)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--streams", type=int, default=500)
     p.add_argument("--warmup", type=int, default=50)
     p.add_argument("--results-dir", type=Path, default=Path("results"))
+    p.add_argument(
+        "--no-graph-knobs",
+        action="store_true",
+        help="restrict the search to runtime (CLI) knobs",
+    )
     args = p.parse_args()
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
     log_file = args.results_dir / "bayesian_trials.jsonl"
+
+    space = load_knob_space()
+    if args.no_graph_knobs:
+        space = {**space, "knobs": [k for k in space["knobs"] if k["kind"] == "cli"]}
+    print(f"[bayesian] knob space: {len(space['knobs'])} knobs", flush=True)
 
     baseline = establish_baseline(
         streams=args.streams,
@@ -58,25 +72,8 @@ def main() -> None:
         i = trial_counter[0]
         trial_counter[0] += 1
 
-        knobs = KnobConfig(
-            workers=int(trial.suggest_categorical("workers", [1, 2, 4, 8])),
-            slots=int(trial.suggest_categorical("slots", [1, 4, 16, 64])),
-            inline_continuation=bool(
-                trial.suggest_categorical("inline_continuation", [True, False])
-            ),
-            coalesce_barriers=bool(
-                trial.suggest_categorical("coalesce_barriers", [True, False])
-            ),
-            fifo=bool(trial.suggest_categorical("fifo", [True, False])),
-            custom=bool(trial.suggest_categorical("custom", [True, False])),
-            no_fanout_bulk=bool(
-                trial.suggest_categorical("no_fanout_bulk", [True, False])
-            ),
-            batching_size=int(
-                trial.suggest_categorical("batching_size", [1, 4, 8, 16])
-            ),
-        )
-        result = evaluate(knobs, streams=args.streams, warmup=args.warmup)
+        knobs = tomii_knobs.suggest_optuna(space, trial)
+        result = evaluate(knobs, streams=args.streams, warmup=args.warmup, space=space)
         record = TrialRecord(iteration=i, knobs=knobs, result=result, arm="bayesian")
         log_trial(record, log_file)
 

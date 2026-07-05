@@ -1,8 +1,8 @@
-"""Arm 3: grid search over the stream-analytics knob space.
+"""Arm 3: grid search over the generated knob space.
 
-Iterates a bounded cross-product of all knob values. The full grid is large
-(4 × 4 × 2 × 2 × 2 × 2 × 2 × 4 = 2048 cells); this arm caps at --iterations
-(default 50) and documents the gap.
+Iterates a bounded prefix of the full cross-product grid of the space from
+`tomii.knob_space` (via harness.load_knob_space).  The full grid is large;
+this arm caps at --iterations (default 50) and documents the gap.
 """
 
 from __future__ import annotations
@@ -15,73 +15,42 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from harness import (  # noqa: E402
-    KnobConfig,
     TrialRecord,
     establish_baseline,
     evaluate,
+    load_knob_space,
     log_trial,
 )
 
-WORKERS_OPTS: list[int] = [1, 2, 4, 8]
-SLOTS_OPTS: list[int] = [1, 4, 16, 64]
-BOOL_OPTS: list[bool] = [True, False]
-BATCHING_OPTS: list[int] = [1, 4, 8, 16]
-
-
-def _grid_cells() -> list[KnobConfig]:
-    """Return all cells in the full cross-product grid."""
-    cells = []
-    for (
-        workers,
-        slots,
-        inline_continuation,
-        coalesce_barriers,
-        fifo,
-        custom,
-        no_fanout_bulk,
-        batching_size,
-    ) in itertools.product(
-        WORKERS_OPTS,
-        SLOTS_OPTS,
-        BOOL_OPTS,
-        BOOL_OPTS,
-        BOOL_OPTS,
-        BOOL_OPTS,
-        BOOL_OPTS,
-        BATCHING_OPTS,
-    ):
-        cells.append(
-            KnobConfig(
-                workers=workers,
-                slots=slots,
-                inline_continuation=inline_continuation,
-                coalesce_barriers=coalesce_barriers,
-                fifo=fifo,
-                custom=custom,
-                no_fanout_bulk=no_fanout_bulk,
-                batching_size=batching_size,
-            )
-        )
-    return cells
+from tomii import knobs as tomii_knobs  # noqa: E402
 
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="grid search over stream-analytics knobs (budget-capped)"
+        description="grid search over the knob space (budget-capped)"
     )
     p.add_argument(
         "--iterations",
         type=int,
         default=50,
-        help="maximum grid cells to evaluate (full grid = 2048)",
+        help="maximum grid cells to evaluate",
     )
     p.add_argument("--streams", type=int, default=500)
     p.add_argument("--warmup", type=int, default=50)
     p.add_argument("--results-dir", type=Path, default=Path("results"))
+    p.add_argument(
+        "--no-graph-knobs",
+        action="store_true",
+        help="restrict the search to runtime (CLI) knobs",
+    )
     args = p.parse_args()
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
     log_file = args.results_dir / "grid_trials.jsonl"
+
+    space = load_knob_space()
+    if args.no_graph_knobs:
+        space = {**space, "knobs": [k for k in space["knobs"] if k["kind"] == "cli"]}
 
     baseline = establish_baseline(
         streams=args.streams,
@@ -90,10 +59,9 @@ def main() -> None:
     )
     best_ms = baseline if baseline > 0.0 else float("inf")
 
-    all_cells = _grid_cells()
-    total_grid = len(all_cells)
+    total_grid = tomii_knobs.grid_size(space)
     budget = min(args.iterations, total_grid)
-    cells = all_cells[:budget]
+    cells = list(itertools.islice(tomii_knobs.grid_cells(space), budget))
 
     print(
         f"[grid] full grid = {total_grid} cells; evaluating {budget} cells "
@@ -102,7 +70,7 @@ def main() -> None:
     )
 
     for i, knobs in enumerate(cells):
-        result = evaluate(knobs, streams=args.streams, warmup=args.warmup)
+        result = evaluate(knobs, streams=args.streams, warmup=args.warmup, space=space)
         record = TrialRecord(iteration=i, knobs=knobs, result=result, arm="grid")
         log_trial(record, log_file)
 

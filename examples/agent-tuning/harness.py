@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,22 +29,31 @@ STREAM_ANALYTICS = REPO_ROOT / "examples" / "stream-analytics"
 VERIFY_PY = STREAM_ANALYTICS / "verify.py"
 _HERE = Path(__file__).resolve().parent
 
+sys.path.insert(0, str(REPO_ROOT))
+
+from tomii import knobs as tomii_knobs  # noqa: E402
+from tomii._runner import build_command  # noqa: E402
+
+GRAPH_JSON = STREAM_ANALYTICS / "graph.json"
 
 # ---------------------------------------------------------------------------
 # Data types
 # ---------------------------------------------------------------------------
 
+# Knob configurations are plain dicts keyed by knob name, drawn from the
+# generated knob space (see load_knob_space) — no per-workload dataclass.
 
-@dataclass
-class KnobConfig:
-    workers: int = 4
-    slots: int = 4
-    inline_continuation: bool = True
-    coalesce_barriers: bool = True
-    fifo: bool = False
-    custom: bool = True
-    no_fanout_bulk: bool = False
-    batching_size: int = 1
+# The workload's documented starting point (matches the pre-M3 defaults).
+BASELINE_KNOBS: dict[str, Any] = {
+    "workers": 4,
+    "slots": 4,
+    "inline_continuation": True,
+    "coalesce_barriers": True,
+    "fifo": False,
+    "custom": True,
+    "no_fanout_bulk": False,
+    "batching_size": 1,
+}
 
 
 @dataclass
@@ -58,7 +67,7 @@ class EvalResult:
 @dataclass
 class TrialRecord:
     iteration: int
-    knobs: KnobConfig
+    knobs: dict[str, Any]
     result: EvalResult
     arm: str
     notes: str = ""
@@ -139,15 +148,32 @@ def _find_binary() -> str:
 
 
 def evaluate(
-    knobs: KnobConfig,
+    knobs: dict[str, Any],
     streams: int = 500,
     warmup: int = 50,
+    space: dict[str, Any] | None = None,
 ) -> EvalResult:
-    """Run stream-analytics with the given knobs and return an EvalResult.
+    """Run stream-analytics with the given knob values and return an EvalResult.
 
-    Uses a temporary result.txt so concurrent calls don't interfere.
+    `knobs` is a dict keyed by knob name from the generated knob space: CLI
+    knobs become command-line flags, `graph:*` knobs are applied as edits to a
+    per-trial copy of graph.json.  Uses a temporary result.txt so concurrent
+    calls don't interfere.
     """
     t0 = time.monotonic()
+
+    if space is None:
+        space = load_knob_space()
+
+    try:
+        cli_kwargs, graph_edits = tomii_knobs.split(space, knobs)
+    except KeyError as exc:
+        return EvalResult(
+            verifier_ok=False,
+            ms_per_stream=None,
+            rejection_reason=f"unknown knob: {exc}",
+            wall_seconds=time.monotonic() - t0,
+        )
 
     try:
         dylib, binary = _ensure_build()
@@ -159,8 +185,6 @@ def evaluate(
             wall_seconds=time.monotonic() - t0,
         )
 
-    graph_json = STREAM_ANALYTICS / "graph.json"
-
     with tempfile.TemporaryDirectory(prefix="agent_tuning_") as tmp_str:
         tmp_dir = Path(tmp_str)
         result_file = tmp_dir / "result.txt"
@@ -169,29 +193,24 @@ def evaluate(
 
         out_file = tmp_dir / "out.txt"
         timing_file = tmp_dir / "timing.txt"
-        cmd = [
+
+        graph_path = GRAPH_JSON
+        if graph_edits:
+            patched = tomii_knobs.apply_graph_edits(GRAPH_JSON, graph_edits)
+            graph_path = tmp_dir / "graph.json"
+            graph_path.write_text(json.dumps(patched, indent=1), encoding="utf-8")
+
+        cmd = build_command(
             binary,
-            "--json", str(graph_json),
-            "--dylib", dylib,
-            "--max-streams", str(streams),
-            "--exclude-streams", str(warmup),
-            "--workers", str(knobs.workers),
-            "--slots", str(knobs.slots),
-            "--batching-size", str(knobs.batching_size),
-            "--output", str(out_file),
-            "--report", str(report_file),
-            "--timing", str(timing_file),
-        ]
-        if knobs.inline_continuation:
-            cmd.append("--inline-continuation")
-        if knobs.coalesce_barriers:
-            cmd.append("--coalesce-barriers")
-        if knobs.fifo:
-            cmd.append("--fifo")
-        if knobs.custom:
-            cmd.append("--custom")
-        if knobs.no_fanout_bulk:
-            cmd.append("--no-fanout-bulk")
+            str(graph_path),
+            dylib,
+            max_streams=streams,
+            exclude_streams=warmup,
+            output=str(out_file),
+            report=str(report_file),
+            timing=str(timing_file),
+            **cli_kwargs,
+        )
 
         run_env = {**os.environ, "SCRIPT_DIR": str(tmp_dir)}
 
@@ -273,11 +292,11 @@ def establish_baseline(
     warmup: int = 50,
     results_dir: Path | None = None,
 ) -> float:
-    """Run with default KnobConfig and return ms_per_stream.
+    """Run with the documented BASELINE_KNOBS and return ms_per_stream.
 
     Writes results_dir/baseline.json. Falls back to 0.0 on failure.
     """
-    knobs = KnobConfig()
+    knobs = dict(BASELINE_KNOBS)
     print("[harness] establishing baseline with default knobs ...", flush=True)
     result = evaluate(knobs, streams=streams, warmup=warmup)
 
@@ -300,7 +319,7 @@ def establish_baseline(
             "verifier_ok": result.verifier_ok,
             "rejection_reason": result.rejection_reason,
             "wall_seconds": result.wall_seconds,
-            "knobs": asdict(knobs),
+            "knobs": knobs,
         }
         (results_dir / "baseline.json").write_text(json.dumps(data, indent=2))
 
@@ -318,7 +337,7 @@ def log_trial(record: TrialRecord, log_file: Path) -> None:
         "iteration": record.iteration,
         "arm": record.arm,
         "notes": record.notes,
-        "knobs": asdict(record.knobs),
+        "knobs": record.knobs,
         "verifier_ok": record.result.verifier_ok,
         "ms_per_stream": record.result.ms_per_stream,
         "rejection_reason": record.result.rejection_reason,
@@ -333,11 +352,25 @@ def log_trial(record: TrialRecord, log_file: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+_SPACE_CACHE: dict[str, Any] | None = None
+
+
 def load_knob_space() -> dict[str, Any]:
-    """Read knob_space.json and return it as a dict."""
-    ks_path = _HERE / "knob_space.json"
-    result: dict[str, Any] = json.loads(ks_path.read_text())
-    return result
+    """Generate the knob search space for stream-analytics.
+
+    Generated live from the runtime knob catalog + graph.json — the single
+    source of truth (M3).  No hand-written per-workload spec exists; regenerate
+    a snapshot any time with:
+
+        python -m tomii --knob-space examples/stream-analytics/graph.json \\
+            --workload stream-analytics
+    """
+    global _SPACE_CACHE
+    if _SPACE_CACHE is None:
+        _SPACE_CACHE = tomii_knobs.knob_space(
+            GRAPH_JSON, workload="stream-analytics"
+        )
+    return _SPACE_CACHE
 
 
 # ---------------------------------------------------------------------------

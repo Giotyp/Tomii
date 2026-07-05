@@ -24,6 +24,8 @@ from ._export import export
 from ._graph import Graph
 from ._procs import procs
 from ._runner import list_knobs
+from ._knobs import knob_space
+from . import _knobs as knobs
 from ._loop import Condition, IndexFunc, Loop
 from ._node import NodeDep, NodeOutput
 from ._types import (
@@ -55,6 +57,8 @@ __all__ = [
     "export",
     "Graph",
     "list_knobs",
+    "knob_space",
+    "knobs",
     "procs",
     # Node dependency helpers
     "NodeOutput",
