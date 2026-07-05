@@ -433,6 +433,8 @@ impl TomiiRtBuilder {
                         .map(|_| AtomicBool::new(false))
                         .collect(),
                 ),
+                pending_frames: parking_lot::Mutex::new(std::collections::BTreeMap::new()),
+                pending_count: AtomicUsize::new(0),
             },
             exec: ExecCtx {
                 scheduler: Arc::new(self.scheduler),

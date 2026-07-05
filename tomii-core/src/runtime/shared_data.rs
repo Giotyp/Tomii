@@ -182,6 +182,15 @@ pub struct SlotData {
     pub last_assigned: Arc<AtomicUsize>,
 }
 
+/// A decoded packet parked because its stream is ahead of the admission window.
+/// Retains the receive metadata needed for telemetry when it is later admitted.
+#[cfg(feature = "network")]
+pub struct PendingPacket {
+    pub packet: CmTypes,
+    pub timestamp: Instant,
+    pub receiver_core_id: usize,
+}
+
 /// Network receiver infrastructure — present only when the `network` feature is enabled.
 #[cfg(feature = "network")]
 pub struct NetworkInfra {
@@ -200,6 +209,14 @@ pub struct NetworkInfra {
     pub dropped_streams: Arc<AtomicUsize>,
     /// Per-frame drop bitmap — prevents double-counting of dropped frames.
     pub frame_dropped: Arc<Vec<AtomicBool>>,
+    /// Out-of-window packets parked until the admission window advances, keyed by
+    /// stream id.  Bounded by `stream_packets × slots`; on overflow the furthest-out
+    /// frame is dropped whole (via `frame_dropped`) so the run degrades instead of
+    /// wedging on a permanently incomplete stream.
+    pub pending_frames: Mutex<std::collections::BTreeMap<usize, Vec<PendingPacket>>>,
+    /// Total packets parked in `pending_frames`.  Relaxed loads outside the lock are
+    /// only an emptiness hint — a stale read delays re-injection by one poll iteration.
+    pub pending_count: AtomicUsize,
 }
 
 /// Scheduler, batch queue, resolution state, result storage, and resolution strategy.

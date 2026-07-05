@@ -38,10 +38,24 @@ Network socket
     v
 packet_processing.rs
     |
+    +---> admission window check: stream < stream_complete_counter + slots?
+    |         |
+    |         +-- out of window: park decoded packet in net.pending_frames
+    |               (bounded at stream_packets x slots; on overflow the
+    |                furthest-out frame is dropped WHOLE via frame_dropped so
+    |                the run degrades instead of wedging on a stream left
+    |                permanently incomplete by partial packet loss).
+    |               Parked streams are re-injected at the top of each poll
+    |               once the window advances.
+    |
     +---> assign_stream_to_available_slot()
     |         |
     |         +-- Inactive slot: mark Active, spawn initial_nodes()
-    |         +-- All slots busy: buffer packet in slot_buffers, mark Buffering
+    |         +-- Occupied but another Inactive found: mark Buffering,
+    |         |     packet buffered in slot_buffers until promotion
+    |         +-- No slot free (transient: completion counter advances before
+    |               release_slot): park in net.pending_frames and retry —
+    |               permanent drops happen only via pending-buffer overflow
     |
     v
 active_packet_batch  (Vec<(NodeInfo, Option<CmTypes>)>)
