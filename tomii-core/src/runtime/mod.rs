@@ -484,6 +484,20 @@ pub struct TomiiRt {
     shared: Arc<SharedData>,
 }
 
+/// Snapshot of run progress handed to a [`TomiiRt::run_until`] predicate on
+/// each poll tick.
+#[derive(Debug, Clone, Copy)]
+pub struct RunProgress {
+    /// Wall-clock time since the run started.
+    pub elapsed: std::time::Duration,
+    /// Streams completed so far (includes dropped frames on network graphs).
+    pub streams_completed: usize,
+    /// The configured stream budget (`max_streams`).
+    pub max_streams: usize,
+    /// Number of slots currently marked active.
+    pub active_slots: u32,
+}
+
 impl TomiiRt {
     pub fn base_instant(&self) -> Instant {
         *self.shared.telemetry.base_instant
@@ -498,6 +512,32 @@ impl TomiiRt {
     /// unwrap and is not converted to an error — that indicates a bug in the runtime, not a
     /// recoverable user error.
     pub fn run(&mut self) -> Result<(), crate::RuntimeError> {
+        self.run_impl(None)
+    }
+
+    /// Like [`run`](Self::run), but additionally polls `predicate` on every
+    /// wait tick and shuts the run down when it returns `true`.
+    ///
+    /// Generalizes `max_runtime`'s wall-clock-only termination (Taskflow
+    /// `run_until` analog): completion of all streams and an optional
+    /// `max_runtime` still terminate the run as usual — the predicate is a
+    /// third, caller-defined condition.  Unlike [`run`](Self::run), the wait
+    /// loop runs even when `max_runtime` is `None`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`run`](Self::run).
+    pub fn run_until<F>(&mut self, mut predicate: F) -> Result<(), crate::RuntimeError>
+    where
+        F: FnMut(&RunProgress) -> bool,
+    {
+        self.run_impl(Some(&mut predicate))
+    }
+
+    fn run_impl(
+        &mut self,
+        mut predicate: Option<&mut dyn FnMut(&RunProgress) -> bool>,
+    ) -> Result<(), crate::RuntimeError> {
         // Start timing for system thread slots
         for thread_id in 0..self.shared.config.system_threads {
             let system_slot = self.shared.config.slots + thread_id;
@@ -510,11 +550,22 @@ impl TomiiRt {
         let receiver_handles = self.spawn_receiver_threads()?;
         let resolution_handles = self.spawn_resolution_threads()?;
 
-        // Wait loop: sleep until max_runtime exceeded or all streams complete
+        // Wait loop: sleep until max_runtime exceeded, all streams complete,
+        // or the caller's run_until predicate fires.  Without a max_runtime
+        // or predicate there is nothing to poll — join immediately (the
+        // resolution threads terminate themselves), preserving pre-run_until
+        // behaviour exactly.
         let start_time = Instant::now();
         tracing::debug!("Max runtime check started");
-        if let Some(max_runtime) = self.shared.config.max_runtime {
-            sleep(RUN_SLEEP);
+        if self.shared.config.max_runtime.is_some() || predicate.is_some() {
+            // RUN_SLEEP (10s) matches max_runtime's whole-second granularity,
+            // but is far too coarse for a caller predicate — poll those at 10ms.
+            let tick = if predicate.is_some() {
+                Duration::from_millis(10)
+            } else {
+                RUN_SLEEP
+            };
+            sleep(tick);
             let mut finish = false;
             loop {
                 let completed_streams = self
@@ -524,12 +575,37 @@ impl TomiiRt {
                     .load(Ordering::Acquire);
                 let completed = completed_streams == self.shared.config.max_streams;
 
-                if start_time.elapsed().as_secs() > max_runtime {
+                let max_runtime_exceeded = self
+                    .shared
+                    .config
+                    .max_runtime
+                    .is_some_and(|max| start_time.elapsed().as_secs() > max);
+                if max_runtime_exceeded {
                     tracing::info!("Max runtime reached, exiting");
                     finish = true;
                 } else if completed {
                     tracing::info!("All streams completed, exiting");
                     finish = true;
+                }
+
+                if !finish {
+                    if let Some(pred) = predicate.as_deref_mut() {
+                        let progress = RunProgress {
+                            elapsed: start_time.elapsed(),
+                            streams_completed: completed_streams,
+                            max_streams: self.shared.config.max_streams,
+                            active_slots: self
+                                .shared
+                                .slot_data
+                                .active_bitmap
+                                .load(Ordering::Acquire)
+                                .count_ones(),
+                        };
+                        if pred(&progress) {
+                            tracing::info!("run_until predicate satisfied, exiting");
+                            finish = true;
+                        }
+                    }
                 }
 
                 if finish {
@@ -539,7 +615,7 @@ impl TomiiRt {
                     self.schedule_post_nodes();
                     break;
                 }
-                sleep(RUN_SLEEP);
+                sleep(tick);
             }
         }
 

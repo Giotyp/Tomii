@@ -118,7 +118,7 @@ pub mod wrappers {}
 pub use crate::async_recorder::AsyncRecorder;
 pub use crate::custom_scheduler::Priority;
 pub use crate::dependency_counter::{DependencyCounter, MultiThreadedCounter};
-pub use crate::runtime::RuntimeConfig;
+pub use crate::runtime::{RunProgress, RuntimeConfig};
 #[cfg(build_rs_ran)]
 pub mod func_reg {
     include!(concat!(env!("OUT_DIR"), "/func_reg.rs"));
@@ -146,3 +146,6 @@ pub mod funcs {}
 
 pub mod worker_range;
 pub use worker_range::{WorkerRange, WorkerRangeSpec};
+
+pub mod worker_hook;
+pub use worker_hook::WorkerHook;

@@ -60,6 +60,7 @@ pub struct CustomSchedulerBuilder {
     pub(super) external_recorder: Option<Arc<AsyncRecorder>>,
     pub(super) base_instant: Instant,
     pub(super) worker_affinity: Option<crate::scheduler::WorkerAffinityConfig>,
+    pub(super) worker_hook: Option<Arc<dyn crate::WorkerHook>>,
 }
 
 impl CustomSchedulerBuilder {
@@ -73,6 +74,7 @@ impl CustomSchedulerBuilder {
             external_recorder: None,
             base_instant: Instant::now(),
             worker_affinity: None,
+            worker_hook: None,
         }
     }
 
@@ -116,6 +118,13 @@ impl CustomSchedulerBuilder {
     /// Enable recording
     pub fn record(mut self, enable: bool) -> Self {
         self.record = enable;
+        self
+    }
+
+    /// Set the per-worker lifecycle hook (see [`crate::WorkerHook`]).
+    /// Called on each worker thread at start and exit; `None` costs nothing.
+    pub fn worker_hook(mut self, hook: Option<Arc<dyn crate::WorkerHook>>) -> Self {
+        self.worker_hook = hook;
         self
     }
 
@@ -257,6 +266,7 @@ impl CustomSchedulerBuilder {
             self.base_instant,
             system_core_offset,
             total_recorders,
+            self.worker_hook,
         );
 
         let group_configs: Vec<WorkerGroupConfig> = self.groups;
@@ -298,6 +308,7 @@ impl CustomSchedulerBuilder {
 }
 
 /// Create the shared worker state and per-group channel sets.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_channels_and_state(
     num_groups: usize,
     record: bool,
@@ -305,6 +316,7 @@ pub(super) fn create_channels_and_state(
     base_instant: Instant,
     system_core_offset: usize,
     total_recorders: usize,
+    worker_hook: Option<Arc<dyn crate::WorkerHook>>,
 ) -> (Arc<SharedWorkerState>, Vec<Arc<ChannelSet>>) {
     let async_recorder = if record {
         external_recorder.or_else(|| Some(Arc::new(AsyncRecorder::new(total_recorders, 100))))
@@ -328,6 +340,7 @@ pub(super) fn create_channels_and_state(
         base_instant: Arc::new(base_instant),
         system_core_offset,
         node_exec: std::sync::OnceLock::new(),
+        worker_hook,
     });
 
     (shared, group_channels)

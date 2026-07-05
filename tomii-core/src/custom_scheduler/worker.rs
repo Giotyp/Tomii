@@ -36,6 +36,9 @@ pub(super) struct SharedWorkerState {
     pub(super) system_core_offset: usize,
     /// Typed node-task executor (set before any `Job::Node` is spawned)
     pub(super) node_exec: OnceLock<NodeExecutor>,
+    /// Optional per-worker lifecycle hook — called once at worker start and
+    /// exit, never on the task hot path.
+    pub(super) worker_hook: Option<Arc<dyn crate::WorkerHook>>,
 }
 
 // Per-worker state accessible via thread-local
@@ -97,6 +100,12 @@ pub(super) fn worker_loop(
         if let Some(tx) = recorder.get_worker_sender(channel_index) {
             set_worker_recorder(tx);
         }
+    }
+
+    // Lifecycle hook: worker fully initialized (pinned, thread-locals set),
+    // no task has run yet.
+    if let Some(ref hook) = shared.worker_hook {
+        hook.on_worker_start(worker_id);
     }
 
     let has_recorder = shared.async_recorder.is_some();
@@ -167,6 +176,11 @@ pub(super) fn worker_loop(
         if let Some(task) = task {
             execute_job(&shared, task, has_recorder);
         }
+    }
+
+    // Lifecycle hook: worker is about to exit (shutdown signalled).
+    if let Some(ref hook) = shared.worker_hook {
+        hook.on_worker_exit(worker_id);
     }
 }
 

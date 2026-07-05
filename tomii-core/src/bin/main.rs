@@ -446,6 +446,7 @@ pub fn run_graph(
         target_batch_size: cfg.batch.target_size,
         batch_timeout_us: cfg.batch.timeout_us,
         worker_affinity,
+        worker_hook: None,
     });
 
     if let Some(core_id) = scheduler.main_core() {
