@@ -1,5 +1,95 @@
 # Changelog
 
+## v1.1.0 — 2026-07-06
+
+### Breaking changes for plugin authors
+
+**Function registry contract grew three entries.** The runtime now queries the registry for
+unchecked wrapper twins and their variant metadata. Converter-generated registries (the
+`FUNC_PATH` build flow) get these automatically; **hand-maintained registries supplied via
+`REG_PATH` must add them** or the build fails to compile. Minimal stubs:
+
+```rust
+/// # Safety
+/// Always returns `None`; no contract to uphold when no unchecked twins exist.
+pub unsafe fn get_unchecked_func(_name: &str) -> Option<CmPtr> { None }
+pub fn get_func_argspec(_name: &str) -> Option<&'static [&'static str]> { None }
+pub fn get_func_ret_variant(_name: &str) -> Option<&'static str> { None }
+```
+
+**`SchedulerConfig` gained a `worker_hook` field**
+(`Option<Arc<dyn tomii_core::WorkerHook>>`). Struct-literal construction in custom-scheduler
+embedders needs the new field; pass `worker_hook: None` to keep the old behaviour.
+
+**`tomii_converter::ExportedFn` gained a `ret_variant_hint` field** — only affects code that
+constructs `ExportedFn` values directly.
+
+### New features
+
+**Runtime state dump (`--dump-state FILE`, SIGUSR1).** `StateDumper`
+(`tomii-core/src/runtime/dump.rs`) writes a JSON snapshot of per-slot state, counters,
+scheduler totals, and parked frames at shutdown; sending `SIGUSR1` mid-run writes numbered
+live snapshots (`FILE.1`, `FILE.2`, …).
+
+**Graph topology dump.** `python -m tomii --dump graph.json [--out FILE]` renders any graph
+JSON to GraphViz DOT (solid/dashed/bold edges for `$res`/`$dep`/`$barrier`).
+
+**Unified knob ontology.** `python -m tomii --knob-space [graph.json] [--workload NAME]`
+generates a versioned tuning space (schema v2) from the runtime knob catalog
+(`--list-knobs-json`, roles perf/measurement/io/env) plus per-graph knobs (shared factor
+variables, literal node factors, `group_by` widths). Any Tomii graph is now autotunable by
+any optimizer without a hand-written spec; the example-local `knob_space.json` is removed.
+
+**`WorkerHook` per-worker lifecycle callbacks.** `SchedulerConfig::worker_hook` fires
+`on_worker_start` / `on_worker_exit` on both Rayon and Custom scheduler worker threads.
+
+**`TomiiRt::run_until(predicate)`.** Runs until a `FnMut(&RunProgress) -> bool` predicate
+returns true, polled at a 10 ms tick (plain `run()` behaviour is unchanged).
+
+**Workload-pluggable agent-tuning harness.** `examples/agent-tuning/` now drives all four
+search arms (random / Bayesian / grid / agent) over any registered workload —
+stream-analytics, pipeline (knob-aware verify pass), and MIMO (keep-up gate with
+2×-compute-floor sender pacing) — purely from the generated knob space:
+`run_all.sh [iterations] [workload]`.
+
+### Performance
+
+- **`SuccessorArena`**: successor edges flattened into contiguous per-node slices, replacing
+  the 3–4 dependent pointer chases through N×N `Arc` tables in the successor hot loop (both
+  the batch path and the worker-resolvable fast path). Batch entry points now route through
+  `ResolutionStrategy::drive_batch`, making the v1.0 strategy seam live.
+- **Typed zero-alloc spawn path**: the Custom scheduler queues a POD `NodeTaskDesc` instead
+  of a `Box<dyn FnOnce>` + `Arc` clones per task.
+- **Persistent per-node argument templates** for stable-arity nodes; disable with
+  `TOMII_DISABLE_ARG_TEMPLATES` for same-binary A/B attribution.
+- **Unchecked wrapper twins**: the converter emits `_cm_wrap_unchecked` variants (unchecked
+  slice access, no per-arg variant matches); at init the runtime selects them only for nodes
+  whose argument variants are provable from the graph (static discriminants, `$ref` types,
+  predecessor return-variant hints). Disable with `TOMII_DISABLE_UNCHECKED_WRAPPERS`.
+
+### Distribution
+
+- **Free-threaded-first Python**: pyo3 0.26 with `gil_used = false` — wheels for CPython
+  3.9–3.14 now include **cp313t and cp314t** (Python kernels no longer serialize on the GIL
+  at W>1).
+- **macOS / aarch64 targets** enabled by a portable fallback clock for the x86-only
+  `utils_rdtsc` paths.
+
+### Bug fixes / internal changes
+
+- **Network packet admission no longer wedges** (#6): out-of-window and no-slot-yet packets
+  park in a bounded `pending_frames` buffer and re-inject when the window advances; on
+  overflow the furthest-out frame is dropped whole (stream counters advance — degrade,
+  never hang). Previously such packets could be silently dropped mid-frame, hanging the
+  stream's barrier.
+- MIMO bench verifier hardened: sender killed hard (`kill` + `wait`), inter-frame pacing,
+  steady-state assertion.
+- Python package type-checks clean (mypy 133 → 0); serializer calls pydantic alias kwargs
+  correctly; `$network` args raise `ValueError` when `index_function` is missing (the
+  runtime requires it).
+- Benches prefer the workspace-built binary over the bundled wheel binary.
+- `uv.lock` refreshed for the `agent-tuning` extra (optuna).
+
 ## v1.0.0 — 2026-05-11
 
 ### Breaking changes for plugin authors
