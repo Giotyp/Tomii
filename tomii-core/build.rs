@@ -94,6 +94,14 @@ fn main() {
                 "fn noop(_: &[CmTypes]) -> CmTypes { CmTypes::None }\n",
                 "pub fn get_func(name: &str) -> Option<CmPtr> { if name == \"noop\" { Some(noop) } else { None } }\n",
                 "pub fn get_bulk_func(_name: &str) -> Option<CmBulkPtr> { None }\n",
+                "/// Stub twin table.\n",
+                "///\n",
+                "/// # Safety\n",
+                "///\n",
+                "/// Always returns `None`; there is no contract to uphold in stub builds.\n",
+                "pub unsafe fn get_unchecked_func(_name: &str) -> Option<CmPtr> { None }\n",
+                "pub fn get_func_argspec(_name: &str) -> Option<&'static [&'static str]> { None }\n",
+                "pub fn get_func_ret_variant(_name: &str) -> Option<&'static str> { None }\n",
             ),
         )
         .expect("write func_reg.rs stub");

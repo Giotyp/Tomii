@@ -84,6 +84,14 @@ pub struct NodeCacheEntry {
     /// of re-cloning the static template — and re-dropping it — on every task.
     /// Computed in `build_node_cache` after `res_predecessors` is populated.
     pub template_stable: bool,
+    /// Plugin function name (registry key) — retained for the P3 Phase B
+    /// unchecked-wrapper selection pass, which needs registry lookups after
+    /// the cache is built.
+    pub func_name: String,
+    /// True when `func_ptr` was swapped to the `_unchecked` wrapper twin
+    /// (P3 Phase B): every argument slot's variant was proven at build time,
+    /// so the wrapper skips variant matches and bounds checks.
+    pub uses_unchecked: bool,
 }
 
 #[derive(Clone)]
@@ -188,6 +196,8 @@ pub(super) fn node_cache_entry(
             bulk_func: None,
             is_fanout_bulk: false,
             template_stable: false,
+            func_name: node.func_name.clone(),
+            uses_unchecked: false,
         };
     }
 
@@ -221,6 +231,8 @@ pub(super) fn node_cache_entry(
         bulk_func: resolve_bulk_func(&node.func_name),
         is_fanout_bulk: false,  // populated in build_node_cache second pass
         template_stable: false, // populated in build_node_cache second pass
+        func_name: node.func_name.clone(),
+        uses_unchecked: false, // populated by select_unchecked_wrappers
     }
 }
 

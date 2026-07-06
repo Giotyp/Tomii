@@ -289,7 +289,7 @@ impl TomiiRtBuilder {
         // --- Destructure compiled graph IR ---
         let GraphCompiled {
             graph,
-            node_cache,
+            mut node_cache,
             successor_arena,
             pred_index_filter,
             pred_group_by,
@@ -301,6 +301,11 @@ impl TomiiRtBuilder {
             max_factor,
             num_nodes,
         } = self.compiled;
+
+        // P3 Phase B: swap in unchecked wrapper twins for nodes whose argument
+        // variants are provable at build time.  Runs here (not at compile) so
+        // the TOMII_DISABLE_UNCHECKED_WRAPPERS toggle is honoured per run.
+        init::select_unchecked_wrappers(&mut node_cache, &pred_group_by);
 
         // --- Slot counters & condition tracking (slot-count-dependent) ---
         let (

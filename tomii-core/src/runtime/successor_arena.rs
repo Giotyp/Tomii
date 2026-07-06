@@ -239,6 +239,8 @@ mod tests {
             bulk_func: None,
             is_fanout_bulk,
             template_stable: false,
+            func_name: String::new(),
+            uses_unchecked: false,
         }
     }
 

@@ -136,6 +136,25 @@ pub mod func_reg {
     pub fn get_bulk_func(_: &str) -> Option<CmBulkPtr> {
         None
     }
+    /// Stub: no unchecked twins in test / check-only builds.
+    ///
+    /// # Safety
+    ///
+    /// Always returns `None`; no contract to uphold in stub builds.
+    #[allow(dead_code)]
+    pub unsafe fn get_unchecked_func(_: &str) -> Option<CmPtr> {
+        None
+    }
+    /// Stub: no argument specs in test / check-only builds.
+    #[allow(dead_code)]
+    pub fn get_func_argspec(_: &str) -> Option<&'static [&'static str]> {
+        None
+    }
+    /// Stub: no return-variant table in test / check-only builds.
+    #[allow(dead_code)]
+    pub fn get_func_ret_variant(_: &str) -> Option<&'static str> {
+        None
+    }
 }
 #[cfg(build_rs_ran)]
 pub mod funcs {

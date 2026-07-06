@@ -149,6 +149,26 @@ changes the buffer length) fall back to the rebuild-per-task `ARG_BUF` path.
 Invariant: every dynamic slot is unconditionally rewritten before each kernel
 call, so values left behind by a stale-task abort can never be observed.
 
+### Unchecked wrapper twins (P3 Phase B)
+
+tomii-converter emits a `_cm_wrap_unchecked` twin for every Rust plugin entry:
+identical `CmPtr` signature, but argument extraction uses unchecked slice
+access and `unreachable_unchecked` instead of variant matches and panics
+(debug builds keep loud assertions). At build time,
+`init::select_unchecked_wrappers` swaps a node's `func_ptr` to the twin only
+after PROVING every fixed argument slot's variant: the node must be
+`template_stable`, static slots are inspected directly in the template,
+`$ref::index`/`$ref::worker` slots are always `Usize`, buffer-rotation slots
+need a unanimous variant, `$dep` slots are `None`, and `$res` slots take the
+predecessor wrapper's return variant from the generated
+`get_func_ret_variant` table — any `group_by`/`group_size` rewrapping
+disqualifies. Trailing extra slots (`$barrier` args) are ignored, exactly as
+the checked wrapper ignores them. `get_unchecked_func` is `unsafe`; the
+selection pass is the single place its contract is discharged.
+`TOMII_DISABLE_UNCHECKED_WRAPPERS` disables selection (same-binary A/B).
+Measured: anti-diag W=1 −1.9% (the variant matches are well-predicted
+branches, so their 7% instruction share translates to only ~2% of cycles).
+
 ### 2. Batch-queue path (slow path)
 
 Condition: any successor of this node is a condition node (`is_condition == true`).
