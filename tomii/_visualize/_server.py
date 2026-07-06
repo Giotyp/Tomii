@@ -8,7 +8,7 @@ import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from ._parser import VizGraph
 
@@ -18,7 +18,7 @@ def _html_template() -> str:
     return html_path.read_text(encoding="utf-8")
 
 
-def _viz_to_dict(viz: VizGraph) -> dict:
+def _viz_to_dict(viz: VizGraph) -> "dict[str, Any]":
     return {
         "nodes": [
             {
@@ -63,7 +63,7 @@ def _viz_to_dict(viz: VizGraph) -> dict:
 def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+        return int(s.getsockname()[1])
 
 
 def serve(
@@ -158,7 +158,7 @@ def serve(
             except Exception as exc:
                 self._json_error(500, str(exc))
 
-        def _json_ok(self, payload: dict) -> None:
+        def _json_ok(self, payload: "dict[str, Any]") -> None:
             body = json.dumps(payload).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

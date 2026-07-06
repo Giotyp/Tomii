@@ -232,6 +232,14 @@ impl GraphSpec {
             crate::runtime::build_node_cache(&self.graph, &self.init_objects, scheduler);
         let (pred_index_filter, pred_group_by, pred_succ_1to1_offset) =
             crate::runtime::build_predecessor_tables(&self.graph);
+        let successor_arena = crate::runtime::SuccessorArena::build(
+            &self.graph.successors,
+            self.graph.nodes.len(),
+            &node_cache,
+            &pred_index_filter,
+            &pred_group_by,
+            &pred_succ_1to1_offset,
+        );
 
         let total_tasks: usize = node_cache
             .iter()
@@ -250,6 +258,7 @@ impl GraphSpec {
         GraphCompiled {
             graph: self.graph,
             node_cache,
+            successor_arena,
             pred_index_filter,
             pred_group_by,
             pred_succ_1to1_offset,
@@ -275,6 +284,8 @@ pub struct GraphCompiled {
     pub graph: Graph,
     /// Per-node precomputed cache (function pointers, arg caches, flags, priorities).
     pub node_cache: Vec<crate::runtime::NodeCacheEntry>,
+    /// Flattened successor edges for the Phase-3 hot loops (see `successor_arena.rs`).
+    pub successor_arena: crate::runtime::SuccessorArena,
     /// Per-(succ, pred) index range filter: which predecessor instances drive a successor.
     pub pred_index_filter: Vec<Vec<Option<(usize, usize)>>>,
     /// Per-(succ, pred) group_by divisor for grouped barriers.

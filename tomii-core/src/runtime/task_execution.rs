@@ -15,10 +15,8 @@ use super::arg_resolution::{populate_cached_args_into, populate_dynamic_args_int
 use super::ordering::{slot_gen_load, slot_gen_rmw};
 use super::scheduling::send_to_scheduler;
 use super::shared_data::{SchedCtx, SharedData};
-use super::successor::{
-    collect_successors_for_node_into, decrement_and_collect_ready, push_ready_chunked,
-};
-use super::thread_locals::{WorkerResolutionBuffers, ARG_BUF, WORKER_BUFS};
+use super::successor::{decrement_and_collect_ready, push_ready_chunked};
+use super::thread_locals::{WorkerResolutionBuffers, ARG_BUF, NODE_ARG_TEMPLATES, WORKER_BUFS};
 use crate::buffers::*;
 use crate::debug::print_debug;
 use std::sync::Arc;
@@ -96,44 +94,41 @@ pub(super) fn worker_resolve_successors(
         sctx.slots.pending_tasks[slot].fetch_sub(node_info.bulk_count, slot_gen_rmw(ssm));
     }
 
-    // Steps 4-6: Collect successors, resolve dependencies, schedule ready nodes.
+    // Steps 4-6: Walk successor edges, resolve dependencies, schedule ready nodes.
     let rctx = shared.resolve_ctx();
     let inline_result = WORKER_BUFS.with(|bufs| {
         let mut bufs = bufs.borrow_mut();
         bufs.sched.clear();
 
-        // Step 4: Collect successors.
-        collect_successors_for_node_into(&shared.graph, rctx.cache, node_info, &mut bufs.succ);
-
         // Load slot generation once for all successors.
         let slot_gen = rctx.slots.generation[slot].load(slot_gen_load(ssm)) as u32;
 
-        // Step 5: Resolve dependencies for each successor (all non-condition).
+        // Steps 4+5: Iterate the flattened successor edges (all non-condition —
+        // guaranteed by worker_resolvable) and resolve dependencies for each.
         // Destructure into separate field borrows so the borrow checker allows
-        // iterating `succ` while mutating `ready` and `sched` simultaneously.
-        let WorkerResolutionBuffers {
-            succ, ready, sched, ..
-        } = &mut *bufs;
-        for (_succ_info, _has_cond, succ_id, pred_group) in succ.iter() {
-            let succ_node_id = *succ_id as usize;
+        // mutating `ready` and `sched` simultaneously.
+        let WorkerResolutionBuffers { ready, sched, .. } = &mut *bufs;
+        for edge in rctx.cache.successor_arena.edges_for(node_info.id as usize) {
+            // Skip successors whose declared index range excludes this instance.
+            if !edge.passes_filter(node_info.index) {
+                continue;
+            }
+            let succ_node_id = edge.succ_id as usize;
 
             decrement_and_collect_ready(
                 &rctx,
                 slot,
-                node_info.id,
                 node_info.index,
-                succ_node_id,
-                *pred_group,
+                edge,
                 node_info.bulk_count,
                 slot_gen,
                 ready,
             );
 
-            let succ_entry = &rctx.cache.node_cache[succ_node_id];
             // Only apply fanout-bulk when inline_continuation is disabled or W=1.
             // With inline_continuation + W>1, ingest→transform runs zero-cost inline;
             // batching would block that pipeline and lose the Rayon-free fast path.
-            let fanout_bulk_eligible = succ_entry.is_fanout_bulk
+            let fanout_bulk_eligible = edge.is_fanout_bulk
                 && !sctx.cfg.no_fanout_bulk
                 && (!sctx.cfg.inline_continuation || sctx.cfg.workers == 1);
             if fanout_bulk_eligible && !ready.is_empty() {
@@ -145,15 +140,16 @@ pub(super) fn worker_resolve_successors(
                     ready.len(),
                 );
                 ready.clear();
-                if new_arrived >= succ_entry.factor {
-                    let factor = succ_entry.factor;
+                if new_arrived >= edge.succ_factor() {
+                    let factor = edge.succ_factor();
                     let n_chunks = sctx.cfg.workers.min(factor).max(1);
                     let base = factor / n_chunks;
                     let extra = factor % n_chunks;
                     let mut start = 0usize;
                     for c in 0..n_chunks {
                         let count = base + if c < extra { 1 } else { 0 };
-                        let mut chunk_ni = NodeInfo::new(*succ_id, slot, start, node_info.index);
+                        let mut chunk_ni =
+                            NodeInfo::new(edge.succ_id, slot, start, node_info.index);
                         chunk_ni.bulk_count = count;
                         chunk_ni.gen = slot_gen;
                         sched.push(chunk_ni);
@@ -163,7 +159,7 @@ pub(super) fn worker_resolve_successors(
             } else {
                 push_ready_chunked(
                     ready,
-                    succ_node_id as crate::IdType,
+                    edge.succ_id,
                     slot,
                     node_info.index,
                     sctx.cfg.workers,
@@ -421,28 +417,65 @@ fn execute_single_task(
         func(args)
     } else {
         let node_cache = &sctx.cache.node_cache[node_info.id as usize];
-        let result_opt = ARG_BUF.with(|buf_cell| {
-            let mut buf = buf_cell.borrow_mut();
-            buf.clear();
-            let stale = populate_cached_args_into(
-                &mut buf,
-                shared,
-                &node_cache.arg_cache,
-                node_info.id,
-                node_info.index,
-                node_info.slot,
-                node_info.pred_index,
-                exec_slot,
-                exec_gen,
-            );
-            if stale {
+        let result_opt = if node_cache.template_stable {
+            // P3 Phase A: persistent per-(thread, node) template — clone the
+            // static args once, then patch only the dynamic slots per task.
+            NODE_ARG_TEMPLATES.with(|tpls| {
+                let mut tpls = tpls.borrow_mut();
+                let id = node_info.id as usize;
+                if tpls.len() <= id {
+                    tpls.resize_with(id + 1, || None);
+                }
+                let buf = tpls[id].get_or_insert_with(|| node_cache.arg_cache.args.clone());
+                let args_cache = &node_cache.arg_cache;
+                let workers = if !args_cache.rt_workers_indexes.is_empty() {
+                    shared.config.workers
+                } else {
+                    0
+                };
+                // template_stable guarantees every $res is width-1, so the
+                // splice arm inside populate_dynamic_args_into is unreachable
+                // and the buffer length stays constant across tasks.
+                let stale = populate_dynamic_args_into(
+                    buf,
+                    shared,
+                    args_cache,
+                    node_info.index,
+                    node_info.slot,
+                    node_info.pred_index,
+                    exec_slot,
+                    exec_gen,
+                    workers,
+                );
+                if stale {
+                    return None::<CmTypes>;
+                }
+                Some(func(buf))
+            })
+        } else {
+            ARG_BUF.with(|buf_cell| {
+                let mut buf = buf_cell.borrow_mut();
                 buf.clear();
-                return None::<CmTypes>;
-            }
-            let r = func(&buf);
-            buf.clear();
-            Some(r)
-        });
+                let stale = populate_cached_args_into(
+                    &mut buf,
+                    shared,
+                    &node_cache.arg_cache,
+                    node_info.id,
+                    node_info.index,
+                    node_info.slot,
+                    node_info.pred_index,
+                    exec_slot,
+                    exec_gen,
+                );
+                if stale {
+                    buf.clear();
+                    return None::<CmTypes>;
+                }
+                let r = func(&buf);
+                buf.clear();
+                Some(r)
+            })
+        };
         match result_opt {
             Some(r) => r,
             None => {

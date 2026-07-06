@@ -223,7 +223,8 @@ fn activate_buffered_slot(
             )
         });
         let start_ns = shared.telemetry.base_instant.elapsed().as_nanos();
-        super::resolution_loop::process_batch_resolution(
+        // Route through the pluggable resolution strategy (the batch-protocol seam).
+        let _ = shared.exec.resolution_strategy.drive_batch(
             shared,
             &mut buffered_batch,
             thread_core,

@@ -14,18 +14,19 @@ import json
 import subprocess
 import sys
 import time
-from dataclasses import asdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from harness import (  # noqa: E402
-    KnobConfig,
     TrialRecord,
+    add_common_args,
     establish_baseline,
-    evaluate,
     log_trial,
+    setup_arm,
 )
+
+from tomii import knobs as tomii_knobs  # noqa: E402
 
 MODEL = "claude-sonnet-4-6"
 _TIMEOUT_S = 60  # max wall time for one claude call
@@ -33,30 +34,10 @@ _TIMEOUT_S = 60  # max wall time for one claude call
 _PROMPT_TEMPLATE = """\
 You are an expert performance-tuning assistant for the Tomii task-graph framework.
 
-Your task: suggest runtime knob configurations for the stream-analytics workload \
+Your task: suggest runtime knob configurations for the {workload} workload \
 to minimise ms_per_stream while keeping the verifier passing.
 
-## Knob space (use only the listed values)
-
-workers:              [1, 2, 4, 8]
-slots:                [1, 4, 16, 64]
-inline_continuation:  [true, false]
-coalesce_barriers:    [true, false]
-fifo:                 [true, false]
-custom:               [true, false]
-no_fanout_bulk:       [true, false]
-batching_size:        [1, 4, 8, 16]
-
-## Knob semantics
-
-- workers: Rayon worker thread count. Match physical cores for compute-bound graphs.
-- slots: Concurrent in-flight streams. 1 minimises latency; higher values increase throughput.
-- inline_continuation: Run single-successor tasks inline (reduces scheduling overhead).
-- coalesce_barriers: Batch barrier fan-outs into bulk tasks (helps when factor >> workers).
-- fifo: FIFO scheduling instead of depth-first (default depth-first usually better for latency).
-- custom: Enable custom lock-free scheduling strategy.
-- no_fanout_bulk: Disable fanout bulk dispatch.
-- batching_size: Max tasks per scheduler batch (reduce to lower dispatch overhead).
+{knob_space_block}
 
 ## Current state
 
@@ -69,9 +50,9 @@ Last {n_shown} trials:
 
 ## Instructions
 
-Reply with ONLY a JSON object — no prose, no markdown fences — like:
-{{"workers": 4, "slots": 4, "inline_continuation": true, "coalesce_barriers": true, \
-"fifo": false, "custom": true, "no_fanout_bulk": false, "batching_size": 4}}
+Reply with ONLY a JSON object — no prose, no markdown fences — keyed by the
+exact knob names listed above (any knob you omit keeps its default), like:
+{{"workers": 4, "slots": 4, "inline_continuation": true, "batching_size": 4}}
 """
 
 
@@ -87,26 +68,54 @@ def _format_trial_summary(records: list[dict], n: int = 5) -> str:
         k = r.get("knobs", {})
         reason = r.get("rejection_reason") or ""
         status = "OK" if ok else f"REJECTED ({reason})"
-        lines.append(
-            f"  iter={r['iteration']} {status} ms={ms_str} | "
-            f"workers={k.get('workers')} slots={k.get('slots')} "
-            f"inline={k.get('inline_continuation')} coalesce={k.get('coalesce_barriers')} "
-            f"fifo={k.get('fifo')} custom={k.get('custom')} "
-            f"no_fanout={k.get('no_fanout_bulk')} batching={k.get('batching_size')}"
-        )
+        lines.append(f"  iter={r['iteration']} {status} ms={ms_str} | {json.dumps(k)}")
     return "\n".join(lines)
 
 
+def _validate_reply(space: dict, data: dict) -> dict | None:
+    """Filter a raw reply dict down to known knobs with in-domain values.
+
+    Unknown keys are dropped with a warning; out-of-domain values invalidate
+    the reply (return None) so the retry prompt is exercised.
+    """
+    domains = {
+        k["name"]: tomii_knobs.enumerate_domain(k["domain"]) for k in space["knobs"]
+    }
+    knobs: dict = {}
+    for name, value in data.items():
+        if name not in domains:
+            print(f"[agent] dropping unknown knob {name!r}", flush=True)
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            coerced = value
+        else:
+            try:
+                coerced = int(value)
+            except (TypeError, ValueError):
+                coerced = value
+        if coerced not in domains[name]:
+            print(
+                f"[agent] value {value!r} out of domain for {name!r}",
+                flush=True,
+            )
+            return None
+        knobs[name] = coerced
+    return knobs or None
+
+
 def _ask_claude(
+    space: dict,
     baseline_ms: float,
     best_ms: float,
     iteration: int,
     trial_log: list[dict],
-) -> KnobConfig | None:
+) -> dict | None:
     """Ask Claude for the next knob config via `claude -p`. Returns None if parsing fails."""
     n_shown = min(5, len(trial_log))
     best_str = f"{best_ms:.4f}" if best_ms < float("inf") else "none yet"
     prompt = _PROMPT_TEMPLATE.format(
+        workload=space.get("workload") or "target",
+        knob_space_block=tomii_knobs.render_prompt(space),
         iteration=iteration,
         baseline_ms=baseline_ms,
         best_ms=best_str,
@@ -152,16 +161,12 @@ def _ask_claude(
 
         try:
             data = json.loads(raw)
-            return KnobConfig(
-                workers=int(data.get("workers", 4)),
-                slots=int(data.get("slots", 4)),
-                inline_continuation=bool(data.get("inline_continuation", True)),
-                coalesce_barriers=bool(data.get("coalesce_barriers", True)),
-                fifo=bool(data.get("fifo", False)),
-                custom=bool(data.get("custom", True)),
-                no_fanout_bulk=bool(data.get("no_fanout_bulk", False)),
-                batching_size=int(data.get("batching_size", 1)),
-            )
+            if not isinstance(data, dict):
+                raise ValueError(f"expected a JSON object, got {type(data).__name__}")
+            knobs = _validate_reply(space, data)
+            if knobs is None:
+                raise ValueError("no valid knob values in reply")
+            return knobs
         except (json.JSONDecodeError, ValueError, TypeError) as exc:
             if attempt == 0:
                 print(
@@ -181,19 +186,21 @@ def main() -> None:
     p = argparse.ArgumentParser(
         description="Claude-agent search over stream-analytics knobs"
     )
-    p.add_argument("--iterations", type=int, default=50)
-    p.add_argument("--streams", type=int, default=500)
-    p.add_argument("--warmup", type=int, default=50)
-    p.add_argument("--results-dir", type=Path, default=Path("results"))
+    add_common_args(p)
     args = p.parse_args()
 
-    args.results_dir.mkdir(parents=True, exist_ok=True)
-    log_file = args.results_dir / "agent_trials.jsonl"
+    workload, space, results_dir = setup_arm(args)
+    log_file = results_dir / "agent_trials.jsonl"
+    print(
+        f"[agent] workload={workload.name} knob space: {len(space['knobs'])} knobs",
+        flush=True,
+    )
 
     baseline = establish_baseline(
         streams=args.streams,
         warmup=args.warmup,
-        results_dir=args.results_dir,
+        results_dir=results_dir,
+        workload=workload,
     )
     best_ms = baseline if baseline > 0.0 else float("inf")
 
@@ -203,6 +210,7 @@ def main() -> None:
     for i in range(args.iterations):
         t_iter = time.monotonic()
         knobs = _ask_claude(
+            space,
             baseline_ms=baseline,
             best_ms=best_ms,
             iteration=i,
@@ -214,7 +222,9 @@ def main() -> None:
             print(f"[agent {i}] skipped — Claude response could not be parsed", flush=True)
             continue
 
-        result = evaluate(knobs, streams=args.streams, warmup=args.warmup)
+        result = workload.evaluate(
+            knobs, streams=args.streams, warmup=args.warmup, space=space
+        )
         record = TrialRecord(
             iteration=i,
             knobs=knobs,
@@ -229,7 +239,7 @@ def main() -> None:
             "verifier_ok": result.verifier_ok,
             "ms_per_stream": result.ms_per_stream,
             "rejection_reason": result.rejection_reason,
-            "knobs": asdict(knobs),
+            "knobs": knobs,
         }
         trial_log.append(entry)
 

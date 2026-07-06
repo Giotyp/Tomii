@@ -186,6 +186,26 @@ pub(crate) fn build_node_cache(
         }
     }
 
+    // template_stable — P3 Phase A eligibility: the arg vector's length is a
+    // build-time constant iff every $res/$dep arg resolves to exactly one value.
+    // Mirrors the width logic in `fetch_res_results`: width is 1 for $dep, empty
+    // or single index, and the 1:1 mapping (indexes.len() == node_factor); only
+    // the collect-all path (multi-index, != node_factor) splices >1 values and
+    // would grow a persistent template unboundedly.
+    // Escape hatch for A/B measurement and field debugging: disables the
+    // persistent-template path at runtime without a rebuild (same binary, so
+    // comparisons are not confounded by code-layout changes).
+    let templates_disabled = std::env::var_os("TOMII_DISABLE_ARG_TEMPLATES").is_some();
+    for cache_entry in cache.iter_mut() {
+        let all_width_one = cache_entry
+            .arg_cache
+            .res_predecessors
+            .iter()
+            .all(|rp| rp.is_dep || rp.indexes.len() <= 1 || rp.indexes.len() == rp.node_factor);
+        cache_entry.template_stable =
+            !templates_disabled && all_width_one && cache_entry.name != "$network";
+    }
+
     cache
 }
 
@@ -312,4 +332,161 @@ pub(super) fn build_slot_counters(
         cond_instances_to_spawn,
         fanout_bulk_arrived,
     )
+}
+
+// ---------------------------------------------------------------------------
+// P3 Phase B: unchecked-wrapper selection
+// ---------------------------------------------------------------------------
+
+/// Discriminant name of a `CmTypes` value, matching the vocabulary of the
+/// generated `get_func_argspec` / `get_func_ret_variant` tables.
+fn variant_tag(v: &CmTypes) -> &'static str {
+    match v {
+        CmTypes::Bool(_) => "Bool",
+        CmTypes::I8(_) => "I8",
+        CmTypes::I16(_) => "I16",
+        CmTypes::I32(_) => "I32",
+        CmTypes::I64(_) => "I64",
+        CmTypes::U8(_) => "U8",
+        CmTypes::U16(_) => "U16",
+        CmTypes::U32(_) => "U32",
+        CmTypes::U64(_) => "U64",
+        CmTypes::F32(_) => "F32",
+        CmTypes::F64(_) => "F64",
+        CmTypes::Char(_) => "Char",
+        CmTypes::Usize(_) => "Usize",
+        CmTypes::Isize(_) => "Isize",
+        CmTypes::I128(_) => "I128",
+        CmTypes::U128(_) => "U128",
+        CmTypes::String(_) => "String",
+        CmTypes::Complex32(_) => "Complex32",
+        CmTypes::Complex64(_) => "Complex64",
+        CmTypes::VecCmt(_) => "VecCmt",
+        CmTypes::Ref(_) => "Ref",
+        CmTypes::Res(_) => "Res",
+        CmTypes::Dep(_) => "Dep",
+        CmTypes::Barrier(_) => "Barrier",
+        CmTypes::None => "None",
+        CmTypes::Init => "Init",
+        CmTypes::Any(_) => "Any",
+        CmTypes::AnySliced(_) => "AnySliced",
+        CmTypes::VecAny(_) => "VecAny",
+        CmTypes::Bytes(_) => "Bytes",
+        CmTypes::AnyHeld(_) => "AnyHeld",
+    }
+}
+
+/// Variant an argument slot is PROVEN to hold at every invocation, or `None`
+/// when unprovable.  Static slots are inspected directly in the arg template;
+/// runtime-index slots are always `Usize`; buffer-rotation slots are provable
+/// when every rotation value shares one variant; `$dep` slots are always
+/// `None`-variant; `$res` slots take the predecessor wrapper's return variant
+/// from the registry — unless grouping (`group_by`/`group_size`) rewraps the
+/// value, which disqualifies the slot.
+fn provable_variant(
+    entry: &NodeCacheEntry,
+    arg_idx: usize,
+    cache: &[NodeCacheEntry],
+    pred_group_by: &[Vec<Option<usize>>],
+) -> Option<&'static str> {
+    let ac = &entry.arg_cache;
+
+    if let Some(pos) = ac.res_indexes.iter().position(|&ri| ri == arg_idx) {
+        let rp = &ac.res_predecessors[pos];
+        if rp.is_dep {
+            return Some("None");
+        }
+        // Grouped collection rewraps results (VecCmt) — unprovable here.
+        if rp.node_group_size.is_some() || rp.pred_group_size.is_some() {
+            return None;
+        }
+        let table_gb = pred_group_by
+            .get(rp.node_id as usize)
+            .and_then(|row| row.get(rp.res_node_id as usize))
+            .copied()
+            .flatten();
+        if table_gb.is_some() {
+            return None;
+        }
+        let pred = cache.get(rp.res_node_id as usize)?;
+        return crate::func_reg::get_func_ret_variant(&pred.func_name);
+    }
+
+    if ac.rt_idxs_indexes.contains(&arg_idx) || ac.rt_workers_indexes.contains(&arg_idx) {
+        return Some("Usize");
+    }
+
+    if let Some(bpos) = ac.buffer_ref_indexes.iter().position(|&bi| bi == arg_idx) {
+        let values = ac.buffer_values.get(bpos)?;
+        let mut tags = values.iter().map(variant_tag);
+        let first = tags.next()?;
+        return tags.all(|t| t == first).then_some(first);
+    }
+
+    ac.args.get(arg_idx).map(variant_tag)
+}
+
+/// Swap `func_ptr` to the generated `_unchecked` wrapper twin for every node
+/// whose argument variants are provably constant (P3 Phase B).
+///
+/// Eligibility per node: `template_stable` (P3 Phase A — fixed arg vector
+/// length, no splices shifting slots), a twin registered for the function,
+/// argument count matching the spec, and every non-`"*"` spec slot proven by
+/// [`provable_variant`].  `TOMII_DISABLE_UNCHECKED_WRAPPERS` disables the pass
+/// entirely (same-binary A/B methodology).
+///
+/// This is the single place where `get_unchecked_func`'s safety contract is
+/// discharged: a twin is installed only when the proof above succeeds.
+pub(super) fn select_unchecked_wrappers(
+    cache: &mut [NodeCacheEntry],
+    pred_group_by: &[Vec<Option<usize>>],
+) {
+    if std::env::var_os("TOMII_DISABLE_UNCHECKED_WRAPPERS").is_some() {
+        tracing::info!("unchecked wrappers disabled via TOMII_DISABLE_UNCHECKED_WRAPPERS");
+        return;
+    }
+
+    for id in 0..cache.len() {
+        let entry = &cache[id];
+        if !entry.template_stable || entry.name == "$network" {
+            continue;
+        }
+        let Some(spec) = crate::func_reg::get_func_argspec(&entry.func_name) else {
+            continue;
+        };
+
+        let has_variadic = spec.last().copied() == Some("...");
+        let fixed = spec.len() - usize::from(has_variadic);
+        let arg_len = entry.arg_cache.args.len();
+        // The wrapper reads slots 0..fixed unconditionally and ignores any
+        // extra trailing slots (e.g. $barrier args), exactly like the checked
+        // wrapper — so only a SHORT template is disqualifying.
+        if arg_len < fixed {
+            continue;
+        }
+
+        let all_proven = spec[..fixed].iter().enumerate().all(|(i, req)| {
+            *req == "*" || provable_variant(entry, i, cache, pred_group_by) == Some(req)
+        });
+        if !all_proven {
+            continue;
+        }
+
+        // SAFETY: every fixed slot's variant was proven above for all
+        // invocations (template_stable fixes the layout; provable_variant
+        // covers each population source), satisfying the twin's contract.
+        if let Some(ptr) = unsafe { crate::func_reg::get_unchecked_func(&cache[id].func_name) } {
+            cache[id].func_ptr = ptr;
+            cache[id].uses_unchecked = true;
+            tracing::debug!(node = %cache[id].name, func = %cache[id].func_name,
+                "selected unchecked wrapper twin");
+        }
+    }
+
+    let selected = cache.iter().filter(|e| e.uses_unchecked).count();
+    tracing::info!(
+        selected,
+        total = cache.len(),
+        "unchecked wrapper selection complete"
+    );
 }

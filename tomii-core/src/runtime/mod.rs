@@ -18,6 +18,7 @@
 mod arg_resolution;
 mod batch_resolution;
 mod consts;
+mod dump;
 mod init;
 #[cfg(feature = "network")]
 mod network_init;
@@ -39,6 +40,8 @@ mod shared_data;
 mod slot_lifecycle;
 mod slot_management;
 mod successor;
+/// Flattened successor-edge arena consumed by the Phase-3 hot loops.
+pub(crate) mod successor_arena;
 mod task_execution;
 mod thread_locals;
 mod threading;
@@ -53,7 +56,9 @@ pub(crate) use node_cache::NodeCacheEntry;
 use parking_lot::RwLock;
 #[cfg(feature = "network")]
 pub(crate) use shared_data::NetworkInfra;
+pub(crate) use successor_arena::SuccessorArena;
 // SharedData is crate-internal; only BatchConfig, SpinWaitConfig, and RuntimeConfig are public.
+pub use dump::StateDumper;
 pub use resolution_strategy::{BatchOutcome, MultiSlotBatchStrategy, ResolutionStrategy};
 pub use shared_data::SchedCtx;
 pub(crate) use shared_data::SharedData;
@@ -284,7 +289,8 @@ impl TomiiRtBuilder {
         // --- Destructure compiled graph IR ---
         let GraphCompiled {
             graph,
-            node_cache,
+            mut node_cache,
+            successor_arena,
             pred_index_filter,
             pred_group_by,
             pred_succ_1to1_offset,
@@ -295,6 +301,11 @@ impl TomiiRtBuilder {
             max_factor,
             num_nodes,
         } = self.compiled;
+
+        // P3 Phase B: swap in unchecked wrapper twins for nodes whose argument
+        // variants are provable at build time.  Runs here (not at compile) so
+        // the TOMII_DISABLE_UNCHECKED_WRAPPERS toggle is honoured per run.
+        init::select_unchecked_wrappers(&mut node_cache, &pred_group_by);
 
         // --- Slot counters & condition tracking (slot-count-dependent) ---
         let (
@@ -386,6 +397,7 @@ impl TomiiRtBuilder {
             graph,
             graph_cache: GraphCache {
                 node_cache,
+                successor_arena,
                 pred_index_filter: Arc::new(pred_index_filter),
                 pred_group_by: Arc::new(pred_group_by),
                 pred_succ_1to1_offset: Arc::new(pred_succ_1to1_offset),
@@ -428,6 +440,8 @@ impl TomiiRtBuilder {
                         .map(|_| AtomicBool::new(false))
                         .collect(),
                 ),
+                pending_frames: parking_lot::Mutex::new(std::collections::BTreeMap::new()),
+                pending_count: AtomicUsize::new(0),
             },
             exec: ExecCtx {
                 scheduler: Arc::new(self.scheduler),
@@ -447,6 +461,23 @@ impl TomiiRtBuilder {
             },
         });
 
+        // Typed spawn path (P2): install the node-task executor on the Custom
+        // scheduler. The hook holds a Weak — the scheduler is owned by
+        // SharedData.exec, so an Arc here would form a reference cycle that
+        // leaks the worker pool. Tasks arriving after SharedData teardown fail
+        // the upgrade and are dropped (their slot generation is stale anyway).
+        if shared.exec.scheduler.has_typed_spawn() {
+            let weak = Arc::downgrade(&shared);
+            shared
+                .exec
+                .scheduler
+                .set_node_executor(Box::new(move |desc| {
+                    if let Some(shared) = weak.upgrade() {
+                        scheduling::run_node_desc(&shared, desc);
+                    }
+                }));
+        }
+
         Ok(TomiiRt { shared })
     }
 }
@@ -460,9 +491,31 @@ pub struct TomiiRt {
     shared: Arc<SharedData>,
 }
 
+/// Snapshot of run progress handed to a [`TomiiRt::run_until`] predicate on
+/// each poll tick.
+#[derive(Debug, Clone, Copy)]
+pub struct RunProgress {
+    /// Wall-clock time since the run started.
+    pub elapsed: std::time::Duration,
+    /// Streams completed so far (includes dropped frames on network graphs).
+    pub streams_completed: usize,
+    /// The configured stream budget (`max_streams`).
+    pub max_streams: usize,
+    /// Number of slots currently marked active.
+    pub active_slots: u32,
+}
+
 impl TomiiRt {
     pub fn base_instant(&self) -> Instant {
         *self.shared.telemetry.base_instant
+    }
+
+    /// Cloneable handle for snapshotting runtime state from any thread —
+    /// including while `run()` is blocked (the wedged-run debugging case).
+    pub fn state_dumper(&self) -> StateDumper {
+        StateDumper {
+            shared: Arc::clone(&self.shared),
+        }
     }
 
     /// Spawn all threads and run the graph to completion (or until max_runtime).
@@ -474,6 +527,32 @@ impl TomiiRt {
     /// unwrap and is not converted to an error — that indicates a bug in the runtime, not a
     /// recoverable user error.
     pub fn run(&mut self) -> Result<(), crate::RuntimeError> {
+        self.run_impl(None)
+    }
+
+    /// Like [`run`](Self::run), but additionally polls `predicate` on every
+    /// wait tick and shuts the run down when it returns `true`.
+    ///
+    /// Generalizes `max_runtime`'s wall-clock-only termination (Taskflow
+    /// `run_until` analog): completion of all streams and an optional
+    /// `max_runtime` still terminate the run as usual — the predicate is a
+    /// third, caller-defined condition.  Unlike [`run`](Self::run), the wait
+    /// loop runs even when `max_runtime` is `None`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`run`](Self::run).
+    pub fn run_until<F>(&mut self, mut predicate: F) -> Result<(), crate::RuntimeError>
+    where
+        F: FnMut(&RunProgress) -> bool,
+    {
+        self.run_impl(Some(&mut predicate))
+    }
+
+    fn run_impl(
+        &mut self,
+        mut predicate: Option<&mut dyn FnMut(&RunProgress) -> bool>,
+    ) -> Result<(), crate::RuntimeError> {
         // Start timing for system thread slots
         for thread_id in 0..self.shared.config.system_threads {
             let system_slot = self.shared.config.slots + thread_id;
@@ -486,11 +565,22 @@ impl TomiiRt {
         let receiver_handles = self.spawn_receiver_threads()?;
         let resolution_handles = self.spawn_resolution_threads()?;
 
-        // Wait loop: sleep until max_runtime exceeded or all streams complete
+        // Wait loop: sleep until max_runtime exceeded, all streams complete,
+        // or the caller's run_until predicate fires.  Without a max_runtime
+        // or predicate there is nothing to poll — join immediately (the
+        // resolution threads terminate themselves), preserving pre-run_until
+        // behaviour exactly.
         let start_time = Instant::now();
         tracing::debug!("Max runtime check started");
-        if let Some(max_runtime) = self.shared.config.max_runtime {
-            sleep(RUN_SLEEP);
+        if self.shared.config.max_runtime.is_some() || predicate.is_some() {
+            // RUN_SLEEP (10s) matches max_runtime's whole-second granularity,
+            // but is far too coarse for a caller predicate — poll those at 10ms.
+            let tick = if predicate.is_some() {
+                Duration::from_millis(10)
+            } else {
+                RUN_SLEEP
+            };
+            sleep(tick);
             let mut finish = false;
             loop {
                 let completed_streams = self
@@ -500,12 +590,37 @@ impl TomiiRt {
                     .load(Ordering::Acquire);
                 let completed = completed_streams == self.shared.config.max_streams;
 
-                if start_time.elapsed().as_secs() > max_runtime {
+                let max_runtime_exceeded = self
+                    .shared
+                    .config
+                    .max_runtime
+                    .is_some_and(|max| start_time.elapsed().as_secs() > max);
+                if max_runtime_exceeded {
                     tracing::info!("Max runtime reached, exiting");
                     finish = true;
                 } else if completed {
                     tracing::info!("All streams completed, exiting");
                     finish = true;
+                }
+
+                if !finish {
+                    if let Some(pred) = predicate.as_deref_mut() {
+                        let progress = RunProgress {
+                            elapsed: start_time.elapsed(),
+                            streams_completed: completed_streams,
+                            max_streams: self.shared.config.max_streams,
+                            active_slots: self
+                                .shared
+                                .slot_data
+                                .active_bitmap
+                                .load(Ordering::Acquire)
+                                .count_ones(),
+                        };
+                        if pred(&progress) {
+                            tracing::info!("run_until predicate satisfied, exiting");
+                            finish = true;
+                        }
+                    }
                 }
 
                 if finish {
@@ -515,7 +630,7 @@ impl TomiiRt {
                     self.schedule_post_nodes();
                     break;
                 }
-                sleep(RUN_SLEEP);
+                sleep(tick);
             }
         }
 

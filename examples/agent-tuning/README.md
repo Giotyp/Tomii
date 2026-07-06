@@ -11,7 +11,8 @@ Tomii's JSON-defined computation graphs make the tuning surface machine-readable
 optimizer — random, Bayesian, grid, or a language model — can enumerate candidate
 configurations, run the verifier, and iterate. The four arms here share:
 
-- the same `KnobConfig` search space (`knob_space.json`)
+- the same generated search space (`tomii.knob_space` from the runtime knob
+  catalog + `graph.json` — no hand-written per-workload spec)
 - the same evaluation budget (`--iterations N`)
 - the same correctness gate (`verify.py` from stream-analytics)
 - the same metric (`ms_per_stream` from the runtime report)
@@ -43,23 +44,36 @@ FUNC_PATH=$(pwd)/examples/stream-analytics/src/lib.rs \
 
 ```bash
 cd examples/agent-tuning
-bash run_all.sh 50   # run all 4 arms with 50 iterations each
+bash run_all.sh 50                            # all 4 arms, stream-analytics
+bash run_all.sh 50 pipeline                   # all 4 arms, pipeline-bench
+bash run_all.sh 30 mimo --streams 200 --warmup 20   # all 4 arms, mimo-bench
 ```
 
 Each arm writes a `.jsonl` trial log to the results directory.
+
+## Workloads
+
+Every arm takes `--workload {stream-analytics,pipeline,mimo}` (see `workloads.py`);
+the search loop is workload-agnostic and the knob space is always generated
+(`tomii.knob_space`) from the workload's graph.
+
+| Workload | Source | Correctness gate | Metric | Notes |
+|---|---|---|---|---|
+| `stream-analytics` | `examples/stream-analytics` | golden-file `verify.py` per trial | avg latency ms/stream (`report.json`) | self-contained |
+| `pipeline` | `bench/pipeline-bench` | knob-aware verify pass per trial (emit-to-file graph run with the trial's knobs + graph edits, numeric checks vs Python reference) | `Avg Time Per Stream` from timing file | self-contained, heavy kernel |
+| `mimo` | `bench/mimo-bench` | keep-up gate: `Total Streams Processed == frames sent` (a config cannot look fast by dropping frames) | `Avg Time Per Stream` (ms/slot) from timing file | needs Agora sender + MKL; graph knobs disabled (no per-trial output verification for edited MIMO graphs); `--streams` = sender frame budget; ~25-40 s/trial |
 
 ## Methodology
 
 | Property | Value |
 |---|---|
 | Budget per arm | `--iterations` (default 50) |
-| Streams per eval | 500 (50 warmup excluded) |
-| Correctness gate | `examples/stream-analytics/verify.py` |
-| Metric | `ms_per_stream` (from `report.json` summary) |
-| Rejected trial | `verifier_ok=False` — not counted toward best |
+| Trial size | `--streams` / `--warmup` (defaults 500/50; mimo interprets streams as sender frames) |
+| Correctness gate | per workload (table above) — gates every trial |
+| Rejected trial | `verifier_ok=False` — logged with reason, not counted toward best |
 
-All four arms use identical budget, threshold, and verifier. A trial is valid only if
-the verifier passes for the full stream count.
+All four arms use identical budget, fixtures, and verifier per workload. A trial is
+valid only if the workload's gate passes for the full trial.
 
 ## Arms
 
@@ -103,9 +117,20 @@ A `baseline.json` file is written at the start of each run.
 
 ## Allowed edits
 
-See `knob_space.json` for the full list of tunable CLI flags and what is forbidden.
-The forbidden list protects correctness: `$barrier`, `$dep`, and `$res` arguments
-encode data-dependency semantics that must not be removed.
+The search space is generated — inspect it with:
+
+```bash
+python -m tomii --knob-space examples/stream-analytics/graph.json --workload stream-analytics
+```
+
+It contains the runtime (CLI) knobs whose catalog role is `perf`, plus graph
+knobs extracted from `graph.json` (shared factor variables, literal node
+factors, `group_by` widths).  Graph knobs may violate workload invariants the
+generator cannot know — such trials are rejected by the verifier and logged,
+which is the point of a verifier-gated search.  The space's `forbidden` list
+protects correctness: `$barrier`, `$dep`, and `$res` arguments encode
+data-dependency semantics that must not be removed.  Pass `--no-graph-knobs`
+to any arm to restrict the search to runtime knobs.
 
 ## Results
 

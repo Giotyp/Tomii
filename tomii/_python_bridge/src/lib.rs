@@ -13,10 +13,12 @@
 //! compatibility before the graph starts.
 //!
 //! GIL strategy (auto-detected at startup):
-//!   Tier 1 (default, stock 3.11/3.12): Python::with_gil per call. NumPy/BLAS
-//!     release the GIL internally, so matmul/FFT-heavy graphs scale with worker count.
-//!   Tier 3 (python3.13t, PEP 703): Python::with_gil is a no-op in the free-threaded
-//!     build (compiled with Py_GIL_DISABLED). Full parallelism for all Python code.
+//!   Tier 1 (default, stock 3.11/3.12): Python::attach acquires the GIL per call.
+//!     NumPy/BLAS release the GIL internally, so matmul/FFT-heavy graphs scale
+//!     with worker count.
+//!   Tier 3 (python3.13t, PEP 703): Python::attach only attaches to the runtime
+//!     in the free-threaded build (compiled with Py_GIL_DISABLED) — no lock is
+//!     taken. Full parallelism for all Python code.
 //!
 //! Python initialization is owned by the embedding binary; the bridge uses the
 //! `extension-module` PyO3 feature so it does NOT link its own libpython copy.
@@ -28,9 +30,9 @@
 
 #![allow(improper_ctypes_definitions)]
 
-use parking_lot::RwLock;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyModule, PyTuple};
+use pyo3::IntoPyObjectExt;
 use std::any::Any;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -52,6 +54,19 @@ include!(concat!(env!("OUT_DIR"), "/python_abi.rs"));
 pub extern "C" fn tomii_python_bridge_abi() -> u32 {
     let gil_bit: u32 = if cfg!(Py_GIL_DISABLED) { 1 << 15 } else { 0 };
     PYTHON_BRIDGE_ABI_BASE | gil_bit
+}
+
+/// Python import entry point (`import tomii._lib.tomii_python_bridge`).
+///
+/// The bridge is normally dlopen'd by the embedding tomii binary rather than
+/// imported from Python, but maturin installs the dylib as an importable
+/// extension module. `gil_used = false` declares it free-threaded-safe so a
+/// direct import on CPython 3.13t+ does not silently re-enable the GIL.
+/// This is sound: the bridge keeps no mutable statics — shared state is a
+/// `OnceLock` and per-value `Arc<RwLock<..>>` handles owned by the runtime.
+#[pymodule(gil_used = false)]
+fn tomii_python_bridge(_m: &Bound<'_, PyModule>) -> PyResult<()> {
+    Ok(())
 }
 
 // --------------------------------------------------------------------------- //
@@ -88,29 +103,27 @@ fn ensure_logged() {
 fn cm_to_py<'py>(py: Python<'py>, cm: &CmTypes) -> Bound<'py, PyAny> {
     use pyo3::types::PyString;
     match cm {
-        CmTypes::Any(arc) => {
-            let guard = arc.read();
-            let py_obj = guard
-                .downcast_ref::<Py<PyAny>>()
-                .expect("py bridge: Any slot does not contain Py<PyAny>");
-            // clone_ref increments refcount under the GIL and returns a new Py<PyAny>
-            py_obj.clone_ref(py).into_bound(py)
-        }
-        CmTypes::Bool(b) => b.into_py(py).into_bound(py),
-        CmTypes::I8(n) => n.into_py(py).into_bound(py),
-        CmTypes::I16(n) => n.into_py(py).into_bound(py),
-        CmTypes::I32(n) => n.into_py(py).into_bound(py),
-        CmTypes::I64(n) => n.into_py(py).into_bound(py),
-        CmTypes::U8(n) => n.into_py(py).into_bound(py),
-        CmTypes::U16(n) => n.into_py(py).into_bound(py),
-        CmTypes::U32(n) => n.into_py(py).into_bound(py),
-        CmTypes::U64(n) => n.into_py(py).into_bound(py),
-        CmTypes::Usize(n) => (*n as u64).into_py(py).into_bound(py),
-        CmTypes::Isize(n) => (*n as i64).into_py(py).into_bound(py),
-        CmTypes::F32(f) => f.into_py(py).into_bound(py),
-        CmTypes::F64(f) => f.into_py(py).into_bound(py),
-        CmTypes::String(s) => PyString::new_bound(py, s.as_ref()).into_any(),
-        CmTypes::Bytes(data) => pyo3::types::PyBytes::new_bound(py, data.as_slice()).into_any(),
+        // `with_any` serves both `Any` (RwLock read) and `AnyHeld` (the
+        // pre-resolved pointer the runtime substitutes during bulk tasks).
+        CmTypes::Any(_) | CmTypes::AnyHeld(_) => cm
+            .with_any::<Py<PyAny>, _, _>(|obj| obj.clone_ref(py))
+            .expect("py bridge: Any slot does not contain Py<PyAny>")
+            .into_bound(py),
+        CmTypes::Bool(b) => b.into_bound_py_any(py).unwrap(),
+        CmTypes::I8(n) => n.into_bound_py_any(py).unwrap(),
+        CmTypes::I16(n) => n.into_bound_py_any(py).unwrap(),
+        CmTypes::I32(n) => n.into_bound_py_any(py).unwrap(),
+        CmTypes::I64(n) => n.into_bound_py_any(py).unwrap(),
+        CmTypes::U8(n) => n.into_bound_py_any(py).unwrap(),
+        CmTypes::U16(n) => n.into_bound_py_any(py).unwrap(),
+        CmTypes::U32(n) => n.into_bound_py_any(py).unwrap(),
+        CmTypes::U64(n) => n.into_bound_py_any(py).unwrap(),
+        CmTypes::Usize(n) => (*n as u64).into_bound_py_any(py).unwrap(),
+        CmTypes::Isize(n) => (*n as i64).into_bound_py_any(py).unwrap(),
+        CmTypes::F32(f) => f.into_bound_py_any(py).unwrap(),
+        CmTypes::F64(f) => f.into_bound_py_any(py).unwrap(),
+        CmTypes::String(s) => PyString::new(py, s.as_ref()).into_any(),
+        CmTypes::Bytes(data) => pyo3::types::PyBytes::new(py, data.as_slice()).into_any(),
         // Barrier sentinels — not a real value; convert to Python None so callers
         // can filter them with `if arg is None` if needed.
         CmTypes::None => py.None().into_bound(py),
@@ -124,16 +137,22 @@ fn cm_to_py<'py>(py: Python<'py>, cm: &CmTypes) -> Bound<'py, PyAny> {
 fn py_to_cm(_py: Python<'_>, obj: Bound<'_, PyAny>) -> CmTypes {
     let py_obj: Py<PyAny> = obj.unbind();
     let boxed: Box<dyn Any + Send + Sync> = Box::new(py_obj);
-    CmTypes::Any(Arc::new(RwLock::new(boxed)))
+    CmTypes::Any(Arc::new(parking_lot::RwLock::new(boxed)))
 }
 
-/// Extract the callable from a CmTypes::Any slot, incrementing its refcount.
-fn get_callable(py: Python<'_>, arc: &Arc<RwLock<Box<dyn Any + Send + Sync>>>) -> Py<PyAny> {
-    let guard = arc.read();
-    guard
-        .downcast_ref::<Py<PyAny>>()
+/// Extract the callable from a `CmTypes::Any` / `CmTypes::AnyHeld` slot,
+/// incrementing its refcount. The runtime upgrades `Any` args to `AnyHeld`
+/// (lock-free pre-resolved pointer) inside bulk tasks, so both must be accepted.
+fn get_callable(py: Python<'_>, cm: &CmTypes) -> Py<PyAny> {
+    cm.with_any::<Py<PyAny>, _, _>(|obj| obj.clone_ref(py))
         .expect("py bridge: callable slot does not contain Py<PyAny>")
-        .clone_ref(py)
+}
+
+/// Panic unless the slot can hold a Python callable (Any or AnyHeld).
+fn expect_callable_slot(cm: &CmTypes, who: &str) {
+    if !matches!(cm, CmTypes::Any(_) | CmTypes::AnyHeld(_)) {
+        panic!("{who}: args[0] must be CmTypes::Any (callable handle)");
+    }
 }
 
 // --------------------------------------------------------------------------- //
@@ -156,8 +175,8 @@ pub fn py_load_callable_cm(args: &[CmTypes]) -> CmTypes {
         _ => panic!("py_load_callable: args[1] must be String (function name)"),
     };
 
-    Python::with_gil(|py| {
-        let module = PyModule::import_bound(py, module_name.as_ref()).unwrap_or_else(|e| {
+    Python::attach(|py| {
+        let module = PyModule::import(py, module_name.as_ref()).unwrap_or_else(|e| {
             panic!(
                 "py_load_callable: cannot import module '{}': {}",
                 module_name, e
@@ -171,7 +190,7 @@ pub fn py_load_callable_cm(args: &[CmTypes]) -> CmTypes {
         });
         let callable: Py<PyAny> = func.unbind();
         let boxed: Box<dyn Any + Send + Sync> = Box::new(callable);
-        CmTypes::Any(Arc::new(RwLock::new(boxed)))
+        CmTypes::Any(Arc::new(parking_lot::RwLock::new(boxed)))
     })
 }
 
@@ -185,13 +204,10 @@ pub fn py_load_callable_cm(args: &[CmTypes]) -> CmTypes {
 /// Returns: CmTypes::Any wrapping the Python result
 #[no_mangle]
 pub fn py_call_any_cm(args: &[CmTypes]) -> CmTypes {
-    let callable_arc = match &args[0] {
-        CmTypes::Any(arc) => arc.clone(),
-        _ => panic!("py_call_any: args[0] must be CmTypes::Any (callable handle)"),
-    };
+    expect_callable_slot(&args[0], "py_call_any");
 
-    Python::with_gil(|py| {
-        let callable = get_callable(py, &callable_arc);
+    Python::attach(|py| {
+        let callable = get_callable(py, &args[0]);
         let callable_bound = callable.bind(py);
 
         // Collect non-None args (filter out barrier sentinels)
@@ -201,7 +217,7 @@ pub fn py_call_any_cm(args: &[CmTypes]) -> CmTypes {
             .map(|cm| cm_to_py(py, cm))
             .collect();
 
-        let tuple = PyTuple::new_bound(py, &py_args);
+        let tuple = PyTuple::new(py, &py_args).expect("py_call_any: cannot build args tuple");
         let result = callable_bound
             .call1(tuple)
             .unwrap_or_else(|e| panic!("py_call_any: call failed: {}", e));
@@ -228,13 +244,10 @@ pub fn py_call_void_cm(args: &[CmTypes]) -> CmTypes {
     if args.len() < 2 {
         panic!("py_call_void: need at least 2 args (callable, first_arg)");
     }
-    let callable_arc = match &args[0] {
-        CmTypes::Any(arc) => arc.clone(),
-        _ => panic!("py_call_void: args[0] must be CmTypes::Any (callable handle)"),
-    };
+    expect_callable_slot(&args[0], "py_call_void");
 
-    Python::with_gil(|py| {
-        let callable = get_callable(py, &callable_arc);
+    Python::attach(|py| {
+        let callable = get_callable(py, &args[0]);
         let callable_bound = callable.bind(py);
 
         let first_arg = cm_to_py(py, &args[1]);
@@ -245,9 +258,10 @@ pub fn py_call_void_cm(args: &[CmTypes]) -> CmTypes {
             .filter(|cm| !matches!(cm, CmTypes::None))
             .map(|cm| cm_to_py(py, cm))
             .collect();
-        let py_list = PyList::new_bound(py, &rest);
+        let py_list = PyList::new(py, &rest).expect("py_call_void: cannot build args list");
 
-        let tuple = PyTuple::new_bound(py, &[first_arg, py_list.into_any()]);
+        let tuple = PyTuple::new(py, [first_arg, py_list.into_any()])
+            .expect("py_call_void: cannot build args tuple");
         callable_bound
             .call1(tuple)
             .unwrap_or_else(|e| panic!("py_call_void: call failed: {}", e));
@@ -270,10 +284,7 @@ pub fn py_call_void_cm(args: &[CmTypes]) -> CmTypes {
 /// Returns: CmTypes::Bytes
 #[no_mangle]
 pub fn py_call_bytes_cm(args: &[CmTypes]) -> CmTypes {
-    let callable_arc = match &args[0] {
-        CmTypes::Any(arc) => arc.clone(),
-        _ => panic!("py_call_bytes: args[0] must be CmTypes::Any (callable handle)"),
-    };
+    expect_callable_slot(&args[0], "py_call_bytes");
     let data = match &args[1] {
         CmTypes::Bytes(b) => b.clone(),
         _ => panic!("py_call_bytes: args[1] must be CmTypes::Bytes"),
@@ -283,14 +294,15 @@ pub fn py_call_bytes_cm(args: &[CmTypes]) -> CmTypes {
         _ => panic!("py_call_bytes: args[2] must be CmTypes::String (metadata)"),
     };
 
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         use pyo3::types::PyString;
-        let callable = get_callable(py, &callable_arc);
+        let callable = get_callable(py, &args[0]);
         let callable_bound = callable.bind(py);
 
-        let py_bytes = pyo3::types::PyBytes::new_bound(py, data.as_slice());
-        let py_meta = PyString::new_bound(py, meta.as_ref()).into_any();
-        let tuple = PyTuple::new_bound(py, &[py_bytes.into_any(), py_meta]);
+        let py_bytes = pyo3::types::PyBytes::new(py, data.as_slice());
+        let py_meta = PyString::new(py, meta.as_ref()).into_any();
+        let tuple = PyTuple::new(py, [py_bytes.into_any(), py_meta])
+            .expect("py_call_bytes: cannot build args tuple");
 
         let result = callable_bound
             .call1(tuple)

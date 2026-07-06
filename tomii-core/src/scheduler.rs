@@ -76,6 +76,7 @@ pub fn create_threadpool(
     receiver_threads: usize,
     system_threads: usize,
     async_recorder: Option<Arc<AsyncRecorder>>,
+    worker_hook: Option<Arc<dyn crate::WorkerHook>>,
 ) -> ThreadPoolResult {
     // Use core allocation algorithm
     let alloc =
@@ -108,6 +109,8 @@ pub fn create_threadpool(
     }
 
     let recorder_clone = async_recorder.clone();
+    let start_hook = worker_hook.clone();
+    let exit_hook = worker_hook;
     let worker_threadpool = ThreadPoolBuilder::new()
         .num_threads(actual_workers)
         .start_handler(move |thread_index| {
@@ -126,6 +129,15 @@ pub fn create_threadpool(
                 if let Some(tx) = recorder.get_worker_sender(channel_index) {
                     set_worker_recorder(tx);
                 }
+            }
+
+            if let Some(ref hook) = start_hook {
+                hook.on_worker_start(thread_index);
+            }
+        })
+        .exit_handler(move |thread_index| {
+            if let Some(ref hook) = exit_hook {
+                hook.on_worker_exit(thread_index);
             }
         })
         .build()
@@ -245,6 +257,7 @@ struct SchedulerBase {
 }
 
 impl SchedulerBase {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         core_offset: usize,
         workers: usize,
@@ -253,6 +266,7 @@ impl SchedulerBase {
         base_instant: Instant,
         system_threads: usize,
         receiver_threads: usize,
+        worker_hook: Option<Arc<dyn crate::WorkerHook>>,
     ) -> Self {
         let total_recorders = workers + receiver_threads + system_threads;
         let async_recorder = if record {
@@ -270,6 +284,7 @@ impl SchedulerBase {
             receiver_threads,
             system_threads,
             async_recorder.clone(),
+            worker_hook,
         );
 
         // Phase 4: Initialize worker metrics (only when recording enabled).
@@ -451,6 +466,7 @@ impl RayonScheduler {
         base_instant: Instant,
         system_threads: usize,
         receiver_threads: usize,
+        worker_hook: Option<Arc<dyn crate::WorkerHook>>,
     ) -> Self {
         Self {
             base: SchedulerBase::new(
@@ -461,6 +477,7 @@ impl RayonScheduler {
                 base_instant,
                 system_threads,
                 receiver_threads,
+                worker_hook,
             ),
             mode,
         }
@@ -647,6 +664,44 @@ impl SchedulerImpl {
             s => s.spawn_task_with_meta(meta, task),
             s => s.spawn_with_meta_priority(priority, meta, task),
             p => p.spawn_task_with_priority(sched_priority, Box::new(task)))
+    }
+
+    /// Whether this scheduler has a typed zero-alloc node spawn path.
+    ///
+    /// Callers hoist this check out of dispatch loops: when `true`, hot-path
+    /// node tasks go through [`Self::spawn_node`] (no per-task `Box`, no
+    /// `Arc<SharedData>` clone); when `false` (Rayon/Plugin), they take the
+    /// boxed-closure path.
+    #[inline]
+    pub fn has_typed_spawn(&self) -> bool {
+        matches!(self, SchedulerImpl::Custom(_))
+    }
+
+    /// Typed zero-alloc spawn of a graph-node task (P2).
+    ///
+    /// Only valid when [`Self::has_typed_spawn`] returns `true`; the runtime
+    /// must have installed the executor via [`Self::set_node_executor`] first.
+    #[inline]
+    pub fn spawn_node(
+        &self,
+        group_id: usize,
+        priority: crate::custom_scheduler::Priority,
+        desc: crate::custom_scheduler::NodeTaskDesc,
+    ) {
+        match self {
+            SchedulerImpl::Custom(s) => s.spawn_node(group_id, priority, desc),
+            _ => unreachable!("spawn_node requires has_typed_spawn() == true"),
+        }
+    }
+
+    /// Install the typed node-task executor (Custom scheduler only; no-op otherwise).
+    pub fn set_node_executor(
+        &self,
+        exec: Box<dyn Fn(crate::custom_scheduler::NodeTaskDesc) + Send + Sync>,
+    ) {
+        if let SchedulerImpl::Custom(s) = self {
+            s.set_node_executor(exec);
+        }
     }
 
     /// Spawn a task to a specific worker affinity group.
@@ -897,6 +952,9 @@ pub struct SchedulerConfig {
     pub target_batch_size: usize,
     pub batch_timeout_us: u64,
     pub worker_affinity: Option<WorkerAffinityConfig>,
+    /// Optional per-worker lifecycle hook (see [`crate::WorkerHook`]).
+    /// Invoked on each worker thread at start and exit; `None` costs nothing.
+    pub worker_hook: Option<Arc<dyn crate::WorkerHook>>,
 }
 
 pub fn create_scheduler(cfg: SchedulerConfig) -> SchedulerImpl {
@@ -912,6 +970,7 @@ pub fn create_scheduler(cfg: SchedulerConfig) -> SchedulerImpl {
         target_batch_size: _,
         batch_timeout_us: _,
         worker_affinity,
+        worker_hook,
     } = cfg;
     match scheduler_type {
         SchedulerType::Fifo => SchedulerImpl::Rayon(RayonScheduler::new(
@@ -923,6 +982,7 @@ pub fn create_scheduler(cfg: SchedulerConfig) -> SchedulerImpl {
             base_instant,
             system_threads,
             receiver_threads,
+            worker_hook,
         )),
         SchedulerType::WorkStealing => SchedulerImpl::Rayon(RayonScheduler::new(
             SpawnMode::WorkStealing,
@@ -933,6 +993,7 @@ pub fn create_scheduler(cfg: SchedulerConfig) -> SchedulerImpl {
             base_instant,
             system_threads,
             receiver_threads,
+            worker_hook,
         )),
         SchedulerType::Custom => {
             let mut builder = crate::custom_scheduler::CustomScheduler::builder()
@@ -940,7 +1001,8 @@ pub fn create_scheduler(cfg: SchedulerConfig) -> SchedulerImpl {
                 .system_threads(system_threads)
                 .receiver_threads(receiver_threads)
                 .record(record)
-                .base_instant(base_instant);
+                .base_instant(base_instant)
+                .worker_hook(worker_hook);
 
             // Build worker groups based on affinity configuration
             //

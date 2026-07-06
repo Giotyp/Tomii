@@ -7,10 +7,28 @@
 //! The trait also covers the worker fast path (`worker_resolve`) which runs
 //! directly on a worker thread for nodes whose successors are all non-condition.
 //!
+//! # How the seam is wired
+//! Every batch-protocol entry point routes through `ExecCtx::resolution_strategy`:
+//! the batch-queue drain (`resolution_loop::drain_and_process_batch_queue`), network
+//! packet ingestion (`packet_processing`), and buffered-slot activation
+//! (`slot_lifecycle`) all call [`ResolutionStrategy::drive_batch`]. One indirect call
+//! per *batch* — amortised to noise across the 8–256 tasks a batch carries.
+//!
+//! # `worker_resolve` is deliberately NOT called per task
+//! The worker fast path (`task_execution::worker_resolve_successors`) is on the
+//! per-task critical path in inline-continuation mode; an indirect call + vtable
+//! load there would cost 2–5% of the dispatch budget on fine-grained workloads
+//! (anti-diagonal wavefront). Worker-side behaviour is instead specialised
+//! *data-driven* — via `NodeCacheEntry` flags and the `SuccessorArena` edge data —
+//! so both paths change together without a per-task virtual call.
+//! `worker_resolve` exists on the trait so a custom strategy can keep its batch
+//! protocol consistent with the worker path; it is invoked only from strategy code,
+//! not from the runtime's per-task hot loop.
+//!
 //! # v1 note
-//! Only [`MultiSlotBatchStrategy`] is shipped in v1. The `--resolution-strategy`
-//! CLI flag documents the seam; future strategies (priority-aware, frozen-graph)
-//! plug in here without modifying `resolution_loop.rs` or `task_execution.rs`.
+//! Only [`MultiSlotBatchStrategy`] is shipped in v1. Future strategies
+//! (priority-aware, frozen-graph) register in `bin/main.rs` behind the
+//! `--resolution-strategy` flag and plug in without modifying `resolution_loop.rs`.
 
 use super::shared_data::{SchedCtx, SharedData};
 use crate::buffers::NodeInfo;

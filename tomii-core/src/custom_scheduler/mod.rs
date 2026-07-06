@@ -37,7 +37,7 @@ mod worker;
 pub use builder::CustomSchedulerBuilder;
 
 use builder::WorkerGroup;
-use channels::{RecordMeta, ScheduledTask};
+use channels::{Job, RecordMeta, ScheduledTask};
 use core_affinity::CoreId;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -50,6 +50,26 @@ use worker::SharedWorkerState;
 
 /// A boxed task that can be sent across threads
 pub type BoxedTask = Box<dyn FnOnce() + Send + 'static>;
+
+/// POD descriptor for a graph-node task — the zero-allocation typed spawn path.
+///
+/// Instead of boxing a closure per task (heap alloc + `Arc<SharedData>` clone +
+/// vtable call), the runtime sends this descriptor through the scheduler
+/// channels by value; workers execute it via the node-executor hook installed
+/// once at runtime init ([`CustomScheduler::set_node_executor`]).
+pub struct NodeTaskDesc {
+    /// Node identity: id, slot, index, and the slot generation stamped at spawn.
+    pub node: crate::buffers::NodeInfo,
+    /// Plugin function pointer resolved from the node cache at spawn time.
+    pub func: tomii_types::CmPtr,
+    /// Spawn timestamp (ns since the scheduler base instant) for latency metrics.
+    pub spawn_ns: u128,
+    /// Scheduler-assigned job id (set inside [`CustomScheduler::spawn_node`];
+    /// callers pass 0).
+    pub job_id: usize,
+    /// Whether this task's execution should be submitted to the async recorder.
+    pub should_record: bool,
+}
 
 /// Priority levels for task scheduling
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -109,10 +129,10 @@ impl CustomScheduler {
 
         self.shared.global_channels.send(
             priority,
-            ScheduledTask {
+            Job::Boxed(ScheduledTask {
                 task: Box::new(task),
                 meta: None,
-            },
+            }),
         );
     }
 
@@ -127,10 +147,10 @@ impl CustomScheduler {
 
             self.shared.group_channels[group_id].send(
                 priority,
-                ScheduledTask {
+                Job::Boxed(ScheduledTask {
                     task: Box::new(task),
                     meta: None,
-                },
+                }),
             );
         } else {
             // Fallback to global queue
@@ -168,10 +188,10 @@ impl CustomScheduler {
 
         self.shared.global_channels.send(
             Priority::Normal,
-            ScheduledTask {
+            Job::Boxed(ScheduledTask {
                 task: Box::new(task),
                 meta: record_meta,
-            },
+            }),
         );
     }
 
@@ -209,10 +229,10 @@ impl CustomScheduler {
 
         self.shared.global_channels.send(
             priority,
-            ScheduledTask {
+            Job::Boxed(ScheduledTask {
                 task: Box::new(task),
                 meta: record_meta,
-            },
+            }),
         );
     }
 
@@ -252,14 +272,43 @@ impl CustomScheduler {
 
             self.shared.group_channels[group_id].send(
                 priority,
-                ScheduledTask {
+                Job::Boxed(ScheduledTask {
                     task: Box::new(task),
                     meta: record_meta,
-                },
+                }),
             );
         } else {
             // Fallback to global queue with priority
             self.spawn_with_meta_priority(priority, meta, task);
+        }
+    }
+
+    /// Install the executor for typed node tasks (P2 zero-alloc spawn path).
+    ///
+    /// Must be called before any [`Self::spawn_node`]; the runtime installs it
+    /// right after `SharedData` is assembled. The hook should hold a `Weak`
+    /// reference to runtime state — the scheduler is owned by that state, so an
+    /// `Arc` here would form a reference cycle and leak the worker pool.
+    pub fn set_node_executor(&self, exec: Box<dyn Fn(NodeTaskDesc) + Send + Sync>) {
+        if self.shared.node_exec.set(exec).is_err() {
+            tracing::warn!("node executor already installed; ignoring");
+        }
+    }
+
+    /// Zero-allocation spawn of a graph-node task (P2 typed spawn path).
+    ///
+    /// Assigns the job id, then sends the POD descriptor by value — no `Box`,
+    /// no closure capture. `group_id > 0` routes to that group's channels
+    /// (falling back to global if out of range), matching the boxed path's
+    /// `spawn_to_group_with_meta` routing.
+    pub fn spawn_node(&self, group_id: usize, priority: Priority, mut desc: NodeTaskDesc) {
+        desc.job_id = self.shared.total_spawned.fetch_add(1, Ordering::Relaxed);
+        self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
+
+        if group_id > 0 && group_id < self.shared.group_channels.len() {
+            self.shared.group_channels[group_id].send(priority, Job::Node(desc));
+        } else {
+            self.shared.global_channels.send(priority, Job::Node(desc));
         }
     }
 
@@ -390,44 +439,44 @@ mod tests {
         let order_low = Arc::clone(&order);
         channels.send(
             Priority::Low,
-            ScheduledTask {
+            Job::Boxed(ScheduledTask {
                 task: Box::new(move || {
                     order_low.lock().unwrap().push("low");
                 }),
                 meta: None,
-            },
+            }),
         );
 
         let order_normal = Arc::clone(&order);
         channels.send(
             Priority::Normal,
-            ScheduledTask {
+            Job::Boxed(ScheduledTask {
                 task: Box::new(move || {
                     order_normal.lock().unwrap().push("normal");
                 }),
                 meta: None,
-            },
+            }),
         );
 
         let order_high = Arc::clone(&order);
         channels.send(
             Priority::High,
-            ScheduledTask {
+            Job::Boxed(ScheduledTask {
                 task: Box::new(move || {
                     order_high.lock().unwrap().push("high");
                 }),
                 meta: None,
-            },
+            }),
         );
 
         // Receive in priority order: high first
-        if let Ok(st) = channels.high_rx.try_recv() {
+        if let Ok(Job::Boxed(st)) = channels.high_rx.try_recv() {
             (st.task)();
         }
-        if let Ok(st) = channels.normal_rx.try_recv() {
+        if let Ok(Job::Boxed(st)) = channels.normal_rx.try_recv() {
             (st.task)();
         }
-        if let Ok(st) = channels.low_rx.try_recv() {
+        if let Ok(Job::Boxed(st)) = channels.low_rx.try_recv() {
             (st.task)();
         }
 
@@ -458,5 +507,47 @@ mod tests {
         // Wait for completion
         assert!(scheduler.wait_idle(Duration::from_secs(5)));
         assert_eq!(counter.load(Ordering::SeqCst), 100);
+    }
+
+    #[test]
+    fn test_typed_spawn_node_executes_via_hook() {
+        let scheduler = CustomScheduler::builder()
+            .add_workers(2, 64)
+            .core_offset(0)
+            .system_threads(1)
+            .receiver_threads(0)
+            .record(false)
+            .base_instant(Instant::now())
+            .build();
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let hook_counter = Arc::clone(&counter);
+        scheduler.set_node_executor(Box::new(move |desc: NodeTaskDesc| {
+            assert_eq!(desc.node.id, 7);
+            assert_eq!(desc.node.index, 3);
+            hook_counter.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        fn dummy_func(_: &[tomii_types::CmTypes]) -> tomii_types::CmTypes {
+            tomii_types::CmTypes::None
+        }
+
+        for _ in 0..100 {
+            scheduler.spawn_node(
+                0,
+                Priority::Normal,
+                NodeTaskDesc {
+                    node: crate::buffers::NodeInfo::new(7, 0, 3, 0),
+                    func: dummy_func,
+                    spawn_ns: 0,
+                    job_id: 0,
+                    should_record: false,
+                },
+            );
+        }
+
+        assert!(scheduler.wait_idle(Duration::from_secs(5)));
+        assert_eq!(counter.load(Ordering::SeqCst), 100);
+        assert_eq!(scheduler.total_completed(), 100);
     }
 }

@@ -5,10 +5,13 @@ use crate::graph::Graph;
 use crate::network::{bind_udp_socket_range, NetworkSocket};
 use flume;
 use parking_lot;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tomii_types::*;
 
+/// Extracts the stream id from a decoded packet via the graph's id function.
+/// Pure extraction — admission-window policy (defer/drop for streams ahead of
+/// the window) lives in `packet_processing.rs`.
 #[inline]
 pub(super) fn process_id_function(shared: &Arc<SharedData>, result: &CmTypes) -> Option<usize> {
     let network_config_opt = shared.graph.network_config();
@@ -20,23 +23,6 @@ pub(super) fn process_id_function(shared: &Arc<SharedData>, result: &CmTypes) ->
 
         // Extract stream from the result
         if let Some(new_stream) = id_result.valid_number_to_usize() {
-            // Validate stream range
-            let current_counter = shared
-                .telemetry
-                .stream_complete_counter
-                .load(Ordering::SeqCst);
-            let max_allowed_stream = current_counter + shared.config.slots;
-
-            if new_stream >= max_allowed_stream {
-                tracing::warn!(
-                    new_stream,
-                    max_allowed_stream,
-                    current_counter,
-                    slots = shared.config.slots,
-                    "ID function returned out-of-range stream"
-                );
-                return None;
-            }
             Some(new_stream)
         } else {
             panic!("ID function did not return a valid number for stream");

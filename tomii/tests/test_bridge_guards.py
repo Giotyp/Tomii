@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 import types
+from typing import Any
 import unittest.mock as mock
 from pathlib import Path
 
@@ -28,10 +29,10 @@ from tomii._export import TomiiExportError, _TOMII_REGISTRY
 # --------------------------------------------------------------------------- #
 
 
-def test_export_main_raises():
+def test_export_main_raises() -> None:
     """Functions defined in __main__ must raise TomiiExportError."""
 
-    def fake_main_fn():
+    def fake_main_fn() -> None:
         pass
 
     fake_main_fn.__module__ = "__main__"
@@ -42,10 +43,10 @@ def test_export_main_raises():
         tomii.export(fake_main_fn)
 
 
-def test_export_main_error_message_includes_qualname():
+def test_export_main_error_message_includes_qualname() -> None:
     """Error message should mention the function's qualified name."""
 
-    def my_func():
+    def my_func() -> None:
         pass
 
     my_func.__module__ = "__main__"
@@ -56,10 +57,10 @@ def test_export_main_error_message_includes_qualname():
         tomii.export(my_func)
 
 
-def test_export_module_function_succeeds():
+def test_export_module_function_succeeds() -> None:
     """Functions from a proper module (not __main__) register without error."""
 
-    def real_fn():
+    def real_fn() -> None:
         pass
 
     real_fn.__module__ = "mymodule"
@@ -78,10 +79,10 @@ def test_export_module_function_succeeds():
     _TOMII_REGISTRY.pop("mymodule.real_fn", None)
 
 
-def test_export_stores_py_qualname():
+def test_export_stores_py_qualname() -> None:
     """ExportMeta.py_qualname holds f.__qualname__, not the registry key."""
 
-    def nested():
+    def nested() -> None:
         pass
 
     nested.__module__ = "somemod"
@@ -89,7 +90,7 @@ def test_export_stores_py_qualname():
     nested.__qualname__ = "Outer.nested"
 
     tomii.export(nested)
-    meta = nested.__tomii_export__
+    meta = getattr(nested, "__tomii_export__")
     assert meta.py_qualname == "Outer.nested"
     assert meta.fn_name == "nested"
 
@@ -116,11 +117,13 @@ def _make_minimal_graph_with_build_result(
     return app
 
 
-def _capture_run_env(app: tomii.Graph) -> dict:
+def _capture_run_env(app: tomii.Graph) -> "dict[str, str]":
     """Invoke app.run() with a mocked _runner.run and return the merged env."""
-    captured = {}
+    captured: "dict[str, str]" = {}
 
-    def fake_run(graph, *, dylib, env, **kwargs):
+    def fake_run(
+        graph: Any, *, dylib: str, env: "dict[str, str]", **kwargs: Any
+    ) -> Any:
         captured.update(env)
         # Return a mock CompletedProcess so callers don't crash
         return mock.MagicMock()
@@ -141,20 +144,20 @@ def _capture_run_env(app: tomii.Graph) -> dict:
     return captured
 
 
-def test_run_env_sets_tomii_parent_python():
+def test_run_env_sets_tomii_parent_python() -> None:
     app = _make_minimal_graph_with_build_result()
     env = _capture_run_env(app)
     assert env.get("TOMII_PARENT_PYTHON") == sys.executable
 
 
-def test_run_env_sets_pythonhome():
+def test_run_env_sets_pythonhome() -> None:
     app = _make_minimal_graph_with_build_result()
     env = _capture_run_env(app)
     assert "PYTHONHOME" in env
     assert sys.prefix in env["PYTHONHOME"]
 
 
-def test_run_env_pythonpath_includes_non_site_packages():
+def test_run_env_pythonpath_includes_non_site_packages() -> None:
     """PYTHONPATH must include sys.path entries beyond just site-packages."""
     # Add a custom path entry that doesn't contain "site-packages"
     custom_path = "/tmp/my_custom_lib"
@@ -173,7 +176,7 @@ def test_run_env_pythonpath_includes_non_site_packages():
         sys.path[:] = original_path
 
 
-def test_run_env_pythonpath_deduplicates():
+def test_run_env_pythonpath_deduplicates() -> None:
     """Duplicate entries in sys.path must appear only once in PYTHONPATH."""
     dup_path = "/tmp/dup_entry"
     original_path = sys.path[:]

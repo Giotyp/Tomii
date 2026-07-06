@@ -41,6 +41,13 @@ pub enum SlotState {
 /// Precomputed node cache and predecessor routing tables.
 pub struct GraphCache {
     pub node_cache: Vec<super::node_cache::NodeCacheEntry>,
+    /// Flattened successor edges — the Phase-3 hot-loop layout.  Joins the three
+    /// N×N tables below (plus per-successor node-cache flags) into one contiguous
+    /// slice per predecessor; see `successor_arena.rs` for the full rationale.
+    pub successor_arena: super::successor_arena::SuccessorArena,
+    /// N×N routing tables — retained for the cold `arg_resolution.rs` reads
+    /// (indexed by `(node, pred)` pairs, a different access axis than the arena).
+    /// The Phase-3 hot loops read `successor_arena` instead.
     #[allow(clippy::type_complexity)]
     pub pred_index_filter: Arc<Vec<Vec<Option<(usize, usize)>>>>,
     pub pred_group_by: Arc<Vec<Vec<Option<usize>>>>,
@@ -175,6 +182,15 @@ pub struct SlotData {
     pub last_assigned: Arc<AtomicUsize>,
 }
 
+/// A decoded packet parked because its stream is ahead of the admission window.
+/// Retains the receive metadata needed for telemetry when it is later admitted.
+#[cfg(feature = "network")]
+pub struct PendingPacket {
+    pub packet: CmTypes,
+    pub timestamp: Instant,
+    pub receiver_core_id: usize,
+}
+
 /// Network receiver infrastructure — present only when the `network` feature is enabled.
 #[cfg(feature = "network")]
 pub struct NetworkInfra {
@@ -193,6 +209,14 @@ pub struct NetworkInfra {
     pub dropped_streams: Arc<AtomicUsize>,
     /// Per-frame drop bitmap — prevents double-counting of dropped frames.
     pub frame_dropped: Arc<Vec<AtomicBool>>,
+    /// Out-of-window packets parked until the admission window advances, keyed by
+    /// stream id.  Bounded by `stream_packets × slots`; on overflow the furthest-out
+    /// frame is dropped whole (via `frame_dropped`) so the run degrades instead of
+    /// wedging on a permanently incomplete stream.
+    pub pending_frames: Mutex<std::collections::BTreeMap<usize, Vec<PendingPacket>>>,
+    /// Total packets parked in `pending_frames`.  Relaxed loads outside the lock are
+    /// only an emptiness hint — a stale read delays re-injection by one poll iteration.
+    pub pending_count: AtomicUsize,
 }
 
 /// Scheduler, batch queue, resolution state, result storage, and resolution strategy.

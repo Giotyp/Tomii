@@ -1,7 +1,9 @@
 """Machine-readable schema for Τομί graph construction parameters."""
 
+from typing import Any
 
-def graph_schema() -> dict:
+
+def graph_schema() -> "dict[str, Any]":
     """Return a JSON-serializable schema describing the graph Python API."""
     return {
         "overview": (
@@ -122,6 +124,7 @@ def graph_schema() -> dict:
         "discovery_commands": {
             "--list-knobs": "Human-readable list of all graph.run() runtime flags",
             "--list-knobs-json": "Machine-readable JSON of all graph.run() runtime flags with search hints",
+            "--knob-space [graph.json]": "Generated tuning search space: perf-role runtime knobs plus per-graph knobs (factors, group widths) with value domains — consumable by any optimizer",
             "--schema": "This document",
         },
     }

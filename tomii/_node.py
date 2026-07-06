@@ -1,7 +1,10 @@
 """Node, NodeOutput, and NodeBarrier — computation graph nodes."""
 
 from __future__ import annotations
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional, Union, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ._var import Var
 
 
 class NodeOutput:
@@ -10,7 +13,7 @@ class NodeOutput:
     def __init__(
         self,
         node: "Node",
-        start: Union[int, str, list],
+        start: Union[int, str, "list[int]"],
         end: Optional[Union[int, str, "Var"]] = None,
         *,
         group_by: Optional[int] = None,
@@ -44,7 +47,7 @@ class NodeBarrier:
     def __init__(
         self,
         node: "Node",
-        start: Union[int, str, list],
+        start: Union[int, str, "list[int]"],
         end: Optional[Union[int, str, "Var"]] = None,
         *,
         group_by: Optional[int] = None,
@@ -59,7 +62,9 @@ class NodeBarrier:
         return f"NodeBarrier({self.node.name!r}, {idx!r})"
 
 
-def _format_indexes(start, end) -> str:
+def _format_indexes(
+    start: Union[int, str, "list[int]"], end: Optional[Union[int, str, "Var"]]
+) -> str:
     if isinstance(start, list):
         return ",".join(str(i) for i in start)
     if end is None:
@@ -99,7 +104,7 @@ class Node:
 
     def out(
         self,
-        start: Union[int, str, list] = 0,
+        start: Union[int, str, "list[int]"] = 0,
         end: Optional[Union[int, str, "Var"]] = None,
         *,
         group_by: Optional[int] = None,
@@ -109,7 +114,7 @@ class Node:
 
     def dep(
         self,
-        start: Union[int, str, list] = 0,
+        start: Union[int, str, "list[int]"] = 0,
         end: Optional[Union[int, str, "Var"]] = None,
         *,
         group_by: Optional[int] = None,
@@ -123,7 +128,7 @@ class Node:
 
     def wait(
         self,
-        start: Union[int, str, list] = 0,
+        start: Union[int, str, "list[int]"] = 0,
         end: Optional[Union[int, str, "Var"]] = None,
         *,
         group_by: Optional[int] = None,

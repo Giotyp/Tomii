@@ -88,12 +88,16 @@ def _shutdown_executor() -> None:
         _executor = None
 
 
-def _call_fn(fn: Callable, args: tuple, kwargs: dict) -> Any:
+def _call_fn(
+    fn: Callable[..., Any], args: "tuple[Any, ...]", kwargs: "dict[str, Any]"
+) -> Any:
     """Top-level function executed inside the worker process."""
     return fn(*args, **kwargs)
 
 
-def procs(workers: Optional[int] = None):
+def procs(
+    workers: Optional[int] = None,
+) -> "Callable[[Callable[..., Any]], Callable[..., Any]]":
     """Decorator factory that wraps a function with process-pool dispatch.
 
     The decorated function submits work to a ``ProcessPoolExecutor`` and
@@ -114,7 +118,7 @@ def procs(workers: Optional[int] = None):
     inside your function body instead.
     """
 
-    def decorator(fn: Callable) -> Callable:
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
         executor = _get_executor(workers)
 
         @wraps(fn)

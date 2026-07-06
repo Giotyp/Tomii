@@ -422,6 +422,7 @@ fn build_entry(decl: &str, ann: &Annotation) -> Option<ExportedFn> {
         registry_key: fn_name,
         cm_params,
         cm_ret,
+        ret_variant_hint: None,
         source_lang: SourceLang::C,
         auto_params,
         has_bulk_cm: false, // C plugins do not support bulk kernels

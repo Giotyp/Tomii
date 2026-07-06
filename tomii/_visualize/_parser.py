@@ -19,7 +19,9 @@ class VizNode:
     group_size: Optional[str] = None
     has_loop: bool = False
     condition_summary: Optional[str] = None  # e.g. "check_bool == true"
-    raw: Optional[dict] = None  # original graph JSON dict for round-trip editing
+    raw: "Optional[dict[str, Any]]" = (
+        None  # original graph JSON dict for round-trip editing
+    )
 
 
 @dataclass
@@ -37,7 +39,7 @@ class VizInitVar:
     name: str
     value: Optional[str] = None
     function: Optional[str] = None
-    raw: Optional[dict] = None  # original JSON dict for round-trip editing
+    raw: "Optional[dict[str, Any]]" = None  # original JSON dict for round-trip editing
 
 
 @dataclass
@@ -60,10 +62,10 @@ def _factor_str(f: Any) -> Optional[str]:
     return str(f)
 
 
-def _edges_from_args(args: list, target_name: str) -> List[VizEdge]:
+def _edges_from_args(args: "list[Any]", target_name: str) -> List[VizEdge]:
     """Extract VizEdge list from a list of ArgJson dicts."""
     edges: List[VizEdge] = []
-    seen: set = set()  # deduplicate (source, type) pairs
+    seen: "set[tuple[Any, ...]]" = set()  # dedupe (source, target, type, indexes)
 
     for arg in args:
         type_ = arg.get("type", "")
@@ -102,7 +104,7 @@ def _edges_from_args(args: list, target_name: str) -> List[VizEdge]:
     return edges
 
 
-def _condition_summary(cond: dict) -> str:
+def _condition_summary(cond: "dict[str, Any]") -> str:
     op = cond.get("operation", "?")
     val = cond.get("value", "?")
     func = cond.get("function", "")
@@ -128,7 +130,7 @@ def parse_graph(graph: Any) -> VizGraph:
     return _parse_dict(data)
 
 
-def _parse_dict(data: dict) -> VizGraph:
+def _parse_dict(data: "dict[str, Any]") -> VizGraph:
     viz = VizGraph()
 
     # Init vars

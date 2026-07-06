@@ -103,7 +103,7 @@ SENDER_CONFIG=${MIMO_SENDER_CONFIG:-"files/config/ci/tddconfig-4x4.json"}
 SENDER_FRAME_DURATION=${MIMO_FRAME_DURATION:-1000}
 SENDER_INTER_FRAME_DELAY=${MIMO_INTER_FRAME_DELAY:-0}
 chr="********************"
-(sleep 5 && cd "$SENDER_DIR" && echo -e "\n${chr} Sender Output ${chr}\n" && \
+(sleep 10 && cd "$SENDER_DIR" && echo -e "\n${chr} Sender Output ${chr}\n" && \
     ./build/sender --num_threads=2 --core_offset=55 \
         --frame_duration=$SENDER_FRAME_DURATION \
         --enable_slow_start=0 \

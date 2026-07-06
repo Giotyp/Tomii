@@ -38,10 +38,24 @@ Network socket
     v
 packet_processing.rs
     |
+    +---> admission window check: stream < stream_complete_counter + slots?
+    |         |
+    |         +-- out of window: park decoded packet in net.pending_frames
+    |               (bounded at stream_packets x slots; on overflow the
+    |                furthest-out frame is dropped WHOLE via frame_dropped so
+    |                the run degrades instead of wedging on a stream left
+    |                permanently incomplete by partial packet loss).
+    |               Parked streams are re-injected at the top of each poll
+    |               once the window advances.
+    |
     +---> assign_stream_to_available_slot()
     |         |
     |         +-- Inactive slot: mark Active, spawn initial_nodes()
-    |         +-- All slots busy: buffer packet in slot_buffers, mark Buffering
+    |         +-- Occupied but another Inactive found: mark Buffering,
+    |         |     packet buffered in slot_buffers until promotion
+    |         +-- No slot free (transient: completion counter advances before
+    |               release_slot): park in net.pending_frames and retry —
+    |               permanent drops happen only via pending-buffer overflow
     |
     v
 active_packet_batch  (Vec<(NodeInfo, Option<CmTypes>)>)
@@ -88,12 +102,72 @@ without touching `batch_queue`. This path:
 
 1. Increments `processing_count` to prevent premature completion detection.
 2. Decrements `pending_tasks` or `pending_cond_tasks`.
-3. Calls `collect_successors_for_node_into` + `decrement_and_collect_ready`.
+3. Iterates the node's `SuccessorArena` edge slice, calling
+   `decrement_and_collect_ready` per edge.
 4. Dispatches ready successors via `send_to_scheduler`.
 5. Decrements `processing_count` after all successor dispatch is complete.
 
 This is the fast path because it eliminates a `batch_queue` round-trip and a
 context switch to the resolution thread.
+
+### Task dispatch: typed and boxed spawn paths
+
+`send_to_scheduler` (scheduling.rs) is the single choke-point for submitting
+ready nodes. It has two arms:
+
+- **Typed spawn (Custom scheduler, hot path).** Regular nodes are sent as POD
+  `NodeTaskDesc` values (node identity + gen, `CmPtr`, spawn timestamp,
+  recording flags) directly through the scheduler's crossbeam channels — no
+  per-task `Box`, closure capture, or `Arc<SharedData>` clone. Workers execute
+  the descriptor via a node-executor hook installed once in
+  `TomiiRtBuilder::build`; the hook holds a `Weak<SharedData>` (an `Arc` would
+  form a cycle — the scheduler is owned by `SharedData.exec` — and leak the
+  worker pool) and upgrades it per task, running the same trampoline loop
+  (`run_node_desc`) as the boxed path: execute, then follow inline
+  continuations on the same worker.
+- **Boxed spawn (everything else).** Rayon/Plugin schedulers, post-nodes,
+  custom-func nodes, and nodes with pre-built args are spawned as
+  `Box<dyn FnOnce()>` closures, preserving the plugin-scheduler ABI.
+
+The two arms must stay behaviorally identical: gen is stamped before spawn in
+both, and the worker-side recording semantics (one `Record` spanning the whole
+trampoline, keyed by the spawn-assigned job id) match.
+
+### Argument materialisation: persistent per-node templates
+
+For `template_stable` nodes (every `$res`/`$dep` arg resolves to exactly one
+value, so the arg vector's length is a build-time constant — computed in
+`build_node_cache`), `execute_single_task` keeps a persistent per-(thread,
+node) arg buffer (`NODE_ARG_TEMPLATES` thread-local): the static template is
+cloned once on first execution, and each task rewrites only the dynamic slots
+(buffer refs, `$ref::index`/`$ref::worker`, `$res` results) via
+`populate_dynamic_args_into` — the same patch function the bulk path uses on
+its hoisted template. This eliminates the per-task template clone and the
+matching per-task drops (each static `Any` arc previously cost an atomic
+inc+dec per task). Non-stable nodes (collect-all `$res` args whose splice
+changes the buffer length) fall back to the rebuild-per-task `ARG_BUF` path.
+Invariant: every dynamic slot is unconditionally rewritten before each kernel
+call, so values left behind by a stale-task abort can never be observed.
+
+### Unchecked wrapper twins (P3 Phase B)
+
+tomii-converter emits a `_cm_wrap_unchecked` twin for every Rust plugin entry:
+identical `CmPtr` signature, but argument extraction uses unchecked slice
+access and `unreachable_unchecked` instead of variant matches and panics
+(debug builds keep loud assertions). At build time,
+`init::select_unchecked_wrappers` swaps a node's `func_ptr` to the twin only
+after PROVING every fixed argument slot's variant: the node must be
+`template_stable`, static slots are inspected directly in the template,
+`$ref::index`/`$ref::worker` slots are always `Usize`, buffer-rotation slots
+need a unanimous variant, `$dep` slots are `None`, and `$res` slots take the
+predecessor wrapper's return variant from the generated
+`get_func_ret_variant` table — any `group_by`/`group_size` rewrapping
+disqualifies. Trailing extra slots (`$barrier` args) are ignored, exactly as
+the checked wrapper ignores them. `get_unchecked_func` is `unsafe`; the
+selection pass is the single place its contract is discharged.
+`TOMII_DISABLE_UNCHECKED_WRAPPERS` disables selection (same-binary A/B).
+Measured: anti-diag W=1 −1.9% (the variant matches are well-predicted
+branches, so their 7% instruction share translates to only ~2% of cycles).
 
 ### 2. Batch-queue path (slow path)
 
@@ -131,10 +205,18 @@ Decrement `pending_cond_tasks[slot]` for condition nodes, or
 operation that races with `check_slots` completion detection.
 
 **Phase 3 — Dispatch successors**
-Call `collect_successors_for_node_into`, then `decrement_and_collect_ready` for
-each successor. Any now-ready successor `NodeInfo`s are accumulated in
-`batch_sched` and flushed to workers via `dispatch_nodes`. This phase is
-protected by `processing_count > 0` (set before the batch loop in Phase 0).
+Iterate `successor_arena.edges_for(node_id)` — a contiguous, precomputed
+`&[SuccEdge]` slice — and call `decrement_and_collect_ready` for each edge that
+passes its index filter. Each `SuccEdge` carries the pre-joined routing data
+(index filter, `group_by` divisor, 1:1 offset, successor factor/flags), so the
+loop performs no graph or table lookups (see `successor_arena.rs`). Any
+now-ready successor `NodeInfo`s are accumulated in `batch_sched` and flushed to
+workers via `dispatch_nodes`. This phase is protected by `processing_count > 0`
+(set before the batch loop in Phase 0).
+
+The worker fast path (`worker_resolve_successors` in `task_execution.rs`) walks
+the same arena with the same `decrement_and_collect_ready` helper, so both
+completion paths share identical dispatch semantics by construction.
 
 **Phase 4 — Decrement `processing_count`** (outer, after `process_batch_inner` returns)
 The `processing_count` decrement happens in `process_batch_resolution` after
@@ -336,6 +418,13 @@ mirror it into `node_cache.rs::NodeCacheEntry` and populate it in
 `init.rs::build_node_cache`. If it affects dependency routing, update
 `init.rs::build_predecessor_tables`.
 
+**New per-edge routing data (predecessor→successor)**
+Add the field to `successor_arena.rs::SuccEdge` with an accessor method that
+names its semantics, and populate it in `SuccessorArena::build` (called from
+`graph_gen.rs::GraphSpec::compile`). Both Phase-3 hot loops (batch and worker)
+read edges from the arena, so a single change covers both paths. Keep the
+`SuccEdge` compact — it is copied per edge iteration on the hot path.
+
 ---
 
 ## Key invariants checklist
@@ -383,11 +472,14 @@ operations must be `SeqCst` (see invariants above).  At W workers and S concurre
 slots this produces W×S SeqCst RMWs competing on the same cache line per node,
 which becomes the dominant cost for fan-in nodes with large K.
 
-**Type-erased dispatch (~40–85 ns/call).** Task functions are stored as
-`Box<dyn FnOnce()>` (Rayon path) or raw `fn` pointers (inline-continuation path).
-The inline-continuation path eliminates the box allocation but retains one indirect
-call per task.  Sub-µs workloads where per-task work is comparable to this overhead
-will not amortise it.
+**Type-erased dispatch (~40–85 ns/call).** On the Custom scheduler, regular
+nodes travel as POD `NodeTaskDesc` values (typed spawn path) — no per-task box
+or `Arc` clone; one indirect call through the node-executor hook plus one
+`Weak::upgrade` per task remain.  The Rayon/Plugin paths and post/custom-func
+nodes still box a `Box<dyn FnOnce()>` per task.  The inline-continuation path
+eliminates even the queue round-trip but retains one indirect call per task.
+Sub-µs workloads where per-task work is comparable to this overhead will not
+amortise it.
 
 **Resolution-thread state machine.**  By default a single resolution thread runs
 the four-phase batch protocol (batch drain → completion detection → successor

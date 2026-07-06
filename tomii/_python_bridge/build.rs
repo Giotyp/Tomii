@@ -5,6 +5,12 @@ fn main() {
     // pyo3-build-config when the linked Python is a free-threaded (3.13t) build.
     println!("cargo::rustc-check-cfg=cfg(Py_GIL_DISABLED)");
 
+    // Re-emit pyo3's interpreter cfgs for THIS crate: pyo3's build script only
+    // sets them for pyo3's own compilation, so without this call
+    // cfg!(Py_GIL_DISABLED) in lib.rs is always false and the reported ABI
+    // would claim a GIL-ful interpreter even when linked against 3.13t.
+    pyo3_build_config::use_pyo3_cfgs();
+
     // Write python_abi.rs into OUT_DIR so lib.rs can include it.
     // Only the version bits (major/minor) are baked here; the GIL_DISABLED bit
     // is set at compile time via cfg!(Py_GIL_DISABLED) in lib.rs so that the

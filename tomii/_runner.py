@@ -45,6 +45,7 @@ _STR_FLAGS: Dict[str, str] = {
     "output": "--output",
     "timing": "--timing",
     "report": "--report",
+    "dump_state": "--dump-state",
 }
 
 _KNOB_DESCRIPTIONS: Dict[str, str] = {
@@ -72,8 +73,57 @@ _KNOB_DESCRIPTIONS: Dict[str, str] = {
     "inline_continuation": "Run single-successor tasks inline (reduces scheduling overhead)",
     # Str flags
     "output": "Path for raw timing output file",
+    "dump_state": "Path for a runtime state snapshot (JSON) written at shutdown; "
+    "SIGUSR1 writes numbered live snapshots (wedged-run debugging)",
     "timing": "Path for per-node timing CSV",
     "report": "Path for JSON summary report (avg/p99 latency, bottleneck hints)",
+}
+
+# Role of each knob in a tuning context:
+#   perf        — affects performance and is safe to search (verifier-gated)
+#   measurement — benchmark parameter; fix it for fair comparison, never search it
+#   io          — output/diagnostic plumbing; never search
+#   env         — machine-specific (CPU pinning); set once per host, don't search
+_KNOB_ROLES: Dict[str, str] = {
+    "workers": "perf",
+    "core_offset": "env",
+    "system_threads": "perf",
+    "receiver_threads": "perf",
+    "max_runtime": "measurement",
+    "slots": "perf",
+    "max_streams": "measurement",
+    "batching_size": "perf",
+    "batching_limit": "perf",
+    "exclude_streams": "measurement",
+    "record_stream": "measurement",
+    "fifo": "perf",
+    "custom": "perf",
+    "inits": "measurement",
+    "debug": "io",
+    "record": "io",
+    "use_rdtsc": "measurement",
+    "slot_priority": "perf",
+    "coalesce_barriers": "perf",
+    "inline_continuation": "perf",
+    "no_fanout_bulk": "perf",
+    "output": "io",
+    "timing": "io",
+    "report": "io",
+    "dump_state": "io",
+}
+
+# Value domains for searchable knobs.  "pow2" means the sensible search points
+# are powers of two within [min, max] (sample the exponent, not the value).
+# Knobs without a domain entry get {"kind": "bool"} if boolean, else none
+# (not searchable).  `workers`' max is resolved to the host's CPU count at
+# catalog-generation time.
+_KNOB_DOMAINS: Dict[str, Dict[str, Any]] = {
+    "workers": {"kind": "int", "min": 1, "max": None, "scale": "pow2"},  # max = cpus
+    "slots": {"kind": "int", "min": 1, "max": 64, "scale": "pow2"},
+    "batching_size": {"kind": "int", "min": 1, "max": 512, "scale": "pow2"},
+    "batching_limit": {"kind": "int", "min": 1, "max": 8, "scale": "pow2"},
+    "system_threads": {"kind": "int", "min": 1, "max": 4, "scale": "linear"},
+    "receiver_threads": {"kind": "int", "min": 0, "max": 4, "scale": "linear"},
 }
 
 _KNOB_SEARCH_HINTS: Dict[str, str] = {
@@ -111,27 +161,49 @@ def list_knobs() -> str:
     return "\n".join(lines)
 
 
-def list_knobs_json() -> dict:
-    """Return a machine-readable dict of all graph.run() options with search hints."""
+def _resolved_domain(key: str) -> Optional[Dict[str, Any]]:
+    """Return the value domain for `key` with host-dependent bounds resolved."""
+    domain = _KNOB_DOMAINS.get(key)
+    if domain is None:
+        return None
+    domain = dict(domain)
+    if key == "workers" and domain.get("max") is None:
+        domain["max"] = os.cpu_count() or 8
+    return domain
+
+
+def list_knobs_json() -> "dict[str, Any]":
+    """Return a machine-readable dict of all graph.run() options.
+
+    Each knob carries: name, type, cli flag, role (perf/measurement/io/env),
+    description, search_hint, and — for searchable knobs — a value domain.
+    This catalog is the single source the knob-space generator
+    (`tomii.knob_space`) builds search spaces from.
+    """
     knobs = []
     for key, flag in _INT_FLAGS.items():
-        knobs.append(
-            {
-                "name": key,
-                "type": "int",
-                "cli": flag,
-                "description": _KNOB_DESCRIPTIONS.get(key, ""),
-                "search_hint": _KNOB_SEARCH_HINTS.get(key, ""),
-            }
-        )
+        entry: Dict[str, Any] = {
+            "name": key,
+            "type": "int",
+            "cli": flag,
+            "role": _KNOB_ROLES.get(key, "perf"),
+            "description": _KNOB_DESCRIPTIONS.get(key, ""),
+            "search_hint": _KNOB_SEARCH_HINTS.get(key, ""),
+        }
+        domain = _resolved_domain(key)
+        if domain is not None:
+            entry["domain"] = domain
+        knobs.append(entry)
     for key, flag in _BOOL_FLAGS.items():
         knobs.append(
             {
                 "name": key,
                 "type": "bool",
                 "cli": flag,
+                "role": _KNOB_ROLES.get(key, "perf"),
                 "description": _KNOB_DESCRIPTIONS.get(key, ""),
                 "search_hint": _KNOB_SEARCH_HINTS.get(key, "try both True and False"),
+                "domain": {"kind": "bool"},
             }
         )
     for key, flag in _STR_FLAGS.items():
@@ -140,10 +212,11 @@ def list_knobs_json() -> dict:
                 "name": key,
                 "type": "str",
                 "cli": flag,
+                "role": _KNOB_ROLES.get(key, "io"),
                 "description": _KNOB_DESCRIPTIONS.get(key, ""),
             }
         )
-    return {"knobs": knobs}
+    return {"version": 2, "knobs": knobs}
 
 
 def build_command(
@@ -187,7 +260,7 @@ def run(
     release: bool = True,
     env: Optional[Dict[str, str]] = None,
     **kwargs: Any,
-) -> subprocess.CompletedProcess:
+) -> "subprocess.CompletedProcess[bytes]":
     """Write graph JSON to a temp file and invoke the Τομί binary.
 
     Args:

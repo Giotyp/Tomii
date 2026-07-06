@@ -97,6 +97,9 @@ struct ExportedFn {
     cm_params: Vec<CmParam>,
     /// Return type of the `_cm` / C function.
     cm_ret: CmRet,
+    /// Variant name the wrapper's return value always carries, when knowable
+    /// (mirrors the proc-macro's return wrapping); `None` = opaque.
+    ret_variant_hint: Option<&'static str>,
     /// Which backend generated this entry.
     source_lang: SourceLang,
     /// Names of C companion length parameters that are NOT consumed from
@@ -644,6 +647,7 @@ fn try_extract(func: &ItemFn) -> Option<ExportedFn> {
             cm_name,
             registry_key,
             cm_params,
+            ret_variant_hint: ret_hint_from_cm_ret(&cm_ret),
             cm_ret,
             source_lang: SourceLang::Rust,
             auto_params: vec![],
@@ -685,6 +689,7 @@ fn try_extract(func: &ItemFn) -> Option<ExportedFn> {
             registry_key,
             cm_params,
             cm_ret,
+            ret_variant_hint: ret_hint_from_original(&func.sig.output),
             source_lang: SourceLang::Rust,
             auto_params: vec![],
             has_bulk_cm: false, // populated by collect_entries after full file scan
@@ -881,6 +886,13 @@ fn render_wrappers(entries: &[ExportedFn]) -> String {
     for entry in entries {
         out.push_str(&render_entry_wrapper(entry));
         out.push('\n');
+        // P3 Phase B: unchecked twin (Rust entries only) — same extraction
+        // without variant matches or bounds checks.  Selected at graph-build
+        // time only for nodes whose argument variants are provably constant.
+        if entry_argspec(entry).is_some() {
+            out.push_str(&render_entry_wrapper_unchecked(entry));
+            out.push('\n');
+        }
         // If a _bulk_cm companion exists, emit a trivial passthrough wrapper.
         if entry.has_bulk_cm && entry.source_lang == SourceLang::Rust {
             out.push_str(&render_bulk_entry_wrapper(entry));
@@ -889,6 +901,183 @@ fn render_wrappers(entries: &[ExportedFn]) -> String {
     }
 
     out
+}
+
+/// Return-variant hint for a `_cm` function whose signature is explicit
+/// (the `#[no_mangle] *_cm` path — `classify_cm_return` sees real kinds).
+fn ret_hint_from_cm_ret(r: &CmRet) -> Option<&'static str> {
+    match r {
+        CmRet::Void => Some("None"),
+        CmRet::Primitive(pk) => Some(pk.variant_name()),
+        CmRet::OwnedString => Some("String"),
+        CmRet::CmTypes => None,
+        CmRet::OpaquePtr | CmRet::AllocatedArray { .. } | CmRet::AllocatedString { .. } => None,
+    }
+}
+
+/// Return-variant hint for a `#[tomii_export]` original: mirrors the
+/// proc-macro's return wrapping (`RetKind` in tomii-macro) — void wraps to
+/// `None`, primitives to their variant, `String` to `String`, `CmTypes`
+/// passes through (opaque), and any other path type goes through
+/// `CmTypes::from_any` (`Any`).  Non-path returns get no hint.
+fn ret_hint_from_original(ret: &ReturnType) -> Option<&'static str> {
+    match ret {
+        ReturnType::Default => Some("None"),
+        ReturnType::Type(_, ty) => {
+            let name = type_path_ident(ty)?;
+            if let Some(pk) = prim_kind_from_str(&name) {
+                Some(pk.variant_name())
+            } else if name == "String" {
+                Some("String")
+            } else if name == "CmTypes" {
+                None
+            } else {
+                Some("Any")
+            }
+        }
+    }
+}
+
+/// Per-argument required `CmTypes` variant names for an entry's wrapper, or
+/// `None` when the entry has no unchecked twin (C entries).
+///
+/// Spec vocabulary: a variant name (`"Usize"`, `"String"`, ...) means the slot
+/// must hold exactly that variant; `"*"` means any variant is accepted (the
+/// `&CmTypes` param is passed through and the kernel handles it); `"..."`
+/// marks a variadic tail (always last) that accepts any remaining args.
+fn entry_argspec(entry: &ExportedFn) -> Option<Vec<&'static str>> {
+    if entry.source_lang != SourceLang::Rust {
+        return None;
+    }
+    let mut spec = Vec::with_capacity(entry.cm_params.len());
+    for p in &entry.cm_params {
+        let s = match &p.kind {
+            CmParamKind::Primitive(pk) => pk.variant_name(),
+            CmParamKind::StrRef | CmParamKind::OwnedString => "String",
+            CmParamKind::CmTypesRef => "*",
+            CmParamKind::VecCmTypes | CmParamKind::SliceCmTypes => "...",
+            CmParamKind::OpaquePtr
+            | CmParamKind::ArrayPtr { .. }
+            | CmParamKind::MutArrayPtr { .. } => return None, // C-only kinds
+        };
+        spec.push(s);
+    }
+    Some(spec)
+}
+
+/// Wrapper return variant name, or `None` when the return is opaque
+/// (`CmTypes` pass-through — variant unknowable at build time).
+fn entry_ret_variant(entry: &ExportedFn) -> Option<&'static str> {
+    entry.ret_variant_hint
+}
+
+/// Render the `_unchecked` twin of a Rust entry's wrapper.
+///
+/// Identical calling convention (`CmPtr`), but argument extraction uses
+/// `get_unchecked` slice access and `unreachable_unchecked` in place of the
+/// variant-mismatch panic.  Debug builds keep loud assertions.  Soundness is
+/// enforced by the retrieval contract: `func_reg::get_unchecked_func` is
+/// `unsafe`, and the runtime only selects a twin after proving every argument
+/// slot's variant at graph-build time (see `init::select_unchecked_wrappers`).
+fn render_entry_wrapper_unchecked(entry: &ExportedFn) -> String {
+    let wrap_name = wrap_fn_name(&entry.cm_name);
+    let fn_name_str = &entry.cm_name;
+
+    let variadic_idx = entry
+        .cm_params
+        .iter()
+        .position(|p| matches!(p.kind, CmParamKind::VecCmTypes | CmParamKind::SliceCmTypes));
+    let fixed_params = variadic_idx.unwrap_or(entry.cm_params.len());
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "/// Unchecked twin of `{wrap_name}` — see `get_unchecked_func` safety contract.\n\
+         pub fn {wrap_name}_unchecked(args: &[CmTypes]) -> CmTypes {{\n"
+    ));
+    if fixed_params > 0 {
+        out.push_str(&format!(
+            "    debug_assert!(args.len() >= {fixed_params}, \"{fn_name_str}: arg count\");\n"
+        ));
+    }
+
+    for (i, param) in entry.cm_params.iter().enumerate().take(fixed_params) {
+        let name = &param.name;
+        match &param.kind {
+            CmParamKind::CmTypesRef => {} // passed inline below
+            CmParamKind::Primitive(pk) => {
+                let variant = pk.variant_name();
+                out.push_str(&format!(
+                    "    let {name} = match unsafe {{ args.get_unchecked({i}) }} {{ CmTypes::{variant}(x) => *x, _ => {{ debug_assert!(false, \"{fn_name_str}: expected {variant} for {name}\"); unsafe {{ core::hint::unreachable_unchecked() }} }} }};\n"
+                ));
+            }
+            CmParamKind::StrRef => {
+                out.push_str(&format!(
+                    "    let {name}_s = match unsafe {{ args.get_unchecked({i}) }} {{ CmTypes::String(x) => x.to_string(), _ => {{ debug_assert!(false, \"{fn_name_str}: expected String for {name}\"); unsafe {{ core::hint::unreachable_unchecked() }} }} }};\n"
+                ));
+                out.push_str(&format!("    let {name} = {name}_s.as_str();\n"));
+            }
+            CmParamKind::OwnedString => {
+                out.push_str(&format!(
+                    "    let {name} = match unsafe {{ args.get_unchecked({i}) }} {{ CmTypes::String(x) => x.to_string(), _ => {{ debug_assert!(false, \"{fn_name_str}: expected String for {name}\"); unsafe {{ core::hint::unreachable_unchecked() }} }} }};\n"
+                ));
+            }
+            _ => unreachable!("filtered by entry_argspec / fixed_params"),
+        }
+    }
+
+    if let Some(vi) = variadic_idx {
+        let name = &entry.cm_params[vi].name;
+        if matches!(entry.cm_params[vi].kind, CmParamKind::VecCmTypes) {
+            out.push_str(&format!(
+                "    let {name}: Vec<CmTypes> = args[{vi}..].iter().cloned().collect();\n"
+            ));
+        }
+    }
+
+    let sym_call = build_rust_sym_call_unchecked(entry, variadic_idx);
+    let final_ret = match &entry.cm_ret {
+        CmRet::Void => format!("    {sym_call};\n    CmTypes::None\n"),
+        CmRet::CmTypes => format!("    {sym_call}\n"),
+        CmRet::Primitive(pk) => {
+            let variant = pk.variant_name();
+            format!("    CmTypes::{variant}({sym_call})\n")
+        }
+        CmRet::OwnedString => format!(
+            "    let __result = {sym_call};\n    CmTypes::String(std::sync::Arc::from(__result.as_str()))\n"
+        ),
+        CmRet::OpaquePtr | CmRet::AllocatedArray { .. } | CmRet::AllocatedString { .. } => {
+            unreachable!("C-only return kinds filtered by entry_argspec")
+        }
+    };
+    out.push_str(&final_ret);
+    out.push_str("}\n");
+    out
+}
+
+/// Like [`build_rust_sym_call`] but with unchecked slice access for the
+/// pass-through `&CmTypes` and `&[CmTypes]` argument forms.
+fn build_rust_sym_call_unchecked(entry: &ExportedFn, variadic_idx: Option<usize>) -> String {
+    let sym_name = sym_static_name(&entry.cm_name);
+
+    let args: Vec<String> = entry
+        .cm_params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| match &p.kind {
+            CmParamKind::CmTypesRef => format!("unsafe {{ args.get_unchecked({}) }}", i),
+            CmParamKind::Primitive(_) => p.name.clone(),
+            CmParamKind::StrRef => p.name.clone(),
+            CmParamKind::OwnedString => p.name.clone(),
+            CmParamKind::VecCmTypes => format!("&{}", p.name),
+            CmParamKind::SliceCmTypes => format!("unsafe {{ args.get_unchecked({}..) }}", i),
+            CmParamKind::OpaquePtr
+            | CmParamKind::ArrayPtr { .. }
+            | CmParamKind::MutArrayPtr { .. } => unreachable!("C-only kinds in Rust entry"),
+        })
+        .collect();
+
+    let _ = variadic_idx;
+    format!("{}({})", sym_name, args.join(", "))
 }
 
 fn render_entry_wrapper(entry: &ExportedFn) -> String {
@@ -1394,7 +1583,61 @@ fn render_registry(entries: &[ExportedFn]) -> String {
 
     out.push_str("        _ => None,\n");
     out.push_str("    }\n");
-    out.push_str("}\n");
+    out.push_str("}\n\n");
+
+    // P3 Phase B: unchecked twins + build-time provability tables.
+    out.push_str(
+        "/// Unchecked twin of `get_func` (P3 Phase B).\n\
+         ///\n\
+         /// # Safety\n\
+         ///\n\
+         /// The returned wrapper skips argument variant checks and slice bounds\n\
+         /// checks.  The caller must guarantee that EVERY invocation passes at\n\
+         /// least as many arguments as `get_func_argspec(func_name)` lists, with\n\
+         /// each slot holding exactly the listed variant (\"*\" slots accept any\n\
+         /// variant).  Violations are undefined behaviour in release builds.\n\
+         pub unsafe fn get_unchecked_func(func_name: &str) -> Option<CmPtr> {\n    match func_name {\n",
+    );
+    for entry in entries {
+        if entry_argspec(entry).is_some() {
+            let key = &entry.registry_key;
+            let wrap_fn = wrap_fn_name(&entry.cm_name);
+            out.push_str(&format!(
+                "        \"{key}\" => Some({wrap_fn}_unchecked),\n"
+            ));
+        }
+    }
+    out.push_str("        _ => None,\n    }\n}\n\n");
+
+    out.push_str(
+        "/// Per-argument required `CmTypes` variant names for a function's wrapper.\n\
+         /// \"*\" = any variant accepted; \"...\" = variadic tail (always last).\n\
+         pub fn get_func_argspec(func_name: &str) -> Option<&'static [&'static str]> {\n    match func_name {\n",
+    );
+    for entry in entries {
+        if let Some(spec) = entry_argspec(entry) {
+            let key = &entry.registry_key;
+            let quoted: Vec<String> = spec.iter().map(|s| format!("\"{s}\"")).collect();
+            out.push_str(&format!(
+                "        \"{key}\" => Some(&[{}]),\n",
+                quoted.join(", ")
+            ));
+        }
+    }
+    out.push_str("        _ => None,\n    }\n}\n\n");
+
+    out.push_str(
+        "/// Variant name of the wrapper's return value, or `None` when the\n\
+         /// return is opaque (`CmTypes` pass-through) or the function is unknown.\n\
+         pub fn get_func_ret_variant(func_name: &str) -> Option<&'static str> {\n    match func_name {\n",
+    );
+    for entry in entries {
+        if let Some(variant) = entry_ret_variant(entry) {
+            let key = &entry.registry_key;
+            out.push_str(&format!("        \"{key}\" => Some(\"{variant}\"),\n"));
+        }
+    }
+    out.push_str("        _ => None,\n    }\n}\n");
 
     out
 }
@@ -1487,6 +1730,56 @@ mod tests {
     /// Regression: when `wf_cell` and `wf_cell_bulk` coexist, the per-cell
     /// companion `wf_cell_bulk_cm` (generated for `wf_cell_bulk`) must NOT be
     /// mistaken for the bulk companion of `wf_cell`.
+
+    #[test]
+    fn test_unchecked_twin_generation() {
+        let src = r#"
+            #[tomii_export]
+            pub fn kern(data: &Vec<f64>, n: usize, name: &str) -> f64 { todo!() }
+        "#;
+        let file: File = parse_str(src).unwrap();
+        let entries = collect_entries(&file);
+        let entry = entries
+            .iter()
+            .find(|e| e.registry_key == "kern")
+            .expect("kern entry");
+
+        // Argspec: &Vec<f64> falls back to CmTypesRef ("*"), usize is exact,
+        // &str requires String.
+        let spec = entry_argspec(entry).expect("Rust entry has a spec");
+        assert_eq!(spec, vec!["*", "Usize", "String"]);
+        assert_eq!(entry_ret_variant(entry), Some("F64"));
+
+        let wrappers = render_wrappers(&entries);
+        assert!(wrappers.contains("pub fn kern_cm_wrap(args: &[CmTypes]) -> CmTypes"));
+        assert!(wrappers.contains("pub fn kern_cm_wrap_unchecked(args: &[CmTypes]) -> CmTypes"));
+        assert!(wrappers.contains("unreachable_unchecked"));
+        // Twin extracts without bounds checks.
+        assert!(wrappers.contains("args.get_unchecked(1)"));
+
+        let registry = render_registry(&entries);
+        assert!(registry.contains("pub unsafe fn get_unchecked_func"));
+        assert!(registry.contains("\"kern\" => Some(kern_cm_wrap_unchecked)"));
+        assert!(registry.contains("\"kern\" => Some(&[\"*\", \"Usize\", \"String\"])"));
+        assert!(registry.contains("\"kern\" => Some(\"F64\")"));
+    }
+
+    #[test]
+    fn test_unchecked_twin_skipped_for_c_entries() {
+        // C entries have no unchecked twin (pointer/array kinds).
+        let entry = ExportedFn {
+            registry_key: "cfunc".into(),
+            cm_name: "cfunc".into(),
+            cm_params: vec![],
+            cm_ret: CmRet::Void,
+            has_bulk_cm: false,
+            source_lang: SourceLang::C,
+            auto_params: Vec::new(),
+            ret_variant_hint: None,
+        };
+        assert!(entry_argspec(&entry).is_none());
+    }
+
     #[test]
     fn test_no_bulk_collision_between_wf_cell_and_wf_cell_bulk() {
         // Simulate the macro-generated output for both functions.

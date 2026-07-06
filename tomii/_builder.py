@@ -115,7 +115,7 @@ def _resolve(path: Optional[str]) -> Optional[str]:
     return str(Path(path).resolve()) if path else None
 
 
-def _cargo(args: list, env: dict, cwd: Path) -> None:
+def _cargo(args: "list[str]", env: "dict[str, str]", cwd: Path) -> None:
     """Run a cargo command, streaming output to the terminal."""
     cmd = ["cargo"] + args
     print(f"[tomii.build] {' '.join(cmd)}", flush=True)
@@ -152,11 +152,16 @@ def build(config: BuildConfig) -> BuildResult:
     build_env = {**os.environ, **config.env}
 
     if has_wrap:
-        build_env["WRAP_PATH"] = _resolve(config.wrap_path)
-        build_env["REG_PATH"] = _resolve(config.reg_path)
+        wrap_path = _resolve(config.wrap_path)
+        reg_path = _resolve(config.reg_path)
+        assert wrap_path is not None and reg_path is not None  # implied by has_wrap
+        build_env["WRAP_PATH"] = wrap_path
+        build_env["REG_PATH"] = reg_path
         build_env.pop("FUNC_PATH", None)
     else:
-        build_env["FUNC_PATH"] = _resolve(config.func_path)
+        func_path = _resolve(config.func_path)
+        assert func_path is not None  # build() validated func_path when no wrap
+        build_env["FUNC_PATH"] = func_path
         build_env.pop("WRAP_PATH", None)
         build_env.pop("REG_PATH", None)
 
@@ -221,21 +226,23 @@ def _find_binary(release: bool = True) -> str:
     """Locate the tomii main binary from any supported location.
 
     Search order:
-    1. Bundled binary packaged with the wheel (``tomii/_bin/main``).
-    2. Workspace ``target/<profile>/main`` for development builds.
+    1. Workspace ``target/<profile>/main`` for development builds — a source
+       checkout always wins so freshly built binaries (with the checkout's
+       plugin registry) are never shadowed by the wheel-bundled binary.
+    2. Bundled binary packaged with the wheel (``tomii/_bin/main``).
 
     Raises BuildError if neither is found.
     """
-    bundled = _bundled_binary()
-    if bundled:
-        return bundled
-
     workspace = _try_workspace_root()
     if workspace:
         profile = "release" if release else "debug"
         binary = workspace / "target" / profile / "main"
         if binary.exists():
             return str(binary.resolve())
+
+    bundled = _bundled_binary()
+    if bundled:
+        return bundled
 
     raise RuntimeError(
         "tomii binary not found. Either:\n"
@@ -323,20 +330,22 @@ def _build_python_plugin(config: BuildConfig) -> BuildResult:
         binary = _find_binary_in_workspace(workspace, profile)
     else:
         # PyPI path: use artifacts bundled in the wheel (no Rust toolchain needed).
-        dylib = _bundled_bridge()
-        if dylib is None:
+        bundled_bridge = _bundled_bridge()
+        if bundled_bridge is None:
             raise BuildError(
                 f"No pre-built bridge dylib found in tomii/_lib/ for Python "
                 f"{sys.version_info.major}.{sys.version_info.minor}. "
                 "Try reinstalling: pip install --upgrade tomii"
             )
 
-        binary = _bundled_binary()
-        if binary is None:
+        dylib = bundled_bridge
+        bundled_binary = _bundled_binary()
+        if bundled_binary is None:
             raise BuildError(
                 "No tomii binary found in tomii/_bin/. "
                 "Try reinstalling: pip install --upgrade tomii"
             )
+        binary = bundled_binary
 
     return BuildResult(dylib=dylib, binary=binary, python_interpreter=python_interp)
 

@@ -6,7 +6,7 @@ build-backend = "maturin"
 # Distribution name on PyPI ("tomii" was rejected as too similar to "tobii").
 # The import name is unaffected — users still `import tomii`.
 name = "tomii-rt"
-version = "1.0.0"
+version = "1.1.0"
 description = "Python API for the Τομί task-graph framework"
 requires-python = ">=3.9"
 readme = "README.md"
@@ -20,7 +20,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
 ]
-dependencies = ["pydantic>=2.0", "matplotlib>=3.0"]
+dependencies = ["pydantic>=2.0"]
 
 [project.urls]
 Homepage = "https://github.com/Giotyp/Tomii"
@@ -28,6 +28,11 @@ Repository = "https://github.com/Giotyp/Tomii"
 Changelog = "https://github.com/Giotyp/Tomii/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
+# Plotting helpers (bench/analysis scripts). Kept optional so the core package
+# installs cleanly on free-threaded (3.13t+) interpreters without matplotlib.
+viz = [
+    "matplotlib>=3.0",
+]
 dev = [
     "datamodel-code-generator>=0.25",
     "pytest>=7.0",

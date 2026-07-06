@@ -34,6 +34,7 @@ fn make_scheduler() -> tomii_core::scheduler::SchedulerImpl {
         target_batch_size: 1,
         batch_timeout_us: 10,
         worker_affinity: None,
+        worker_hook: None,
     })
 }
 
@@ -346,6 +347,7 @@ mod plugin_tests {
             target_batch_size: 1,
             batch_timeout_us: 10,
             worker_affinity: None,
+            worker_hook: None,
         });
         let compiled = from_json_str(json, 2).unwrap().compile(&sched);
 
@@ -357,5 +359,178 @@ mod plugin_tests {
                 .expect("build failed");
 
         rt.run().expect("plugin scheduler run failed");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P5: WorkerHook + run_until
+// ---------------------------------------------------------------------------
+
+mod worker_hook_and_run_until {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// Counts start/exit callbacks; both must run on the worker threads.
+    struct CountingHook {
+        starts: AtomicUsize,
+        exits: AtomicUsize,
+    }
+
+    impl tomii_core::WorkerHook for CountingHook {
+        fn on_worker_start(&self, _worker_index: usize) {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+        }
+        fn on_worker_exit(&self, _worker_index: usize) {
+            self.exits.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn make_scheduler_with_hook(
+        scheduler_type: SchedulerType,
+        hook: Arc<CountingHook>,
+    ) -> tomii_core::scheduler::SchedulerImpl {
+        create_scheduler(SchedulerConfig {
+            scheduler_type,
+            core_offset: 0,
+            num_workers: 2,
+            record: false,
+            external_recorder: None,
+            base_instant: std::time::Instant::now(),
+            system_threads: 1,
+            receiver_threads: 0,
+            target_batch_size: 1,
+            batch_timeout_us: 10,
+            worker_affinity: None,
+            worker_hook: Some(hook),
+        })
+    }
+
+    /// Wait (bounded) for exits to catch up with starts — rayon detaches its
+    /// worker threads, so exit handlers can lag pool drop slightly.
+    fn wait_for_exits(hook: &CountingHook, expected: usize) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if hook.exits.load(Ordering::SeqCst) == expected {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    fn hook_lifecycle(scheduler_type: SchedulerType) {
+        let hook = Arc::new(CountingHook {
+            starts: AtomicUsize::new(0),
+            exits: AtomicUsize::new(0),
+        });
+        {
+            let scheduler = make_scheduler_with_hook(scheduler_type, Arc::clone(&hook));
+            // Rayon calls start handlers as threads spawn; give them a moment.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while hook.starts.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            drop(scheduler);
+        }
+        let starts = hook.starts.load(Ordering::SeqCst);
+        assert!(starts >= 1, "no worker start callbacks ran");
+        assert!(
+            wait_for_exits(&hook, starts),
+            "exit callbacks ({}) never matched start callbacks ({})",
+            hook.exits.load(Ordering::SeqCst),
+            starts
+        );
+    }
+
+    #[test]
+    fn test_worker_hook_rayon_lifecycle() {
+        hook_lifecycle(SchedulerType::WorkStealing);
+    }
+
+    #[test]
+    fn test_worker_hook_custom_lifecycle() {
+        hook_lifecycle(SchedulerType::Custom);
+    }
+
+    /// run_until: the predicate terminates a run that would otherwise churn
+    /// through a huge stream budget, and it observes sane progress snapshots.
+    #[test]
+    fn test_run_until_predicate_terminates_run() {
+        let json = r#"
+        {
+            "nodes": [
+                { "name": "a", "function": "noop", "args": [] },
+                {
+                    "name": "b",
+                    "function": "noop",
+                    "args": [
+                        { "type": "$res", "predecessor": { "name": "a", "indexes": "0" } }
+                    ]
+                }
+            ]
+        }
+        "#;
+        let spec = from_json_str(json, 2).expect("JSON parse failed");
+        let scheduler = create_scheduler(SchedulerConfig {
+            scheduler_type: SchedulerType::WorkStealing,
+            core_offset: 0,
+            num_workers: 2,
+            record: false,
+            external_recorder: None,
+            base_instant: std::time::Instant::now(),
+            system_threads: 1,
+            receiver_threads: 0,
+            target_batch_size: 1,
+            batch_timeout_us: 10,
+            worker_affinity: None,
+            worker_hook: None,
+        });
+        let compiled = spec.compile(&scheduler);
+
+        let config = RuntimeConfig {
+            slots: 1,
+            // Budget far beyond what completes before the predicate fires
+            // (a few thousand streams at most in the ~30ms this test runs).
+            // Not usize::MAX: the network build sizes a per-frame drop bitmap
+            // to max_streams + slots, which must stay allocatable.
+            max_streams: 10_000_000,
+            max_runtime: None,
+            system_threads: 1,
+            workers: 2,
+            spin_wait: SpinWaitConfig {
+                spin_iters: 32,
+                yield_iters: 64,
+                park_ns: 100,
+            },
+            batch: BatchConfig {
+                target_size: 32,
+                timeout_us: 10,
+                poll_spin_iters: 16,
+                flush_threshold: 8,
+            },
+            ..RuntimeConfig::default()
+        };
+
+        let mut rt = TomiiRtBuilder::with_config(compiled, scheduler, config)
+            .build()
+            .expect("build failed");
+
+        let started = Instant::now();
+        let mut ticks = 0usize;
+        rt.run_until(|progress| {
+            assert_eq!(progress.max_streams, 10_000_000);
+            ticks += 1;
+            ticks >= 3
+        })
+        .expect("run_until failed");
+
+        assert!(ticks >= 3, "predicate saw only {} ticks", ticks);
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "run_until did not terminate promptly ({:?})",
+            started.elapsed()
+        );
     }
 }
