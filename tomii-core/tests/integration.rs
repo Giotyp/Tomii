@@ -407,17 +407,23 @@ mod worker_hook_and_run_until {
         })
     }
 
-    /// Wait (bounded) for exits to catch up with starts — rayon detaches its
-    /// worker threads, so exit handlers can lag pool drop slightly.
-    fn wait_for_exits(hook: &CountingHook, expected: usize) -> bool {
+    /// Wait (bounded) for exits to converge with starts — rayon detaches its
+    /// worker threads, so a worker can fire its start callback after pool drop
+    /// and both handlers can lag it. Re-reads both counters each poll: comparing
+    /// exits against a stale starts snapshot races with late-starting workers.
+    fn wait_for_exits(hook: &CountingHook) -> bool {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            if hook.exits.load(Ordering::SeqCst) == expected {
+        loop {
+            let starts = hook.starts.load(Ordering::SeqCst);
+            let exits = hook.exits.load(Ordering::SeqCst);
+            if starts >= 1 && exits == starts {
                 return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        false
     }
 
     fn hook_lifecycle(scheduler_type: SchedulerType) {
@@ -434,13 +440,15 @@ mod worker_hook_and_run_until {
             }
             drop(scheduler);
         }
-        let starts = hook.starts.load(Ordering::SeqCst);
-        assert!(starts >= 1, "no worker start callbacks ran");
         assert!(
-            wait_for_exits(&hook, starts),
-            "exit callbacks ({}) never matched start callbacks ({})",
+            hook.starts.load(Ordering::SeqCst) >= 1,
+            "no worker start callbacks ran"
+        );
+        assert!(
+            wait_for_exits(&hook),
+            "exit callbacks ({}) never converged with start callbacks ({})",
             hook.exits.load(Ordering::SeqCst),
-            starts
+            hook.starts.load(Ordering::SeqCst)
         );
     }
 
