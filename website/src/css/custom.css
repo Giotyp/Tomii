@@ -1,0 +1,252 @@
+/**
+ * custom.css — Tomii typography and component styling.
+ * Color tokens live in theme.css.
+ */
+
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/400-italic.css';
+@import '@fontsource/ibm-plex-sans/500.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+@import '@fontsource/ibm-plex-sans/700.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+@import '@fontsource/jetbrains-mono/700.css';
+
+:root {
+  --ifm-font-family-base: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont,
+    'Segoe UI', sans-serif;
+  --ifm-font-family-monospace: 'JetBrains Mono', SFMono-Regular, Menlo,
+    monospace;
+
+  /* 18px root — everything below is rem-based, so this scales the site. */
+  --ifm-font-size-base: 112.5%;
+
+  /* Type scale */
+  --tomii-text-micro: 0.75rem; /* 12px */
+  --tomii-text-small: 0.875rem; /* 14px */
+  --tomii-text-base: 1rem; /* 16px */
+  --tomii-text-lg: 1.125rem; /* 18px */
+  --tomii-text-xl: 1.375rem; /* 22px */
+  --tomii-text-2xl: 1.75rem; /* 28px */
+  --tomii-text-3xl: 2rem; /* 32px */
+
+  --ifm-code-font-size: 0.875em;
+  --ifm-code-border-radius: 6px;
+  --ifm-global-radius: 8px;
+  --ifm-heading-font-weight: 600;
+  --ifm-h1-font-size: var(--tomii-text-3xl);
+  --ifm-h2-font-size: var(--tomii-text-2xl);
+  --ifm-h3-font-size: var(--tomii-text-xl);
+  --ifm-line-height-base: 1.65;
+
+  --tomii-transition: 140ms ease;
+}
+
+/* ---------------------------------------------------------------- navbar */
+
+.navbar {
+  backdrop-filter: blur(8px);
+}
+
+.navbar__link {
+  font-weight: 500;
+  transition: color var(--tomii-transition);
+}
+
+.navbar__link--active {
+  color: var(--ifm-color-primary);
+}
+
+/* --------------------------------------------------------------- sidebar */
+
+.menu__link {
+  font-size: var(--tomii-text-small);
+  transition: color var(--tomii-transition),
+    background-color var(--tomii-transition);
+}
+
+.menu__link--active:not(.menu__link--sublist) {
+  color: var(--ifm-color-primary);
+  border-left: 2px solid var(--ifm-color-primary);
+  border-radius: 0 6px 6px 0;
+  background: var(--tomii-bg-tint);
+}
+
+.menu__list-item-collapsible .menu__link {
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------- markdown */
+
+.markdown a:not(.card) {
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color var(--tomii-transition);
+}
+
+.markdown a:not(.card):hover {
+  border-bottom-color: currentColor;
+  text-decoration: none;
+}
+
+.markdown h1:first-child {
+  --ifm-h1-font-size: var(--tomii-text-3xl);
+}
+
+.markdown table {
+  display: table;
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--tomii-border);
+  border-radius: var(--ifm-global-radius);
+  overflow: hidden;
+  font-size: var(--tomii-text-small);
+}
+
+.markdown table th {
+  background: var(--tomii-bg-sunken);
+  border-top: none;
+  font-weight: 600;
+}
+
+.markdown table th:first-child,
+.markdown table td:first-child {
+  border-left: none;
+}
+
+.markdown table th:last-child,
+.markdown table td:last-child {
+  border-right: none;
+}
+
+.markdown table tr:last-child td {
+  border-bottom: none;
+}
+
+code {
+  border: 1px solid var(--tomii-border);
+  padding: 0.1rem 0.3rem;
+}
+
+pre code {
+  border: none;
+}
+
+.theme-code-block {
+  border: 1px solid var(--tomii-border);
+  border-radius: var(--ifm-global-radius);
+  box-shadow: none;
+}
+
+blockquote {
+  background: var(--tomii-bg-sunken);
+  border-radius: 0 var(--ifm-global-radius) var(--ifm-global-radius) 0;
+  padding: 0.75rem 1rem;
+}
+
+/* ------------------------------------------------------------ admonitions */
+
+.alert {
+  border-left-width: 3px;
+  box-shadow: none;
+}
+
+.alert--info {
+  --ifm-alert-background-color: var(--tomii-bg-tint);
+  --ifm-alert-border-color: var(--tomii-azure);
+}
+
+.alert--success {
+  --ifm-alert-background-color: var(--tomii-teal-tint);
+  --ifm-alert-border-color: var(--tomii-teal);
+}
+
+.alert--warning {
+  --ifm-alert-background-color: var(--tomii-amber-tint);
+  --ifm-alert-border-color: var(--tomii-amber);
+}
+
+.alert--danger {
+  --ifm-alert-background-color: var(--tomii-red-tint);
+  --ifm-alert-border-color: var(--tomii-red);
+}
+
+.alert--secondary {
+  --ifm-alert-background-color: var(--tomii-bg-sunken);
+  --ifm-alert-border-color: var(--tomii-border-strong);
+}
+
+/* ------------------------------------------------------------ pagination */
+
+.pagination-nav__link {
+  border: 1px solid var(--tomii-border);
+  transition: border-color var(--tomii-transition),
+    background-color var(--tomii-transition);
+}
+
+.pagination-nav__link:hover {
+  border-color: var(--ifm-color-primary);
+  background: var(--tomii-bg-sunken);
+}
+
+/* ---------------------------------------------------------------- footer */
+
+.footer {
+  border-top: 1px solid var(--tomii-border);
+  padding-top: 3rem;
+  padding-bottom: 3rem;
+}
+
+.footer__title {
+  font-size: var(--tomii-text-small);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.footer__link-item {
+  font-size: var(--tomii-text-small);
+  transition: color var(--tomii-transition);
+}
+
+.footer__link-item:hover {
+  color: var(--ifm-color-primary);
+  text-decoration: none;
+}
+
+.footer__copyright {
+  font-size: var(--tomii-text-micro);
+  color: var(--tomii-ink-muted);
+  margin-top: 2rem;
+}
+
+/* ---------------------------------------------------------------- search */
+
+.navbar__search-input {
+  border-radius: 6px;
+  background-color: var(--tomii-bg-sunken);
+}
+
+/* --------------------------------------------------------------- buttons */
+
+.button--primary {
+  --ifm-button-background-color: var(--tomii-azure);
+  --ifm-button-border-color: var(--tomii-azure);
+  transition: background-color var(--tomii-transition),
+    border-color var(--tomii-transition);
+}
+
+[data-theme='dark'] .button--primary {
+  --ifm-button-color: #0d1420;
+}
+
+.button--outline {
+  --ifm-button-color: var(--tomii-ink-soft);
+  --ifm-button-border-color: var(--tomii-border-strong);
+}
+
+.button--outline:hover {
+  --ifm-button-border-color: var(--tomii-azure);
+  --ifm-button-color: var(--tomii-azure);
+  background: var(--tomii-bg-sunken);
+}

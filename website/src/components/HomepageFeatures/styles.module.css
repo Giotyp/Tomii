@@ -1,0 +1,87 @@
+.pillars {
+  padding: 2rem 0 3rem;
+  border-top: 1px solid var(--tomii-border);
+}
+
+.pillar,
+.pillarFlipped {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 3.5rem;
+  align-items: center;
+  padding: 2.5rem 0;
+}
+
+.pillarFlipped .pillarText {
+  order: 2;
+}
+
+.pillarFlipped .pillarCode {
+  order: 1;
+}
+
+.pillarText {
+  position: relative;
+}
+
+.pillarNumber {
+  display: block;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 4.5rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--tomii-bg-tint);
+  -webkit-text-stroke: 1px var(--tomii-border-strong);
+  margin-bottom: 0.5rem;
+  user-select: none;
+}
+
+.pillarTitle {
+  font-size: var(--tomii-text-2xl);
+  letter-spacing: -0.01em;
+  margin-bottom: 0.75rem;
+}
+
+.pillarBody {
+  color: var(--tomii-ink-soft);
+  margin-bottom: 1rem;
+}
+
+.pillarLink {
+  font-weight: 500;
+  font-size: var(--tomii-text-small);
+}
+
+.pillarCode {
+  min-width: 0;
+}
+
+.pillarCode :global(.theme-code-block) {
+  font-size: 0.8rem;
+  margin-bottom: 0.75rem;
+}
+
+.pillarCode :global(.theme-code-block:last-child) {
+  margin-bottom: 0;
+}
+
+@media (max-width: 996px) {
+  .pillar,
+  .pillarFlipped {
+    grid-template-columns: 1fr;
+    gap: 1.75rem;
+    padding: 2rem 0;
+  }
+
+  .pillarFlipped .pillarText {
+    order: 1;
+  }
+
+  .pillarFlipped .pillarCode {
+    order: 2;
+  }
+
+  .pillarNumber {
+    font-size: 3.25rem;
+  }
+}

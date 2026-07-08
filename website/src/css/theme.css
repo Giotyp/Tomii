@@ -1,0 +1,111 @@
+/**
+ * theme.css — Tomii color tokens (light + dark).
+ * Azure is the single loud color; everything else stays quiet.
+ */
+
+:root {
+  /* Brand */
+  --tomii-azure: #007fff;
+  --tomii-azure-ink: #005ec2;
+
+  /* Infima primary scale (light) */
+  --ifm-color-primary: #007fff;
+  --ifm-color-primary-dark: #0072e6;
+  --ifm-color-primary-darker: #006cd9;
+  --ifm-color-primary-darkest: #0059b3;
+  --ifm-color-primary-light: #1a8cff;
+  --ifm-color-primary-lighter: #2693ff;
+  --ifm-color-primary-lightest: #4da6ff;
+
+  /* Surfaces */
+  --tomii-bg: #ffffff;
+  --tomii-bg-sunken: #f3f8ff;
+  --tomii-bg-tint: #e9f2ff;
+  --tomii-border: #dce7f5;
+  --tomii-border-strong: #b9cfec;
+
+  /* Ink */
+  --tomii-ink: #1a2230;
+  --tomii-ink-soft: #3e4c61;
+  --tomii-ink-muted: #5a6a80;
+  --tomii-ink-ghost: #8fa1b8;
+
+  /* Semantic accents — desaturated so azure stays dominant */
+  --tomii-teal: #0e7a70;
+  --tomii-teal-tint: #e6f4f2;
+  --tomii-amber: #a06a1c;
+  --tomii-amber-tint: #faf3e4;
+  --tomii-red: #b03a3a;
+  --tomii-red-tint: #f9ecec;
+  --tomii-violet: #6656c8;
+  --tomii-violet-tint: #efedfa;
+
+  /* Infima mappings */
+  --ifm-background-color: var(--tomii-bg);
+  --ifm-background-surface-color: var(--tomii-bg-sunken);
+  --ifm-font-color-base: var(--tomii-ink);
+  --ifm-color-content-secondary: var(--tomii-ink-muted);
+  --ifm-toc-border-color: var(--tomii-border);
+  --ifm-table-border-color: var(--tomii-border);
+  --ifm-blockquote-border-left-width: 3px;
+  --ifm-blockquote-color: var(--tomii-ink-soft);
+  --ifm-code-background: var(--tomii-bg-tint);
+  --ifm-footer-background-color: var(--tomii-bg-sunken);
+  --ifm-footer-link-color: var(--tomii-ink-soft);
+  --ifm-footer-title-color: var(--tomii-ink);
+  --ifm-navbar-background-color: rgba(255, 255, 255, 0.88);
+  --ifm-navbar-shadow: 0 1px 0 var(--tomii-border);
+  --ifm-hr-background-color: var(--tomii-border);
+
+  --docusaurus-highlighted-code-line-bg: rgba(0, 127, 255, 0.08);
+}
+
+[data-theme='dark'] {
+  /* Lifted azure for dark backgrounds */
+  --tomii-azure: #4d9fff;
+  --tomii-azure-ink: #82bcff;
+
+  --ifm-color-primary: #4d9fff;
+  --ifm-color-primary-dark: #3392ff;
+  --ifm-color-primary-darker: #268bff;
+  --ifm-color-primary-darkest: #0073ff;
+  --ifm-color-primary-light: #67acff;
+  --ifm-color-primary-lighter: #74b3ff;
+  --ifm-color-primary-lightest: #9ac7ff;
+
+  --tomii-bg: #0d1420;
+  --tomii-bg-sunken: #121a29;
+  --tomii-bg-tint: #16233a;
+  --tomii-border: #223049;
+  --tomii-border-strong: #33476b;
+
+  --tomii-ink: #e6edf6;
+  --tomii-ink-soft: #bccadd;
+  --tomii-ink-muted: #93a4bc;
+  --tomii-ink-ghost: #5d6f89;
+
+  --tomii-teal: #4dbdb2;
+  --tomii-teal-tint: #12332f;
+  --tomii-amber: #d9a75c;
+  --tomii-amber-tint: #33291472;
+  --tomii-red: #e08585;
+  --tomii-red-tint: #3a1f1f;
+  --tomii-violet: #a99cf0;
+  --tomii-violet-tint: #262040;
+
+  --ifm-background-color: var(--tomii-bg);
+  --ifm-background-surface-color: var(--tomii-bg-sunken);
+  --ifm-font-color-base: var(--tomii-ink);
+  --ifm-color-content-secondary: var(--tomii-ink-muted);
+  --ifm-toc-border-color: var(--tomii-border);
+  --ifm-table-border-color: var(--tomii-border);
+  --ifm-code-background: var(--tomii-bg-tint);
+  --ifm-footer-background-color: var(--tomii-bg-sunken);
+  --ifm-footer-link-color: var(--tomii-ink-soft);
+  --ifm-footer-title-color: var(--tomii-ink);
+  --ifm-navbar-background-color: rgba(13, 20, 32, 0.88);
+  --ifm-navbar-shadow: 0 1px 0 var(--tomii-border);
+  --ifm-hr-background-color: var(--tomii-border);
+
+  --docusaurus-highlighted-code-line-bg: rgba(77, 159, 255, 0.12);
+}

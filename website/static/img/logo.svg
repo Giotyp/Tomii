@@ -1,0 +1,17 @@
+<svg width="32" height="32" viewBox="0 0 34 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Tomii mark: a streaming DAG — source fans out through two lanes and re-joins -->
+  <g stroke="#007FFF" stroke-width="1.8" stroke-linecap="round">
+    <path d="M4.5 16 L12 8" />
+    <path d="M4.5 16 L12 24" />
+    <path d="M12 8 L22 8" />
+    <path d="M12 24 L22 24" />
+    <path d="M22 8 L29.5 16" />
+    <path d="M22 24 L29.5 16" />
+  </g>
+  <circle cx="4.5" cy="16" r="3.2" fill="#007FFF" />
+  <circle cx="12" cy="8" r="2.5" fill="#ffffff" stroke="#007FFF" stroke-width="1.8" />
+  <circle cx="12" cy="24" r="2.5" fill="#ffffff" stroke="#007FFF" stroke-width="1.8" />
+  <circle cx="22" cy="8" r="2.5" fill="#ffffff" stroke="#007FFF" stroke-width="1.8" />
+  <circle cx="22" cy="24" r="2.5" fill="#ffffff" stroke="#007FFF" stroke-width="1.8" />
+  <circle cx="29.5" cy="16" r="3.2" fill="#007FFF" />
+</svg>
