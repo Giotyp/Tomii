@@ -129,7 +129,7 @@ def network(**config) -> None
 
 Sets the network receiver configuration. Keys map to the
 [`network_config`](/docs/reference/json-graph-format#network_config) JSON
-block: `socket_type`, `num_sockets`, `packet_length`, `stream_packets`,
+block: `socket_type`, `num_sockets`, `packet_length`, `frame_packets`,
 `buffer_depth` (default 128), `address`, `start_port`,
 `extract_packet_func`, `id_function`, and `index_function` (an `IndexFunc`
 or dict; required). Values that are `Var` objects serialize as name

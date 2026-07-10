@@ -6,12 +6,12 @@ sidebar_label: What is Tomii?
 Tomii is a Rust task-graph runtime for packet-driven streaming pipelines. You
 define a computation graph in Python (or directly as JSON), implement its
 kernels in Rust, C, or Python, and Tomii executes the graph across up to 64
-concurrent streams with worker threads pinned to cores.
+concurrent frames with worker threads pinned to cores.
 
 Tomii is a research and prototyping framework. It is **not** a
-general-purpose Taskflow or TBB replacement: for single-stream micro-task
+general-purpose Taskflow or TBB replacement: for single-frame micro-task
 DAGs where dispatch overhead dominates, those frameworks are faster. Tomii's
-advantage appears in a specific niche — concurrent streams, generational slot
+advantage appears in a specific niche: concurrent frames, generational slot
 reuse, network-driven MIMO pipelines, and machine-driven optimization. The
 [When to use Tomii](/docs/overview/when-to-use) page states the boundary
 precisely, including the losses.
@@ -42,9 +42,9 @@ control surface.
 
 Three structural properties follow from this architecture:
 
-**The same compiled graph replays across concurrent streams.** Up to 64
+**The same compiled graph replays across concurrent frames.** Up to 64
 slots each hold an independent instance of the graph, sharing initialized
-objects across lanes. Completing a stream is an O(1) generational reset, not
+objects across lanes. Completing a frame is an O(1) generational reset, not
 a graph reconstruction. Network packets are first-class graph sources
 (`$network`), ingested by dedicated receiver threads.
 

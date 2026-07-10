@@ -61,8 +61,8 @@ cargo run -p tomii-core --bin main -- \
 | `--core-offset N` | int, `1` | First CPU to pin workers to |
 | `--system-threads N` | int, `1` | Resolution threads |
 | `--receiver-threads N` | int, `1` | Dedicated network receiver threads |
-| `--slots N` | int, `1` | Concurrent in-flight streams |
-| `--max-streams N` | int, `1` | Total streams to process |
+| `--slots N` | int, `1` | Concurrent in-flight frames |
+| `--max-frames N` | int, `1` | Total frames to process |
 | `--max-runtime SECS` | int, `0` | Stop after this many seconds; `0` = no time limit |
 
 ### Scheduling flags
@@ -94,12 +94,16 @@ these flags lives in [knobs](/docs/guide/tuning/knobs).
 | `--timing FILE` | string, unset | Per-node timing CSV |
 | `--report FILE` | string, unset | JSON performance report |
 | `--record` | bool, off | Scheduler event recording |
-| `--record-stream ID` | int, unset | Record only one stream (memory optimization) |
-| `--exclude-streams N` | int, `0` | Exclude the first N streams from timing statistics |
+| `--record-frame ID` | int, unset | Record only one frame (memory optimization) |
+| `--exclude-frames N` | int, `0` | Exclude the first N frames from timing statistics |
 | `--use-rdtsc` | bool, off | RDTSC-based timing (x86) |
 | `--debug` | bool, off | Debug-level logging (`RUST_LOG` overrides it) |
 | `--inits` | bool, off | Print initializations to stdout |
 | `--dump-state FILE` | string, unset | Runtime state snapshot (JSON) at shutdown |
+
+The pre-rename spellings `--max-streams`, `--record-stream`, and
+`--exclude-streams` still parse as hidden aliases of the `--*-frame(s)` flags
+above, so existing scripts keep working.
 
 With `--dump-state FILE` set, the binary writes a JSON snapshot of per-slot
 runtime state to `FILE` at shutdown. On Unix, sending `SIGUSR1` to the

@@ -85,8 +85,8 @@ function Hero() {
             </h1>
             <p className={styles.heroSubtitle}>
               Tomii is a Rust runtime for packet-driven streaming pipelines.
-              Define the DAG in Python, mix Rust, C, and Python kernels in one
-              graph, replay it across 64 concurrent streams — and let an agent
+              Define the DAG in Python or JSON, mix Rust, C, and Python kernels in one
+              graph, replay it across multiple concurrent frames, and let an agent
               tune it, verifier-gated, without recompiling.
             </p>
             <div className={styles.heroButtons}>
@@ -118,11 +118,11 @@ function Tripartite() {
   return (
     <section className={styles.tripartite}>
       <div className="container">
-        <h2 className={styles.sectionTitle}>Three artifacts, not one codebase</h2>
+        <h2 className={styles.sectionTitle}>Tripartite Decoupling: Three artifacts, not one codebase</h2>
         <p className={styles.sectionLead}>
           Streaming frameworks usually fuse what you compute, how each kernel is
           implemented, and how execution is organized into a single program.
-          Tomii keeps them separate — each one can change without touching the
+          Tomii keeps them separate, so each one can change without touching the
           other two.
         </p>
         <div className={styles.tripartiteCards}>
@@ -131,7 +131,7 @@ function Tripartite() {
             <h3>Graph specification</h3>
             <p>
               Declarative, machine-readable, language-agnostic. Nodes,
-              dependencies, barriers, network sources — nothing about how
+              dependencies, barriers, network sources; nothing about how
               computation runs.
             </p>
           </div>
@@ -154,7 +154,7 @@ function Tripartite() {
             <span className={styles.tripartiteTag}>CLI flags</span>
             <h3>Runtime control</h3>
             <p>
-              Workers, slots, scheduler, batching — a bounded, documented
+              Workers, slots, scheduler, batching; a bounded, documented
               control surface. Reconfigure execution without rebuilding
               anything.
             </p>
@@ -173,7 +173,7 @@ function Honesty() {
         <p className={styles.sectionLead}>
           Tomii is a research and prototyping framework with a deliberate
           niche. A fused, application-specific system like Agora will beat it
-          on absolute latency (a bounded 3–4× on massive-MIMO) — but changing a
+          on absolute latency (a bounded 3-4x on massive-MIMO), but changing a
           subcarrier count, a scheduling policy, or a kernel in Tomii is a
           graph edit or a CLI flag, not a source change and a recompile.
         </p>
@@ -183,10 +183,10 @@ function Honesty() {
             <ul>
               <li>
                 Packet-driven MIMO-class pipelines: network ingress, FFT/beam
-                stages, concurrent streams
+                stages, concurrent frames
               </li>
               <li>
-                Multi-stream replay where the same pipeline fires repeatedly on
+                Multi-frame replay where the same pipeline fires repeatedly on
                 arriving data (per-task compute ≥ 16 µs)
               </li>
               <li>
@@ -199,7 +199,7 @@ function Honesty() {
             <h3 className={styles.honestyNo}>Not for</h3>
             <ul>
               <li>
-                Single-stream micro-task DAGs where dispatch overhead dominates
+                Single-frame micro-task DAGs where dispatch overhead dominates
                 — Taskflow and TBB are faster there
               </li>
               <li>
@@ -249,7 +249,7 @@ export default function Home(): React.ReactNode {
   return (
     <Layout
       title={siteConfig.title}
-      description="Tomii is a Rust task-graph runtime for packet-driven streaming pipelines: Python-defined JSON graphs, polyglot Rust/C/Python kernels, multi-slot stream replay, and an agent-tunable runtime surface.">
+      description="Tomii is a Rust task-graph runtime for packet-driven streaming pipelines: Python-defined JSON graphs, polyglot Rust/C/Python kernels, multi-slot frame replay, and an agent-tunable runtime surface.">
       <Hero />
       <main>
         <Tripartite />

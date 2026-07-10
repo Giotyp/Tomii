@@ -55,8 +55,8 @@ const PILLARS: Pillar[] = [
         The topology is pure JSON: nodes, data dependencies (<code>$res</code>),
         barriers, and network sources (<code>$network</code>) as first-class
         argument types. The same compiled graph replays across up to 64
-        concurrent stream slots, with O(1) generational reset between streams —
-        no per-stream graph reconstruction.
+        concurrent frame slots, with O(1) generational reset between frames;
+        no per-frame graph reconstruction.
       </>
     ),
     link: {to: '/docs/guide/graphs/nodes-and-vars', label: 'Building graphs'},
@@ -69,8 +69,7 @@ const PILLARS: Pillar[] = [
       <>
         Annotate a function in Rust, C, or Python and the build step generates
         the wrapper and registry entry. All three languages compose in one
-        graph, referenced by name — the runtime never knows which language a
-        kernel is written in.
+        graph, referenced by name; the runtime never knows the kernel language.
       </>
     ),
     link: {to: '/docs/guide/plugins/polyglot', label: 'One DAG, three languages'},

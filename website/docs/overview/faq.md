@@ -7,13 +7,12 @@ sidebar_label: FAQ
 
 Tomii is a research and prototyping framework. The runtime is tested,
 benchmarked, and verifier-gated, but the project's goal is fast iteration on
-streaming pipeline structure — not displacing fused production systems at the
+streaming pipeline structure; not displacing fused production systems at the
 absolute latency limit. See [When to use Tomii](/docs/overview/when-to-use).
 
-### Why is the package called `tomii-rt` when the import is `tomii`?
+### Python package name: `tomii-rt`?
 
-PyPI rejected the name `tomii` as too similar to an existing project. The
-distribution is `tomii-rt`; the import name is `tomii`:
+The distribution is `tomii-rt`; the used import name is `tomii`:
 
 ```bash
 pip install tomii-rt
@@ -39,10 +38,11 @@ by hand, the Python builder emits it for you.
 No. The graph is compiled once at startup and replayed across all slots.
 Data-dependent fan-out and dynamic node creation are out of scope; that
 constraint is what makes O(1) generational slot reset and pre-computed
-routing tables possible. If your topology is dynamic, use a framework built
+routing tables possible. However, conditional nodes are left for future upgrades.
+If your topology is dynamic, use a framework built
 for that (see the [comparison](/docs/overview/comparison)).
 
-### How many concurrent streams can one process run?
+### How many concurrent frames can one process run?
 
 Up to 64 slots. Each slot holds an independent instance of the graph;
 initialized objects (`$ref`) are shared across slots without copying.
@@ -56,7 +56,7 @@ builds. See [Python plugins](/docs/guide/plugins/python).
 
 ### Can I mix languages in one graph?
 
-Yes — that is a design goal. Kernels exported from Rust, C, and Python are
+Yes, that is a design goal. Kernels exported from Rust, C, and Python are
 all registered by name in one function registry; a single graph can reference
 any of them. See [One DAG, three languages](/docs/guide/plugins/polyglot).
 

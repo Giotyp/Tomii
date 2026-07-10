@@ -28,7 +28,7 @@ counts:
 |---|---|
 | `stream-analytics` | golden-file `verify.py` per trial |
 | `pipeline` | knob-aware verify pass with numeric checks vs a Python reference |
-| `mimo` | keep-up gate: streams processed must equal frames sent |
+| `mimo` | keep-up gate: frames processed must equal frames sent |
 
 A trial that fails its gate is logged with `verifier_ok: false` and a
 rejection reason, and is excluded from the best-result comparison. An edit
@@ -55,7 +55,7 @@ history — no source code, no documentation.
 cd examples/agent-tuning
 bash run_all.sh 50                                  # all 4 arms, stream-analytics
 bash run_all.sh 50 pipeline
-bash run_all.sh 30 mimo --streams 200 --warmup 20   # needs Agora sender + MKL
+bash run_all.sh 30 mimo --frames 200 --warmup 20   # needs Agora sender + MKL
 ```
 
 Each arm writes a `.jsonl` trial log; one line per trial:
@@ -66,7 +66,7 @@ Each arm writes a `.jsonl` trial log; one line per trial:
   "arm": "random",
   "knobs": {"workers": 4, "slots": 4},
   "verifier_ok": true,
-  "ms_per_stream": 0.1823,
+  "ms_per_frame": 0.1823,
   "rejection_reason": null,
   "wall_seconds": 2.41
 }

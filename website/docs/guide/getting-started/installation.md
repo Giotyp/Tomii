@@ -4,14 +4,14 @@ sidebar_label: Installation
 ---
 
 Tomii ships as a Python package. The distribution name on PyPI is `tomii-rt`;
-the import name is `tomii`.
+the used import name is `tomii`.
 
 ```bash
 pip install tomii-rt
 python -c "import tomii"
 ```
 
-Version 1.0.0 ships Linux x86_64 wheels for CPython 3.9–3.13 (see the install
+Version 1.1.0 ships Linux x86_64 wheels for CPython 3.9–3.13 (see the install
 section of the repository `README.md`). macOS, Windows, and ARM wheels are
 planned for a later release.
 

@@ -229,12 +229,12 @@ the virtual `$network` node's results. See
 | `socket_type` | yes | string | Only `"udp"` is currently supported |
 | `num_sockets` | yes | [factor](#factor) | Number of receive sockets |
 | `packet_length` | yes | [factor](#factor) | Packet size in bytes |
-| `stream_packets` | yes | [factor](#factor) | Packets per stream (frame) |
+| `frame_packets` | yes | [factor](#factor) | Packets per frame (legacy spelling `stream_packets` still accepted) |
 | `buffer_depth` | no (default 128) | integer | Receive buffer depth |
 | `address` | yes | string | Bind address, literal or the name of a `String` init object |
 | `start_port` | yes | [factor](#factor) | First port; socket *i* binds `start_port + i` |
 | `extract_packet_func` | yes | string | Plugin function that extracts payload from a packet |
-| `id_function` | yes | string | Plugin function that maps a packet to its stream (frame) id |
+| `id_function` | yes | string | Plugin function that maps a packet to its frame id |
 | `index_function` | yes | object | `{"function": string, "args": [...]}` — maps a packet to a `$network` instance index |
 
 ```json
@@ -242,7 +242,7 @@ the virtual `$network` node's results. See
     "socket_type": "udp",
     "num_sockets": "antennas",
     "packet_length": "packet_length",
-    "stream_packets": "packets_per_frame",
+    "frame_packets": "packets_per_frame",
     "buffer_depth": 2000,
     "address": "server_address",
     "start_port": "base_port",

@@ -13,7 +13,7 @@ Tomii occupies a point between two families: general task-parallel frameworks
 |---|---|---|---|---|---|---|
 | Topology defined as | JSON data | C++ code | C++ code | Rust code | Python code | C++ code (fused) |
 | Kernel languages in one DAG | Rust + C + Python | C++ | C++ | Rust | Python | C++ (fused) |
-| Concurrent stream replay with O(1) reset | Yes (64 slots) | Rebuild per stream | Rebuild per stream | Fork-join only | Per-task scheduling | Yes (hard-coded) |
+| Concurrent frame replay with O(1) reset | Yes (64 slots) | Rebuild per frame | Rebuild per frame | Fork-join only | Per-task scheduling | Yes (hard-coded) |
 | Network ingress as a graph primitive | Yes (`$network`) | No | No | No | Worker comms only | Yes (hard-coded) |
 | Machine-readable tuning surface | Knob catalog + schema | No | No | No | Config objects | No |
 | Reconfigure without recompiling | Graph edit / CLI flag | Rebuild | Rebuild | Rebuild | Re-run script | Rebuild |
@@ -22,10 +22,10 @@ Tomii occupies a point between two families: general task-parallel frameworks
 
 ## Against general frameworks
 
-**Taskflow and TBB flow graph** are the right choice for single-stream
+**Taskflow and TBB flow graph** are the right choice for single-frame
 micro-task DAGs: their pre-compiled graphs have lower per-invocation cost, and
 on a fine-grained wavefront Tomii is ~2.4× slower
-([benchmarks](/docs/overview/benchmarks)). What they lack is Tomii's stream
+([benchmarks](/docs/overview/benchmarks)). What they lack is Tomii's frame
 model — both reconstruct or re-submit the graph per invocation, while Tomii
 replays the same compiled graph across 64 slots with generational reset — and
 both bake topology and kernels into homogeneous C++.
@@ -71,8 +71,8 @@ affinity, timing, and CSV output built into the runtime instead of
 re-implemented per application.
 
 If you are deploying production baseband at the latency limit, use Agora. If
-you are iterating on pipeline structure, kernels, or scheduling — the
-prototyping loop — the fused design cannot support that iteration without
+you are iterating on pipeline structure, kernels, or scheduling (the
+prototyping loop) the fused design cannot support that iteration without
 source changes, and Tomii is built for it.
 
 ## The one-line summary

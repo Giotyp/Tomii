@@ -15,7 +15,7 @@ app.run(workers=4, timing="timing.csv", output="out.txt", record=True)
 `timing` writes a per-node timing CSV; `output` writes the raw timing stream.
 `record=True` enables the recording path — timing events go through a
 dedicated lock-free async recorder thread, so recording does not block
-workers. Use `exclude_streams=N` to drop warm-up streams from the
+workers. Use `exclude_frames=N` to drop warm-up frames from the
 statistics, and `use_rdtsc=True` on x86 for sub-microsecond timer precision
 (see [Running graphs](/docs/guide/getting-started/running)).
 
@@ -26,7 +26,7 @@ app.run(workers=4, report="report.json")
 ```
 
 The report is the primary diagnostic. Its `summary` block carries avg/p50/p99
-stream latency and throughput; `summary.scheduling_overhead_diagnostic`
+frame latency and throughput; `summary.scheduling_overhead_diagnostic`
 splits time into scheduling overhead versus compute (`overhead_pct`,
 `overhead_us`, plus an interpretation string); `per_node` gives per-node
 avg/p99 execution time and an `on_critical_path` flag; and
@@ -67,7 +67,7 @@ run:
 kill -USR1 <pid>
 ```
 
-This is the tool for wedged runs: if a stream never completes, a live
+This is the tool for wedged runs: if a frame never completes, a live
 snapshot shows which slots are active, which dependencies are outstanding,
 and how many packets are parked in the pending-frames buffer
 (`tomii-core/src/runtime/dump.rs`).

@@ -19,13 +19,13 @@ MIMO uplink Tomii measures 1.26–1.39× faster than a Taskflow port running
 identical kernel binaries (`bench/mimo-bench/`).
 
 **Multi-slot fan-out.** The same graph topology applied to many independent
-streams concurrently. Slot parallelism hides resolution-thread latency, and
-stream completion is an O(1) generational reset instead of a per-stream graph
+frames concurrently. Slot parallelism hides resolution-thread latency, and
+frame completion is an O(1) generational reset instead of a per-frame graph
 rebuild. Session-processing patterns where the same pipeline fires repeatedly
-on arriving streams fit this shape.
+on arriving frames fit this shape.
 
 **Heterogeneous DAGs with barriers.** Mixed compute and network nodes,
-conditional routing, grouped synchronization across fan-in nodes — expressed
+conditional routing, grouped synchronization across fan-in nodes; expressed
 declaratively with `$barrier`, `$dep`, and `group_by` rather than hand-written
 coordination code.
 
@@ -50,10 +50,10 @@ just slow — it is inexpressible.
 
 **Dynamic-topology DAGs.** The graph is compiled once at startup and reused
 across all slots. Workloads where the node set or edges change between
-streams (dynamic batching, irregular graph analytics) are out of scope.
+frames (dynamic batching, irregular graph analytics) are out of scope.
 
-**Latency-sensitive single streams at high slot counts.** Throughput improves
-with slots; per-stream latency does not. If you need one stream to finish as
+**Latency-sensitive single frames at high slot counts.** Throughput improves
+with slots; per-frame latency does not. If you need one frame to finish as
 fast as possible, run it with few slots — or use a fused system.
 
 ## The intrinsic costs
@@ -82,6 +82,6 @@ this trade, including the configurations where Tomii loses.
 ## In one sentence
 
 Use Tomii when you are prototyping a streaming pipeline with concurrent
-streams, per-task work above ~16 µs, and a topology you want to edit, share,
-and optimize as data — and use a fused or fork-join system when you are past
+frames, per-task work above ~16 µs, and a topology you want to edit, share,
+and optimize as data. Use a fused or fork-join system when you are past
 prototyping and need the last 3–4× of absolute latency.

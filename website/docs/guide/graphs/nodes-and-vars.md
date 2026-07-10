@@ -4,7 +4,7 @@ sidebar_label: Nodes and vars
 ---
 
 A `tomii.Graph` holds two kinds of entries: variables (initializations,
-computed once) and nodes (tasks, executed once per stream).
+computed once) and nodes (tasks, executed once per frame).
 
 ## Variables
 
@@ -34,7 +34,7 @@ The full signature (from `tomii/_graph.py`): `name`, `func`, `args`,
 `condition`. `priority`, `loop`, and `condition` are covered in
 [Control flow](/docs/guide/graphs/control-flow).
 
-`factor` sets the number of parallel instances of the node per stream. It
+`factor` sets the number of parallel instances of the node per frame. It
 takes an `int` or a `Var`, so instance counts can be graph parameters. Where
 a factor is accepted, the string `"$workers"` resolves to the worker count at
 runtime (`tomii-core/src/json_structs.rs`).
@@ -75,8 +75,8 @@ in the [JSON graph format reference](/docs/reference/json-graph-format).
 app.post_node("cleanup", func="cleanup_state", args=[])
 ```
 
-A post node runs after the stream's compute nodes complete, before the slot
-is released. The stream-analytics example uses one for per-stream state
+A post node runs after the frame's compute nodes complete, before the slot
+is released. The stream-analytics example uses one for per-frame state
 cleanup (`examples/stream-analytics/run_bench.py`). Post nodes take the same
 options as `node()` and serialize into a separate `post_nodes` array.
 

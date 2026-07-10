@@ -23,7 +23,7 @@ import tomii as tm
 
 app = tm.Graph()
 
-# Initializations — computed once, before any stream runs
+# Initializations — computed once, before any frame runs
 buf_size    = app.var("buf_size", 100)
 num_nodes   = app.var("num_nodes", 200)
 fft_planner = app.var("fft_planner", func="fft_planner", args=[buf_size])
@@ -57,7 +57,7 @@ Line by line:
   kernel code — only function names. The kernels live in
   `examples/matrix-compute/src/lib.rs`, annotated with `#[tomii_export]`
   (see [Rust plugins](/docs/guide/plugins/rust)).
-- `factor=num_nodes` creates 200 instances of each node per stream. Instance
+- `factor=num_nodes` creates 200 instances of each node per frame. Instance
   `i` of `compute_fft` depends on instance `i` of `gen_vec`.
 - `gen_vec.out()` is a data dependency: instance `i` receives the result of
   `gen_vec[i]`. `compute_fft.wait()` is a barrier: `vec_mat[i]` waits for
@@ -92,7 +92,7 @@ became a `$ref`. The full mapping is in the
 From the repository root:
 
 ```bash
-python examples/matrix-compute/run_bench.py --workers 4 --slots 8 --max-streams 100
+python examples/matrix-compute/run_bench.py --workers 4 --slots 8 --max-frames 100
 ```
 
 The first run compiles `libmatcomp.so` and regenerates the function registry;
