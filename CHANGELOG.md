@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.2.0 — 2026-07-10
 
 ### Terminology: "stream" → "frame"
 
@@ -29,8 +29,9 @@ MIMO spatial-stream terminology in plugin code is unrelated and unchanged.
   (`pipeline-comparison.py` reads both, so archived CSVs stay plottable).
 
 Also fixed: `make schema` stub registry now satisfies the five-function registry contract
-introduced in v1.1.0, and `build.rs` re-runs when `WRAP_PATH`/`REG_PATH`/`FUNC_PATH`
-inputs change.
+introduced in v1.1.0, `build.rs` re-runs when `WRAP_PATH`/`REG_PATH`/`FUNC_PATH` inputs
+change, and two clippy 1.97 lints (`approx_constant`, `for_kv_map`/`question_mark`) were
+cleaned up. The documentation site launched at https://tomii.dev with this release.
 
 ## v1.1.0 — 2026-07-06
 

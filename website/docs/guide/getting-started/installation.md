@@ -11,9 +11,9 @@ pip install tomii-rt
 python -c "import tomii"
 ```
 
-Version 1.1.0 ships Linux x86_64 wheels for CPython 3.9–3.13 (see the install
-section of the repository `README.md`). macOS, Windows, and ARM wheels are
-planned for a later release.
+Version 1.2.0 ships wheels for Linux (x86_64, arm64) and macOS (Intel, Apple
+Silicon) covering CPython 3.9–3.14, including the free-threaded 3.13t/3.14t
+builds. Windows wheels are planned for a later release.
 
 :::warning[A Rust toolchain is required]
 

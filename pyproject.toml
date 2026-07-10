@@ -6,7 +6,7 @@ build-backend = "maturin"
 # Distribution name on PyPI ("tomii" was rejected as too similar to "tobii").
 # The import name is unaffected — users still `import tomii`.
 name = "tomii-rt"
-version = "1.1.0"
+version = "1.2.0"
 description = "Python API for the Τομί task-graph framework"
 requires-python = ">=3.9"
 readme = "README.md"
@@ -60,9 +60,12 @@ include = [
     { path = "tomii/_bin/main.exe", format = ["wheel"] },
     "LICENSE",
 ]
-# Exclude Rust sources and build artefacts that are not Python runtime deps
+# Exclude Rust sources and build artefacts that are not Python runtime deps.
+# The bridge exclusion is wheel-only: the sdist MUST carry the bridge crate —
+# its packaged workspace manifest lists the bridge as a member and source
+# builds compile it (an unqualified exclude broke the 1.1.0 sdist on PyPI).
 exclude = [
-    "tomii/_python_bridge/**",
+    { path = "tomii/_python_bridge/**", format = ["wheel"] },
     "tomii/tests/**",
     "**/__pycache__/**",
 ]

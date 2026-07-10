@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "tomii-converter"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "clap",
  "regex",
@@ -1188,7 +1188,7 @@ dependencies = [
 
 [[package]]
 name = "tomii-core"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "build-print",
  "clap",
@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "tomii-macro"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1224,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "tomii-python-bridge"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "parking_lot",
  "pyo3",
@@ -1234,7 +1234,7 @@ dependencies = [
 
 [[package]]
 name = "tomii-types"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "lazy_static",
  "num-complex",

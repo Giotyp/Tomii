@@ -23,7 +23,7 @@ resolver = "3"
 
 # Shared metadata inherited by the publishable crates via `field.workspace = true`.
 [workspace.package]
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Τομί Team"]

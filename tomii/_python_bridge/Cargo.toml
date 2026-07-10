@@ -1,6 +1,6 @@
 [package]
 name = "tomii-python-bridge"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 # Internal PyO3 bridge built into the PyPI wheel by maturin; never published to crates.io.
 publish = false
