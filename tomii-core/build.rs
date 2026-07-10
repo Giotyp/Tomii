@@ -37,6 +37,16 @@ fn main() {
     let wrap_env = env::var("WRAP_PATH").ok();
     let reg_env = env::var("REG_PATH").ok();
 
+    println!("cargo:rerun-if-env-changed=WRAP_PATH");
+    println!("cargo:rerun-if-env-changed=REG_PATH");
+    println!("cargo:rerun-if-env-changed=FUNC_PATH");
+    if let Some(p) = &wrap_env {
+        println!("cargo:rerun-if-changed={p}");
+    }
+    if let Some(p) = &reg_env {
+        println!("cargo:rerun-if-changed={p}");
+    }
+
     let mut bypass_transformer = false;
 
     if let Some(wrap_path) = wrap_env {
@@ -110,7 +120,7 @@ fn main() {
     }
 
     let func_file = func_env.unwrap();
-    // println!("cargo:rerun-if-changed={}", func_file);
+    println!("cargo:rerun-if-changed={func_file}");
     let path = PathBuf::from(func_file.clone());
 
     // Extract the path to function file

@@ -8,8 +8,8 @@ _SCHEMA_REG  := /tmp/_ss_schema_reg.rs
 ##         Run this after changing any struct in json_structs.rs.
 schema:
 	@printf '// schema-gen stub\n' > $(_SCHEMA_WRAP)
-	@printf 'use tomii_types::CmPtr;\npub fn get_func(_name: &str) -> Option<CmPtr> { None }\n' \
-		> $(_SCHEMA_REG)
+	@printf 'use tomii_types::*;\npub fn get_func(_name: &str) -> Option<CmPtr> { None }\npub fn get_bulk_func(_name: &str) -> Option<CmBulkPtr> { None }\n/// Stub twin table.\n///\n/// # Safety\n///\n/// Always returns `None`; there is no contract to uphold in stub builds.\npub unsafe fn get_unchecked_func(_name: &str) -> Option<CmPtr> { None }\npub fn get_func_argspec(_name: &str) -> Option<&%%static [&%%static str]> { None }\npub fn get_func_ret_variant(_name: &str) -> Option<&%%static str> { None }\n' \
+		| sed "s/%/'/g" > $(_SCHEMA_REG)
 	WRAP_PATH=$(_SCHEMA_WRAP) REG_PATH=$(_SCHEMA_REG) \
 		cargo run -p tomii-core --bin gen-schema > tomii/schema.json
 	datamodel-codegen \
