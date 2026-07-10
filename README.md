@@ -1,6 +1,23 @@
-# Τομί (Tomii)
+<div align="center">
+  <img alt="Tomii — task-graph runtime for streaming pipelines"
+       src="https://tomii.dev/img/logo.svg"
+       width="110">
+  <h1>Τομί (Tomii)</h1>
+
+[Website] | [Guide] | [Reference]
+
+</div>
+
+[Website]: https://tomii.dev/
+[Guide]: https://tomii.dev/docs/guide/getting-started/installation
+[Reference]: https://tomii.dev/docs/reference/cli
 
 **Task-graph framework for streaming pipelines, MIMO workloads, and agent-tuneable applications.**
+
+> **NOTE**
+> Tomii is a research prototype under active development. Interfaces and
+> performance characteristics may change between releases; it is best suited
+> for research and experimentation today.
 
 Tomii implements **Tripartite Decoupling** separating the three following artifacts: 1) Computation structure, 2) Kernel Implementation, 3) Runtime. 
 Each artifact can be modified independently and Tomii is responsible for combining them at compile (transform kernels into tomii-suitable format) or execution time (parse computation structure description).
@@ -42,8 +59,9 @@ app.run(workers=4, slots=2, timing="timing.csv")
 
 ```bash
 # From PyPI — the distribution is named `tomii-rt`; the import name is `tomii`.
-# 1.0.0 ships Linux x86_64 wheels for CPython 3.9–3.13.
-# (macOS / Windows / ARM wheels are planned for a later release.)
+# 1.2.0 ships wheels for Linux (x86_64, arm64) and macOS (Intel, Apple
+# Silicon), CPython 3.9–3.14 including free-threaded 3.13t/3.14t.
+# (Windows wheels are planned for a later release.)
 pip install tomii-rt          # then:  import tomii
 
 # From source (for development)
