@@ -475,7 +475,7 @@ mod tests {
         let ni = make_node_info(0, 0, 0, 0);
 
         let cases: &[CmTypes] = &[
-            CmTypes::F64(3.14159265358979),
+            CmTypes::F64(std::f64::consts::PI),
             CmTypes::F64(0.0),
             CmTypes::F64(-1.5),
             CmTypes::F64(f64::MAX),
