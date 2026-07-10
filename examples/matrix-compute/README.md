@@ -22,7 +22,7 @@ gen_vec(buf_size) ────────────────────�
 python examples/matrix-compute/run_bench.py
 
 # Tune parameters:
-python examples/matrix-compute/run_bench.py --workers 4 --slots 8 --max-streams 100
+python examples/matrix-compute/run_bench.py --workers 4 --slots 8 --max-frames 100
 ```
 
 The first run compiles `libmatcomp.so` and regenerates the function registry.
@@ -42,8 +42,8 @@ Builds the `perfval` binary and runs numerical validation. Prints `PASS` on succ
 |------|---------|--------|
 | `--workers` | 2 | Rayon worker threads |
 | `--system-threads` | 3 | Resolution threads |
-| `--slots` | 2 | Concurrent stream slots |
-| `--max-streams` | 1 | Streams processed before exit |
+| `--slots` | 2 | Concurrent frame slots |
+| `--max-frames` | 1 | Frames processed before exit |
 | `--batching-size` | 1 | Tasks dispatched per batch |
 | `--no-clean` | — | Skip library rebuild |
 

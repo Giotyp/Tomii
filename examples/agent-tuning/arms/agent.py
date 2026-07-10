@@ -35,14 +35,14 @@ _PROMPT_TEMPLATE = """\
 You are an expert performance-tuning assistant for the Tomii task-graph framework.
 
 Your task: suggest runtime knob configurations for the {workload} workload \
-to minimise ms_per_stream while keeping the verifier passing.
+to minimise ms_per_frame while keeping the verifier passing.
 
 {knob_space_block}
 
 ## Current state
 
 Iteration: {iteration}
-Baseline: {baseline_ms:.4f} ms/stream
+Baseline: {baseline_ms:.4f} ms/frame
 Current best: {best_ms}
 
 Last {n_shown} trials:
@@ -63,7 +63,7 @@ def _format_trial_summary(records: list[dict], n: int = 5) -> str:
     lines = []
     for r in recent:
         ok = r.get("verifier_ok", False)
-        ms = r.get("ms_per_stream")
+        ms = r.get("ms_per_frame")
         ms_str = f"{ms:.4f} ms" if ms is not None else "N/A"
         k = r.get("knobs", {})
         reason = r.get("rejection_reason") or ""
@@ -197,7 +197,7 @@ def main() -> None:
     )
 
     baseline = establish_baseline(
-        streams=args.streams,
+        frames=args.frames,
         warmup=args.warmup,
         results_dir=results_dir,
         workload=workload,
@@ -223,7 +223,7 @@ def main() -> None:
             continue
 
         result = workload.evaluate(
-            knobs, streams=args.streams, warmup=args.warmup, space=space
+            knobs, frames=args.frames, warmup=args.warmup, space=space
         )
         record = TrialRecord(
             iteration=i,
@@ -237,27 +237,27 @@ def main() -> None:
         entry: dict = {
             "iteration": i,
             "verifier_ok": result.verifier_ok,
-            "ms_per_stream": result.ms_per_stream,
+            "ms_per_frame": result.ms_per_frame,
             "rejection_reason": result.rejection_reason,
             "knobs": knobs,
         }
         trial_log.append(entry)
 
         elapsed = time.monotonic() - t_iter
-        if result.verifier_ok and result.ms_per_stream is not None:
-            if result.ms_per_stream < best_ms:
-                best_ms = result.ms_per_stream
+        if result.verifier_ok and result.ms_per_frame is not None:
+            if result.ms_per_frame < best_ms:
+                best_ms = result.ms_per_frame
                 delta_pct = (
                     (baseline - best_ms) / baseline * 100.0 if baseline > 0.0 else 0.0
                 )
                 print(
-                    f"[agent {i}] new best: {best_ms:.4f} ms/stream "
+                    f"[agent {i}] new best: {best_ms:.4f} ms/frame "
                     f"(delta: {delta_pct:.1f}%) wall={elapsed:.1f}s",
                     flush=True,
                 )
             else:
                 print(
-                    f"[agent {i}] ok: {result.ms_per_stream:.4f} ms  "
+                    f"[agent {i}] ok: {result.ms_per_frame:.4f} ms  "
                     f"best={best_ms:.4f}  wall={elapsed:.1f}s",
                     flush=True,
                 )
@@ -274,7 +274,7 @@ def main() -> None:
         )
     else:
         print(
-            f"\nAgent search complete. best={best_ms:.4f} ms/stream "
+            f"\nAgent search complete. best={best_ms:.4f} ms/frame "
             f"— {rejected_count} rejected trials"
         )
 

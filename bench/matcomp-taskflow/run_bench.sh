@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run tf_matcomp under the polyglot regime:
-#   N=200 items, buf=100, W=4 workers, S=4 slots, 10 warmup + 30 measured streams
+#   N=200 items, buf=100, W=4 workers, S=4 slots, 10 warmup + 30 measured frames
 #   Workers pinned to cores 3-6 (NUMA node 0), matching the polyglot run setup.
 set -euo pipefail
 
@@ -17,13 +17,13 @@ fi
 
 OUTPUT="${1:-${SCRIPT_DIR}/tf_matcomp_polyglot.csv}"
 
-echo "[run_bench.sh] Running polyglot regime: N=200 buf=100 slots=4 workers=4 streams=30 warmup=10"
+echo "[run_bench.sh] Running polyglot regime: N=200 buf=100 slots=4 workers=4 frames=30 warmup=10"
 "${BINARY}" \
     --n 200 \
     --buf 100 \
     --slots 4 \
     --workers 4 \
-    --streams 30 \
+    --frames 30 \
     --warmup 10 \
     --pin 3 \
     --output "${OUTPUT}"

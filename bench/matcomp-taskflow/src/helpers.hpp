@@ -32,8 +32,8 @@ static long peak_rss_kb()
 
 static void append_matcomp_csv(
     const std::string &path,
-    int n, int buf_size, int slots, int workers, int streams,
-    double ms_per_stream,
+    int n, int buf_size, int slots, int workers, int frames,
+    double ms_per_frame,
     double gv_kern,  double fft_kern, double vtm_kern, double mm_kern,
     double gv_disp,  double fft_disp, double vtm_disp, double mm_disp)
 {
@@ -44,12 +44,12 @@ static void append_matcomp_csv(
     }
     std::ofstream f(path, std::ios::app);
     if (write_header)
-        f << "system,n,buf_size,slots,workers,streams,ms_per_stream,"
+        f << "system,n,buf_size,slots,workers,frames,ms_per_frame,"
           << "gv_kern_us,fft_kern_us,vtm_kern_us,mm_kern_us,"
           << "gv_disp_us,fft_disp_us,vtm_disp_us,mm_disp_us\n";
     f << "taskflow_matcomp"
-      << ',' << n << ',' << buf_size << ',' << slots << ',' << workers << ',' << streams
-      << ',' << ms_per_stream
+      << ',' << n << ',' << buf_size << ',' << slots << ',' << workers << ',' << frames
+      << ',' << ms_per_frame
       << ',' << gv_kern  << ',' << fft_kern << ',' << vtm_kern << ',' << mm_kern
       << ',' << gv_disp  << ',' << fft_disp << ',' << vtm_disp << ',' << mm_disp
       << '\n';
@@ -61,11 +61,11 @@ static void append_matcomp_csv(
 
 struct Cli
 {
-    int n        = 200;   // DAG fan-out (items per stream)
+    int n        = 200;   // DAG fan-out (items per frame)
     int buf_size = 100;   // complex vector length per item
-    int slots    = 4;     // concurrent streams (S)
-    int streams  = 30;    // measured streams
-    int warmup   = 10;    // warmup streams
+    int slots    = 4;     // concurrent frames (S)
+    int frames  = 30;    // measured frames
+    int warmup   = 10;    // warmup frames
     int workers  = 4;     // executor threads (W)
     int pin_core = 3;     // first worker core (0 = no pinning)
     bool pin     = false;
@@ -85,7 +85,7 @@ static Cli parse_args(int argc, char **argv)
         if      (a == "--n")        c.n        = std::stoi(val());
         else if (a == "--buf")      c.buf_size = std::stoi(val());
         else if (a == "--slots")    c.slots    = std::stoi(val());
-        else if (a == "--streams")  c.streams  = std::stoi(val());
+        else if (a == "--frames")  c.frames  = std::stoi(val());
         else if (a == "--warmup")   c.warmup   = std::stoi(val());
         else if (a == "--workers")  c.workers  = std::stoi(val());
         else if (a == "--pin")      { c.pin_core = std::stoi(val()); c.pin = true; }

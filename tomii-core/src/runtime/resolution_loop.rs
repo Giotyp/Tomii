@@ -1,7 +1,7 @@
 //! Resolution-thread main loop: batch-queue drain, network polling, and slot-completion checks.
 //!
 //! Each resolution thread runs [`resolution`], which loops until either the shutdown flag is
-//! set or all streams complete.  On every iteration it (1) polls network packets (network
+//! set or all frames complete.  On every iteration it (1) polls network packets (network
 //! feature only), (2) drains the `batch_queue` non-blockingly, and (3) calls [`check_slots`]
 //! unconditionally — the unconditional call is load-bearing for Bug #21 correctness.
 //!
@@ -21,7 +21,7 @@ use super::reporting::should_record_slot;
 use super::scheduling::dispatch_nodes;
 use super::shared_data::SharedData;
 use super::slot_lifecycle::check_slots;
-use super::slot_management::{assign_stream_to_available_slot, initial_nodes};
+use super::slot_management::{assign_frame_to_available_slot, initial_nodes};
 use super::thread_locals::{BatchInnerBuffers, BATCH_INNER_BUFS, TASK_COMP_BUF};
 use crate::async_recorder::{set_worker_recorder, submit_record};
 use crate::buffers::*;
@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tomii_types::*;
 
-/// Resolution Thread: Processes completed compute tasks and manages stream lifecycle
+/// Resolution Thread: Processes completed compute tasks and manages frame lifecycle
 pub(super) fn resolution(
     shared: Arc<SharedData>,
     thread_core: usize,
@@ -56,11 +56,11 @@ pub(super) fn resolution(
     // prefetch cond indexes for efficiency
     let cond_indexes = shared.graph.get_condition_indexes();
 
-    // Persistent completion tracking across all batches for this stream
-    let mut stream_slot_activity: HashMap<usize, bool> = HashMap::new();
+    // Persistent completion tracking across all batches for this frame
+    let mut frame_slot_activity: HashMap<usize, bool> = HashMap::new();
 
-    // Cached slot list for check_slots — avoids running_streams.read() every iteration.
-    // Refreshed only when a stream is assigned or released (slots_dirty = true).
+    // Cached slot list for check_slots — avoids running_frames.read() every iteration.
+    // Refreshed only when a frame is assigned or released (slots_dirty = true).
     let mut cached_slots: Vec<usize> = Vec::new();
     let mut slots_dirty = true; // force refresh on first check_slots call
 
@@ -101,7 +101,7 @@ pub(super) fn resolution(
                         &mut packet_buf,
                         &mut slots_dirty,
                         &cond_indexes,
-                        &mut stream_slot_activity,
+                        &mut frame_slot_activity,
                         thread_core,
                         thread_id,
                         thread_slot,
@@ -114,7 +114,7 @@ pub(super) fn resolution(
             &shared,
             &mut batch_buf,
             &cond_indexes,
-            &mut stream_slot_activity,
+            &mut frame_slot_activity,
             thread_core,
             thread_id,
             thread_slot,
@@ -126,15 +126,15 @@ pub(super) fn resolution(
             break;
         }
 
-        // Also check stream completion here (before processing batch)
+        // Also check frame completion here (before processing batch)
         // This ensures threads exit promptly even if shutdown_flag hasn't been set yet
         {
-            let completed_streams = shared
+            let completed_frames = shared
                 .telemetry
-                .stream_complete_counter
+                .frame_complete_counter
                 .load(Ordering::Acquire);
-            if completed_streams >= shared.config.max_streams {
-                tracing::debug!(thread_id, "all streams completed (after recv), exiting");
+            if completed_frames >= shared.config.max_frames {
+                tracing::debug!(thread_id, "all frames completed (after recv), exiting");
                 break;
             }
         }
@@ -143,7 +143,7 @@ pub(super) fn resolution(
         // Check slots for completion
         check_slots(
             &shared,
-            &mut stream_slot_activity,
+            &mut frame_slot_activity,
             thread_id,
             thread_core,
             thread_slot,
@@ -155,14 +155,14 @@ pub(super) fn resolution(
             .telemetry
             .record_timing(start_proc, thread_slot, "Slot Check", usize::MAX);
 
-        // Check for completion of all streams
-        let completed_streams = shared
+        // Check for completion of all frames
+        let completed_frames = shared
             .telemetry
-            .stream_complete_counter
+            .frame_complete_counter
             .load(Ordering::Acquire);
 
-        if completed_streams >= shared.config.max_streams {
-            tracing::debug!(thread_id, "all streams completed, exiting resolution loop");
+        if completed_frames >= shared.config.max_frames {
+            tracing::debug!(thread_id, "all frames completed, exiting resolution loop");
             break;
         }
     }
@@ -184,7 +184,7 @@ pub(crate) fn process_batch_resolution(
     thread_id: usize,
     thread_slot: usize,
     cond_indexes: &[Vec<usize>],
-    stream_slot_activity: &mut HashMap<usize, bool>,
+    frame_slot_activity: &mut HashMap<usize, bool>,
     start_ns: u128,
 ) {
     if batch.is_empty() {
@@ -228,7 +228,7 @@ pub(crate) fn process_batch_resolution(
             thread_id,
             thread_slot,
             cond_indexes,
-            stream_slot_activity,
+            frame_slot_activity,
             schedule,
             ready,
             batch_sched,
@@ -275,8 +275,8 @@ pub(crate) fn process_batch_resolution(
     }
 }
 
-/// CAS-guarded initial stream setup: only the first thread (thread_id == 0) that wins
-/// the compare_exchange activates the initial set of streams and spawns their compute
+/// CAS-guarded initial frame setup: only the first thread (thread_id == 0) that wins
+/// the compare_exchange activates the initial set of frames and spawns their compute
 /// nodes. All other threads skip this section.
 pub(super) fn perform_initial_preparation(
     shared: &Arc<SharedData>,
@@ -304,20 +304,20 @@ pub(super) fn perform_initial_preparation(
         )
     });
 
-    let activate_streams: Vec<usize> = if shared.config.slot_priority_enabled {
-        // activate first stream
+    let activate_frames: Vec<usize> = if shared.config.slot_priority_enabled {
+        // activate first frame
         vec![0]
     } else {
-        // activate all streams
+        // activate all frames
         (0..shared.config.slots).collect()
     };
 
     if !shared.graph.initial_nodes.is_empty() {
-        // run assign_stream_to_available_slot for each stream to set slot state to Active
-        let assigned_slots: Vec<usize> = activate_streams
+        // run assign_frame_to_available_slot for each frame to set slot state to Active
+        let assigned_slots: Vec<usize> = activate_frames
             .iter()
-            .map(|&stream_id| {
-                assign_stream_to_available_slot(shared, stream_id)
+            .map(|&frame_id| {
+                assign_frame_to_available_slot(shared, frame_id)
                     .expect("initial slot assignment must succeed")
                     .0
             })
@@ -335,8 +335,8 @@ pub(super) fn perform_initial_preparation(
 ///
 /// Uses `try_iter` (never blocks) plus a short spin-loop to catch burst completions that land
 /// just after the first `try_iter` returns empty.  Items whose slot generation does not match
-/// the current generation are silently dropped to avoid corrupting a newly-started stream's
-/// dependency counters (stale tasks from a completed stream).
+/// the current generation are silently dropped to avoid corrupting a newly-started frame's
+/// dependency counters (stale tasks from a completed frame).
 ///
 /// The caller retains `batch_buf` capacity across calls so no heap allocation occurs on the hot
 /// path; the Vec is cleared in-place at the start of each call.
@@ -344,7 +344,7 @@ fn drain_and_process_batch_queue(
     shared: &Arc<SharedData>,
     batch_buf: &mut Vec<NodeInfo>,
     cond_indexes: &[Vec<usize>],
-    stream_slot_activity: &mut HashMap<usize, bool>,
+    frame_slot_activity: &mut HashMap<usize, bool>,
     thread_core: usize,
     thread_id: usize,
     thread_slot: usize,
@@ -395,7 +395,7 @@ fn drain_and_process_batch_queue(
         // Filter out stale tasks: workers that passed the gen check in execute_task
         // before the slot's generation was bumped will complete and submit to
         // batch_queue with the old gen. Processing these would corrupt the new
-        // stream's pending counters and dependency state (Bug #31).
+        // frame's pending counters and dependency state (Bug #31).
         // Cache per-slot generation locally — reduces ~256 SeqCst loads to ~1-2 per unique slot.
         let mut gen_cache: [u32; super::consts::MAX_SLOTS] = [0; super::consts::MAX_SLOTS];
         let mut gen_loaded: u64 = 0;
@@ -430,7 +430,7 @@ fn drain_and_process_batch_queue(
             thread_id,
             thread_slot,
             cond_indexes,
-            stream_slot_activity,
+            frame_slot_activity,
             start_ns_batch,
         );
         // comp_batch is now empty (drained); capacity is retained for the next call.

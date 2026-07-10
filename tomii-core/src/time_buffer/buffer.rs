@@ -1,6 +1,6 @@
 use super::report::{
     aggregate_task_data, build_json_report_value, collect_print_stats_data,
-    collect_report_stream_data, compute_critical_path_report, compute_node_stats,
+    collect_report_frame_data, compute_critical_path_report, compute_node_stats,
     format_per_task_analysis, format_system_thread_stats, format_timing_summary,
     generate_optimization_suggestions,
 };
@@ -113,11 +113,11 @@ impl AsyncTimeBuffer {
                     TimingRequest::PrintStats {
                         bench_name,
                         out_file,
-                        exclude_streams,
+                        exclude_frames,
                         response_tx,
                     } => {
                         if let Ok(buf) = time_buffer.lock() {
-                            buf.print_stats(&bench_name, out_file.as_deref(), exclude_streams);
+                            buf.print_stats(&bench_name, out_file.as_deref(), exclude_frames);
                             let _ = response_tx.send(());
                         }
                     }
@@ -285,11 +285,11 @@ impl AsyncTimeBuffer {
         &self,
         bench_name: &str,
         out_file: Option<&str>,
-        exclude_streams: usize,
+        exclude_frames: usize,
     ) -> Result<(), &'static str> {
         // Direct access to TimeBuffer - no channel needed
         if let Ok(buf) = self.time_buffer.lock() {
-            buf.print_stats(bench_name, out_file, exclude_streams);
+            buf.print_stats(bench_name, out_file, exclude_frames);
             Ok(())
         } else {
             Err("Failed to acquire lock on time buffer")
@@ -301,10 +301,10 @@ impl AsyncTimeBuffer {
         &self,
         graph_edges: &[(String, Vec<String>)],
         path: &str,
-        exclude_streams: usize,
+        exclude_frames: usize,
     ) -> Result<(), &'static str> {
         if let Ok(buf) = self.time_buffer.lock() {
-            buf.write_json_report(graph_edges, path, exclude_streams);
+            buf.write_json_report(graph_edges, path, exclude_frames);
             Ok(())
         } else {
             Err("Failed to acquire lock on time buffer")
@@ -333,7 +333,7 @@ pub struct TimeBuffer {
     // Current task times for each slot (accumulated during processing)
     current_slot_tasks: Vec<RapidHashMap<String, Vec<(usize, Duration)>>>,
     // Completed slot statistics
-    slot_statistics: Vec<Vec<SlotStats>>, // [slot][stream]
+    slot_statistics: Vec<Vec<SlotStats>>, // [slot][frame]
     // Use rdtsc timing instead of Instant
     use_rdtsc: bool,
 }
@@ -448,7 +448,7 @@ impl TimeBuffer {
     }
 
     /// Finish processing for a slot and calculate total time
-    /// Returns the SlotStats for this processing stream
+    /// Returns the SlotStats for this processing frame
     /// NOTE: End timestamp is captured at call site. Use finish_slot_processing_with_time
     /// for async mode where the end time is pre-captured before channel transit.
     pub fn finish_slot_processing(&mut self, slot_id: usize) -> SlotStats {
@@ -491,8 +491,8 @@ impl TimeBuffer {
             _ => panic!("Cannot mix Instant and Rdtsc timing methods"),
         };
 
-        let stream_count = self.slot_statistics[slot_id].len();
-        let mut slot_stats = SlotStats::new(slot_id, stream_count);
+        let frame_count = self.slot_statistics[slot_id].len();
+        let mut slot_stats = SlotStats::new(slot_id, frame_count);
         slot_stats.total_time = total_time;
 
         // Copy task times from current slot to slot stats
@@ -505,7 +505,7 @@ impl TimeBuffer {
         // Store the completed slot stats
         self.slot_statistics[slot_id].push(slot_stats.clone());
 
-        // Clear task times for this slot after finishing (for next stream on this slot)
+        // Clear task times for this slot after finishing (for next frame on this slot)
         self.current_slot_tasks[slot_id].clear();
 
         slot_stats
@@ -555,7 +555,7 @@ impl TimeBuffer {
     }
 
     /// Get the number of completed cycles for a slot
-    pub fn get_slot_stream_count(&self, slot_id: usize) -> usize {
+    pub fn get_slot_frame_count(&self, slot_id: usize) -> usize {
         if slot_id >= self.slots {
             panic!(
                 "Slot ID {} out of bounds (max: {})",
@@ -567,8 +567,8 @@ impl TimeBuffer {
     }
 
     /// Print comprehensive statistics for all slots with aggregated per-task analysis
-    /// `exclude_streams` - Number of initial streams to exclude from average calculations (for steady-state measurement)
-    pub fn print_stats(&self, bench_name: &str, out_file: Option<&str>, exclude_streams: usize) {
+    /// `exclude_frames` - Number of initial frames to exclude from average calculations (for steady-state measurement)
+    pub fn print_stats(&self, bench_name: &str, out_file: Option<&str>, exclude_frames: usize) {
         let filler = "****************";
         let mut output_buffer = format!("Time Statistics for {}\n", bench_name);
         output_buffer.push_str(&format!("Total Slots: {}\n", self.slots));
@@ -586,24 +586,24 @@ impl TimeBuffer {
             worker_slots_end, system_slots_start, self.slots
         ));
 
-        let (global_total_times, per_stream_task_data, system_task_data_by_slot, total_streams) =
+        let (global_total_times, per_frame_task_data, system_task_data_by_slot, total_frames) =
             collect_print_stats_data(&self.slot_statistics, self.slots, system_slots_start);
 
         let (global_task_data, per_worker_counts, per_worker_totals) =
-            aggregate_task_data(&per_stream_task_data, exclude_streams);
+            aggregate_task_data(&per_frame_task_data, exclude_frames);
 
         output_buffer.push_str(&format_timing_summary(
             &global_total_times,
             &global_task_data,
-            total_streams,
-            exclude_streams,
+            total_frames,
+            exclude_frames,
             worker_slots_end,
             &self.slot_statistics,
             filler,
         ));
 
-        let excluded_count = exclude_streams.min(total_streams);
-        let steady_state_count = total_streams.saturating_sub(excluded_count);
+        let excluded_count = exclude_frames.min(total_frames);
+        let steady_state_count = total_frames.saturating_sub(excluded_count);
 
         output_buffer.push_str(&format_per_task_analysis(
             &global_task_data,
@@ -630,34 +630,34 @@ impl TimeBuffer {
     /// Write a JSON performance report to the given path.
     ///
     /// `graph_edges` – `(node_name, Vec<successor_names>)` pairs describing the DAG.
-    /// `exclude_streams` – number of leading streams to skip (warm-up exclusion, mirrors `print_stats`).
+    /// `exclude_frames` – number of leading frames to skip (warm-up exclusion, mirrors `print_stats`).
     pub fn write_json_report(
         &self,
         graph_edges: &[(String, Vec<String>)],
         path: &str,
-        exclude_streams: usize,
+        exclude_frames: usize,
     ) {
         // ── 1. Determine slot ranges (same split as print_stats) ──────────────────
         let worker_slots_end = self.slots.saturating_sub(self.system_threads);
 
         // ── 2+3. Collect and apply exclusion ──────────────────────────────────────
-        let (included_total_times, per_stream_tasks) = match collect_report_stream_data(
+        let (included_total_times, per_frame_tasks) = match collect_report_frame_data(
             &self.slot_statistics,
             worker_slots_end,
-            exclude_streams,
+            exclude_frames,
         ) {
             Some(data) => data,
             None => {
-                tracing::warn!("no streams to report after exclusion");
+                tracing::warn!("no frames to report after exclusion");
                 return;
             }
         };
 
         let num_included = included_total_times.len();
         let included_tasks: Vec<&std::collections::HashMap<String, Vec<(usize, Duration)>>> =
-            per_stream_tasks.iter().collect();
+            per_frame_tasks.iter().collect();
 
-        // ── 4. Stream-level latency statistics ────────────────────────────────────
+        // ── 4. Frame-level latency statistics ────────────────────────────────────
         let mut sorted_latencies: Vec<f64> = included_total_times
             .iter()
             .map(|d| d.as_nanos() as f64 / 1_000.0)
@@ -677,7 +677,7 @@ impl TimeBuffer {
             .iter()
             .map(|d| d.as_nanos() as f64 / 1_000.0)
             .sum();
-        let throughput_streams_per_sec = if total_wall_us > 0.0 {
+        let throughput_frames_per_sec = if total_wall_us > 0.0 {
             (num_included as f64) / (total_wall_us / 1_000_000.0)
         } else {
             0.0
@@ -742,7 +742,7 @@ impl TimeBuffer {
                 let ratio = cp.estimated_latency_us / avg_latency_us;
                 if ratio > 0.8 {
                     hints.push(format!(
-                        "critical path accounts for {:.1}% of average stream latency — limited parallelism gains from adding workers",
+                        "critical path accounts for {:.1}% of average frame latency — limited parallelism gains from adding workers",
                         ratio * 100.0
                     ));
                 }
@@ -750,8 +750,8 @@ impl TimeBuffer {
         }
 
         // ── 9b. Agent-native derived metrics ─────────────────────────────────────
-        // Total tasks spawned per stream (sum of all node factors).
-        let total_tasks_per_stream: usize = node_stats_map
+        // Total tasks spawned per frame (sum of all node factors).
+        let total_tasks_per_frame: usize = node_stats_map
             .values()
             .map(|s| s.invocations.checked_div(num_included).unwrap_or(0))
             .sum();
@@ -811,7 +811,7 @@ impl TimeBuffer {
         let suggestions = generate_optimization_suggestions(
             overhead_pct,
             max_cp_factor,
-            total_tasks_per_stream,
+            total_tasks_per_frame,
             critical_path.as_ref(),
             &worker_busy_pct,
         );
@@ -822,8 +822,8 @@ impl TimeBuffer {
             avg_latency_us,
             p50_latency_us,
             p99_latency_us,
-            throughput_streams_per_sec,
-            total_tasks_per_stream,
+            throughput_frames_per_sec,
+            total_tasks_per_frame,
             cp_exec_us,
             overhead_us,
             overhead_pct,

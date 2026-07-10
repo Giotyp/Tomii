@@ -1,6 +1,6 @@
 //! Compile-time constants shared across the runtime module.
 
-/// Maximum number of concurrent slots (streams) the runtime supports.
+/// Maximum number of concurrent slots (frames) the runtime supports.
 ///
 /// This limit is enforced by the `u64` completion bitmap (`SlotData::active_bitmap`)
 /// and the per-slot generation cache in `drain_and_process_batch_queue`.  Raising it

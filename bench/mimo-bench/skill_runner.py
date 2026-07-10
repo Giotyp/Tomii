@@ -6,7 +6,7 @@ Protocol (4 iterations):
   1. Boolean toggles: coalesce_barriers, inline_continuation (both expected OFF for MIMO)
   2. Doubling sweep batching_size (1,2,4,...,512) — pick knee
   3. Sweep batching_limit (1,2,4,10 µs)
-  4. 3× verification trials; escalate max_streams if std > 10% mean
+  4. 3× verification trials; escalate max_frames if std > 10% mean
 
 Workers, system_threads, and receiver_threads are fixed (not tuned) — set via config.
 
@@ -166,8 +166,8 @@ def run_phase_a(
     iter4_dir = run_dir / "iter4_verify"
     iter4_dir.mkdir(exist_ok=True)
     verify_cfg = dict(best_cfg)
-    verify_streams = opt.max_streams
-    for attempt in range(2):  # escalate streams once if variance too high
+    verify_frames = opt.max_frames
+    for attempt in range(2):  # escalate frames once if variance too high
         lats = []
         for t in range(3):
             trial_cfg = dict(verify_cfg)
@@ -175,7 +175,7 @@ def run_phase_a(
                 run_benchmark,
                 trial_cfg,
                 opt.run_script,
-                str(iter4_dir / f"trial_{t}_streams{verify_streams}.json"),
+                str(iter4_dir / f"trial_{t}_frames{verify_frames}.json"),
                 opt.run_timeout_s * 2,
             )
             if lat is not None:
@@ -185,15 +185,15 @@ def run_phase_a(
         mean_lat = statistics.mean(lats)
         std_lat = statistics.stdev(lats) if len(lats) > 1 else 0.0
         print(
-            f"  verify: mean={mean_lat:.1f} std={std_lat:.1f} (streams={verify_streams})"
+            f"  verify: mean={mean_lat:.1f} std={std_lat:.1f} (frames={verify_frames})"
         )
-        if std_lat <= 0.1 * mean_lat or verify_streams >= 50:
+        if std_lat <= 0.1 * mean_lat or verify_frames >= 50:
             if mean_lat < best_latency:
                 best_latency = mean_lat
             break
-        verify_streams = max(50, verify_streams)
+        verify_frames = max(50, verify_frames)
         print(
-            f"  high variance ({std_lat:.1f} > 10% of mean) — escalating to {verify_streams} streams"
+            f"  high variance ({std_lat:.1f} > 10% of mean) — escalating to {verify_frames} frames"
         )
 
     (iter4_dir / "config.json").write_text(json.dumps(best_cfg, indent=2))

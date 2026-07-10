@@ -42,21 +42,21 @@ def aggregate(results_dir: Path) -> list[dict[str, Any]]:
     if baseline_file.exists():
         try:
             data = json.loads(baseline_file.read_text())
-            baseline_ms = data.get("baseline_ms_per_stream")
+            baseline_ms = data.get("baseline_ms_per_frame")
         except Exception:
             pass
 
     rows = []
     for arm in ARMS:
         trials = _load_trials(results_dir / JSONL_NAMES[arm])
-        passing = [t for t in trials if t.get("verifier_ok") and t.get("ms_per_stream") is not None]
+        passing = [t for t in trials if t.get("verifier_ok") and t.get("ms_per_frame") is not None]
         n_total = len(trials)
         n_passing = len(passing)
         n_rejected = n_total - n_passing
 
-        best_ms: float | None = min((t["ms_per_stream"] for t in passing), default=None)
+        best_ms: float | None = min((t["ms_per_frame"] for t in passing), default=None)
         mean_ms: float | None = (
-            sum(t["ms_per_stream"] for t in passing) / n_passing if n_passing > 0 else None
+            sum(t["ms_per_frame"] for t in passing) / n_passing if n_passing > 0 else None
         )
         wall_total = sum(t.get("wall_seconds", 0.0) for t in trials)
 

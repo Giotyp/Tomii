@@ -109,7 +109,7 @@ thread_local! {
         RefCell::new(Vec::with_capacity(256));
 
     /// Reusable args buffer for `preparation()` — eliminates `vec![None; N]` heap
-    /// allocation on every incremental flush (~77 flushes/stream).
+    /// allocation on every incremental flush (~77 flushes/frame).
     ///
     /// Written and read by: resolution threads (or worker threads, depending on
     /// scheduling mode) inside `schedule_post_nodes` → `preparation`.

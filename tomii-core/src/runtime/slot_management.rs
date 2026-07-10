@@ -1,11 +1,11 @@
-//! Slot allocation primitives: assign, release, activate, and reinitialise concurrent stream slots.
+//! Slot allocation primitives: assign, release, activate, and reinitialise concurrent frame slots.
 //!
 //! This module owns the low-level slot state machine transitions (`Inactive → Active`,
 //! `Inactive → Buffering`, `Buffering → Active`, `Active → Inactive`) and the lock-ordering
 //! protocol that prevents deadlocks between concurrent slot transitions.
 //!
-//! **Lock ordering**: all functions that hold both `running_streams` and `slot_states` must
-//! acquire them in the order `running_streams` first, `slot_states` second.  Violating this
+//! **Lock ordering**: all functions that hold both `running_frames` and `slot_states` must
+//! acquire them in the order `running_frames` first, `slot_states` second.  Violating this
 //! order causes deadlock (Bugs #11, #12 in project history).
 //!
 //! This module does **not** own the lifecycle orchestration logic (what to do *after* a slot
@@ -22,10 +22,10 @@ use tomii_types::*;
 /// Finalize a completed slot: record timing, increment the global completion counter, reinitialise
 /// result buffers, and release the slot back to `Inactive`.
 ///
-/// Returns `true` if the slot should be reused for a new stream (`can_restart`), `false` if
-/// `max_streams` has been reached.  The caller is responsible for spawning new tasks when
+/// Returns `true` if the slot should be reused for a new frame (`can_restart`), `false` if
+/// `max_frames` has been reached.  The caller is responsible for spawning new tasks when
 /// `can_restart` is true.  `reinit_slot` is called **before** `release_slot` so that the new
-/// stream cannot observe stale results (Bug #16 fix).
+/// frame cannot observe stale results (Bug #16 fix).
 #[inline]
 pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> bool {
     // Complete timing - use unwrap_or to handle errors gracefully
@@ -35,8 +35,8 @@ pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> 
         }
     });
 
-    // Count currently active/processing streams (excluding this completing slot)
-    let currently_active_streams = {
+    // Count currently active/processing frames (excluding this completing slot)
+    let currently_active_frames = {
         let slot_states = shared.slot_data.states.read();
         slot_states
             .iter()
@@ -48,46 +48,46 @@ pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> 
     };
 
     // Increment global completion counter
-    let completed_streams = shared
+    let completed_frames = shared
         .telemetry
-        .stream_complete_counter
+        .frame_complete_counter
         .fetch_add(1, Ordering::SeqCst)
         + 1;
 
-    // Total streams in-flight or completed
-    let total_streams_processed = completed_streams + currently_active_streams;
+    // Total frames in-flight or completed
+    let total_frames_processed = completed_frames + currently_active_frames;
 
-    // Decide whether to start a new stream on this slot
-    let can_restart = total_streams_processed < shared.config.max_streams;
+    // Decide whether to start a new frame on this slot
+    let can_restart = total_frames_processed < shared.config.max_frames;
 
     if can_restart {
         tracing::info!(
             slot,
-            completed = completed_streams,
-            active = currently_active_streams,
-            total = total_streams_processed,
-            max = shared.config.max_streams,
-            "slot completed stream, starting new"
+            completed = completed_frames,
+            active = currently_active_frames,
+            total = total_frames_processed,
+            max = shared.config.max_frames,
+            "slot completed frame, starting new"
         );
 
         // Clear completed nodes BEFORE releasing the slot.
         // reinit_slot must finish before release_slot makes the slot available for a new
-        // stream assignment.  If release_slot ran first, assign_stream_to_available_slot
+        // frame assignment.  If release_slot ran first, assign_frame_to_available_slot
         // could pick up the Inactive slot, spawn initial tasks (storing results), and then
-        // reinit_slot would clear those new-stream results → panic in legitimate tasks.
+        // reinit_slot would clear those new-frame results → panic in legitimate tasks.
         shared.exec.node_results.reinit_slot(slot);
 
-        // Release the slot (makes it available for next stream assignment)
+        // Release the slot (makes it available for next frame assignment)
         release_slot(shared, slot);
 
         true // Signal to caller: slot should restart
     } else {
         tracing::info!(
             slot,
-            max = shared.config.max_streams,
-            completed = completed_streams,
-            active = currently_active_streams,
-            "slot completed, max streams reached"
+            max = shared.config.max_frames,
+            completed = completed_frames,
+            active = currently_active_frames,
+            "slot completed, max frames reached"
         );
 
         // Release the slot
@@ -97,28 +97,28 @@ pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> 
     }
 }
 
-/// Assign `stream` to an available slot and return `(slot_id, newly_activated)`.
+/// Assign `frame` to an available slot and return `(slot_id, newly_activated)`.
 ///
 /// Prefers the `last_assigned` slot (sequential assignment keeps slot 0, 1, 2, … in order so
 /// `activate_next_slot` always finds the right slot on completion).  If that slot is busy,
 /// searches round-robin for the next `Inactive` slot, which it marks `Buffering` instead of
 /// `Active` (the slot will be promoted by `activate_next_slot` when its predecessor completes).
 ///
-/// **Lock ordering**: acquires `running_streams` (write) first, then `slot_states` (write).
+/// **Lock ordering**: acquires `running_frames` (write) first, then `slot_states` (write).
 /// All other functions that hold both locks must follow the same order.
 ///
 /// Returns `None` when every slot is occupied; callers must drop the frame gracefully.
 #[inline]
-pub(super) fn assign_stream_to_available_slot(
+pub(super) fn assign_frame_to_available_slot(
     shared: &Arc<SharedData>,
-    stream: usize,
+    frame: usize,
 ) -> Option<(usize, bool)> {
-    // Get write access to have updated view of running streams
-    let mut running_streams = shared.slot_data.running_streams.write();
+    // Get write access to have updated view of running frames
+    let mut running_frames = shared.slot_data.running_frames.write();
 
-    // Check if this stream is already mapped to a slot
-    for (stream_id, slot_id) in running_streams.iter() {
-        if *stream_id == stream {
+    // Check if this frame is already mapped to a slot
+    for (frame_id, slot_id) in running_frames.iter() {
+        if *frame_id == frame {
             return Some((*slot_id, false)); // Already assigned, not newly activated
         }
     }
@@ -134,21 +134,21 @@ pub(super) fn assign_stream_to_available_slot(
             .active_bitmap
             .fetch_or(1u64 << last_slot_assigned, Ordering::Release);
         shared.slot_data.needs_check[last_slot_assigned].store(true, Ordering::Release);
-        running_streams.push((stream, last_slot_assigned));
-        shared.slot_data.stream_id[last_slot_assigned].store(stream, Ordering::Relaxed);
+        running_frames.push((frame, last_slot_assigned));
+        shared.slot_data.frame_id[last_slot_assigned].store(frame, Ordering::Relaxed);
         print_debug(|| {
             format!(
-                "Assigned stream {} to slot {} (Inactive) -> Active (last assigned)",
-                stream, last_slot_assigned
+                "Assigned frame {} to slot {} (Inactive) -> Active (last assigned)",
+                frame, last_slot_assigned
             )
         });
-        drop(running_streams); // Release lock before returning
+        drop(running_frames); // Release lock before returning
 
-        // Bump slot generation for the new stream — lazily reinitialises all
+        // Bump slot generation for the new frame — lazily reinitialises all
         // NodeDependencyEntry, instances_sent, and cond_instances_to_spawn entries.
-        // Done here (new-stream start, Inactive → Active) rather than in the slot
-        // completion path so that old-stream in-flight tasks retain the old generation
-        // and cannot spuriously spawn or corrupt the new stream's dependency counters.
+        // Done here (new-frame start, Inactive → Active) rather than in the slot
+        // completion path so that old-frame in-flight tasks retain the old generation
+        // and cannot spuriously spawn or corrupt the new frame's dependency counters.
         shared.slot_data.generation[last_slot_assigned].fetch_add(1, Ordering::SeqCst);
 
         // Start timing for the slot immediately upon assignment
@@ -164,27 +164,27 @@ pub(super) fn assign_stream_to_available_slot(
         let state = slot_states.get_mut(slot_id).unwrap();
         if *state == SlotState::Inactive {
             *state = SlotState::Buffering; // Mark slot as Buffering
-            running_streams.push((stream, slot_id));
-            shared.slot_data.stream_id[slot_id].store(stream, Ordering::Relaxed);
+            running_frames.push((frame, slot_id));
+            shared.slot_data.frame_id[slot_id].store(frame, Ordering::Relaxed);
             shared
                 .slot_data
                 .last_assigned
                 .store(slot_id, Ordering::SeqCst);
             print_debug(|| {
                 format!(
-                    "Assigned stream {} to slot {} (Inactive) -> Buffering",
-                    stream, slot_id
+                    "Assigned frame {} to slot {} (Inactive) -> Buffering",
+                    frame, slot_id
                 )
             });
-            drop(running_streams); // Release lock before returning
-                                   // In non-network mode, initial nodes are spawned immediately for
-                                   // Buffering slots too (see initial_nodes call site). Without this
-                                   // start_slot_processing call the timing controller panics when
-                                   // finish_slot_processing is called at stream completion because it
-                                   // never saw a StartSlotProcessing for this slot.
-                                   // In network mode, activate_next_slot will call start_slot_processing
-                                   // again (overwriting the start time) when the slot transitions to
-                                   // Active — that is fine; the later timestamp is more accurate there.
+            drop(running_frames); // Release lock before returning
+                                  // In non-network mode, initial nodes are spawned immediately for
+                                  // Buffering slots too (see initial_nodes call site). Without this
+                                  // start_slot_processing call the timing controller panics when
+                                  // finish_slot_processing is called at frame completion because it
+                                  // never saw a StartSlotProcessing for this slot.
+                                  // In network mode, activate_next_slot will call start_slot_processing
+                                  // again (overwriting the start time) when the slot transitions to
+                                  // Active — that is fine; the later timestamp is more accurate there.
             shared
                 .telemetry
                 .with_timing(|tb| tb.start_slot_processing(slot_id));
@@ -197,7 +197,7 @@ pub(super) fn assign_stream_to_available_slot(
 }
 
 pub(super) fn release_slot(shared: &Arc<SharedData>, slot: usize) {
-    let mut running_streams = shared.slot_data.running_streams.write();
+    let mut running_frames = shared.slot_data.running_frames.write();
     let mut slot_states = shared.slot_data.states.write();
 
     let old_state = slot_states[slot];
@@ -206,27 +206,27 @@ pub(super) fn release_slot(shared: &Arc<SharedData>, slot: usize) {
         .slot_data
         .active_bitmap
         .fetch_and(!(1u64 << slot), Ordering::Release);
-    shared.slot_data.stream_id[slot].store(usize::MAX, Ordering::Relaxed);
+    shared.slot_data.frame_id[slot].store(usize::MAX, Ordering::Relaxed);
 
-    // Remove from running streams
-    if let Some(pos) = running_streams.iter().position(|&(_, s_id)| s_id == slot) {
-        let (stream_id, _) = running_streams.remove(pos);
+    // Remove from running frames
+    if let Some(pos) = running_frames.iter().position(|&(_, s_id)| s_id == slot) {
+        let (frame_id, _) = running_frames.remove(pos);
         print_debug(|| {
             format!(
-                "Released slot {} from stream {} (had state: {:?})",
-                slot, stream_id, old_state
+                "Released slot {} from frame {} (had state: {:?})",
+                slot, frame_id, old_state
             )
         });
     } else {
         print_debug(|| {
             format!(
-                "Released slot {} with no assigned stream (had state: {:?})",
+                "Released slot {} with no assigned frame (had state: {:?})",
                 slot, old_state
             )
         });
     }
     drop(slot_states);
-    drop(running_streams);
+    drop(running_frames);
 }
 
 /// Activate the next buffering slot in round-robin order
@@ -241,8 +241,8 @@ pub(super) fn activate_next_slot(
         return None;
     }
 
-    // 1. Acquire running_streams (Read) FIRST
-    let running_streams = shared.slot_data.running_streams.read();
+    // 1. Acquire running_frames (Read) FIRST
+    let running_frames = shared.slot_data.running_frames.read();
 
     // 2. Then acquire slot_states (Write)
     let mut states = shared.slot_data.states.write();
@@ -250,8 +250,8 @@ pub(super) fn activate_next_slot(
     // Find and activate next buffering slot in round-robin order
     let activated_slot = if let Some(completed) = completing_slot {
         let mut found_slot = None;
-        // We can safely iterate running_streams while holding the lock
-        for (stream, slot) in running_streams.iter() {
+        // We can safely iterate running_frames while holding the lock
+        for (frame, slot) in running_frames.iter() {
             if states[*slot] == SlotState::Buffering {
                 states[*slot] = SlotState::Active;
                 shared
@@ -265,8 +265,8 @@ pub(super) fn activate_next_slot(
                     .store(*slot, Ordering::SeqCst);
                 print_debug(|| {
                     format!(
-                        "Round-Robin: Activated slot {} for stream {} after completing slot {}",
-                        slot, stream, completed
+                        "Round-Robin: Activated slot {} for frame {} after completing slot {}",
+                        slot, frame, completed
                     )
                 });
                 found_slot = Some(*slot);
@@ -286,13 +286,13 @@ pub(super) fn activate_next_slot(
         // Drop locks in LIFO order
         drop(slot_buffers);
         drop(states);
-        drop(running_streams); // Release the first lock last
+        drop(running_frames); // Release the first lock last
 
-        // Bump slot generation for the new stream — lazily reinitialises all
+        // Bump slot generation for the new frame — lazily reinitialises all
         // NodeDependencyEntry, instances_sent, and cond_instances_to_spawn entries.
-        // Done here (new-stream start, Buffering → Active) so that old-stream tasks
+        // Done here (new-frame start, Buffering → Active) so that old-frame tasks
         // still in the batch_queue use the old generation and cannot corrupt the
-        // new stream's dependency counters or cause spurious task spawning.
+        // new frame's dependency counters or cause spurious task spawning.
         shared.slot_data.generation[slot_id].fetch_add(1, Ordering::SeqCst);
 
         shared
@@ -302,7 +302,7 @@ pub(super) fn activate_next_slot(
         Some((slot_id, buffered))
     } else {
         drop(states);
-        drop(running_streams);
+        drop(running_frames);
         None
     }
 }

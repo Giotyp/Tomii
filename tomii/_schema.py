@@ -33,7 +33,7 @@ def graph_schema() -> "dict[str, Any]":
                 "returns": "Var — a handle that can be referenced in node args via $ref",
             },
             "node": {
-                "description": "Define a computation node, executed once per stream.",
+                "description": "Define a computation node, executed once per frame.",
                 "parameters": {
                     "name": {"type": "str", "description": "Unique node name"},
                     "func": {"type": "str", "description": "Plugin function name"},
@@ -44,7 +44,7 @@ def graph_schema() -> "dict[str, Any]":
                     "factor": {
                         "type": "int | Var",
                         "description": (
-                            "Number of parallel task instances per stream. "
+                            "Number of parallel task instances per frame. "
                             "Controls the granularity of parallelism for this node."
                         ),
                         "optimization_hint": (

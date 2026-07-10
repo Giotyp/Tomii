@@ -1,6 +1,6 @@
 """Tomii anti-diagonal wavefront benchmark.
 
-Sweeps worker counts for an N×N wavefront and writes per-stream timing.
+Sweeps worker counts for an N×N wavefront and writes per-frame timing.
 Matches the Taskflow benchmark (N=512, 100 iterations, 10 warmup) so the
 two CSV outputs can be compared directly.
 
@@ -33,7 +33,7 @@ ALL_FUNCS = ["wf_cell", "wf_cell_bulk"]
 
 def _parse_avg_ms(timing_file: Path) -> float:
     text = timing_file.read_text()
-    m = re.search(r"Avg Time Per Stream:\s+([\d.]+)(ms|µs|us|s)", text)
+    m = re.search(r"Avg Time Per Frame:\s+([\d.]+)(ms|µs|us|s)", text)
     if not m:
         return float("nan")
     val, unit = float(m.group(1)), m.group(2)
@@ -80,7 +80,7 @@ def run_sweep(
         f.write("system,n,workers,iterations,ms_per_iter\n")
 
     results: dict[int, float] = {}
-    total_streams = warmup + iterations
+    total_frames = warmup + iterations
 
     for w in workers:
         timing_file = results_dir / f"tomii_wavefront_n{n}_{func_tag}_w{w}.txt"
@@ -93,8 +93,8 @@ def run_sweep(
             core_offset=1,
             system_threads=1,
             slots=1,
-            max_streams=total_streams,
-            exclude_streams=warmup,
+            max_frames=total_frames,
+            exclude_frames=warmup,
             batching_size=1,
             timing=str(timing_file),
             use_rdtsc=True,

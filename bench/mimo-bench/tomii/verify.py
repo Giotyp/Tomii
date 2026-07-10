@@ -94,7 +94,7 @@ def _run_pass(
     sender_delay: int,
     frame_duration: int,
     inter_frame_delay: int,
-    max_streams: int,
+    max_frames: int,
     max_runtime: int,
     workers: int,
     num_frames: int,
@@ -117,8 +117,8 @@ def _run_pass(
         # may be partial; a steady-state frame (buffer fully populated, all
         # FrameWnd slots overwritten with complete data) is deterministic since
         # the Agora sender replays identical IQ every frame and MKL is sequential.
-        max_streams=max_streams,
-        exclude_streams=0,
+        max_frames=max_frames,
+        exclude_frames=0,
         max_runtime=max_runtime,
         timing=str(timing_file),
         use_rdtsc=True,
@@ -149,7 +149,7 @@ def _run_pass(
                 frame_duration=frame_duration,
                 inter_frame_delay=inter_frame_delay,
             )
-        # Binary exits on max_streams or max_runtime, whichever first; add a grace
+        # Binary exits on max_frames or max_runtime, whichever first; add a grace
         # watchdog so a wedged run never hangs the verifier.
         ret = tomii_proc.wait(timeout=sender_delay + max_runtime + 30)
         if ret != 0:
@@ -160,7 +160,7 @@ def _run_pass(
     finally:
         # Kill hard and wait for full exit: the Agora sender ignores SIGTERM and
         # would keep spraying frames into the NEXT pass's freshly-bound socket,
-        # poisoning its stream counter (stale frame N >> counter -> rejected;
+        # poisoning its frame counter (stale frame N >> counter -> rejected;
         # stale replays wedge admission ordering).
         if sender_proc is not None and sender_proc.poll() is None:
             sender_proc.kill()
@@ -172,11 +172,11 @@ def _run_pass(
     # state (all frames processed, last completed frame == num_frames - 1).
     # A starved pass (packet loss / mispacing / stale-sender contamination)
     # must be reported as a harness failure, NOT compared by hash.
-    streams_done = _parse_streams_processed(timing_file)
-    if streams_done != num_frames:
+    frames_done = _parse_frames_processed(timing_file)
+    if frames_done != num_frames:
         raise RuntimeError(
-            f"pass {pass_id} HARNESS FAILURE: processed {streams_done} of "
-            f"{num_frames} streams — run is starved (check sender pacing >= 2x "
+            f"pass {pass_id} HARNESS FAILURE: processed {frames_done} of "
+            f"{num_frames} frames — run is starved (check sender pacing >= 2x "
             f"per-frame processing time and sender-delay); hash would be "
             f"meaningless"
         )
@@ -184,10 +184,10 @@ def _run_pass(
     return demod_file
 
 
-def _parse_streams_processed(timing_file: Path) -> int:
+def _parse_frames_processed(timing_file: Path) -> int:
     if not timing_file.exists():
         return 0
-    m = re.search(r"Total Streams Processed:\s+(\d+)", timing_file.read_text())
+    m = re.search(r"Total Frames Processed:\s+(\d+)", timing_file.read_text())
     return int(m.group(1)) if m else 0
 
 
@@ -253,7 +253,7 @@ def main() -> None:
         "packets so the completion counter catches up before the next frame's "
         "head packets arrive. With slots=1 the admission window is "
         "[0, counter+1): a gap of 0 makes frame N+1's first packets race "
-        "stream N's completion and get dropped permanently, wedging the run "
+        "frame N's completion and get dropped permanently, wedging the run "
         "(default: 60000)",
     )
     p.add_argument(
@@ -286,9 +286,9 @@ def main() -> None:
     # Run long enough to send all frames (slow, non-overlapping) and drain.
     send_window_s = (args.num_frames * args.frame_duration) // 1_000_000
     args.max_runtime = args.sender_delay + send_window_s + 20
-    # Cap streams well above num_frames so the run exits on max_runtime after the
-    # last frame completes, not before (avoids stopping mid-stream on a dropped frame).
-    args.max_streams = 100_000
+    # Cap frames well above num_frames so the run exits on max_runtime after the
+    # last frame completes, not before (avoids stopping mid-frame on a dropped frame).
+    args.max_frames = 100_000
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -350,7 +350,7 @@ def main() -> None:
             sender_delay=args.sender_delay,
             frame_duration=args.frame_duration,
             inter_frame_delay=args.inter_frame_delay,
-            max_streams=args.max_streams,
+            max_frames=args.max_frames,
             max_runtime=args.max_runtime,
             workers=args.workers,
             num_frames=args.num_frames,

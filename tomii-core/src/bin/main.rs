@@ -60,15 +60,23 @@ struct Args {
     inits: bool,
     #[clap(long, help = "Enable Debug Printing")]
     debug: bool,
-    #[clap(long, value_name = "SLOTS", required = false, default_value = "1")]
+    #[clap(
+        long,
+        value_name = "SLOTS",
+        required = false,
+        default_value = "1",
+        help = "Concurrent in-flight frames"
+    )]
     slots: usize,
     #[clap(
         long,
-        value_name = "MAX_STREAMS",
+        alias = "max-streams",
+        value_name = "MAX_FRAMES",
         required = false,
-        default_value = "1"
+        default_value = "1",
+        help = "Total frames to process"
     )]
-    max_streams: usize,
+    max_frames: usize,
     #[clap(long, value_name = "FILE", required = false, help = "Enable timing")]
     timing: Option<String>,
     #[clap(
@@ -84,11 +92,12 @@ struct Args {
     record: bool,
     #[clap(
         long,
-        value_name = "STREAM_ID",
+        alias = "record-stream",
+        value_name = "FRAME_ID",
         required = false,
-        help = "Record only a specific stream (memory optimization)"
+        help = "Record only a specific frame (memory optimization)"
     )]
-    record_stream: Option<usize>,
+    record_frame: Option<usize>,
     #[clap(long, help = "Use rdtsc for timing")]
     use_rdtsc: bool,
     #[clap(
@@ -129,12 +138,13 @@ struct Args {
     no_fanout_bulk: bool,
     #[clap(
         long,
-        value_name = "EXCLUDE_STREAMS",
+        alias = "exclude-streams",
+        value_name = "EXCLUDE_FRAMES",
         required = false,
         default_value = "0",
-        help = "Number of initial streams to exclude from timing statistics (for steady-state measurement)"
+        help = "Number of initial frames to exclude from timing statistics (for steady-state measurement)"
     )]
-    exclude_streams: usize,
+    exclude_frames: usize,
     #[clap(
         long,
         value_name = "FILE",
@@ -300,7 +310,7 @@ fn main() {
 
     let cfg = RuntimeConfig {
         slots: args.slots,
-        max_streams: args.max_streams,
+        max_frames: args.max_frames,
         max_runtime: runtime,
         // system_threads, receiver_threads, workers, core_offset, receiver_core_offset,
         // and single_slot_mode are resolved at build time from the scheduler; these
@@ -315,7 +325,7 @@ fn main() {
         inline_continuation: args.inline_continuation,
         no_fanout_bulk: args.no_fanout_bulk,
         single_slot_mode: args.slots == 1,
-        record_stream: args.record_stream,
+        record_frame: args.record_frame,
         recv_pool_size: args.recv_pool_size,
         spin_wait: SpinWaitConfig {
             spin_iters: args.spin_wait_spin_iters,
@@ -356,7 +366,7 @@ fn main() {
     let time_file = args.timing;
     if let Some(time_file) = &time_file {
         let time_name = time_file.split('/').next_back().unwrap_or_default();
-        synrt.print_statistics(time_name, Some(time_file), args.exclude_streams);
+        synrt.print_statistics(time_name, Some(time_file), args.exclude_frames);
 
         if args.record {
             // remove  extension if present
@@ -371,7 +381,7 @@ fn main() {
     }
 
     if let Some(report_path) = &args.report {
-        synrt.write_json_report(report_path, args.exclude_streams);
+        synrt.write_json_report(report_path, args.exclude_frames);
     }
 }
 
@@ -470,12 +480,12 @@ pub fn run_graph(
     // inserted on `spec.graph` before this point.
     let compiled = spec.compile(&scheduler);
 
-    let record_stream = cfg.record_stream;
+    let record_frame = cfg.record_frame;
     let mut synrt = TomiiRtBuilder::with_config(compiled, scheduler, cfg)
         .base_instant(base_instant)
         .use_rdtsc(use_rdtsc)
         .record(record)
-        .record_stream(record_stream)
+        .record_frame(record_frame)
         .timing_enabled(timing_enabled)
         .async_recorder(shared_recorder)
         .batch_queue_capacity(batch_queue_capacity)

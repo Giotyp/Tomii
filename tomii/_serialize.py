@@ -187,7 +187,11 @@ def _network(config: "dict[str, Any]") -> NetworkConfigJson:
         socket_type=config["socket_type"],
         num_sockets=_factor_net(config["num_sockets"]),
         packet_length=_factor_net(config["packet_length"]),
-        stream_packets=_factor_net(config["stream_packets"]),
+        frame_packets=_factor_net(
+            config["frame_packets"]
+            if "frame_packets" in config
+            else config["stream_packets"]
+        ),
         buffer_depth=config.get("buffer_depth", 128),
         address=_factor_net(config["address"]),
         start_port=_factor_net(config["start_port"]),

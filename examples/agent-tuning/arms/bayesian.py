@@ -52,7 +52,7 @@ def main() -> None:
     )
 
     baseline = establish_baseline(
-        streams=args.streams,
+        frames=args.frames,
         warmup=args.warmup,
         results_dir=results_dir,
         workload=workload,
@@ -66,30 +66,30 @@ def main() -> None:
 
         knobs = tomii_knobs.suggest_optuna(space, trial)
         result = workload.evaluate(
-            knobs, streams=args.streams, warmup=args.warmup, space=space
+            knobs, frames=args.frames, warmup=args.warmup, space=space
         )
         record = TrialRecord(iteration=i, knobs=knobs, result=result, arm="bayesian")
         log_trial(record, log_file)
 
-        if not result.verifier_ok or result.ms_per_stream is None:
+        if not result.verifier_ok or result.ms_per_frame is None:
             reason = result.rejection_reason or "verifier failed"
             print(f"[bayesian {i}] rejected — {reason}", flush=True)
             raise optuna.TrialPruned()
 
         nonlocal best_ms
-        ms = result.ms_per_stream
+        ms = result.ms_per_frame
         if ms < best_ms:
             best_ms = ms
             if baseline > 0.0:
                 delta_pct = (baseline - best_ms) / baseline * 100.0
                 print(
-                    f"[bayesian {i}] new best: {best_ms:.4f} ms/stream "
+                    f"[bayesian {i}] new best: {best_ms:.4f} ms/frame "
                     f"(delta: {delta_pct:.1f}%)",
                     flush=True,
                 )
             else:
                 print(
-                    f"[bayesian {i}] new best: {best_ms:.4f} ms/stream",
+                    f"[bayesian {i}] new best: {best_ms:.4f} ms/frame",
                     flush=True,
                 )
         return ms
@@ -107,7 +107,7 @@ def main() -> None:
             f"({improvement:.1f}% improvement)"
         )
     else:
-        print(f"\nBayesian search complete. best={best_ms:.4f} ms/stream")
+        print(f"\nBayesian search complete. best={best_ms:.4f} ms/frame")
 
     best_trial = study.best_trial if study.trials else None
     if best_trial is not None and best_trial.value is not None:

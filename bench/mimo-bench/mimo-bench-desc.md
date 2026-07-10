@@ -2,7 +2,7 @@
 
 ## Workload
 
-Real LTE/5G uplink slot processing. One "stream" = one OFDM slot.
+Real LTE/5G uplink slot processing. One "frame" = one OFDM slot.
 
 ```
 $network (bs_ant_num UDP sockets, Agora wire format)
@@ -23,14 +23,14 @@ $network (bs_ant_num UDP sockets, Agora wire format)
 | Parameter | Value |
 |---|---|
 | BS antennas | 4 |
-| UE streams | 4 |
+| UE frames | 4 |
 | FFT size | 256 |
 | OFDM data subcarriers | 192 |
 | Modulation | 16-QAM |
 | Symbols per slot | 14 (1P + 13UL, frame schedule `PUUUUUUUUUUUUU`) |
 | Pilot symbols | 1 |
 | UL data symbols | 13 |
-| Total streams | 2000 (+ 200 warmup) |
+| Total frames | 2000 (+ 200 warmup) |
 | S (concurrent slots) sweep | {1, 4, 16, 64} |
 | W (worker threads) sweep | {1, 2, 4, 8} |
 
@@ -53,13 +53,13 @@ same C function pointer is called with the same buffer layout on both sides.
 ## Metric
 
 ```
-ms_per_slot = total_wall_seconds × 1000 / total_streams
+ms_per_slot = total_wall_seconds × 1000 / total_frames
 ```
 
 - Tomii: measured by `time.monotonic()` around the blocking `binary` call in
-  `run_bench.py`; warmup streams are inside the same run but excluded from the
-  denominator via `--exclude-streams`.
-- Taskflow: `total_wall_ms / measured_streams` reported by `tf_mimo` directly.
+  `run_bench.py`; warmup frames are inside the same run but excluded from the
+  denominator via `--exclude-frames`.
+- Taskflow: `total_wall_ms / measured_frames` reported by `tf_mimo` directly.
 
 ## Taskflow Comparator
 
@@ -154,7 +154,7 @@ The relative Tomii vs Taskflow comparison is fair: both sides use identical
 `frame_duration`, see the same packet arrival rate, and are measured with the same
 first-packet-to-last-task-completion metric.
 
-### Results (2026-05-13, W=24, 200 streams, 5 warmup)
+### Results (2026-05-13, W=24, 200 frames, 5 warmup)
 
 **Tomii (first-pkt→done):**
 

@@ -12,7 +12,7 @@
 //! # Invariant
 //! [`TomiiRtBuilder::build`] is cheap (no threads spawned); threads are created only
 //! inside [`TomiiRt::run`].  Dropping [`TomiiRt`] before `run` completes is safe but
-//! will not stop in-flight threads — callers should rely on `max_runtime` or stream
+//! will not stop in-flight threads — callers should rely on `max_runtime` or frame
 //! completion to drive graceful shutdown.
 
 mod arg_resolution;
@@ -92,7 +92,7 @@ pub const RUN_SLEEP: Duration = Duration::from_secs(10);
 /// let compiled = spec.compile(&scheduler);
 /// let synrt = TomiiRtBuilder::new(compiled, scheduler)
 ///     .slots(4)
-///     .max_streams(100)
+///     .max_frames(100)
 ///     .max_runtime(Some(60))
 ///     .timing_enabled(true)
 ///     .build();
@@ -180,8 +180,8 @@ impl TomiiRtBuilder {
         self.config.slots = n;
         self
     }
-    pub fn max_streams(mut self, n: usize) -> Self {
-        self.config.max_streams = n;
+    pub fn max_frames(mut self, n: usize) -> Self {
+        self.config.max_frames = n;
         self
     }
     pub fn max_runtime(mut self, secs: Option<u64>) -> Self {
@@ -196,8 +196,8 @@ impl TomiiRtBuilder {
         self.record = v;
         self
     }
-    pub fn record_stream(mut self, v: Option<usize>) -> Self {
-        self.config.record_stream = v;
+    pub fn record_frame(mut self, v: Option<usize>) -> Self {
+        self.config.record_frame = v;
         self
     }
     pub fn timing_enabled(mut self, v: bool) -> Self {
@@ -254,13 +254,13 @@ impl TomiiRtBuilder {
     /// # Errors
     ///
     /// Returns [`crate::BuildError::InvalidConfig`] if any configuration constraint is violated:
-    /// - `slots` (clamped to `max_streams`) must be in the range `[1, 64]`
-    /// - `max_streams` must be `>= 1`
+    /// - `slots` (clamped to `max_frames`) must be in the range `[1, 64]`
+    /// - `max_frames` must be `>= 1`
     /// - `batch_queue_capacity` must be `> 0`
     pub fn build(mut self) -> Result<TomiiRt, crate::BuildError> {
-        // Clamp slots to max_streams and write back into config so the
+        // Clamp slots to max_frames and write back into config so the
         // assembled RuntimeConfig carries the resolved value.
-        self.config.slots = std::cmp::min(self.config.slots, self.config.max_streams);
+        self.config.slots = std::cmp::min(self.config.slots, self.config.max_frames);
         let slots = self.config.slots;
 
         if slots < 1 {
@@ -275,9 +275,9 @@ impl TomiiRtBuilder {
                 consts::MAX_SLOTS
             )));
         }
-        if self.config.max_streams < 1 {
+        if self.config.max_frames < 1 {
             return Err(crate::BuildError::InvalidConfig(
-                "max_streams must be >= 1 (got 0)".to_string(),
+                "max_frames must be >= 1 (got 0)".to_string(),
             ));
         }
         if self.batch_queue_capacity == 0 {
@@ -382,8 +382,8 @@ impl TomiiRtBuilder {
         );
 
         // --- Assemble SharedData ---
-        // Allocate one extra slot beyond the stream slots to cover post-node writes, which
-        // use slot index `slots + system_threads` (see scheduling.rs `stream_use`).
+        // Allocate one extra slot beyond the frame slots to cover post-node writes, which
+        // use slot index `slots + system_threads` (see scheduling.rs `frame_use`).
         let node_results = Arc::new(crate::buffers::LockFreeResultMap::new(
             &graph.nodes,
             slots + self.config.system_threads + 1,
@@ -391,7 +391,7 @@ impl TomiiRtBuilder {
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
         #[cfg(feature = "network")]
-        let max_streams_for_frame_drop = self.config.max_streams;
+        let max_frames_for_drop = self.config.max_frames;
 
         let shared = Arc::new(SharedData {
             graph,
@@ -414,12 +414,12 @@ impl TomiiRtBuilder {
                 needs_check: Arc::new((0..slots).map(|_| AtomicBool::new(false)).collect()),
                 packet_counters: Arc::new((0..slots).map(|_| AtomicUsize::new(0)).collect()),
                 packet_complete: Arc::new((0..slots).map(|_| AtomicBool::new(false)).collect()),
-                stream_id: Arc::new((0..slots).map(|_| AtomicUsize::new(usize::MAX)).collect()),
+                frame_id: Arc::new((0..slots).map(|_| AtomicUsize::new(usize::MAX)).collect()),
                 active_bitmap: Arc::new(AtomicU64::new(0)),
                 cond_instances_to_spawn: Arc::new(cond_instances_to_spawn),
                 fanout_bulk_arrived: Arc::new(fanout_bulk_arrived),
                 states: Arc::new(RwLock::new(vec![SlotState::Inactive; slots])),
-                running_streams: Arc::new(RwLock::new(Vec::new())),
+                running_frames: Arc::new(RwLock::new(Vec::new())),
                 buffers: slot_buffers,
                 last_assigned: Arc::new(AtomicUsize::new(0)),
             },
@@ -433,10 +433,10 @@ impl TomiiRtBuilder {
                 packet_drop_counters,
                 buffer_return_senders,
                 buffer_return_receivers,
-                streams_receive_counter: Arc::new(AtomicUsize::new(0)),
-                dropped_streams: Arc::new(AtomicUsize::new(0)),
+                frames_receive_counter: Arc::new(AtomicUsize::new(0)),
+                dropped_frames: Arc::new(AtomicUsize::new(0)),
                 frame_dropped: Arc::new(
-                    (0..max_streams_for_frame_drop + slots)
+                    (0..max_frames_for_drop + slots)
                         .map(|_| AtomicBool::new(false))
                         .collect(),
                 ),
@@ -457,7 +457,7 @@ impl TomiiRtBuilder {
                 async_recorder,
                 base_instant: Arc::new(self.base_instant),
                 job_counter: Arc::new(AtomicUsize::new(0)),
-                stream_complete_counter: Arc::new(AtomicUsize::new(0)),
+                frame_complete_counter: Arc::new(AtomicUsize::new(0)),
             },
         });
 
@@ -497,10 +497,10 @@ pub struct TomiiRt {
 pub struct RunProgress {
     /// Wall-clock time since the run started.
     pub elapsed: std::time::Duration,
-    /// Streams completed so far (includes dropped frames on network graphs).
-    pub streams_completed: usize,
-    /// The configured stream budget (`max_streams`).
-    pub max_streams: usize,
+    /// Frames completed so far (includes dropped frames on network graphs).
+    pub frames_completed: usize,
+    /// The configured frame budget (`max_frames`).
+    pub max_frames: usize,
     /// Number of slots currently marked active.
     pub active_slots: u32,
 }
@@ -534,7 +534,7 @@ impl TomiiRt {
     /// wait tick and shuts the run down when it returns `true`.
     ///
     /// Generalizes `max_runtime`'s wall-clock-only termination (Taskflow
-    /// `run_until` analog): completion of all streams and an optional
+    /// `run_until` analog): completion of all frames and an optional
     /// `max_runtime` still terminate the run as usual — the predicate is a
     /// third, caller-defined condition.  Unlike [`run`](Self::run), the wait
     /// loop runs even when `max_runtime` is `None`.
@@ -565,7 +565,7 @@ impl TomiiRt {
         let receiver_handles = self.spawn_receiver_threads()?;
         let resolution_handles = self.spawn_resolution_threads()?;
 
-        // Wait loop: sleep until max_runtime exceeded, all streams complete,
+        // Wait loop: sleep until max_runtime exceeded, all frames complete,
         // or the caller's run_until predicate fires.  Without a max_runtime
         // or predicate there is nothing to poll — join immediately (the
         // resolution threads terminate themselves), preserving pre-run_until
@@ -583,12 +583,12 @@ impl TomiiRt {
             sleep(tick);
             let mut finish = false;
             loop {
-                let completed_streams = self
+                let completed_frames = self
                     .shared
                     .telemetry
-                    .stream_complete_counter
+                    .frame_complete_counter
                     .load(Ordering::Acquire);
-                let completed = completed_streams == self.shared.config.max_streams;
+                let completed = completed_frames == self.shared.config.max_frames;
 
                 let max_runtime_exceeded = self
                     .shared
@@ -599,7 +599,7 @@ impl TomiiRt {
                     tracing::info!("Max runtime reached, exiting");
                     finish = true;
                 } else if completed {
-                    tracing::info!("All streams completed, exiting");
+                    tracing::info!("All frames completed, exiting");
                     finish = true;
                 }
 
@@ -607,8 +607,8 @@ impl TomiiRt {
                     if let Some(pred) = predicate.as_deref_mut() {
                         let progress = RunProgress {
                             elapsed: start_time.elapsed(),
-                            streams_completed: completed_streams,
-                            max_streams: self.shared.config.max_streams,
+                            frames_completed: completed_frames,
+                            max_frames: self.shared.config.max_frames,
                             active_slots: self
                                 .shared
                                 .slot_data

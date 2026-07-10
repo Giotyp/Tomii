@@ -2,11 +2,11 @@
 """Verifier for the stream-analytics example.
 
 Checks that result.txt contains N repetitions of the 4-line golden output,
-one block per measured stream.
+one block per measured frame.
 
 Usage:
     python verify.py                        # check result.txt in this dir
-    python verify.py --streams 5 --exclude 2   # expect exactly 3 blocks
+    python verify.py --frames 5 --exclude 2   # expect exactly 3 blocks
     python verify.py --result path/to/result.txt
 """
 from __future__ import annotations
@@ -48,7 +48,7 @@ def verify(result_path: Path, golden_path: Path, expected_blocks: int | None) ->
 
     if expected_blocks is not None and num_blocks != expected_blocks:
         return False, (
-            f"expected {expected_blocks} stream block(s) but result has {num_blocks}"
+            f"expected {expected_blocks} frame block(s) but result has {num_blocks}"
         )
 
     for i in range(num_blocks):
@@ -60,20 +60,20 @@ def verify(result_path: Path, golden_path: Path, expected_blocks: int | None) ->
                 f"  got:      {block}"
             )
 
-    return True, f"PASS ({num_blocks} stream block(s))"
+    return True, f"PASS ({num_blocks} frame block(s))"
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--result", default=str(HERE / "result.txt"))
     p.add_argument("--golden", default=str(HERE / "result.golden.txt"))
-    p.add_argument("--streams", type=int, default=None, help="total streams run")
-    p.add_argument("--exclude", type=int, default=0, help="warm-up streams excluded")
+    p.add_argument("--frames", type=int, default=None, help="total frames run")
+    p.add_argument("--exclude", type=int, default=0, help="warm-up frames excluded")
     args = p.parse_args()
 
     expected_blocks: int | None = None
-    if args.streams is not None:
-        expected_blocks = args.streams - args.exclude
+    if args.frames is not None:
+        expected_blocks = args.frames - args.exclude
 
     ok, msg = verify(Path(args.result), Path(args.golden), expected_blocks)
     print(msg)

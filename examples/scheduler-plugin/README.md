@@ -39,7 +39,7 @@ let compiled = spec.compile(&placeholder);
 let fifo: Arc<dyn tomii_core::scheduler::TaskScheduler> = FifoScheduler::new(4, 0);
 let rt = TomiiRtBuilder::new_with_plugin(compiled, fifo)
     .slots(4)
-    .max_streams(1000)
+    .max_frames(1000)
     .build();
 
 rt.run();

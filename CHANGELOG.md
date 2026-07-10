@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Terminology: "stream" → "frame"
+
+One in-flight graph execution is now called a **frame** (previously "stream" — the inverse
+of the standard CS meaning, where a stream is a continuous flow comprising many frames).
+Tomii ingests a stream of frames; each frame occupies one slot while it executes. This
+renames identifiers, CLI flags, JSON fields, and output keys across the workspace. The
+MIMO spatial-stream terminology in plugin code is unrelated and unchanged.
+
+**Backward compatible (aliases kept):**
+- JSON graphs: `stream_packets` still deserializes via serde alias; the canonical field is
+  `frame_packets`.
+- CLI: `--max-streams`, `--record-stream`, `--exclude-streams` still parse as hidden
+  aliases of `--max-frames`, `--record-frame`, `--exclude-frames`.
+
+**Breaking (clean rename, no aliases):**
+- Rust API: `RuntimeConfig`/builder names (`max_frames`, `record_frame`), runtime
+  internals (`frame_id`, `frame_complete_counter`, `running_frames`, …).
+- Timing text output: `Total Frames Processed:`, `Avg Time Per Frame:`, … (regex
+  consumers must update).
+- Report JSON: `summary.total_frames`, `summary.throughput_frames_per_sec`,
+  `summary.total_tasks_per_frame`; dump-state keys likewise.
+- Python `RunConfig` kwargs: `max_frames`, `record_frame`, `exclude_frames`.
+- Knob catalog / knob-space schema version bumped 2 → 3 (knob names changed).
+- Comparator bench CSV column `ms_per_stream` → `ms_per_frame`
+  (`pipeline-comparison.py` reads both, so archived CSVs stay plottable).
+
+Also fixed: `make schema` stub registry now satisfies the five-function registry contract
+introduced in v1.1.0, and `build.rs` re-runs when `WRAP_PATH`/`REG_PATH`/`FUNC_PATH`
+inputs change.
+
 ## v1.1.0 — 2026-07-06
 
 ### Breaking changes for plugin authors

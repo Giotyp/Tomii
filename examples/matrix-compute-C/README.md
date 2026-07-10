@@ -37,7 +37,7 @@ python examples/matrix-compute-C/run_bench.py --workers 4 --no-clean
 |------|---------|--------|
 | `--workers` | 2 | Rayon worker threads |
 | `--system-threads` | 3 | Resolution threads |
-| `--slots` | 2 | Concurrent stream slots |
+| `--slots` | 2 | Concurrent frame slots |
 | `--no-clean` | — | Skip library rebuild |
 
 ## Note on validation

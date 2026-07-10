@@ -28,7 +28,7 @@
 //! - `edges_for(pred)` returns edges in the same order as `graph.successors[pred]`,
 //!   preserving the dispatch order of the pre-arena implementation.
 //! - Every field of [`SuccEdge`] is a pure function of the graph topology; no
-//!   per-slot or per-stream state lives here.
+//!   per-slot or per-frame state lives here.
 
 use super::node_cache::NodeCacheEntry;
 use crate::IdType;

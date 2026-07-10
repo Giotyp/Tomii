@@ -68,8 +68,8 @@ _append_rows() {
 mkdir -p "$RESULTS_DIR" "$TF_BUILD_DIR"
 
 # Write combined CSV headers once.
-echo "system,n,items_per_stream,slots,workers,streams,ms_per_stream,transform_iters" > "$COMBINED_TOMII"
-echo "system,n,items_per_stream,slots,workers,streams,ms_per_stream,transform_iters" > "$COMBINED_TF"
+echo "system,n,items_per_frame,slots,workers,frames,ms_per_frame,transform_iters" > "$COMBINED_TOMII"
+echo "system,n,items_per_frame,slots,workers,frames,ms_per_frame,transform_iters" > "$COMBINED_TF"
 
 for ITERS in "${SWEEP_ITERS[@]}"; do
     echo ""
@@ -95,7 +95,7 @@ for ITERS in "${SWEEP_ITERS[@]}"; do
     python "$TOMII_DIR/verify.py" \
         --no-build \
         --transform-iters "$ITERS" \
-        --streams 5
+        --frames 5
 
     # --- Append to combined CSVs ---
     _append_rows "$TOMII_CSV" "$COMBINED_TOMII"

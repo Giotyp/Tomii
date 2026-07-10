@@ -15,7 +15,7 @@ configurations, run the verifier, and iterate. The four arms here share:
   catalog + `graph.json` — no hand-written per-workload spec)
 - the same evaluation budget (`--iterations N`)
 - the same correctness gate (`verify.py` from stream-analytics)
-- the same metric (`ms_per_stream` from the runtime report)
+- the same metric (`ms_per_frame` from the runtime report)
 
 ## Prerequisites
 
@@ -46,7 +46,7 @@ FUNC_PATH=$(pwd)/examples/stream-analytics/src/lib.rs \
 cd examples/agent-tuning
 bash run_all.sh 50                            # all 4 arms, stream-analytics
 bash run_all.sh 50 pipeline                   # all 4 arms, pipeline-bench
-bash run_all.sh 30 mimo --streams 200 --warmup 20   # all 4 arms, mimo-bench
+bash run_all.sh 30 mimo --frames 200 --warmup 20   # all 4 arms, mimo-bench
 ```
 
 Each arm writes a `.jsonl` trial log to the results directory.
@@ -59,16 +59,16 @@ the search loop is workload-agnostic and the knob space is always generated
 
 | Workload | Source | Correctness gate | Metric | Notes |
 |---|---|---|---|---|
-| `stream-analytics` | `examples/stream-analytics` | golden-file `verify.py` per trial | avg latency ms/stream (`report.json`) | self-contained |
-| `pipeline` | `bench/pipeline-bench` | knob-aware verify pass per trial (emit-to-file graph run with the trial's knobs + graph edits, numeric checks vs Python reference) | `Avg Time Per Stream` from timing file | self-contained, heavy kernel |
-| `mimo` | `bench/mimo-bench` | keep-up gate: `Total Streams Processed == frames sent` (a config cannot look fast by dropping frames) | `Avg Time Per Stream` (ms/slot) from timing file | needs Agora sender + MKL; graph knobs disabled (no per-trial output verification for edited MIMO graphs); `--streams` = sender frame budget; ~25-40 s/trial |
+| `stream-analytics` | `examples/stream-analytics` | golden-file `verify.py` per trial | avg latency ms/frame (`report.json`) | self-contained |
+| `pipeline` | `bench/pipeline-bench` | knob-aware verify pass per trial (emit-to-file graph run with the trial's knobs + graph edits, numeric checks vs Python reference) | `Avg Time Per Frame` from timing file | self-contained, heavy kernel |
+| `mimo` | `bench/mimo-bench` | keep-up gate: `Total Frames Processed == frames sent` (a config cannot look fast by dropping frames) | `Avg Time Per Frame` (ms/slot) from timing file | needs Agora sender + MKL; graph knobs disabled (no per-trial output verification for edited MIMO graphs); `--frames` = sender frame budget; ~25-40 s/trial |
 
 ## Methodology
 
 | Property | Value |
 |---|---|
 | Budget per arm | `--iterations` (default 50) |
-| Trial size | `--streams` / `--warmup` (defaults 500/50; mimo interprets streams as sender frames) |
+| Trial size | `--frames` / `--warmup` (defaults 500/50; mimo interprets frames as sender frames) |
 | Correctness gate | per workload (table above) — gates every trial |
 | Rejected trial | `verifier_ok=False` — logged with reason, not counted toward best |
 
@@ -107,7 +107,7 @@ Each arm writes `results/<run_dir>/<arm>_trials.jsonl`. Each line is a JSON obje
   "notes": "",
   "knobs": {"workers": 4, "slots": 4, ...},
   "verifier_ok": true,
-  "ms_per_stream": 0.1823,
+  "ms_per_frame": 0.1823,
   "rejection_reason": null,
   "wall_seconds": 2.41
 }

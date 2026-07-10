@@ -21,11 +21,11 @@ _INT_FLAGS: Dict[str, str] = {
     "receiver_threads": "--receiver-threads",
     "max_runtime": "--max-runtime",
     "slots": "--slots",
-    "max_streams": "--max-streams",
+    "max_frames": "--max-frames",
     "batching_size": "--batching-size",
     "batching_limit": "--batching-limit",
-    "exclude_streams": "--exclude-streams",
-    "record_stream": "--record-stream",
+    "exclude_frames": "--exclude-frames",
+    "record_frame": "--record-frame",
 }
 
 _BOOL_FLAGS: Dict[str, str] = {
@@ -54,17 +54,17 @@ _KNOB_DESCRIPTIONS: Dict[str, str] = {
     "core_offset": "First CPU to pin workers to (use 1 to leave CPU 0 for OS)",
     "system_threads": "Resolution/scheduler threads (default 1; rarely needs changing)",
     "receiver_threads": "Dedicated network receiver threads (for network-input graphs)",
-    "max_runtime": "Stop after N seconds (0 = run until max_streams complete)",
-    "slots": "Concurrent in-flight streams (1 for latency, >1 for throughput)",
-    "max_streams": "Total streams to process (0 = run indefinitely)",
+    "max_runtime": "Stop after N seconds (0 = run until max_frames complete)",
+    "slots": "Concurrent in-flight frames (1 for latency, >1 for throughput)",
+    "max_frames": "Total frames to process (0 = run indefinitely)",
     "batching_size": "Max tasks per scheduler batch",
     "batching_limit": "Max outstanding batches before back-pressure",
-    "exclude_streams": "Skip first N streams from timing output",
-    "record_stream": "Record timing for this specific stream index only",
+    "exclude_frames": "Skip first N frames from timing output",
+    "record_frame": "Record timing for this specific frame index only",
     # Bool flags
     "fifo": "Use FIFO task scheduling instead of default (depth-first)",
     "custom": "Enable custom scheduling strategy",
-    "inits": "Re-run graph initializations on each stream",
+    "inits": "Re-run graph initializations on each frame",
     "debug": "Print verbose debug output",
     "record": "Enable timing/event recording to file",
     "use_rdtsc": "Use RDTSC for sub-\u03bcs timing (x86 only; improves timer precision)",
@@ -91,11 +91,11 @@ _KNOB_ROLES: Dict[str, str] = {
     "receiver_threads": "perf",
     "max_runtime": "measurement",
     "slots": "perf",
-    "max_streams": "measurement",
+    "max_frames": "measurement",
     "batching_size": "perf",
     "batching_limit": "perf",
-    "exclude_streams": "measurement",
-    "record_stream": "measurement",
+    "exclude_frames": "measurement",
+    "record_frame": "measurement",
     "fifo": "perf",
     "custom": "perf",
     "inits": "measurement",
@@ -133,8 +133,8 @@ _KNOB_SEARCH_HINTS: Dict[str, str] = {
     "batching_limit": "unimodal; try 1,2,4; higher allows more outstanding work",
     "core_offset": "set to 1 to leave CPU 0 for OS; rarely needs tuning otherwise",
     "system_threads": "leave at default 1 unless profiling shows scheduler bottleneck",
-    "max_streams": "benchmark parameter; set to fixed value for fair comparison",
-    "exclude_streams": "skip warmup streams; set to 1–3 to exclude JIT effects from timing",
+    "max_frames": "benchmark parameter; set to fixed value for fair comparison",
+    "exclude_frames": "skip warmup frames; set to 1–3 to exclude JIT effects from timing",
     "inline_continuation": "try both; often reduces latency for linear chains or low-fan-out graphs",
     "coalesce_barriers": "helpful when node factor >> worker count (reduces barrier overhead)",
     "slot_priority": "try both when slots > 1; can reduce tail latency under imbalanced graphs",
@@ -216,7 +216,7 @@ def list_knobs_json() -> "dict[str, Any]":
                 "description": _KNOB_DESCRIPTIONS.get(key, ""),
             }
         )
-    return {"version": 2, "knobs": knobs}
+    return {"version": 3, "knobs": knobs}
 
 
 def build_command(

@@ -111,7 +111,7 @@ impl Default for BatchConfig {
 #[derive(Clone)]
 pub struct RuntimeConfig {
     pub slots: usize,
-    pub max_streams: usize,
+    pub max_frames: usize,
     pub max_runtime: Option<u64>,
     pub system_threads: usize,
     pub receiver_threads: usize,
@@ -122,7 +122,7 @@ pub struct RuntimeConfig {
     pub coalesce_barriers: bool,
     pub inline_continuation: bool,
     pub single_slot_mode: bool,
-    pub record_stream: Option<usize>,
+    pub record_frame: Option<usize>,
     pub recv_pool_size: usize,
     pub spin_wait: SpinWaitConfig,
     pub batch: BatchConfig,
@@ -135,7 +135,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             slots: 1,
-            max_streams: 1,
+            max_frames: 1,
             max_runtime: None,
             system_threads: 1,
             receiver_threads: 0,
@@ -146,7 +146,7 @@ impl Default for RuntimeConfig {
             coalesce_barriers: false,
             inline_continuation: false,
             single_slot_mode: true,
-            record_stream: None,
+            record_frame: None,
             recv_pool_size: 1024,
             spin_wait: SpinWaitConfig::default(),
             batch: BatchConfig::default(),
@@ -165,7 +165,7 @@ pub struct SlotData {
     pub needs_check: Arc<Vec<AtomicBool>>,
     pub packet_counters: Arc<Vec<AtomicUsize>>,
     pub packet_complete: Arc<Vec<AtomicBool>>,
-    pub stream_id: Arc<Vec<AtomicUsize>>,
+    pub frame_id: Arc<Vec<AtomicUsize>>,
     pub active_bitmap: Arc<AtomicU64>,
     /// Condition node spawn tracking per slot.
     pub cond_instances_to_spawn: Arc<Vec<Vec<AtomicU64>>>,
@@ -175,14 +175,14 @@ pub struct SlotData {
     /// When low 32 reaches node.factor, one bulk task is dispatched.
     pub fanout_bulk_arrived: Arc<Vec<Vec<AtomicU64>>>,
     pub states: Arc<RwLock<Vec<SlotState>>>,
-    pub running_streams: Arc<RwLock<Vec<(usize, usize)>>>,
+    pub running_frames: Arc<RwLock<Vec<(usize, usize)>>>,
     /// Per-slot buffering: holds ready nodes with packet data waiting for slot activation.
     #[allow(clippy::type_complexity)]
     pub buffers: Arc<RwLock<Vec<Vec<(NodeInfo, Option<CmTypes>)>>>>,
     pub last_assigned: Arc<AtomicUsize>,
 }
 
-/// A decoded packet parked because its stream is ahead of the admission window.
+/// A decoded packet parked because its frame is ahead of the admission window.
 /// Retains the receive metadata needed for telemetry when it is later admitted.
 #[cfg(feature = "network")]
 pub struct PendingPacket {
@@ -204,15 +204,15 @@ pub struct NetworkInfra {
     pub buffer_return_senders: Vec<Sender<Vec<u8>>>,
     /// Receiver ends taken exactly once when the corresponding receiver thread is spawned.
     pub buffer_return_receivers: Vec<Mutex<Option<Receiver<Vec<u8>>>>>,
-    pub streams_receive_counter: Arc<AtomicUsize>,
+    pub frames_receive_counter: Arc<AtomicUsize>,
     /// Counts frames dropped because no slot was available when they arrived.
-    pub dropped_streams: Arc<AtomicUsize>,
+    pub dropped_frames: Arc<AtomicUsize>,
     /// Per-frame drop bitmap — prevents double-counting of dropped frames.
     pub frame_dropped: Arc<Vec<AtomicBool>>,
     /// Out-of-window packets parked until the admission window advances, keyed by
-    /// stream id.  Bounded by `stream_packets × slots`; on overflow the furthest-out
+    /// frame id.  Bounded by `frame_packets × slots`; on overflow the furthest-out
     /// frame is dropped whole (via `frame_dropped`) so the run degrades instead of
-    /// wedging on a permanently incomplete stream.
+    /// wedging on a permanently incomplete frame.
     pub pending_frames: Mutex<std::collections::BTreeMap<usize, Vec<PendingPacket>>>,
     /// Total packets parked in `pending_frames`.  Relaxed loads outside the lock are
     /// only an emptiness hint — a stale read delays re-injection by one poll iteration.
@@ -232,13 +232,13 @@ pub struct ExecCtx {
     pub resolution_strategy: Arc<dyn super::resolution_strategy::ResolutionStrategy>,
 }
 
-/// Timing, recording, and stream counters.
+/// Timing, recording, and frame counters.
 pub struct Telemetry {
     pub time_buffer: Option<Arc<TimeBufferManager>>,
     pub async_recorder: Option<Arc<crate::async_recorder::AsyncRecorder>>,
     pub base_instant: Arc<Instant>,
     pub job_counter: Arc<AtomicUsize>,
-    pub stream_complete_counter: Arc<AtomicUsize>,
+    pub frame_complete_counter: Arc<AtomicUsize>,
 }
 
 impl Telemetry {
@@ -281,7 +281,7 @@ pub struct SharedData {
     pub graph_cache: GraphCache,
     pub config: RuntimeConfig,
     pub slot_data: SlotData,
-    /// Runtime shutdown signal — set by the main thread on max_runtime or stream completion.
+    /// Runtime shutdown signal — set by the main thread on max_runtime or frame completion.
     /// Read by resolution threads to exit their loops. Always present (not network-specific).
     pub shutdown_flag: Arc<AtomicBool>,
     #[cfg(feature = "network")]

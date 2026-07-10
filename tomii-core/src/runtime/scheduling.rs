@@ -94,7 +94,7 @@ pub(super) fn send_to_scheduler(
         let should_record = should_record_slot(sctx.cfg, sctx.slots, node_info.slot);
         let mut node_info = node_info.clone();
         // Stamp the current slot generation so execute_task can detect stale tasks.
-        // Post-nodes are exempt: they run after all streams complete and have no generation risk.
+        // Post-nodes are exempt: they run after all frames complete and have no generation risk.
         if !node_info.post_node {
             node_info.gen = sctx.slots.generation[node_info.slot].load(Ordering::Acquire) as u32;
         }
@@ -191,7 +191,7 @@ pub(super) fn run_node_desc(shared: &Arc<SharedData>, desc: crate::custom_schedu
 ///
 /// Reuses the `PREP_ARGS_BUF` thread-local (`Vec<Option<Vec<CmTypes>>>`) to construct the
 /// `None`-filled args slice passed to [`send_to_scheduler`], avoiding a `vec![None; N]` heap
-/// allocation on every incremental flush (~77 flushes per stream at default batch sizes).
+/// allocation on every incremental flush (~77 flushes per frame at default batch sizes).
 /// Records timing and an optional async-recorder event around the scheduler submission.
 pub(super) fn dispatch_nodes(
     shared: &Arc<SharedData>,
@@ -242,20 +242,20 @@ impl super::TomiiRt {
         use std::time::Duration;
         let nodes = &self.shared.graph.post_nodes;
         if let Some(post_nodes) = nodes {
-            let stream_use = self.shared.config.slots + self.shared.config.system_threads; // Use last available slot for post-nodes
+            let frame_use = self.shared.config.slots + self.shared.config.system_threads; // Use last available slot for post-nodes
             for post_node in post_nodes {
                 let mut post_schedule: Vec<NodeInfo> = Vec::new();
                 let mut pre_build_args: Vec<Option<Vec<CmTypes>>> = Vec::new();
                 let mut functions: Vec<Option<CmPtr>> = Vec::new();
                 for index in 0..post_node.factor {
-                    let mut node_info = NodeInfo::new(post_node.id, stream_use, index, 0);
+                    let mut node_info = NodeInfo::new(post_node.id, frame_use, index, 0);
                     node_info.set_post_node(true);
 
                     let arg_vec = super::arg_resolution::parse_args(
                         &self.shared,
                         &post_node.args,
                         index,
-                        stream_use,
+                        frame_use,
                         0,
                         None,
                     );
@@ -281,7 +281,7 @@ impl super::TomiiRt {
                     completed_count = 0;
                     // Lock-free check - no RwLock needed
                     for i in 0..post_node.factor {
-                        let node_info = NodeInfo::new(post_node.id, stream_use, i, 0);
+                        let node_info = NodeInfo::new(post_node.id, frame_use, i, 0);
                         if self.shared.exec.node_results.result_exists(&node_info) {
                             completed_count += 1;
                         }

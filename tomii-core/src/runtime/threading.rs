@@ -272,7 +272,7 @@ impl TomiiRt {
             }
         }
 
-        let dropped_frames = self.shared.net.dropped_streams.load(Ordering::SeqCst);
+        let dropped_frames = self.shared.net.dropped_frames.load(Ordering::SeqCst);
         if dropped_frames > 0 {
             tracing::warn!(dropped_frames, "frames dropped (no available slots)");
         }

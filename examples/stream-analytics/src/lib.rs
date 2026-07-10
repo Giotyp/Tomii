@@ -110,8 +110,8 @@ pub fn get_out_file(env_var: &str, out_file: &str) -> String {
     path
 }
 
-/// Post-stream cleanup — runs once after the full graph completes each stream.
+/// Post-frame cleanup — runs once after the full graph completes each frame.
 #[tomii_export]
 pub fn cleanup_state() {
-    println!("[stream-analytics] stream cleanup complete");
+    println!("[stream-analytics] frame cleanup complete");
 }

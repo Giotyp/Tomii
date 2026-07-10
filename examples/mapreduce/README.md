@@ -42,7 +42,7 @@ Run the benchmark at least once before verifying.
 | `--num-shards` | 16 | Number of parallel map tasks |
 | `--tokens-per-shard` | 256 | Tokens generated per shard |
 | `--workers` | 2 | Rayon worker threads |
-| `--max-streams` | 1 | Streams processed before exit |
+| `--max-frames` | 1 | Frames processed before exit |
 | `--no-clean` | — | Skip library rebuild |
 
 ## Output

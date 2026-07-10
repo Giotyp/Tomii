@@ -64,7 +64,7 @@ def run_one(
     n: int,
     slots: int,
     workers: int,
-    streams: int,
+    frames: int,
     warmup: int,
     mode: str,
     output_csv: Path,
@@ -79,8 +79,8 @@ def run_one(
         str(slots),
         "--workers",
         str(workers),
-        "--streams",
-        str(streams),
+        "--frames",
+        str(frames),
         "--warmup",
         str(warmup),
         "--mode",
@@ -105,7 +105,7 @@ def main() -> None:
         description="Taskflow pipeline benchmark sweep over slots and workers."
     )
     p.add_argument(
-        "--n", type=int, default=256, help="items per stream (pipeline width)"
+        "--n", type=int, default=256, help="items per frame (pipeline width)"
     )
     p.add_argument(
         "--slots",
@@ -122,13 +122,13 @@ def main() -> None:
         help="worker thread counts to sweep",
     )
     p.add_argument(
-        "--streams",
+        "--frames",
         type=int,
         default=2000,
-        help="total streams to process (excluding warmup)",
+        help="total frames to process (excluding warmup)",
     )
     p.add_argument(
-        "--warmup", type=int, default=200, help="warmup streams excluded from timing"
+        "--warmup", type=int, default=200, help="warmup frames excluded from timing"
     )
     p.add_argument(
         "--mode",
@@ -165,7 +165,7 @@ def main() -> None:
                 n=args.n,
                 slots=s,
                 workers=w,
-                streams=args.streams,
+                frames=args.frames,
                 warmup=args.warmup,
                 mode=args.mode,
                 output_csv=output_csv,

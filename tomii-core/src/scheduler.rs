@@ -410,7 +410,7 @@ impl SchedulerBase {
             }
 
             // Lock-free recording via per-worker channel
-            // should_record flag was pre-computed at spawn time based on stream filter
+            // should_record flag was pre-computed at spawn time based on frame filter
             if recorder_enabled && should_record {
                 submit_record(Record {
                     slot,

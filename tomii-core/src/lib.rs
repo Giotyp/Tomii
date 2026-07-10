@@ -73,7 +73,7 @@ impl std::error::Error for RuntimeError {
 pub struct TaskMeta {
     /// Graph node identifier.
     pub task_id: IdType,
-    /// Execution slot (stream index mod `slots`).
+    /// Execution slot (frame index mod `slots`).
     pub slot: usize,
     /// Instance index within a multi-factor node.
     pub index: usize,
@@ -87,7 +87,7 @@ pub struct TaskMeta {
 /// interval during which a task ran on a specific worker.
 #[derive(Debug, Clone)]
 pub struct Record {
-    /// Execution slot (stream index mod `slots`).
+    /// Execution slot (frame index mod `slots`).
     pub slot: usize,
     /// Monotonically increasing spawn counter used as a unique job ID.
     pub job_id: usize,

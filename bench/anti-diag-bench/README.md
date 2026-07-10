@@ -27,7 +27,7 @@ All Tomii runs use (hardcoded in `tomii/run_bench.py`):
 | `--inline-continuation` | Inline single non-condition successor resolution on the worker thread |
 | `--use-rdtsc` | RDTSC per-node timing |
 | `--batching-size 1` | Immediate batch processing |
-| `--slots 1` | Single concurrent stream (wavefront is sequential per stream) |
+| `--slots 1` | Single concurrent frame (wavefront is sequential per frame) |
 
 Taskflow uses its default `tf::Executor`. The `--custom` flag is important: the Rayon code
 path is not compatible with the barrier argument-injection pattern this workload uses.

@@ -9,8 +9,8 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tomii_types::*;
 
-/// Extracts the stream id from a decoded packet via the graph's id function.
-/// Pure extraction — admission-window policy (defer/drop for streams ahead of
+/// Extracts the frame id from a decoded packet via the graph's id function.
+/// Pure extraction — admission-window policy (defer/drop for frames ahead of
 /// the window) lives in `packet_processing.rs`.
 #[inline]
 pub(super) fn process_id_function(shared: &Arc<SharedData>, result: &CmTypes) -> Option<usize> {
@@ -21,11 +21,11 @@ pub(super) fn process_id_function(shared: &Arc<SharedData>, result: &CmTypes) ->
         // Call the id function - wrap single result in Vec as expected by signature
         let id_result = id_function(std::slice::from_ref(result));
 
-        // Extract stream from the result
-        if let Some(new_stream) = id_result.valid_number_to_usize() {
-            Some(new_stream)
+        // Extract frame from the result
+        if let Some(new_frame) = id_result.valid_number_to_usize() {
+            Some(new_frame)
         } else {
-            panic!("ID function did not return a valid number for stream");
+            panic!("ID function did not return a valid number for frame");
         }
     } else {
         None
@@ -47,11 +47,11 @@ pub(super) fn prepare_network_infrastructure(
 ) {
     if let Some(config_spec) = graph.network_config() {
         let num_sockets = config_spec.num_sockets;
-        // Size the channel to absorb 4× stream_packets worth of data per socket.
-        // stream_packets × num_sockets ≈ one full frame across all sockets; ×4 gives
+        // Size the channel to absorb 4× frame_packets worth of data per socket.
+        // frame_packets × num_sockets ≈ one full frame across all sockets; ×4 gives
         // headroom for multiple concurrent frames and resolution-thread stalls.
         // Minimum 65536 ensures adequate buffering even for small packet counts.
-        let channel_cap = (config_spec.stream_packets * 4).max(65536);
+        let channel_cap = (config_spec.frame_packets * 4).max(65536);
         let (packet_sender, packet_receiver) = flume::bounded(channel_cap);
 
         let receiver_sockets = bind_udp_socket_range(

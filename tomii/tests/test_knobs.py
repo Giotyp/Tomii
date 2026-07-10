@@ -60,13 +60,13 @@ TOY_GRAPH: dict[str, Any] = {
 
 def test_catalog_is_versioned_and_carries_domains() -> None:
     catalog = list_knobs_json()
-    assert catalog["version"] == 2
+    assert catalog["version"] == 3
     by_name = {k["name"]: k for k in catalog["knobs"]}
     for name in ("workers", "slots", "batching_size"):
         assert by_name[name]["role"] == "perf"
         assert by_name[name]["domain"]["kind"] == "int"
     assert by_name["fifo"]["domain"] == {"kind": "bool"}
-    assert by_name["max_streams"]["role"] == "measurement"
+    assert by_name["max_frames"]["role"] == "measurement"
     assert by_name["output"]["role"] == "io"
     assert by_name["workers"]["domain"]["max"] >= 1
 
@@ -78,7 +78,7 @@ def test_catalog_is_versioned_and_carries_domains() -> None:
 
 def test_cli_only_space_has_no_graph_knobs() -> None:
     space = knob_space()
-    assert space["version"] == 2
+    assert space["version"] == 3
     assert all(k["kind"] == "cli" for k in space["knobs"])
     assert all(k["role"] == "perf" for k in space["knobs"])
     assert space["forbidden"]

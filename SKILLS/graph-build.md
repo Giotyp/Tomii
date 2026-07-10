@@ -75,12 +75,12 @@ _TARGET_DIR = str(find_workspace_root() / "target")
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--workers", type=int, default=4)
-parser.add_argument("--max-streams", type=int, default=20)
+parser.add_argument("--max-frames", type=int, default=20)
 args = parser.parse_args()
 
 app = tm.Graph()
 
-# --- Initializations (pre-computed objects, shared across all streams) ---
+# --- Initializations (pre-computed objects, shared across all frames) ---
 n = app.var("n", 1024)                              # constant
 data = app.var("data", func="init_data", args=[n])  # function-computed
 
@@ -108,8 +108,8 @@ app.run(
     dylib=build_result.dylib,
     workers=args.workers,
     core_offset=1,
-    max_streams=args.max_streams,
-    exclude_streams=5,
+    max_frames=args.max_frames,
+    exclude_frames=5,
     report="report.json",
     timing="timing.txt",
 )
@@ -176,7 +176,7 @@ Verify:
 Start conservative for the first run:
 - `workers` = physical core count
 - `slots = 1` (minimize latency; increase later for throughput if needed)
-- `max_streams = 10`, `exclude_streams = 2`
+- `max_frames = 10`, `exclude_frames = 2`
 - `report = "report.json"` (always; needed by [diagnose](diagnose.md))
 
 ## Output

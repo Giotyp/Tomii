@@ -15,7 +15,7 @@
 # Output:
 #   pipeline-bench/tomii/results/pipeline_highS.csv
 #   pipeline-bench/taskflow/build/tf_pipeline_highS.csv
-# (columns: system,n,items_per_stream,slots,workers,streams,ms_per_stream,
+# (columns: system,n,items_per_frame,slots,workers,frames,ms_per_frame,
 #           transform_iters,peak_rss_kb)
 
 set -euo pipefail
@@ -106,10 +106,10 @@ echo "Set TRANSFORM_ITERS = $FIXED_ITERS"
 
 echo ""
 echo "Building Tomii plugin (TRANSFORM_ITERS=$FIXED_ITERS)..."
-# Pass --slots 1 --workers 4 --streams 1 --warmup 0 so the driver does the
+# Pass --slots 1 --workers 4 --frames 1 --warmup 0 so the driver does the
 # cargo build and tomii-macro codegen steps, then exits quickly.
 python "$TOMII_DIR/run_bench.py" \
-    --slots 1 --workers "$FIXED_W" --streams 1 --warmup 0 \
+    --slots 1 --workers "$FIXED_W" --frames 1 --warmup 0 \
     --transform-iters "$FIXED_ITERS" \
     --csv-out "$TMP_DIR/build_probe_tomii.csv"
 # Subsequent cells use --no-clean (binary already built above).
@@ -117,7 +117,7 @@ python "$TOMII_DIR/run_bench.py" \
 echo ""
 echo "Building Taskflow (TRANSFORM_ITERS=$FIXED_ITERS)..."
 python "$TF_DIR/run_bench.py" \
-    --slots 1 --workers "$FIXED_W" --streams 1 --warmup 0 \
+    --slots 1 --workers "$FIXED_W" --frames 1 --warmup 0 \
     --csv-out "$TMP_DIR/build_probe_tf.csv"
 # Subsequent TF cells use --no-clean.
 
@@ -125,8 +125,8 @@ python "$TF_DIR/run_bench.py" \
 # Write combined CSV headers
 # ---------------------------------------------------------------------------
 
-echo "system,n,items_per_stream,slots,workers,streams,ms_per_stream,transform_iters,peak_rss_kb" > "$COMBINED_TOMII"
-echo "system,n,items_per_stream,slots,workers,streams,ms_per_stream,transform_iters,peak_rss_kb" > "$COMBINED_TF"
+echo "system,n,items_per_frame,slots,workers,frames,ms_per_frame,transform_iters,peak_rss_kb" > "$COMBINED_TOMII"
+echo "system,n,items_per_frame,slots,workers,frames,ms_per_frame,transform_iters,peak_rss_kb" > "$COMBINED_TF"
 
 # ---------------------------------------------------------------------------
 # Sweep loop
@@ -175,7 +175,7 @@ for S in "${SWEEP_S[@]}"; do
         python "$TOMII_DIR/run_bench.py" \
             --slots "$S" \
             --workers "$FIXED_W" \
-            --streams "$T" \
+            --frames "$T" \
             --warmup "$WARMUP" \
             --transform-iters "$FIXED_ITERS" \
             --no-clean \
@@ -206,7 +206,7 @@ for S in "${SWEEP_S[@]}"; do
         python "$TF_DIR/run_bench.py" \
             --slots "$S" \
             --workers "$FIXED_W" \
-            --streams "$T" \
+            --frames "$T" \
             --warmup "$WARMUP" \
             --no-clean \
             --csv-out "$CELL_CSV_TF"

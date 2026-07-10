@@ -38,7 +38,7 @@ python examples/stream-analytics/run_bench.py --workers 4 --slots 8
 python examples/stream-analytics/verify.py
 ```
 
-Runs a single stream with a known threshold and checks that the output block in
+Runs a single frame with a known threshold and checks that the output block in
 `result.txt` matches `result.golden.txt` exactly. Prints `PASS` on success.
 
 ## Tuning knobs
@@ -47,8 +47,8 @@ Runs a single stream with a known threshold and checks that the output block in
 |------|---------|--------|
 | `--workers` | 2 | Rayon worker threads |
 | `--system-threads` | 3 | Resolution threads |
-| `--slots` | 2 | Concurrent stream slots |
-| `--max-streams` | 1 | Streams processed before exit |
+| `--slots` | 2 | Concurrent frame slots |
+| `--max-frames` | 1 | Frames processed before exit |
 | `--slot-priority` | off | Enable slot-level priority scheduling |
 | `--no-clean` | — | Skip library rebuild |
 

@@ -77,15 +77,15 @@ Taskflow uses its default `tf::Executor` with no special flags. Tomii's publishe
 |---|---|---|---|
 | `--slots` | `1 4 16 64` | both | Concurrent slot counts to sweep |
 | `--workers` | `1 2 4 8` | both | Worker thread counts to sweep |
-| `--streams` | 2000 | both | Measured streams per cell |
-| `--warmup` | 200 | both | Warmup streams excluded from timing |
+| `--frames` | 2000 | both | Measured frames per cell |
+| `--warmup` | 200 | both | Warmup frames excluded from timing |
 | `--receiver-threads` | 4 | Tomii | Dedicated UDP receiver threads |
 | `--system-threads` | 2 | Tomii | Resolution threads |
 | `--no-clean` | — | both | Skip rebuild |
 
 ## Output
 
-Both sides write `ms_per_slot` (wall-clock ms ÷ streams) to a CSV:
+Both sides write `ms_per_slot` (wall-clock ms ÷ frames) to a CSV:
 
 | Side | CSV |
 |---|---|

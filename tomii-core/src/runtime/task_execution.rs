@@ -171,7 +171,7 @@ pub(super) fn worker_resolve_successors(
 
         // Inline continuation: reserve one ready successor for this worker
         // thread instead of spawning it through the scheduler.
-        // Stamp slot_gen so the trampoline's stale check passes on streams > 0.
+        // Stamp slot_gen so the trampoline's stale check passes on frames > 0.
         let inline = if sctx.cfg.inline_continuation && !bufs.sched.is_empty() {
             bufs.sched.pop().map(|mut ni| {
                 ni.gen = slot_gen;
@@ -205,8 +205,8 @@ pub(super) fn worker_resolve_successors(
 /// `node_info.gen` is compared against the current `slot_data.generation[slot]`.  If they
 /// differ, the slot was recycled while this task waited in the Rayon queue; the task is
 /// silently dropped to prevent reading cleared predecessor results or corrupting the new
-/// stream's counters.  Post-nodes are exempt (they carry `gen = 0` and always run after all
-/// streams finish).
+/// frame's counters.  Post-nodes are exempt (they carry `gen = 0` and always run after all
+/// frames finish).
 ///
 /// Returns `Some(NodeInfo)` when an inline continuation was produced by
 /// `worker_resolve_successors` (i.e. the completing worker will immediately execute the
@@ -221,10 +221,10 @@ pub(super) fn execute_task(
     spawn_ns: u128,
 ) -> Option<NodeInfo> {
     // Stale-task guard: if the slot's generation has advanced since this task was
-    // scheduled, the slot was recycled (stream completed + reassigned) while the
+    // scheduled, the slot was recycled (frame completed + reassigned) while the
     // task sat in the Rayon queue.  Executing it would read cleared predecessor
-    // results → panic, or corrupt the new stream's dependency counters.
-    // Post-nodes are exempt (gen is always 0 and they run after all streams finish).
+    // results → panic, or corrupt the new frame's dependency counters.
+    // Post-nodes are exempt (gen is always 0 and they run after all frames finish).
     if !node_info.post_node {
         let current_gen =
             sctx.slots.generation[node_info.slot].load(std::sync::atomic::Ordering::Acquire) as u32;

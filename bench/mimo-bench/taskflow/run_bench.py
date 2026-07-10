@@ -90,7 +90,7 @@ def run_one(
     *,
     slots: int,
     workers: int,
-    streams: int,
+    frames: int,
     warmup: int,
     config: Path,
     sender_config: str,
@@ -105,8 +105,8 @@ def run_one(
         str(slots),
         "--workers",
         str(workers),
-        "--streams",
-        str(streams),
+        "--frames",
+        str(frames),
         "--warmup",
         str(warmup),
         "--config",
@@ -170,7 +170,7 @@ def main() -> None:
         help="worker thread counts to sweep",
     )
     p.add_argument(
-        "--streams",
+        "--frames",
         type=int,
         default=200,
         help="total frames to time (excluding warmup)",
@@ -221,7 +221,7 @@ def main() -> None:
             run_one(
                 slots=s,
                 workers=w,
-                streams=args.streams,
+                frames=args.frames,
                 warmup=args.warmup,
                 config=args.config,
                 sender_config=args.sender_config,

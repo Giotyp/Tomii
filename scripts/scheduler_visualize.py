@@ -35,7 +35,7 @@ Args:
     --slots: Number of worker slots (default: 0, auto-detect).
     --system-threads: Number of system threads (default: 0, auto-detect).
     --no-rcv: Use earliest worker task as time zero instead of earliest packet.
-    --slot: Plot only the specified slot (useful when using --record-stream).
+    --slot: Plot only the specified slot (useful when using --record-frame).
 """
 
 import argparse
@@ -799,7 +799,7 @@ def main():
     p.add_argument(
         "--slot",
         type=int,
-        help="Plot only the specified slot (useful when using --record-stream).",
+        help="Plot only the specified slot (useful when using --record-frame).",
         default=None,
     )
 

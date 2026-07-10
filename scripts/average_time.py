@@ -307,8 +307,8 @@ def average_timing_files(files: List[str]) -> TimingFile:
     avg_file.timing_method = template.timing_method
     avg_file.worker_slots_range = template.worker_slots_range
     avg_file.system_slots_range = template.system_slots_range
-    avg_file.total_streams = template.total_streams
-    avg_file.streams_per_slot = template.streams_per_slot.copy()
+    avg_file.total_frames = template.total_frames
+    avg_file.frames_per_slot = template.frames_per_slot.copy()
 
     # Average aggregated statistics with unit conversion
     total_runtime_ns = [
@@ -321,33 +321,33 @@ def average_timing_files(files: List[str]) -> TimingFile:
     )
 
     avg_time_ns = [
-        convert_to_ns(f.avg_time_per_stream[0], f.avg_time_per_stream[1])
+        convert_to_ns(f.avg_time_per_frame[0], f.avg_time_per_frame[1])
         for f in parsed_files
     ]
     avg_avg_ns = sum(avg_time_ns) / n
-    avg_file.avg_time_per_stream = (
-        convert_from_ns(avg_avg_ns, template.avg_time_per_stream[1]),
-        template.avg_time_per_stream[1],
+    avg_file.avg_time_per_frame = (
+        convert_from_ns(avg_avg_ns, template.avg_time_per_frame[1]),
+        template.avg_time_per_frame[1],
     )
 
     min_ns = [
-        convert_to_ns(f.min_max_per_stream[0][0], f.min_max_per_stream[0][1])
+        convert_to_ns(f.min_max_per_frame[0][0], f.min_max_per_frame[0][1])
         for f in parsed_files
     ]
     max_ns = [
-        convert_to_ns(f.min_max_per_stream[1][0], f.min_max_per_stream[1][1])
+        convert_to_ns(f.min_max_per_frame[1][0], f.min_max_per_frame[1][1])
         for f in parsed_files
     ]
     avg_min_ns = sum(min_ns) / n
     avg_max_ns = sum(max_ns) / n
-    avg_file.min_max_per_stream = (
+    avg_file.min_max_per_frame = (
         (
-            convert_from_ns(avg_min_ns, template.min_max_per_stream[0][1]),
-            template.min_max_per_stream[0][1],
+            convert_from_ns(avg_min_ns, template.min_max_per_frame[0][1]),
+            template.min_max_per_frame[0][1],
         ),
         (
-            convert_from_ns(avg_max_ns, template.min_max_per_stream[1][1]),
-            template.min_max_per_stream[1],
+            convert_from_ns(avg_max_ns, template.min_max_per_frame[1][1]),
+            template.min_max_per_frame[1],
         ),
     )
 
@@ -361,16 +361,16 @@ def average_timing_files(files: List[str]) -> TimingFile:
         template.total_compute_time[1],
     )
 
-    avg_compute_stream_ns = [
+    avg_compute_frame_ns = [
         convert_to_ns(
-            f.avg_compute_time_per_stream[0], f.avg_compute_time_per_stream[1]
+            f.avg_compute_time_per_frame[0], f.avg_compute_time_per_frame[1]
         )
         for f in parsed_files
     ]
-    avg_avg_compute_ns = sum(avg_compute_stream_ns) / n
-    avg_file.avg_compute_time_per_stream = (
-        convert_from_ns(avg_avg_compute_ns, template.avg_compute_time_per_stream[1]),
-        template.avg_compute_time_per_stream[1],
+    avg_avg_compute_ns = sum(avg_compute_frame_ns) / n
+    avg_file.avg_compute_time_per_frame = (
+        convert_from_ns(avg_avg_compute_ns, template.avg_compute_time_per_frame[1]),
+        template.avg_compute_time_per_frame[1],
     )
 
     # Average per-task analysis
@@ -384,7 +384,7 @@ def average_timing_files(files: List[str]) -> TimingFile:
         }
 
         # Average timing metrics with unit conversion
-        for metric in ["avg_stream", "avg_task", "min", "max", "total"]:
+        for metric in ["avg_frame", "avg_task", "min", "max", "total"]:
             if metric in template.tasks[task_idx]["timing"]:
                 # Convert to nanoseconds before averaging
                 values_ns = [
@@ -526,44 +526,44 @@ def write_timing_file(timing_file: TimingFile, output_path: str):
 
         # Write aggregated statistics
         f.write("Aggregated Statistics (All Slots):\n")
-        f.write(f"  Total Streams Processed: {timing_file.total_streams}\n")
+        f.write(f"  Total Frames Processed: {timing_file.total_frames}\n")
 
-        # Write streams per slot
+        # Write frames per slot
         slot_str = ", ".join(
-            [f"Slot {k}: {v}" for k, v in sorted(timing_file.streams_per_slot.items())]
+            [f"Slot {k}: {v}" for k, v in sorted(timing_file.frames_per_slot.items())]
         )
-        f.write(f"  Streams per Slot: {slot_str}\n")
+        f.write(f"  Frames per Slot: {slot_str}\n")
 
         # Auto-convert units for better readability
         total_runtime_val, total_runtime_unit = auto_convert_unit(
             *timing_file.total_runtime
         )
         avg_time_val, avg_time_unit = auto_convert_unit(
-            *timing_file.avg_time_per_stream
+            *timing_file.avg_time_per_frame
         )
-        min_val, min_unit = auto_convert_unit(*timing_file.min_max_per_stream[0])
-        max_val, max_unit = auto_convert_unit(*timing_file.min_max_per_stream[1])
+        min_val, min_unit = auto_convert_unit(*timing_file.min_max_per_frame[0])
+        max_val, max_unit = auto_convert_unit(*timing_file.min_max_per_frame[1])
         total_compute_val, total_compute_unit = auto_convert_unit(
             *timing_file.total_compute_time
         )
         avg_compute_val, avg_compute_unit = auto_convert_unit(
-            *timing_file.avg_compute_time_per_stream
+            *timing_file.avg_compute_time_per_frame
         )
 
         f.write(
             f"  Total Runtime: {format_unit_value(total_runtime_val, total_runtime_unit)}\n"
         )
         f.write(
-            f"  Avg Time Per Stream: {format_unit_value(avg_time_val, avg_time_unit)}\n"
+            f"  Avg Time Per Frame: {format_unit_value(avg_time_val, avg_time_unit)}\n"
         )
         f.write(
-            f"  Min/Max Per Stream: {format_unit_value(min_val, min_unit)} / {format_unit_value(max_val, max_unit)}\n"
+            f"  Min/Max Per Frame: {format_unit_value(min_val, min_unit)} / {format_unit_value(max_val, max_unit)}\n"
         )
         f.write(
             f"  Total Compute Time: {format_unit_value(total_compute_val, total_compute_unit)}\n"
         )
         f.write(
-            f"  Avg Compute Time Per Stream: {format_unit_value(avg_compute_val, avg_compute_unit)}\n"
+            f"  Avg Compute Time Per Frame: {format_unit_value(avg_compute_val, avg_compute_unit)}\n"
         )
         f.write("****************\n")
 
@@ -577,9 +577,9 @@ def write_timing_file(timing_file: TimingFile, output_path: str):
 
             # Write timing line
             timing_parts = []
-            if "avg_stream" in task["timing"]:
-                val, unit = auto_convert_unit(*task["timing"]["avg_stream"])
-                timing_parts.append(f"Avg/Stream: {format_unit_value(val, unit)}")
+            if "avg_frame" in task["timing"]:
+                val, unit = auto_convert_unit(*task["timing"]["avg_frame"])
+                timing_parts.append(f"Avg/Frame: {format_unit_value(val, unit)}")
             if "avg_task" in task["timing"]:
                 val, unit = auto_convert_unit(*task["timing"]["avg_task"])
                 timing_parts.append(f"Avg/Task: {format_unit_value(val, unit)}")

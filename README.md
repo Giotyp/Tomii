@@ -5,9 +5,9 @@
 Tomii implements **Tripartite Decoupling** separating the three following artifacts: 1) Computation structure, 2) Kernel Implementation, 3) Runtime. 
 Each artifact can be modified independently and Tomii is responsible for combining them at compile (transform kernels into tomii-suitable format) or execution time (parse computation structure description).
 
-Tomii is *not* a general-purpose Taskflow or TBB replacement. For pure single-stream
+Tomii is *not* a general-purpose Taskflow or TBB replacement. For pure single-frame
 micro-task DAGs where dispatch overhead dominates, Taskflow is faster. Tomii's advantage
-is in workloads that benefit from concurrent streams, generational slot reuse, and
+is in workloads that benefit from concurrent frames, generational slot reuse, and
 structured graph surfaces — particularly MIMO-class packet-driven pipelines and
 agent-driven automated optimisation loops.
 
@@ -100,7 +100,7 @@ app.build(func_path="plugin/src/lib.rs",      # Rust source — auto-generates w
 ### Run options
 
 ```python
-app.run(workers=8, system_threads=2, slots=4, max_streams=100,
+app.run(workers=8, system_threads=2, slots=4, max_frames=100,
         timing="timing.csv", report="report.json",
         inline_continuation=True, coalesce_barriers=True)
 ```
@@ -125,8 +125,8 @@ Pass `report="report.json"` to `app.run()` for a JSON performance report after e
 
 | Key | Description |
 |---|---|
-| `summary.avg_latency_us` / `p50` / `p99` | Stream latency statistics |
-| `summary.throughput_streams_per_sec` | End-to-end throughput |
+| `summary.avg_latency_us` / `p50` / `p99` | Frame latency statistics |
+| `summary.throughput_frames_per_sec` | End-to-end throughput |
 | `summary.scheduling_overhead_diagnostic` | `overhead_pct`, `overhead_us`, interpretation |
 | `per_node` | Per-node avg/p99 exec time, `on_critical_path` flag |
 | `optimization_suggestions` | Prioritised list: category, action, knob, estimated speedup |
@@ -172,7 +172,7 @@ ready-to-run script from the current graph.
 ```
 cargo run -p tomii-core --bin main -- \
   --json graph.json --dylib plugin.so \
-  --workers 4 --slots 2 --max-streams 100
+  --workers 4 --slots 2 --max-frames 100
 ```
 
 Key flags: `--workers`, `--slots`, `--system-threads`, `--timing`, `--report`,
@@ -207,23 +207,23 @@ See `examples/scheduler-plugin/` for a minimal FIFO example and
 ```bash
 cd bench/mimo-bench
 # requires Intel MKL, Agora sender (see README)
-python tomii/run_bench.py --workers 4 --slots 4 --streams 200
-python taskflow/run_bench.py --workers 4 --slots 4 --streams 200
+python tomii/run_bench.py --workers 4 --slots 4 --frames 200
+python taskflow/run_bench.py --workers 4 --slots 4 --frames 200
 ```
 
 Tomii dispatches FFT tasks as each UDP packet arrives; Taskflow must collect all packets
 before submitting the full DAG. This packet-overlap is the structural advantage the
 benchmark measures. See `bench/mimo-bench/README.md` for topology and metric.
 
-### Example #2 — Multi-stream pipeline S-scaling
+### Example #2 — Multi-frame pipeline S-scaling
 
 ```bash
 cd bench/pipeline-bench
-python tomii/run_bench.py --workers 4 --slots 16 --streams 200
-python taskflow/run_bench.py --workers 4 --slots 16 --streams 200
+python tomii/run_bench.py --workers 4 --slots 16 --frames 200
+python taskflow/run_bench.py --workers 4 --slots 16 --frames 200
 ```
 
-Sweeps concurrent-slot count (S) to show how per-stream scheduling overhead amortises
+Sweeps concurrent-slot count (S) to show how per-frame scheduling overhead amortises
 as multi-slot reuse takes effect. Run `run_bench.py` to generate the sweep CSV locally
 (run outputs are not committed). See `bench/pipeline-bench/README.md` for the topology
 and metric.

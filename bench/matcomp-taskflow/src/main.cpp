@@ -4,7 +4,7 @@
  * Replicates the 5-stage matrix-compute DAG from examples/matrix-compute-C/
  * using the same C kernels (FFTW3 single-precision + OpenBLAS cblas_cgemm).
  *
- * DAG per stream (N items, buf_size complex elements each):
+ * DAG per frame (N items, buf_size complex elements each):
  *
  *   gen_vec[0..N]       factor=N   malloc complex_f32[buf_size] via generate_vector()
  *       |
@@ -38,7 +38,7 @@
  *                                               equivalently marshaling − dispatch)
  *
  * Execution model: S independent tf::Taskflow clones submitted concurrently
- * to a shared tf::Executor (W workers). Batches of S streams are submitted and
+ * to a shared tf::Executor (W workers). Batches of S frames are submitted and
  * awaited together before the next batch begins — mirrors Tomii's slot model.
  */
 
@@ -95,7 +95,7 @@ struct SlotState
     std::vector<double> vtm_disp_us;   // fft_end → vtm lambda start
     std::vector<double> mm_disp_us;    // vtm_end → mm lambda start
 
-    // write_res (single value per stream)
+    // write_res (single value per frame)
     double write_res_us = 0.0;
 
     explicit SlotState(int n, int buf)
@@ -120,10 +120,10 @@ struct SlotState
 };
 
 // ---------------------------------------------------------------------------
-// Build one stream's DAG into `flow`.
+// Build one frame's DAG into `flow`.
 // ---------------------------------------------------------------------------
 
-static void build_stream_dag(
+static void build_frame_dag(
     tf::Taskflow      &flow,
     SlotState         &s,
     void*              fft_plan,
@@ -212,7 +212,7 @@ static void build_stream_dag(
 
 struct Results
 {
-    double ms_per_stream;
+    double ms_per_frame;
 
     // Kernel body times (µs/invocation)
     double gen_vec_kernel_us;
@@ -241,7 +241,7 @@ static Results run_clone(
 {
     const int N    = cli.n;
     const int S    = cli.slots;
-    const int T    = cli.streams;
+    const int T    = cli.frames;
     const int WARM = cli.warmup;
 
     std::mutex write_mutex;
@@ -253,7 +253,7 @@ static Results run_clone(
 
     std::vector<tf::Taskflow> flows(static_cast<size_t>(S));
     for (int s = 0; s < S; ++s)
-        build_stream_dag(flows[static_cast<size_t>(s)],
+        build_frame_dag(flows[static_cast<size_t>(s)],
                          slots[static_cast<size_t>(s)],
                          fft_plan, result_file, write_mutex);
 
@@ -316,10 +316,10 @@ static Results run_clone(
     }
 
     const double inv_tasks   = 1.0 / (static_cast<double>(measured_count) * N);
-    const double inv_streams = 1.0 / static_cast<double>(measured_count);
+    const double inv_frames = 1.0 / static_cast<double>(measured_count);
 
     Results r;
-    r.ms_per_stream      = total_ms * inv_streams;
+    r.ms_per_frame      = total_ms * inv_frames;
     r.gen_vec_kernel_us  = sum_gv_kern  * inv_tasks;
     r.fft_kernel_us      = sum_fft_kern * inv_tasks;
     r.vtm_kernel_us      = sum_vtm_kern * inv_tasks;
@@ -328,7 +328,7 @@ static Results run_clone(
     r.fft_disp_us        = sum_fft_disp * inv_tasks;
     r.vtm_disp_us        = sum_vtm_disp * inv_tasks;
     r.mm_disp_us         = sum_mm_disp  * inv_tasks;
-    r.write_res_us       = sum_wr_us    * inv_streams;
+    r.write_res_us       = sum_wr_us    * inv_frames;
     return r;
 }
 
@@ -347,8 +347,8 @@ int main(int argc, char **argv)
     }
 
     std::printf(
-        "tf_matcomp | N=%d | buf=%d | slots=%d | workers=%d | streams=%d | warmup=%d\n",
-        cli.n, cli.buf_size, cli.slots, cli.workers, cli.streams, cli.warmup);
+        "tf_matcomp | N=%d | buf=%d | slots=%d | workers=%d | frames=%d | warmup=%d\n",
+        cli.n, cli.buf_size, cli.slots, cli.workers, cli.frames, cli.warmup);
 
     void *fft_plan = fft_planner(static_cast<size_t>(cli.buf_size));
     if (!fft_plan) { std::fprintf(stderr, "fft_planner returned NULL\n"); return 1; }
@@ -374,7 +374,7 @@ int main(int argc, char **argv)
 
     std::printf(
         "\n"
-        "=== Per-task breakdown (µs/invocation, W=%d S=%d N=%d, %d streams) ===\n"
+        "=== Per-task breakdown (µs/invocation, W=%d S=%d N=%d, %d frames) ===\n"
         "              kernel    dispatch    total\n"
         "  gen_vec:   %7.2f    %7.2f    %7.2f\n"
         "  fft:       %7.2f    %7.2f    %7.2f\n"
@@ -382,14 +382,14 @@ int main(int argc, char **argv)
         "  mat_mul:   %7.2f    %7.2f    %7.2f\n"
         "  write_res: %7.0f    (I/O; mutex-serialised across %d clones)\n"
         "\n"
-        "=== Per-stream compute totals (kernel+dispatch) × N=%d ===\n"
+        "=== Per-frame compute totals (kernel+dispatch) × N=%d ===\n"
         "  Kernel only:       %6.0f µs\n"
         "  TF dispatch only:  %6.0f µs\n"
         "  Kernel + dispatch: %6.0f µs\n"
         "\n"
-        "  Wall-clock per stream: %.3f ms  (incl. write_res)\n"
-        "  Throughput:            %.1f streams/s\n",
-        cli.workers, cli.slots, cli.n, cli.streams,
+        "  Wall-clock per frame: %.3f ms  (incl. write_res)\n"
+        "  Throughput:            %.1f frames/s\n",
+        cli.workers, cli.slots, cli.n, cli.frames,
         r.gen_vec_kernel_us, r.gen_vec_disp_us, r.gen_vec_kernel_us + r.gen_vec_disp_us,
         r.fft_kernel_us,     r.fft_disp_us,     r.fft_kernel_us     + r.fft_disp_us,
         r.vtm_kernel_us,     r.vtm_disp_us,     r.vtm_kernel_us     + r.vtm_disp_us,
@@ -397,14 +397,14 @@ int main(int argc, char **argv)
         r.write_res_us,      cli.slots,
         cli.n,
         kern_only_us, disp_only_us, total_task_us,
-        r.ms_per_stream, 1000.0 / r.ms_per_stream);
+        r.ms_per_frame, 1000.0 / r.ms_per_frame);
 
     std::printf("Peak RSS: %ld kB\n", peak_rss_kb());
 
     if (!cli.output.empty()) {
         append_matcomp_csv(
             cli.output, cli.n, cli.buf_size, cli.slots, cli.workers,
-            cli.streams, r.ms_per_stream,
+            cli.frames, r.ms_per_frame,
             r.gen_vec_kernel_us, r.fft_kernel_us, r.vtm_kernel_us, r.mm_kernel_us,
             r.gen_vec_disp_us,   r.fft_disp_us,   r.vtm_disp_us,  r.mm_disp_us);
         std::printf("CSV: %s\n", cli.output.c_str());

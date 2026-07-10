@@ -49,7 +49,7 @@ pub enum BatchOutcome {
 ///
 /// Implementors must be `Send + Sync` because the same instance may be called
 /// from multiple resolution threads simultaneously (one call per thread per
-/// batch). Each call receives independent `batch` and `stream_slot_activity`
+/// batch). Each call receives independent `batch` and `frame_slot_activity`
 /// buffers — no shared mutable state is required beyond `&Arc<SharedData>`.
 pub trait ResolutionStrategy: Send + Sync + 'static {
     /// Drive one complete batch of dependency resolution.
@@ -69,7 +69,7 @@ pub trait ResolutionStrategy: Send + Sync + 'static {
         thread_id: usize,
         thread_slot: usize,
         cond_indexes: &[Vec<usize>],
-        stream_slot_activity: &mut HashMap<usize, bool>,
+        frame_slot_activity: &mut HashMap<usize, bool>,
         start_ns: u128,
     ) -> BatchOutcome;
 
@@ -118,7 +118,7 @@ impl ResolutionStrategy for MultiSlotBatchStrategy {
         thread_id: usize,
         thread_slot: usize,
         cond_indexes: &[Vec<usize>],
-        stream_slot_activity: &mut HashMap<usize, bool>,
+        frame_slot_activity: &mut HashMap<usize, bool>,
         start_ns: u128,
     ) -> BatchOutcome {
         if batch.is_empty() {
@@ -131,7 +131,7 @@ impl ResolutionStrategy for MultiSlotBatchStrategy {
             thread_id,
             thread_slot,
             cond_indexes,
-            stream_slot_activity,
+            frame_slot_activity,
             start_ns,
         );
         BatchOutcome::Continue

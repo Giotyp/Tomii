@@ -27,7 +27,7 @@ per-thread CUDA stream.
 python examples/gpu-vectoradd/run_bench.py
 
 # Scale up:
-python examples/gpu-vectoradd/run_bench.py --workers 4 --max-streams 32 --vec-size 4194304
+python examples/gpu-vectoradd/run_bench.py --workers 4 --max-frames 32 --vec-size 4194304
 ```
 
 ## Tuning knobs
@@ -36,13 +36,13 @@ python examples/gpu-vectoradd/run_bench.py --workers 4 --max-streams 32 --vec-si
 |------|---------|--------|
 | `--workers` | 4 | Worker threads (≥2 recommended for GPU proxy) |
 | `--system-threads` | 3 | Resolution threads |
-| `--slots` | 2 | Concurrent stream slots |
-| `--max-streams` | 4 | Streams processed before exit |
+| `--slots` | 2 | Concurrent frame slots |
+| `--max-frames` | 4 | Frames processed before exit |
 | `--vec-size` | 1048576 | Float elements per vector (1M default) |
 | `--no-clean` | — | Skip library rebuild |
 
 ## Output
 
 The `validate` node checks that `vadd_gpu` results equal `a + b` element-wise
-and prints a pass/fail message per stream. Timing CSV is written when `--record`
+and prints a pass/fail message per frame. Timing CSV is written when `--record`
 is enabled (default).

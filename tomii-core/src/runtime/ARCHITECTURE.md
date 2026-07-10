@@ -38,17 +38,17 @@ Network socket
     v
 packet_processing.rs
     |
-    +---> admission window check: stream < stream_complete_counter + slots?
+    +---> admission window check: frame < frame_complete_counter + slots?
     |         |
     |         +-- out of window: park decoded packet in net.pending_frames
-    |               (bounded at stream_packets x slots; on overflow the
+    |               (bounded at frame_packets x slots; on overflow the
     |                furthest-out frame is dropped WHOLE via frame_dropped so
-    |                the run degrades instead of wedging on a stream left
+    |                the run degrades instead of wedging on a frame left
     |                permanently incomplete by partial packet loss).
-    |               Parked streams are re-injected at the top of each poll
+    |               Parked frames are re-injected at the top of each poll
     |               once the window advances.
     |
-    +---> assign_stream_to_available_slot()
+    +---> assign_frame_to_available_slot()
     |         |
     |         +-- Inactive slot: mark Active, spawn initial_nodes()
     |         +-- Occupied but another Inactive found: mark Buffering,
@@ -230,7 +230,7 @@ thread running `check_slots` could observe `pending_tasks == 0`,
 conclude the slot is done. It would then call `reset_slot_state` (bumping
 generation, resetting counters). Meanwhile, Phase 3 would still be calling
 `decrease_and_get_ready_into` on the now-reset dependency counters of the next
-stream, causing a threshold underflow: the counter would go from its reset
+frame, causing a threshold underflow: the counter would go from its reset
 value downward by 1 without the correct initial decrement sequence, preventing
 condition tasks from ever spawning. This was Bug #20 in the project history.
 
@@ -242,24 +242,24 @@ processing for the batch is finished.**
 ## Slot lifecycle and generation counters
 
 A **slot** is a processing lane. At most `MAX_SLOTS` (64) slots can be active
-concurrently. Each slot processes exactly one stream at a time. The `slots`
-config value is the maximum number of concurrently in-flight streams.
+concurrently. Each slot processes exactly one frame at a time. The `slots`
+config value is the maximum number of concurrently in-flight frames.
 
 ### Generation counter
 
 `SlotData::generation[slot]` is a `u64` atomic that is incremented each time a
-slot begins a new stream. Every `NodeInfo` token carries a `gen: u32` field
+slot begins a new frame. Every `NodeInfo` token carries a `gen: u32` field
 stamped at dispatch time in `send_to_scheduler`. When a worker or resolution
 thread processes a token, it checks `gen == current_generation[slot]`. If they
-differ, the token is from the previous stream (a stale task) and is silently
+differ, the token is from the previous frame (a stale task) and is silently
 dropped. This prevents stale tasks that lingered in the Rayon queue from
-decrementing the new stream's dependency counters.
+decrementing the new frame's dependency counters.
 
 The generation is bumped at the earliest safe point:
-- `Inactive → Active` transition in `assign_stream_to_available_slot`
+- `Inactive → Active` transition in `assign_frame_to_available_slot`
 - `Buffering → Active` transition in `activate_next_slot`
 
-This is done before counter resets in `reset_slot_state` so that old-stream
+This is done before counter resets in `reset_slot_state` so that old-frame
 in-flight tasks see gen mismatch before the counters are cleared.
 
 ### Slot state machine
@@ -275,14 +275,14 @@ Inactive ───────────────────────�
     |    slot completion)             |
     |<--------------------------------+
     |
-    +<-- (release_slot after stream completion)
+    +<-- (release_slot after frame completion)
 ```
 
 In non-slot-priority mode: `Inactive → Active → Inactive`, cycling for each
-new stream. `restart_slot_nonnetwork` re-registers the slot in-place without
+new frame. `restart_slot_nonnetwork` re-registers the slot in-place without
 going through `Inactive`.
 
-In slot-priority mode: streams assigned when the preferred slot is busy go to
+In slot-priority mode: frames assigned when the preferred slot is busy go to
 `Buffering`. They transition to `Active` only when the preceding slot completes,
 via `activate_next_slot` called from `activate_buffered_slot`.
 
@@ -307,28 +307,28 @@ after winning the CAS to rule out a stale win from a concurrent reset.
 
 Two `parking_lot::RwLock` guards protect shared slot metadata:
 
-- `SlotData::running_streams: RwLock<Vec<(stream_id, slot_id)>>`
+- `SlotData::running_frames: RwLock<Vec<(frame_id, slot_id)>>`
 - `SlotData::states: RwLock<Vec<SlotState>>`
 
-**Invariant: always acquire `running_streams` before `slot_states`.**
+**Invariant: always acquire `running_frames` before `slot_states`.**
 
 Every function that holds both locks simultaneously must acquire them in this
 order:
 
 ```
-running_streams.write()  // first
+running_frames.write()  // first
 slot_states.write()      // second
 ```
 
 Violating this order causes deadlock when two threads each hold one lock and
 wait for the other. This was the root cause of Bugs #11 and #12:
 
-- Bug #11: `release_slot` acquired `slot_states` then `running_streams` (inverted).
-- Bug #12: `activate_next_slot` acquired `slot_states` then `running_streams`
-  (inverted), while `assign_stream_to_available_slot` used the correct order.
+- Bug #11: `release_slot` acquired `slot_states` then `running_frames` (inverted).
+- Bug #12: `activate_next_slot` acquired `slot_states` then `running_frames`
+  (inverted), while `assign_frame_to_available_slot` used the correct order.
 
-All three functions (`assign_stream_to_available_slot`, `activate_next_slot`,
-`release_slot`) now acquire `running_streams` first.
+All three functions (`assign_frame_to_available_slot`, `activate_next_slot`,
+`release_slot`) now acquire `running_frames` first.
 
 ---
 
@@ -377,7 +377,7 @@ flag ensures the idle cost is minimal.
 `ordering.rs` provides two helpers that select between `Acquire`/`AcqRel` and
 `SeqCst` based on `RuntimeConfig::single_slot_mode`:
 
-- **`single_slot_mode == true`** (exactly one concurrent stream): pairwise
+- **`single_slot_mode == true`** (exactly one concurrent frame): pairwise
   `Acquire`/`AcqRel` is sufficient because there is no concurrent
   reinitialisation racing with completion detection.
 - **`single_slot_mode == false`** (multiple concurrent slots): `SeqCst` is
@@ -389,7 +389,7 @@ flag ensures the idle cost is minimal.
 
 The `SeqCst` requirement applies to `generation`, `pending_tasks`,
 `pending_cond_tasks`, and `processing_count`. Other atomics (`needs_check`,
-`active_bitmap`, `stream_id`) use weaker orderings documented at their
+`active_bitmap`, `frame_id`) use weaker orderings documented at their
 call sites.
 
 ---
@@ -432,13 +432,13 @@ read edges from the arena, so a single change covers both paths. Keep the
 Do not break these without fully understanding the consequences:
 
 - `processing_count` decremented AFTER successor dispatch (Phase 4 ordering).
-  Violation causes threshold underflow in the next stream (Bug #20).
+  Violation causes threshold underflow in the next frame (Bug #20).
 
 - `check_slots` called unconditionally every resolution-loop iteration.
   Violation causes hangs when all threads simultaneously see an empty queue
   (Bug #21).
 
-- Lock ordering: acquire `running_streams` before `slot_states` in every
+- Lock ordering: acquire `running_frames` before `slot_states` in every
   function that holds both. Violation causes deadlock (Bugs #11, #12).
 
 - Generation bumped in `reset_slot_state` BEFORE counter resets. Violation
@@ -446,8 +446,8 @@ Do not break these without fully understanding the consequences:
   freshly-reset counters.
 
 - `node_results.reinit_slot(slot)` called BEFORE `release_slot(slot)` in
-  `process_slot_completion`. Violation allows a newly-assigned stream to read
-  stale results from the previous stream before the buffers are cleared
+  `process_slot_completion`. Violation allows a newly-assigned frame to read
+  stale results from the previous frame before the buffers are cleared
   (Bug #16).
 
 - `MAX_SLOTS = 64` is load-bearing for the `u64` completion bitmaps
@@ -457,7 +457,7 @@ Do not break these without fully understanding the consequences:
 
 - `SeqCst` on all slot-counter operations in multi-slot mode. Weakening to
   `AcqRel` or `Release` causes non-deterministic counter corruption across
-  stream boundaries (Bugs #14, #18, #19).
+  frame boundaries (Bugs #14, #18, #19).
 
 ## Performance envelope
 
@@ -487,9 +487,9 @@ collection → scheduling).  At high S or large fan-out graphs the resolution th
 becomes the bottleneck.  `--system-threads N` raises the resolution-thread count but
 introduces cross-thread slot ownership checks at each phase boundary.
 
-**Slot lifecycle overhead.**  Each stream requires one `reinit_slot` (generational
+**Slot lifecycle overhead.**  Each frame requires one `reinit_slot` (generational
 reset of all node buffers, O(nodes)) and one `release_slot` call.  For pipelines
-with many nodes and short per-stream work this can dominate.
+with many nodes and short per-frame work this can dominate.
 
 ### Workload classes Tomii targets
 
@@ -497,7 +497,7 @@ with many nodes and short per-stream work this can dominate.
   concurrent slots, long-running (minutes to hours).  The scheduling abstraction and
   slot lifecycle amortise well over these workloads.
 - **Multi-slot fan-out**: pipelines where the same graph topology is applied to many
-  independent streams concurrently.  Slot parallelism hides resolution-thread latency.
+  independent frames concurrently.  Slot parallelism hides resolution-thread latency.
 - **Heterogeneous DAGs with barriers**: mixed compute/network nodes, conditional
   routing via `$barrier`/`$dep`, grouped synchronisation across fan-in nodes.
 
@@ -507,6 +507,6 @@ with many nodes and short per-stream work this can dominate.
   resolution overhead.  Static-graph executors (Taskflow, TBB flow graph) with
   pre-compiled task graphs have lower per-invocation cost here.
 - **Pure `parallel_for` workloads**: homogeneous loops over independent elements are
-  better served by Rayon directly or a fork-join runtime without the slot/stream model.
-- **Dynamic-topology DAGs**: graphs where the node set or edges change between streams
+  better served by Rayon directly or a fork-join runtime without the slot/frame model.
+- **Dynamic-topology DAGs**: graphs where the node set or edges change between frames
   are not supported; the graph is compiled once at startup and reused across all slots.

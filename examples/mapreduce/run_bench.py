@@ -2,7 +2,7 @@
 
 Demonstrates a canonical Map→Reduce pipeline over synthetic text shards:
 
-    generate_shard (x num_shards)   — produce a random token stream per shard
+    generate_shard (x num_shards)   — produce a random token frame per shard
          ↓  1:1 $res
     map_tokens     (x num_shards)   — count word frequencies in each shard
          ↓  variadic $res (all results)
@@ -45,7 +45,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--tokens-per-shard", type=int, default=256,
                    help="Tokens generated per shard (default: 256)")
     p.add_argument("--workers",          type=int, default=2)
-    p.add_argument("--max-streams",      type=int, default=1)
+    p.add_argument("--max-frames",      type=int, default=1)
     p.add_argument("--no-clean", dest="clean", action="store_false", default=True)
     p.add_argument("--debug",            action="store_true", default=False)
     return p.parse_args()
@@ -160,7 +160,7 @@ def main() -> None:
         dylib=str(c_lib),
         env=env,
         workers=args.workers,
-        max_streams=args.max_streams,
+        max_frames=args.max_frames,
         debug=args.debug,
     )
 

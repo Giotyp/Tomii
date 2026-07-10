@@ -13,7 +13,7 @@ class RunConfig:
     system_threads: int = 1
     receiver_threads: int = 1
     slots: int = 1
-    max_streams: int = 1
+    max_frames: int = 1
     max_runtime: int = 0  # 0 = no limit
     # ── Scheduler ────────────────────────────────────────────────────────────
     fifo: bool = False
@@ -26,9 +26,9 @@ class RunConfig:
     # ── Timing / output ──────────────────────────────────────────────────────
     timing: Optional[str] = None
     record: bool = False
-    record_stream: Optional[int] = None
+    record_frame: Optional[int] = None
     use_rdtsc: bool = False
-    exclude_streams: int = 0
+    exclude_frames: int = 0
     report: Optional[str] = None
     # ── Tuning knobs ─────────────────────────────────────────────────────────
     batch_queue_capacity: int = 65536
@@ -57,16 +57,16 @@ class RunConfig:
             str(self.receiver_threads),
             "--slots",
             str(self.slots),
-            "--max-streams",
-            str(self.max_streams),
+            "--max-frames",
+            str(self.max_frames),
             "--max-runtime",
             str(self.max_runtime),
             "--batching-size",
             str(self.batching_size),
             "--batching-limit",
             str(self.batching_limit),
-            "--exclude-streams",
-            str(self.exclude_streams),
+            "--exclude-frames",
+            str(self.exclude_frames),
             # Tuning knobs
             "--batch-queue-capacity",
             str(self.batch_queue_capacity),
@@ -101,8 +101,8 @@ class RunConfig:
             args.append("--use-rdtsc")
         if self.timing is not None:
             args += ["--timing", self.timing]
-        if self.record_stream is not None:
-            args += ["--record-stream", str(self.record_stream)]
+        if self.record_frame is not None:
+            args += ["--record-frame", str(self.record_frame)]
         if self.report is not None:
             args += ["--report", self.report]
         return args

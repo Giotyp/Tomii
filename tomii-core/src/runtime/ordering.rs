@@ -2,7 +2,7 @@
 //!
 //! # Why two orderings?
 //!
-//! In `single_slot_mode` (exactly one concurrent stream) only one stream runs at a time,
+//! In `single_slot_mode` (exactly one concurrent frame) only one frame runs at a time,
 //! so pairwise `Acquire`/`AcqRel` synchronisation between the producing and consuming
 //! sides is sufficient.
 //!

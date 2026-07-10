@@ -121,7 +121,7 @@ class NetworkConfigJson(BaseModel):
     socket_type: str
     num_sockets: Factor
     packet_length: Factor
-    stream_packets: Factor
+    frame_packets: Factor
     buffer_depth: int = 128  # default matches Rust's default_buffer_depth()
     address: str
     start_port: Factor

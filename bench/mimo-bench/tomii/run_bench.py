@@ -35,7 +35,7 @@ def _parse_avg_ms(timing_file: Path) -> float:
     if not timing_file.exists():
         return float("nan")
     text = timing_file.read_text()
-    m = re.search(r"Avg Time Per Stream:\s+([\d.]+)(ms|µs|us|s)", text)
+    m = re.search(r"Avg Time Per Frame:\s+([\d.]+)(ms|µs|us|s)", text)
     if not m:
         return float("nan")
     val, unit = float(m.group(1)), m.group(2)
@@ -81,7 +81,7 @@ def run_one(
     timing_file = results_dir / f"tomii_mimo_s{slots}_w{workers}.txt"
     print(f"\n=== Tomii MIMO | slots={slots}  workers={workers} ===", flush=True)
 
-    # max_streams is set large so slots always restart; max_runtime is the real
+    # max_frames is set large so slots always restart; max_runtime is the real
     # exit trigger (sender sends 500 frames and stops after ~0.5 s).
     cmd = build_command(
         binary,
@@ -92,8 +92,8 @@ def run_one(
         system_threads=system_threads,
         receiver_threads=receiver_threads,
         slots=slots,
-        max_streams=5000,
-        exclude_streams=warmup,
+        max_frames=5000,
+        exclude_frames=warmup,
         max_runtime=max_runtime,
         timing=str(timing_file),
         use_rdtsc=True,
@@ -183,7 +183,7 @@ def main() -> None:
         "--warmup",
         type=int,
         default=20,
-        help="leading streams excluded from timing averages",
+        help="leading frames excluded from timing averages",
     )
     p.add_argument(
         "--max-runtime",
@@ -280,7 +280,7 @@ def main() -> None:
 
     csv_path = args.csv_out or (args.results_dir / "mimo_sweep.csv")
     with open(csv_path, "w") as f:
-        f.write("system,slots,workers,streams,ms_per_slot\n")
+        f.write("system,slots,workers,frames,ms_per_slot\n")
 
     for w in args.workers:
         for s in args.slots:

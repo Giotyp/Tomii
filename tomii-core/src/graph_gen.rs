@@ -346,7 +346,7 @@ pub fn from_json_str(contents: &str, workers: usize) -> Result<GraphSpec, crate:
             args: Vec::new(),
             id: node_id,
             loop_args: None,
-            factor: network_config.stream_packets,
+            factor: network_config.frame_packets,
             group_size: None,
             func_name: String::new(), // virtual node — no function
             loop_: None,
@@ -404,9 +404,7 @@ fn parse_network_config(
 
     let num_sockets = nc_json.num_sockets.resolve(init_vec, obj_id_map, workers);
     let packet_length = nc_json.packet_length.resolve(init_vec, obj_id_map, workers);
-    let stream_packets = nc_json
-        .stream_packets
-        .resolve(init_vec, obj_id_map, workers);
+    let frame_packets = nc_json.frame_packets.resolve(init_vec, obj_id_map, workers);
     let address: String = {
         let given = &nc_json.address;
         if let Some(&obj_id) = obj_id_map.get(given) {
@@ -437,7 +435,7 @@ fn parse_network_config(
         socket_type,
         num_sockets,
         packet_length,
-        stream_packets,
+        frame_packets,
         buffer_depth: nc_json.buffer_depth,
         address,
         start_port,

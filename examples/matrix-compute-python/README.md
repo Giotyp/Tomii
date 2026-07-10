@@ -45,6 +45,6 @@ Passed directly to `run_bench.sh` and forwarded to `run_bench.py`:
 | Flag | Default | Effect |
 |------|---------|--------|
 | `--workers` | 2 | Rayon worker threads |
-| `--slots` | 2 | Concurrent stream slots |
+| `--slots` | 2 | Concurrent frame slots |
 | `--python-interpreter` | `python3` | Python binary for the venv |
 | `--no-clean` | — | Skip library rebuild |

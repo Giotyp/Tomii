@@ -36,7 +36,7 @@ def main() -> None:
     log_file = results_dir / "grid_trials.jsonl"
 
     baseline = establish_baseline(
-        streams=args.streams,
+        frames=args.frames,
         warmup=args.warmup,
         results_dir=results_dir,
         workload=workload,
@@ -55,24 +55,24 @@ def main() -> None:
 
     for i, knobs in enumerate(cells):
         result = workload.evaluate(
-            knobs, streams=args.streams, warmup=args.warmup, space=space
+            knobs, frames=args.frames, warmup=args.warmup, space=space
         )
         record = TrialRecord(iteration=i, knobs=knobs, result=result, arm="grid")
         log_trial(record, log_file)
 
-        if result.verifier_ok and result.ms_per_stream is not None:
-            if result.ms_per_stream < best_ms:
-                best_ms = result.ms_per_stream
+        if result.verifier_ok and result.ms_per_frame is not None:
+            if result.ms_per_frame < best_ms:
+                best_ms = result.ms_per_frame
                 if baseline > 0.0:
                     delta_pct = (baseline - best_ms) / baseline * 100.0
                     print(
-                        f"[grid {i}] new best: {best_ms:.4f} ms/stream "
+                        f"[grid {i}] new best: {best_ms:.4f} ms/frame "
                         f"(delta: {delta_pct:.1f}%)",
                         flush=True,
                     )
                 else:
                     print(
-                        f"[grid {i}] new best: {best_ms:.4f} ms/stream",
+                        f"[grid {i}] new best: {best_ms:.4f} ms/frame",
                         flush=True,
                     )
         else:
@@ -87,7 +87,7 @@ def main() -> None:
         )
     else:
         print(
-            f"\nGrid search complete. best={best_ms:.4f} ms/stream "
+            f"\nGrid search complete. best={best_ms:.4f} ms/frame "
             f"— {budget}/{total_grid} cells evaluated"
         )
 

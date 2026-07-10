@@ -13,13 +13,13 @@ class TimingFile:
         self.system_slots_range = ""
 
         # Aggregated statistics
-        self.total_streams = 0
-        self.streams_per_slot = {}
+        self.total_frames = 0
+        self.frames_per_slot = {}
         self.total_runtime = (0.0, "ms")
-        self.avg_time_per_stream = (0.0, "ms")
-        self.min_max_per_stream = ((0.0, "ms"), (0.0, "ms"))
+        self.avg_time_per_frame = (0.0, "ms")
+        self.min_max_per_frame = ((0.0, "ms"), (0.0, "ms"))
         self.total_compute_time = (0.0, "µs")
-        self.avg_compute_time_per_stream = (0.0, "µs")
+        self.avg_compute_time_per_frame = (0.0, "µs")
 
         # Per-task analysis
         self.tasks = []  # List of task dictionaries
@@ -64,19 +64,19 @@ class TimingFile:
                 continue
 
             # Parse aggregated statistics
-            if line.startswith("Total Streams Processed:"):
-                self.total_streams = int(line.split(":")[1].strip())
+            if line.startswith("Total Frames Processed:"):
+                self.total_frames = int(line.split(":")[1].strip())
                 i += 1
                 continue
 
-            if line.startswith("Streams per Slot:"):
+            if line.startswith("Frames per Slot:"):
                 # Parse slot info (e.g., "Slot 0: 1")
                 slot_info = line.split(":", 1)[1].strip()
                 for slot_pair in slot_info.split(","):
                     if "Slot" in slot_pair:
                         slot_match = re.search(r"Slot (\d+): (\d+)", slot_pair)
                         if slot_match:
-                            self.streams_per_slot[int(slot_match.group(1))] = int(
+                            self.frames_per_slot[int(slot_match.group(1))] = int(
                                 slot_match.group(2)
                             )
                 i += 1
@@ -89,19 +89,19 @@ class TimingFile:
                 i += 1
                 continue
 
-            if line.startswith("Avg Time Per Stream:"):
+            if line.startswith("Avg Time Per Frame:"):
                 value_str = line.split(":")[1].strip()
                 value, unit = parse_unit_value(value_str)
-                self.avg_time_per_stream = (value, unit)
+                self.avg_time_per_frame = (value, unit)
                 i += 1
                 continue
 
-            if line.startswith("Min/Max Per Stream:"):
+            if line.startswith("Min/Max Per Frame:"):
                 rest = line.split(":")[1].strip()
                 parts = rest.split("/")
                 min_val, min_unit = parse_unit_value(parts[0].strip())
                 max_val, max_unit = parse_unit_value(parts[1].strip())
-                self.min_max_per_stream = ((min_val, min_unit), (max_val, max_unit))
+                self.min_max_per_frame = ((min_val, min_unit), (max_val, max_unit))
                 i += 1
                 continue
 
@@ -112,10 +112,10 @@ class TimingFile:
                 i += 1
                 continue
 
-            if line.startswith("Avg Compute Time Per Stream:"):
+            if line.startswith("Avg Compute Time Per Frame:"):
                 value_str = line.split(":")[1].strip()
                 value, unit = parse_unit_value(value_str)
-                self.avg_compute_time_per_stream = (value, unit)
+                self.avg_compute_time_per_frame = (value, unit)
                 i += 1
                 continue
 
@@ -161,8 +161,8 @@ class TimingFile:
             timing_line = lines[start_idx + 1].strip()
             if timing_line.startswith("Timing -"):
                 # Extract timing metrics - flexible unit matching
-                avg_stream_match = re.search(
-                    r"Avg/Stream: ([\d.]+)(µs|ns|ms|s)", timing_line
+                avg_frame_match = re.search(
+                    r"Avg/Frame: ([\d.]+)(µs|ns|ms|s)", timing_line
                 )
                 avg_task_match = re.search(
                     r"Avg/Task: ([\d.]+)(µs|ns|ms|s)", timing_line
@@ -171,10 +171,10 @@ class TimingFile:
                 max_match = re.search(r"Max: ([\d.]+)(µs|ns|ms|s)", timing_line)
                 total_match = re.search(r"Total: ([\d.]+)(µs|ns|ms|s)", timing_line)
 
-                if avg_stream_match:
-                    task["timing"]["avg_stream"] = (
-                        float(avg_stream_match.group(1)),
-                        avg_stream_match.group(2),
+                if avg_frame_match:
+                    task["timing"]["avg_frame"] = (
+                        float(avg_frame_match.group(1)),
+                        avg_frame_match.group(2),
                     )
                 if avg_task_match:
                     task["timing"]["avg_task"] = (

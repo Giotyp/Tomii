@@ -5,7 +5,7 @@
 //! correctly together.  Functions are no-ops (returning `CmTypes::None`) — the
 //! tests validate structural execution rather than computation.
 //!
-//! NOTE: `TomiiRt::run()` blocks the calling thread until all streams complete
+//! NOTE: `TomiiRt::run()` blocks the calling thread until all frames complete
 //! or `max_runtime` is exceeded.  Each test sets `max_runtime` to a short bound
 //! so a hang in the runtime surfaces as a test timeout rather than a deadlock.
 
@@ -47,7 +47,7 @@ fn run_graph(json: &str) {
 
     let config = RuntimeConfig {
         slots: 1,
-        max_streams: 1,
+        max_frames: 1,
         max_runtime: Some(5),
         system_threads: 1,
         workers: 2,
@@ -193,7 +193,7 @@ fn test_build_error_slots_zero() {
 
     let result = TomiiRtBuilder::new(compiled, scheduler)
         .slots(0)
-        .max_streams(1)
+        .max_frames(1)
         .build();
 
     assert!(
@@ -212,7 +212,7 @@ fn test_build_error_slots_too_large() {
 
     let result = TomiiRtBuilder::new(compiled, scheduler)
         .slots(65)
-        .max_streams(100)
+        .max_frames(100)
         .build();
 
     assert!(
@@ -221,10 +221,10 @@ fn test_build_error_slots_too_large() {
     );
 }
 
-/// Multiple streams through a single slot: verifies slot reinitialisation across
-/// stream boundaries (the core correctness invariant for Bugs #14–#22).
+/// Multiple frames through a single slot: verifies slot reinitialisation across
+/// frame boundaries (the core correctness invariant for Bugs #14–#22).
 #[test]
-fn test_multi_stream_single_slot() {
+fn test_multi_frame_single_slot() {
     let json = r#"
     {
         "nodes": [
@@ -249,7 +249,7 @@ fn test_multi_stream_single_slot() {
         scheduler,
         RuntimeConfig {
             slots: 1,
-            max_streams: 5,
+            max_frames: 5,
             max_runtime: Some(10),
             system_threads: 1,
             workers: 2,
@@ -354,7 +354,7 @@ mod plugin_tests {
         let mut rt =
             TomiiRtBuilder::new_with_plugin(compiled, Arc::new(PassthroughScheduler::new(2)))
                 .max_runtime(Some(5))
-                .max_streams(1)
+                .max_frames(1)
                 .build()
                 .expect("build failed");
 
@@ -463,7 +463,7 @@ mod worker_hook_and_run_until {
     }
 
     /// run_until: the predicate terminates a run that would otherwise churn
-    /// through a huge stream budget, and it observes sane progress snapshots.
+    /// through a huge frame budget, and it observes sane progress snapshots.
     #[test]
     fn test_run_until_predicate_terminates_run() {
         let json = r#"
@@ -500,10 +500,10 @@ mod worker_hook_and_run_until {
         let config = RuntimeConfig {
             slots: 1,
             // Budget far beyond what completes before the predicate fires
-            // (a few thousand streams at most in the ~30ms this test runs).
+            // (a few thousand frames at most in the ~30ms this test runs).
             // Not usize::MAX: the network build sizes a per-frame drop bitmap
-            // to max_streams + slots, which must stay allocatable.
-            max_streams: 10_000_000,
+            // to max_frames + slots, which must stay allocatable.
+            max_frames: 10_000_000,
             max_runtime: None,
             system_threads: 1,
             workers: 2,
@@ -528,7 +528,7 @@ mod worker_hook_and_run_until {
         let started = Instant::now();
         let mut ticks = 0usize;
         rt.run_until(|progress| {
-            assert_eq!(progress.max_streams, 10_000_000);
+            assert_eq!(progress.max_frames, 10_000_000);
             ticks += 1;
             ticks >= 3
         })

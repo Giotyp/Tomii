@@ -3,7 +3,7 @@
 use super::network_init::process_id_function;
 use super::reporting::should_record_slot;
 use super::shared_data::{PendingPacket, SharedData};
-use super::slot_management::{assign_stream_to_available_slot, initial_nodes};
+use super::slot_management::{assign_frame_to_available_slot, initial_nodes};
 use crate::async_recorder::submit_record;
 use crate::buffers::NodeInfo;
 use crate::debug::print_debug;
@@ -26,12 +26,12 @@ pub(super) fn poll_and_process_network_packets(
     packet_buf: &mut Vec<PacketMessage>,
     slots_dirty: &mut bool,
     cond_indexes: &[Vec<usize>],
-    stream_slot_activity: &mut HashMap<usize, bool>,
+    frame_slot_activity: &mut HashMap<usize, bool>,
     thread_core: usize,
     thread_id: usize,
     thread_slot: usize,
 ) {
-    let stream_packets = network_config.stream_packets;
+    let frame_packets = network_config.frame_packets;
     let packet_process_func = network_config.extract_packet_func.unwrap();
 
     // Cache index_function pointer outside packet loop to avoid
@@ -49,7 +49,7 @@ pub(super) fn poll_and_process_network_packets(
     let mut active_packet_batch: Vec<(NodeInfo, Option<CmTypes>)> =
         Vec::with_capacity(packet_buf.len());
 
-    // Re-admit parked packets whose streams have entered the admission window.
+    // Re-admit parked packets whose frames have entered the admission window.
     // Done before the fresh drain so older (parked) packets are processed first.
     // Relaxed is only an emptiness hint — a stale read delays this by one poll.
     if shared.net.pending_count.load(Ordering::Relaxed) > 0 {
@@ -61,7 +61,7 @@ pub(super) fn poll_and_process_network_packets(
             thread_core,
             thread_id,
             thread_slot,
-            stream_packets,
+            frame_packets,
         );
     }
 
@@ -76,12 +76,12 @@ pub(super) fn poll_and_process_network_packets(
         let packet_cm = decode_packet(shared, packet_msg, packet_process_func, thread_slot);
 
         let start_id = shared.telemetry.measure_start();
-        let new_stream_opt = process_id_function(shared, &packet_cm);
+        let new_frame_opt = process_id_function(shared, &packet_cm);
         shared
             .telemetry
             .record_timing(start_id, thread_slot, "ID Function", usize::MAX);
 
-        let Some(new_stream) = new_stream_opt else {
+        let Some(new_frame) = new_frame_opt else {
             print_debug(|| {
                 format!(
                     "Thread {:?} -- Skipping packet: ID function returned None",
@@ -91,30 +91,30 @@ pub(super) fn poll_and_process_network_packets(
             continue;
         };
 
-        // Admission window: a stream at or beyond `completed + slots` cannot be
+        // Admission window: a frame at or beyond `completed + slots` cannot be
         // assigned a slot yet.  Park it for re-injection once the window advances —
-        // dropping its head packets here would leave the stream permanently
+        // dropping its head packets here would leave the frame permanently
         // incomplete and wedge the slot it is later assigned to.
         let window_end = shared
             .telemetry
-            .stream_complete_counter
+            .frame_complete_counter
             .load(Ordering::SeqCst)
             + shared.config.slots;
-        if new_stream >= window_end {
+        if new_frame >= window_end {
             park_pending_packet(
                 shared,
-                new_stream,
+                new_frame,
                 packet_cm,
                 packet_timestamp,
                 receiver_core_id,
-                stream_packets,
+                frame_packets,
             );
             continue;
         }
 
         admit_packet(
             shared,
-            new_stream,
+            new_frame,
             packet_cm,
             packet_timestamp,
             receiver_core_id,
@@ -124,7 +124,7 @@ pub(super) fn poll_and_process_network_packets(
             thread_core,
             thread_id,
             thread_slot,
-            stream_packets,
+            frame_packets,
         );
     }
 
@@ -139,7 +139,7 @@ pub(super) fn poll_and_process_network_packets(
             thread_id,
             thread_slot,
             cond_indexes,
-            stream_slot_activity,
+            frame_slot_activity,
             start_ns_batch,
         );
         shared
@@ -150,12 +150,12 @@ pub(super) fn poll_and_process_network_packets(
 
 /// Admits one decoded, in-window packet: assigns it to a slot, routes it into the
 /// active batch (or the slot buffer for `Buffering` slots), records receive
-/// telemetry, and checks stream completion.  Shared by the fresh-packet drain
+/// telemetry, and checks frame completion.  Shared by the fresh-packet drain
 /// loop and pending-frame re-injection.
 #[allow(clippy::too_many_arguments)]
 fn admit_packet(
     shared: &Arc<SharedData>,
-    new_stream: usize,
+    new_frame: usize,
     packet_cm: CmTypes,
     packet_timestamp: Instant,
     receiver_core_id: usize,
@@ -165,11 +165,11 @@ fn admit_packet(
     thread_core: usize,
     thread_id: usize,
     thread_slot: usize,
-    stream_packets: usize,
+    frame_packets: usize,
 ) {
     let node_info = match assign_packet_to_slot(
         shared,
-        new_stream,
+        new_frame,
         &packet_cm,
         idx_func_ptr,
         slots_dirty,
@@ -184,11 +184,11 @@ fn admit_packet(
             // permanently lost frames that were milliseconds from a free slot.
             park_pending_packet(
                 shared,
-                new_stream,
+                new_frame,
                 packet_cm,
                 packet_timestamp,
                 receiver_core_id,
-                stream_packets,
+                frame_packets,
             );
             return;
         }
@@ -224,42 +224,42 @@ fn admit_packet(
         });
     }
 
-    check_stream_completion(shared, node_info.slot, thread_id, stream_packets);
+    check_frame_completion(shared, node_info.slot, thread_id, frame_packets);
 }
 
-/// Parks a decoded packet that cannot be admitted right now — either its stream
-/// is ahead of the admission window, or the stream is in-window but every slot is
+/// Parks a decoded packet that cannot be admitted right now — either its frame
+/// is ahead of the admission window, or the frame is in-window but every slot is
 /// momentarily occupied.  Capacity is one extra window's worth of packets
-/// (`stream_packets × slots`); on overflow the frame furthest from admission
-/// (highest stream id, the incoming packet's frame included) is dropped whole via
+/// (`frame_packets × slots`); on overflow the frame furthest from admission
+/// (highest frame id, the incoming packet's frame included) is dropped whole via
 /// [`mark_frame_dropped`] — never partially, since partial packet loss would
-/// leave a stream permanently incomplete.
+/// leave a frame permanently incomplete.
 fn park_pending_packet(
     shared: &Arc<SharedData>,
-    stream: usize,
+    frame: usize,
     packet_cm: CmTypes,
     timestamp: Instant,
     receiver_core_id: usize,
-    stream_packets: usize,
+    frame_packets: usize,
 ) {
-    // Streams the drop bitmap cannot track (beyond max_streams + slots) can never
+    // Frames the drop bitmap cannot track (beyond max_frames + slots) can never
     // enter the window before shutdown; discard outright.
-    if stream >= shared.net.frame_dropped.len() {
-        tracing::warn!(stream, "packet beyond trackable stream range, discarded");
+    if frame >= shared.net.frame_dropped.len() {
+        tracing::warn!(frame, "packet beyond trackable frame range, discarded");
         return;
     }
-    if shared.net.frame_dropped[stream].load(Ordering::Acquire) {
+    if shared.net.frame_dropped[frame].load(Ordering::Acquire) {
         return;
     }
 
-    let cap = stream_packets * shared.config.slots;
+    let cap = frame_packets * shared.config.slots;
     let mut pending = shared.net.pending_frames.lock();
     if shared.net.pending_count.load(Ordering::Relaxed) >= cap {
         let victim = pending
             .keys()
             .next_back()
             .copied()
-            .map_or(stream, |max_parked| max_parked.max(stream));
+            .map_or(frame, |max_parked| max_parked.max(frame));
         if let Some(evicted) = pending.remove(&victim) {
             shared
                 .net
@@ -267,11 +267,11 @@ fn park_pending_packet(
                 .fetch_sub(evicted.len(), Ordering::Relaxed);
         }
         mark_frame_dropped(shared, victim, "pending-frame buffer full");
-        if victim == stream {
+        if victim == frame {
             return;
         }
     }
-    pending.entry(stream).or_default().push(PendingPacket {
+    pending.entry(frame).or_default().push(PendingPacket {
         packet: packet_cm,
         timestamp,
         receiver_core_id,
@@ -279,7 +279,7 @@ fn park_pending_packet(
     shared.net.pending_count.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Re-admits parked packets whose streams have entered the admission window.
+/// Re-admits parked packets whose frames have entered the admission window.
 /// Extraction happens under the `pending_frames` lock; admission runs after it is
 /// released — `admit_packet` takes slot locks and must not nest inside it.
 #[allow(clippy::too_many_arguments)]
@@ -291,11 +291,11 @@ fn reinject_pending_frames(
     thread_core: usize,
     thread_id: usize,
     thread_slot: usize,
-    stream_packets: usize,
+    frame_packets: usize,
 ) {
     let window_end = shared
         .telemetry
-        .stream_complete_counter
+        .frame_complete_counter
         .load(Ordering::SeqCst)
         + shared.config.slots;
     let ready: Vec<(usize, Vec<PendingPacket>)> = {
@@ -313,19 +313,19 @@ fn reinject_pending_frames(
             })
             .collect()
     };
-    for (stream, packets) in ready {
+    for (frame, packets) in ready {
         print_debug(|| {
             format!(
-                "Thread {:?} -- Re-injecting {} parked packets for stream {}",
+                "Thread {:?} -- Re-injecting {} parked packets for frame {}",
                 thread_id,
                 packets.len(),
-                stream
+                frame
             )
         });
         for pp in packets {
             admit_packet(
                 shared,
-                stream,
+                frame,
                 pp.packet,
                 pp.timestamp,
                 pp.receiver_core_id,
@@ -335,27 +335,27 @@ fn reinject_pending_frames(
                 thread_core,
                 thread_id,
                 thread_slot,
-                stream_packets,
+                frame_packets,
             );
         }
     }
 }
 
-/// Marks `stream` dropped exactly once: sets the drop bit (so later packets are
+/// Marks `frame` dropped exactly once: sets the drop bit (so later packets are
 /// discarded on the fast path), advances the completion counter (so the admission
 /// window keeps moving — the degrade-instead-of-hang invariant), and counts it.
-fn mark_frame_dropped(shared: &Arc<SharedData>, stream: usize, reason: &str) {
-    if stream >= shared.net.frame_dropped.len() {
+fn mark_frame_dropped(shared: &Arc<SharedData>, frame: usize, reason: &str) {
+    if frame >= shared.net.frame_dropped.len() {
         return;
     }
-    let already_marked = shared.net.frame_dropped[stream].swap(true, Ordering::AcqRel);
+    let already_marked = shared.net.frame_dropped[frame].swap(true, Ordering::AcqRel);
     if !already_marked {
         shared
             .telemetry
-            .stream_complete_counter
+            .frame_complete_counter
             .fetch_add(1, Ordering::SeqCst);
-        let dropped = shared.net.dropped_streams.fetch_add(1, Ordering::Relaxed) + 1;
-        tracing::warn!(stream, total_dropped = dropped, reason, "frame dropped");
+        let dropped = shared.net.dropped_frames.fetch_add(1, Ordering::Relaxed) + 1;
+        tracing::warn!(frame, total_dropped = dropped, reason, "frame dropped");
     }
 }
 
@@ -388,22 +388,22 @@ fn decode_packet(
     packet_cm
 }
 
-/// Outcome of trying to place a packet's stream on a slot.
+/// Outcome of trying to place a packet's frame on a slot.
 enum SlotAssignment {
     /// Slot and per-slot index assigned; `NodeInfo` is ready for batch routing.
     Assigned(NodeInfo),
-    /// Stream is admissible but every slot is occupied right now — a transient
+    /// Frame is admissible but every slot is occupied right now — a transient
     /// condition (e.g. a completed slot not yet released).  Caller parks the packet.
     NoSlotYet,
     /// Frame was already dropped — discard the packet.
     Dropped,
 }
 
-/// Assigns `new_stream` to an available slot, spawns initial nodes if the slot was
+/// Assigns `new_frame` to an available slot, spawns initial nodes if the slot was
 /// newly activated, and computes the packet's per-slot index.
 fn assign_packet_to_slot(
     shared: &Arc<SharedData>,
-    new_stream: usize,
+    new_frame: usize,
     packet_cm: &CmTypes,
     idx_func_ptr: Option<(tomii_types::CmPtr, &Vec<crate::graph_struct::Arg>)>,
     slots_dirty: &mut bool,
@@ -411,15 +411,14 @@ fn assign_packet_to_slot(
     thread_slot: usize,
 ) -> SlotAssignment {
     // Fast-path: frame already dropped — discard without touching any shared state.
-    if new_stream < shared.net.frame_dropped.len()
-        && shared.net.frame_dropped[new_stream].load(Ordering::Acquire)
+    if new_frame < shared.net.frame_dropped.len()
+        && shared.net.frame_dropped[new_frame].load(Ordering::Acquire)
     {
         return SlotAssignment::Dropped;
     }
 
     let start_sa = shared.telemetry.measure_start();
-    let (assigned_slot, newly_activated) = match assign_stream_to_available_slot(shared, new_stream)
-    {
+    let (assigned_slot, newly_activated) = match assign_frame_to_available_slot(shared, new_frame) {
         Some(v) => v,
         None => return SlotAssignment::NoSlotYet,
     };
@@ -434,9 +433,9 @@ fn assign_packet_to_slot(
         if !init_nodes.is_empty() {
             print_debug(|| {
                 format!(
-                    "Slot {} newly activated (stream {}), spawning {} initial nodes",
+                    "Slot {} newly activated (frame {}), spawning {} initial nodes",
                     assigned_slot,
-                    new_stream,
+                    new_frame,
                     init_nodes.len()
                 )
             });
@@ -470,16 +469,16 @@ fn assign_packet_to_slot(
 }
 
 /// Checks whether all expected packets for `slot` have been received.  On first
-/// completion, increments the streams-received counter and signals receivers to
-/// stop if all streams are done.
-fn check_stream_completion(
+/// completion, increments the frames-received counter and signals receivers to
+/// stop if all frames are done.
+fn check_frame_completion(
     shared: &Arc<SharedData>,
     slot: usize,
     thread_id: usize,
-    stream_packets: usize,
+    frame_packets: usize,
 ) {
     let packet_count = shared.slot_data.packet_counters[slot].load(Ordering::SeqCst);
-    if packet_count != stream_packets {
+    if packet_count != frame_packets {
         return;
     }
 
@@ -500,20 +499,20 @@ fn check_stream_completion(
     print_debug(|| {
         format!(
             "Thread {:?} -- All {} packets received for slot {} | pending_tasks={}, pending_cond={}",
-            thread_id, stream_packets, slot, pending_tasks, pending_cond
+            thread_id, frame_packets, slot, pending_tasks, pending_cond
         )
     });
 
-    let completed_streams = shared
+    let completed_frames = shared
         .net
-        .streams_receive_counter
+        .frames_receive_counter
         .fetch_add(1, Ordering::AcqRel)
         + 1;
-    if completed_streams >= shared.config.max_streams {
+    if completed_frames >= shared.config.max_frames {
         tracing::info!(
-            streams = shared.config.max_streams,
-            packets_per_stream = stream_packets,
-            "all streams received, receivers will shut down"
+            frames = shared.config.max_frames,
+            packets_per_frame = frame_packets,
+            "all frames received, receivers will shut down"
         );
         shared.net.receive_finished.store(true, Ordering::Release);
     }

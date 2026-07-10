@@ -19,7 +19,8 @@ pub struct NetworkConfigJson {
     pub socket_type: String,
     pub num_sockets: Factor,
     pub packet_length: Factor,
-    pub stream_packets: Factor,
+    #[serde(alias = "stream_packets")]
+    pub frame_packets: Factor,
     #[serde(default = "default_buffer_depth")]
     pub buffer_depth: usize,
     pub address: String,

@@ -6,7 +6,7 @@ scheduling baseline against which the polyglot Tomii example (`examples/matrix-c
 DAG, same C kernels (FFTW3 single-precision + OpenBLAS `cblas_cgemm`), so the difference
 isolates **what Tomii's polyglot marshaling costs versus a native C++ Taskflow lambda.**
 
-## DAG per stream (N items)
+## DAG per frame (N items)
 
 ```
 gen_vec[0..N]     factor=N   generate_vector() → complex_f32[buf_size]
@@ -34,7 +34,7 @@ dispatch add — the polyglot-cost decomposition used in `examples/matrix-comput
 
 ```bash
 cd bench/matcomp-taskflow
-# Polyglot regime: N=200, buf=100, S=4, W=4, 30 measured + 10 warmup streams,
+# Polyglot regime: N=200, buf=100, S=4, W=4, 30 measured + 10 warmup frames,
 # workers pinned to cores 3-6 (NUMA node 0), matching the polyglot run setup.
 bash run_bench.sh                       # builds via CMake if needed
 bash run_bench.sh /path/to/output.csv   # custom output path

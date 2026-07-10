@@ -199,11 +199,11 @@ build_result = app.build(
 
 ### Minimal verification run
 
-After fixing build errors, run with 1 worker and 3 streams to verify the plugin loads and
+After fixing build errors, run with 1 worker and 3 frames to verify the plugin loads and
 executes without panics:
 
 ```python
-app.run(dylib=build_result.dylib, workers=1, slots=1, max_streams=3)
+app.run(dylib=build_result.dylib, workers=1, slots=1, max_frames=3)
 ```
 
 If the plugin loads but panics at runtime, add `println!` debug output to the function

@@ -46,11 +46,11 @@ def _import_module(name: str, path: Path) -> Any:
 
 
 def _parse_avg_ms(timing_file: Path) -> float:
-    """Parse `Avg Time Per Stream` from a Tomii timing file, normalized to ms."""
+    """Parse `Avg Time Per Frame` from a Tomii timing file, normalized to ms."""
     if not timing_file.exists():
         return float("nan")
     m = re.search(
-        r"Avg Time Per Stream:\s+([\d.]+)(ms|µs|us|s)", timing_file.read_text()
+        r"Avg Time Per Frame:\s+([\d.]+)(ms|µs|us|s)", timing_file.read_text()
     )
     if not m:
         return float("nan")
@@ -62,17 +62,17 @@ def _parse_avg_ms(timing_file: Path) -> float:
     return val
 
 
-def _parse_streams_processed(timing_file: Path) -> int:
+def _parse_frames_processed(timing_file: Path) -> int:
     if not timing_file.exists():
         return -1
-    m = re.search(r"Total Streams Processed:\s+(\d+)", timing_file.read_text())
+    m = re.search(r"Total Frames Processed:\s+(\d+)", timing_file.read_text())
     return int(m.group(1)) if m else -1
 
 
 @dataclass
 class EvalResult:
     verifier_ok: bool
-    ms_per_stream: float | None  # None if verifier failed or timing unavailable
+    ms_per_frame: float | None  # None if verifier failed or timing unavailable
     rejection_reason: str | None
     wall_seconds: float
 
@@ -104,7 +104,7 @@ class Workload:
     def evaluate(
         self,
         knobs: dict[str, Any],
-        streams: int,
+        frames: int,
         warmup: int,
         space: dict[str, Any] | None = None,
     ) -> EvalResult:
@@ -121,7 +121,7 @@ class Workload:
         except KeyError as exc:
             return EvalResult(
                 verifier_ok=False,
-                ms_per_stream=None,
+                ms_per_frame=None,
                 rejection_reason=f"unknown knob: {exc}",
                 wall_seconds=time.monotonic() - t0,
             )
@@ -207,7 +207,7 @@ class StreamAnalyticsWorkload(Workload):
     def evaluate(
         self,
         knobs: dict[str, Any],
-        streams: int = 500,
+        frames: int = 500,
         warmup: int = 50,
         space: dict[str, Any] | None = None,
     ) -> EvalResult:
@@ -225,7 +225,7 @@ class StreamAnalyticsWorkload(Workload):
         except RuntimeError as exc:
             return EvalResult(
                 verifier_ok=False,
-                ms_per_stream=None,
+                ms_per_frame=None,
                 rejection_reason=f"build failed: {exc}",
                 wall_seconds=time.monotonic() - t0,
             )
@@ -242,8 +242,8 @@ class StreamAnalyticsWorkload(Workload):
                 str(self.binary),
                 str(graph_path),
                 str(self.dylib),
-                max_streams=streams,
-                exclude_streams=warmup,
+                max_frames=frames,
+                exclude_frames=warmup,
                 output=str(tmp_dir / "out.txt"),
                 report=str(report_file),
                 timing=str(tmp_dir / "timing.txt"),
@@ -258,7 +258,7 @@ class StreamAnalyticsWorkload(Workload):
             except subprocess.TimeoutExpired:
                 return EvalResult(
                     verifier_ok=False,
-                    ms_per_stream=None,
+                    ms_per_frame=None,
                     rejection_reason="timeout after 120s",
                     wall_seconds=time.monotonic() - t0,
                 )
@@ -267,7 +267,7 @@ class StreamAnalyticsWorkload(Workload):
                 stderr_tail = (proc.stderr or "")[-200:].strip()
                 return EvalResult(
                     verifier_ok=False,
-                    ms_per_stream=None,
+                    ms_per_frame=None,
                     rejection_reason=f"tomii exit {proc.returncode}: {stderr_tail}",
                     wall_seconds=time.monotonic() - t0,
                 )
@@ -280,8 +280,8 @@ class StreamAnalyticsWorkload(Workload):
                     str(result_file),
                     "--golden",
                     str(self.root / "result.golden.txt"),
-                    "--streams",
-                    str(streams),
+                    "--frames",
+                    str(frames),
                 ],
                 capture_output=True,
                 text=True,
@@ -290,7 +290,7 @@ class StreamAnalyticsWorkload(Workload):
                 msg = (verify_proc.stdout + verify_proc.stderr).strip()
                 return EvalResult(
                     verifier_ok=False,
-                    ms_per_stream=None,
+                    ms_per_frame=None,
                     rejection_reason=f"verifier: {msg}",
                     wall_seconds=time.monotonic() - t0,
                 )
@@ -307,7 +307,7 @@ class StreamAnalyticsWorkload(Workload):
 
             return EvalResult(
                 verifier_ok=True,
-                ms_per_stream=ms,
+                ms_per_frame=ms,
                 rejection_reason=None,
                 wall_seconds=time.monotonic() - t0,
             )
@@ -325,11 +325,11 @@ class PipelineWorkload(Workload):
     graph (pl_emit_to_file) runs with the SAME CLI knobs and graph edits and
     its numeric output is checked against the Python reference — replicating
     bench/pipeline-bench/tomii/verify.py's checks (line count, 30% envelope
-    for SIMD divergence, cross-stream consistency).
+    for SIMD divergence, cross-frame consistency).
     """
 
     name = "pipeline"
-    N = 256  # items per stream — matches the bench default
+    N = 256  # items per frame — matches the bench default
     baseline_knobs = {
         "workers": 4,
         "slots": 4,
@@ -405,7 +405,7 @@ class PipelineWorkload(Workload):
         graph_path.write_text(json.dumps(verify_graph, indent=1), encoding="utf-8")
 
         result_file = tmp_dir / "verify_result.txt"
-        streams = 5
+        frames = 5
         # max_runtime bounds structurally-broken graph edits (unresolvable
         # dependencies hang forever otherwise); rejection then comes from the
         # output checks below.  The subprocess timeout stays as backstop.
@@ -413,8 +413,8 @@ class PipelineWorkload(Workload):
             str(self.binary),
             str(graph_path),
             str(self.dylib),
-            max_streams=streams,
-            exclude_streams=0,
+            max_frames=frames,
+            exclude_frames=0,
             max_runtime=30,
             **cli_kwargs,
         )
@@ -434,9 +434,9 @@ class PipelineWorkload(Workload):
         lines = [
             ln.strip() for ln in result_file.read_text().splitlines() if ln.strip()
         ]
-        if len(lines) != streams:
+        if len(lines) != frames:
             return self._reject(
-                f"verifier: expected {streams} lines, got {len(lines)}", t0
+                f"verifier: expected {frames} lines, got {len(lines)}", t0
             )
         expected = self._verify.expected_mean(self.N, self.transform_iters)
         tolerance = self._verify.RELATIVE_TOLERANCE
@@ -445,24 +445,24 @@ class PipelineWorkload(Workload):
             try:
                 v = float(line)
             except ValueError:
-                return self._reject(f"verifier: stream {i} not a float: {line!r}", t0)
+                return self._reject(f"verifier: frame {i} not a float: {line!r}", t0)
             if not math.isfinite(v):
-                return self._reject(f"verifier: stream {i} not finite", t0)
+                return self._reject(f"verifier: frame {i} not finite", t0)
             if expected != 0.0 and abs(v - expected) / abs(expected) > tolerance:
                 return self._reject(
-                    f"verifier: stream {i} rel_delta "
+                    f"verifier: frame {i} rel_delta "
                     f"{abs(v - expected) / abs(expected):.1%} > {tolerance:.0%}",
                     t0,
                 )
             vals.append(v)
         if len(set(f"{v:.8f}" for v in vals)) > 1:
-            return self._reject("verifier: streams non-deterministic", t0)
+            return self._reject("verifier: frames non-deterministic", t0)
         return None
 
     def _reject(self, reason: str, t0: float) -> EvalResult:
         return EvalResult(
             verifier_ok=False,
-            ms_per_stream=None,
+            ms_per_frame=None,
             rejection_reason=reason,
             wall_seconds=time.monotonic() - t0,
         )
@@ -470,7 +470,7 @@ class PipelineWorkload(Workload):
     def evaluate(
         self,
         knobs: dict[str, Any],
-        streams: int = 500,
+        frames: int = 500,
         warmup: int = 50,
         space: dict[str, Any] | None = None,
     ) -> EvalResult:
@@ -501,8 +501,8 @@ class PipelineWorkload(Workload):
                 str(self.binary),
                 str(graph_path),
                 str(self.dylib),
-                max_streams=streams + warmup,
-                exclude_streams=warmup,
+                max_frames=frames + warmup,
+                exclude_frames=warmup,
                 max_runtime=240,
                 timing=str(timing_file),
                 use_rdtsc=True,
@@ -522,10 +522,10 @@ class PipelineWorkload(Workload):
 
             ms = _parse_avg_ms(timing_file)
             if math.isnan(ms):
-                return self._reject("no Avg Time Per Stream in timing output", t0)
+                return self._reject("no Avg Time Per Frame in timing output", t0)
             return EvalResult(
                 verifier_ok=True,
-                ms_per_stream=ms,
+                ms_per_frame=ms,
                 rejection_reason=None,
                 wall_seconds=time.monotonic() - t0,
             )
@@ -542,8 +542,8 @@ class MimoWorkload(Workload):
     Runtime (CLI) knobs only: graph knobs are DISABLED because there is no
     per-trial output verification for edited MIMO graphs yet (the hash
     verifier runs a fixed dump-node graph).  The per-trial gate is keep-up
-    soundness — `Total Streams Processed` must equal the frames sent, so a
-    config cannot look fast by dropping frames.  `streams` maps to the sender
+    soundness — `Total Frames Processed` must equal the frames sent, so a
+    config cannot look fast by dropping frames.  `frames` maps to the sender
     frame budget (default 500 is ~35s/trial; 200 is a reasonable tuning
     budget).  Sender lifecycle per the MIMO runbook: receiver first, 10s
     delay, hard kill after; MKL/OMP pinned to 1 thread.
@@ -643,7 +643,7 @@ class MimoWorkload(Workload):
     def evaluate(
         self,
         knobs: dict[str, Any],
-        streams: int = 500,
+        frames: int = 500,
         warmup: int = 50,
         space: dict[str, Any] | None = None,
     ) -> EvalResult:
@@ -658,7 +658,7 @@ class MimoWorkload(Workload):
         if graph_edits:
             return EvalResult(
                 verifier_ok=False,
-                ms_per_stream=None,
+                ms_per_frame=None,
                 rejection_reason="graph knobs are disabled for mimo",
                 wall_seconds=time.monotonic() - t0,
             )
@@ -668,12 +668,12 @@ class MimoWorkload(Workload):
         except RuntimeError as exc:
             return EvalResult(
                 verifier_ok=False,
-                ms_per_stream=None,
+                ms_per_frame=None,
                 rejection_reason=f"build failed: {exc}",
                 wall_seconds=time.monotonic() - t0,
             )
 
-        num_frames = streams
+        num_frames = frames
         warmup = min(warmup, num_frames // 5)
         slots = int(cli_kwargs.get("slots", 1))
         # Pace at 2x the per-slot throughput floor: fast enough that knob
@@ -694,8 +694,8 @@ class MimoWorkload(Workload):
                 str(self.graph_json),
                 str(self.dylib),
                 core_offset=1,
-                max_streams=num_frames,
-                exclude_streams=warmup,
+                max_frames=num_frames,
+                exclude_frames=warmup,
                 max_runtime=max_runtime,
                 timing=str(timing_file),
                 use_rdtsc=True,
@@ -744,7 +744,7 @@ class MimoWorkload(Workload):
             if ret != 0:
                 return EvalResult(
                     verifier_ok=False,
-                    ms_per_stream=None,
+                    ms_per_frame=None,
                     rejection_reason=(
                         "tomii hung past watchdog"
                         if ret == -1
@@ -753,11 +753,11 @@ class MimoWorkload(Workload):
                     wall_seconds=time.monotonic() - t0,
                 )
 
-            processed = _parse_streams_processed(timing_file)
+            processed = _parse_frames_processed(timing_file)
             if processed != num_frames:
                 return EvalResult(
                     verifier_ok=False,
-                    ms_per_stream=None,
+                    ms_per_frame=None,
                     rejection_reason=(
                         f"keep-up gate: processed {processed} of {num_frames} "
                         "frames (config fell behind or dropped frames)"
@@ -769,13 +769,13 @@ class MimoWorkload(Workload):
             if math.isnan(ms):
                 return EvalResult(
                     verifier_ok=False,
-                    ms_per_stream=None,
-                    rejection_reason="no Avg Time Per Stream in timing output",
+                    ms_per_frame=None,
+                    rejection_reason="no Avg Time Per Frame in timing output",
                     wall_seconds=time.monotonic() - t0,
                 )
             return EvalResult(
                 verifier_ok=True,
-                ms_per_stream=ms,
+                ms_per_frame=ms,
                 rejection_reason=None,
                 wall_seconds=time.monotonic() - t0,
             )

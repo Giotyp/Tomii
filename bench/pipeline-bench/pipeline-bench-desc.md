@@ -2,7 +2,7 @@
 
 ## Workload
 
-A 4-stage fan-out / fan-in DAG run over S concurrent streams:
+A 4-stage fan-out / fan-in DAG run over S concurrent frames:
 
 ```
 ingest[0..N]        (factor=N; produces f64 = (idx+1)/N)
@@ -18,10 +18,10 @@ emit                (returns mean; pl_emit_to_file writes it in verify.py)
 
 | Parameter | Value |
 |---|---|
-| N (items per stream) | 256 |
+| N (items per frame) | 256 |
 | TRANSFORM_ITERS | 8192 |
 | Per-task compute | ~64 µs at TRANSFORM_ITERS=8192 |
-| Total streams | 2000 (+ 200 warmup) |
+| Total frames | 2000 (+ 200 warmup) |
 | S (concurrent slots) sweep | {1, 4, 16, 64} |
 | W (worker threads) sweep | {1, 2, 4, 8} |
 
@@ -32,18 +32,18 @@ The 8192-iteration sin loop keeps scheduling overhead well below 15 % of wall ti
 **Both frameworks report wall-clock throughput:**
 
 ```
-ms_per_stream = total_wall_seconds * 1000 / total_streams
+ms_per_frame = total_wall_seconds * 1000 / total_frames
 ```
 
-Tomii: measured externally via `time.monotonic()` around `graph.run()`, divided by `total_streams` (warmup streams excluded from the denominator but run inside the same `graph.run()` call).
+Tomii: measured externally via `time.monotonic()` around `graph.run()`, divided by `total_frames` (warmup frames excluded from the denominator but run inside the same `graph.run()` call).
 
-Taskflow: `total_ms / total_streams` reported by the harness at `pipeline-bench/taskflow/run_bench.py`.
+Taskflow: `total_ms / total_frames` reported by the harness at `pipeline-bench/taskflow/run_bench.py`.
 
-This corrects the pre-Stage-A metric mismatch where Tomii reported per-stream *latency* (`Avg Time Per Stream` from the timing file) while Taskflow reported amortised *throughput*. See `audit-2026-05-07.md` for the full diagnosis.
+This corrects the pre-Stage-A metric mismatch where Tomii reported per-frame *latency* (`Avg Time Per Frame` from the timing file) while Taskflow reported amortised *throughput*. See `audit-2026-05-07.md` for the full diagnosis.
 
 ## Taskflow Comparator
 
-`pipeline-bench/taskflow/src/main.cpp` implements the identical 4-stage topology using `tf::Taskflow` + `tf::Executor`. The `transform` kernel uses the same `heavy_transform` computation (TRANSFORM_ITERS=8192, identical sin loop). The Taskflow harness runs S independent graph clones in parallel (one `tf::Executor` shared across all S clones), then divides total wall time by `total_streams`.
+`pipeline-bench/taskflow/src/main.cpp` implements the identical 4-stage topology using `tf::Taskflow` + `tf::Executor`. The `transform` kernel uses the same `heavy_transform` computation (TRANSFORM_ITERS=8192, identical sin loop). The Taskflow harness runs S independent graph clones in parallel (one `tf::Executor` shared across all S clones), then divides total wall time by `total_frames`.
 
 ## Tomii Runtime Configuration
 
@@ -61,10 +61,10 @@ Taskflow uses its default `tf::Executor` with no special flags. This means Tomii
 
 ## Methodology Rules
 
-1. **Identical input fixtures.** Both frameworks process the same N=256 items per stream with the same TRANSFORM_ITERS=8192 heavy kernel.
+1. **Identical input fixtures.** Both frameworks process the same N=256 items per frame with the same TRANSFORM_ITERS=8192 heavy kernel.
 2. **Identical hardware.** Same machine, same pinned core set (`--core-offset 1`), RDTSC-based per-node timing in Tomii (`--use-rdtsc`).
 3. **Tomii scheduler.** `--custom` (lock-free priority scheduler) is used for all Tomii runs. The default Rayon scheduler is not compatible with this workload's barrier argument injection and is not tested here.
-4. **Correctness gates perf.** Run `python pipeline-bench/tomii/verify.py --transform-iters 8192` before recording any perf number. The verifier checks that all stream outputs match the expected aggregate mean (within 30% relative tolerance to account for SIMD/FMA differences in the sin loop) and that all streams are deterministic.
+4. **Correctness gates perf.** Run `python pipeline-bench/tomii/verify.py --transform-iters 8192` before recording any perf number. The verifier checks that all frame outputs match the expected aggregate mean (within 30% relative tolerance to account for SIMD/FMA differences in the sin loop) and that all frames are deterministic.
 
 ## Results
 
@@ -76,7 +76,7 @@ CSVs at commit-level snapshots:
 | Post-U7c | `tomii/results/pipeline_sweep_post_u7c.csv` | After inline primitive storage in LockFreeResultMap |
 | Taskflow | `taskflow/build/tf_pipeline_sweep_heavy.csv` | Identical heavy kernel |
 
-**Post-U7c headline numbers (ms/stream, lower is better):**
+**Post-U7c headline numbers (ms/frame, lower is better):**
 
 | S | W | Tomii | Taskflow | Ratio |
 |---|---|-------|----------|-------|
@@ -96,12 +96,12 @@ Gap closes from ~2.5× at S=1 to **1.28–1.36× at S≥16** across W∈{4,8}.
 > +132 kB/slot = 1.6× steeper for Taskflow** (S=1 vs S=64, `scripts/memory_measure.sh`,
 > `memory_results.txt`). Treat the numbers in this section as exploratory only.
 
-Fixed W=4, TRANSFORM_ITERS=8192, T = max(4S, 2000) streams.
+Fixed W=4, TRANSFORM_ITERS=8192, T = max(4S, 2000) frames.
 RSS measured directly on the binary process via `/usr/bin/time -v` (not the Python driver wrapper).
 
 **Tomii binary RSS (MAX_SLOTS=128, bench-branch binary):**
 
-| S | ms/stream | RSS (MB) |
+| S | ms/frame | RSS (MB) |
 |---|-----------|----------|
 | 1 | 6.69 | 24.6 |
 | 4 | 6.58 | 24.4 |
@@ -111,7 +111,7 @@ RSS measured directly on the binary process via `/usr/bin/time -v` (not the Pyth
 
 **Taskflow binary RSS (clone mode, no slot cap):**
 
-| S | ms/stream | RSS (MB) |
+| S | ms/frame | RSS (MB) |
 |---|-----------|----------|
 | 1 | 4.57 | 3.8 |
 | 4 | 4.25 | 4.6 |
@@ -125,11 +125,11 @@ RSS measured directly on the binary process via `/usr/bin/time -v` (not the Pyth
 
 Plot: `pipeline-highS.png` (measured + extrapolated Tomii line, crossover annotated).
 
-**Throughput caveat:** Tomii is 1.55–1.63× slower than Taskflow across all S values measured (at TRANSFORM_ITERS=8192). The memory advantage only kicks in at S>190. For workloads where memory budget matters and hundreds of concurrent streams are required, the trade-off favours Tomii.
+**Throughput caveat:** Tomii is 1.55–1.63× slower than Taskflow across all S values measured (at TRANSFORM_ITERS=8192). The memory advantage only kicks in at S>190. For workloads where memory budget matters and hundreds of concurrent frames are required, the trade-off favours Tomii.
 
 ## Honest Caveats
 
-1. At S=1, Tomii's fixed per-stream overhead (~5 ms) dominates: 2.5–2.6× slower regardless of W. Not suitable for sub-µs workloads.
-2. Per-stream *latency* grows with S. Throughput improves; individual stream response time does not.
+1. At S=1, Tomii's fixed per-frame overhead (~5 ms) dominates: 2.5–2.6× slower regardless of W. Not suitable for sub-µs workloads.
+2. Per-frame *latency* grows with S. Throughput improves; individual frame response time does not.
 3. The ~16 µs threshold is workload-specific. Results for sub-µs tasks remain as documented in `audit-2026-05-07.md`.
 4. Tomii's current slot cap is 128 (enforced by u128 completion bitmaps in the bench branch). S>128 requires architectural changes. The high-S memory advantage is projected from a linear fit on S=1..128 data.

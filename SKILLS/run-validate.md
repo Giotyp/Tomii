@@ -38,19 +38,19 @@ If the build fails, read the compiler output carefully:
 
 ### 2. Correctness run (single worker)
 
-Run with `workers=1, slots=1, max_streams=3` to isolate correctness issues from concurrency:
+Run with `workers=1, slots=1, max_frames=3` to isolate correctness issues from concurrency:
 
 ```python
 app.run(
     dylib=build_result.dylib,
     workers=1,
     slots=1,
-    max_streams=3,
+    max_frames=3,
 )
 ```
 
 Using `workers=1` eliminates data races as a source of incorrect output.
-Using `max_streams=3` keeps the run short.
+Using `max_frames=3` keeps the run short.
 
 Check for:
 - Non-zero exit code → read panic message in stderr (look for `thread 'main' panicked`)
@@ -67,7 +67,7 @@ functions in the plugin), read the output and verify it is numerically/logically
 cat result.txt
 ```
 
-For network-input graphs, check that the expected number of streams completed by reading
+For network-input graphs, check that the expected number of frames completed by reading
 stdout (the runtime prints "Completed iteration N").
 
 ### 4. Scale up for baseline measurement
@@ -83,8 +83,8 @@ app.run(
     workers=physical_cores,
     core_offset=1,
     slots=1,
-    max_streams=20,
-    exclude_streams=5,       # skip first 5 streams (JIT warm-up)
+    max_frames=20,
+    exclude_frames=5,       # skip first 5 frames (JIT warm-up)
     report="report.json",
     timing="timing.txt",
 )
@@ -99,7 +99,7 @@ Read `report.json` and record these fields as the baseline:
   "summary": {
     "avg_latency_us": ...,
     "p99_latency_us": ...,
-    "throughput_streams_per_sec": ...,
+    "throughput_frames_per_sec": ...,
     "scheduling_overhead_diagnostic": {
       "overhead_pct": ...,
       "interpretation": "..."
@@ -116,7 +116,7 @@ Read `report.json` and record these fields as the baseline:
 ### 6. Check variance
 
 If `p99_latency_us > 2 * avg_latency_us`, the measurements have high variance.
-Increase `max_streams` to 50 or `exclude_streams` to 10 for a more stable sample.
+Increase `max_frames` to 50 or `exclude_frames` to 10 for a more stable sample.
 
 ### 7. Optional: validate scheduling recording
 
@@ -136,9 +136,9 @@ BASELINE
 Config: workers=N, slots=1, batching_size=1, coalesce_barriers=False, inline_continuation=False
 avg_latency_us: X
 p99_latency_us: X
-throughput_streams_per_sec: X
+throughput_frames_per_sec: X
 overhead_pct: X% (interpretation: ...)
-total_tasks_per_stream: X
+total_tasks_per_frame: X
 critical_path: N nodes, max_factor=N, estimated=Xus
 
 Next: run [diagnose](diagnose.md) to classify the bottleneck.

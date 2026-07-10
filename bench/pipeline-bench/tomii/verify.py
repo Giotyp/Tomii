@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Correctness verifier for pipeline-bench.
 
-Runs a short pipeline (default 5 streams) using pl_emit_to_file and checks
-that every stream's aggregate mean matches the Python-computed expected value
+Runs a short pipeline (default 5 frames) using pl_emit_to_file and checks
+that every frame's aggregate mean matches the Python-computed expected value
 within a tolerance of 1e-6.
 
 Expected mean:
@@ -11,7 +11,7 @@ Expected mean:
 
 Usage (from bench worktree root):
     python pipeline-bench/tomii/verify.py
-    python pipeline-bench/tomii/verify.py --streams 10 --no-build
+    python pipeline-bench/tomii/verify.py --frames 10 --no-build
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ N = 256
 _DEFAULT_TRANSFORM_ITERS = 2048
 # Rust uses -O3 -march=native which may vectorize the sin loop via SVML,
 # producing results that differ from Python's sequential libm sum by up to ~25%.
-# The consistency check (all streams equal) is the primary correctness signal.
+# The consistency check (all frames equal) is the primary correctness signal.
 RELATIVE_TOLERANCE = 0.30  # 30% — wide enough to survive SIMD but catches gross errors
 
 
@@ -73,7 +73,7 @@ def build_verify_graph(n: int) -> tm.Graph:
     )
     aggregate = app.node("aggregate", func="pl_aggregate", args=[transform.out(0, n)])
     # pl_emit_to_file has the same signature as pl_emit but also writes to
-    # PIPELINE_BENCH_RESULT (env var) so we can capture per-stream values.
+    # PIPELINE_BENCH_RESULT (env var) so we can capture per-frame values.
     app.node("emit", func="pl_emit_to_file", args=[aggregate.out(), tm.usize(0)])
 
     return app
@@ -86,8 +86,8 @@ def build_verify_graph(n: int) -> tm.Graph:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="pipeline-bench correctness verifier")
-    p.add_argument("--n", type=int, default=N, help="items per stream")
-    p.add_argument("--streams", type=int, default=5, help="streams to verify")
+    p.add_argument("--n", type=int, default=N, help="items per frame")
+    p.add_argument("--frames", type=int, default=5, help="frames to verify")
     p.add_argument("--no-build", action="store_true", help="skip cargo build")
     p.add_argument(
         "--transform-iters",
@@ -146,8 +146,8 @@ def main() -> None:
         dylib=dylib,
         workers=2,
         slots=1,
-        max_streams=args.streams,
-        exclude_streams=0,
+        max_frames=args.frames,
+        exclude_frames=0,
     )
     del os.environ["PIPELINE_BENCH_RESULT"]
 
@@ -157,8 +157,8 @@ def main() -> None:
         sys.exit(1)
 
     lines = [ln.strip() for ln in result_file.read_text().splitlines() if ln.strip()]
-    if len(lines) != args.streams:
-        print(f"FAIL: expected {args.streams} lines, got {len(lines)}")
+    if len(lines) != args.frames:
+        print(f"FAIL: expected {args.frames} lines, got {len(lines)}")
         sys.exit(1)
 
     failed = []
@@ -187,17 +187,17 @@ def main() -> None:
 
     if failed:
         print(
-            f"FAIL: {len(failed)}/{args.streams} streams failed range check "
+            f"FAIL: {len(failed)}/{args.frames} frames failed range check "
             f"(Python expected ≈ {exp:.6f}, tol={RELATIVE_TOLERANCE:.0%}):"
         )
         for i, val, reason in failed[:5]:
-            print(f"  stream {i}: {val!r} — {reason}")
+            print(f"  frame {i}: {val!r} — {reason}")
         sys.exit(1)
 
-    # Consistency check: all streams must produce identical results (pipeline is deterministic).
+    # Consistency check: all frames must produce identical results (pipeline is deterministic).
     if len(set(f"{v:.8f}" for v in vals)) > 1:
         print(
-            f"FAIL: streams produced different values (non-deterministic): {set(vals)}"
+            f"FAIL: frames produced different values (non-deterministic): {set(vals)}"
         )
         sys.exit(1)
 
@@ -207,7 +207,7 @@ def main() -> None:
     else:
         rel_delta_str = f"{abs(rust_val - exp) / abs(exp):.1%}"
     print(
-        f"PASS ({args.streams} streams, rust={rust_val:.10f}, "
+        f"PASS ({args.frames} frames, rust={rust_val:.10f}, "
         f"python_ref={exp:.10f}, rel_delta={rel_delta_str})"
     )
 

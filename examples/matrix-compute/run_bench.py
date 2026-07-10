@@ -39,10 +39,10 @@ def _parse_args() -> argparse.Namespace:
         "--system-threads", type=int, default=3, help="system threads (default: 3)"
     )
     p.add_argument(
-        "--slots", type=int, default=2, help="concurrent stream slots (default: 2)"
+        "--slots", type=int, default=2, help="concurrent frame slots (default: 2)"
     )
     p.add_argument(
-        "--max-streams", type=int, default=1, help="max concurrent streams (default: 1)"
+        "--max-frames", type=int, default=1, help="max concurrent frames (default: 1)"
     )
     p.add_argument(
         "--max-runtime",
@@ -57,10 +57,10 @@ def _parse_args() -> argparse.Namespace:
         "--batching-limit", type=int, default=10, help="batch limit (default: 10)"
     )
     p.add_argument(
-        "--exclude-streams",
+        "--exclude-frames",
         type=int,
         default=0,
-        help="streams excluded from timing stats (default: 0)",
+        help="frames excluded from timing stats (default: 0)",
     )
     p.add_argument(
         "--no-clean",
@@ -185,11 +185,11 @@ def main() -> None:
         workers=args.workers,
         system_threads=args.system_threads,
         slots=args.slots,
-        max_streams=args.max_streams,
+        max_frames=args.max_frames,
         max_runtime=args.max_runtime,
         batching_size=args.batching_size,
         batching_limit=args.batching_limit,
-        exclude_streams=args.exclude_streams,
+        exclude_frames=args.exclude_frames,
         output=str(out_file),
         timing=str(timing_file),
         record=args.record,

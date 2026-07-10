@@ -80,7 +80,7 @@ find . -name "report.json" -o -name "report.txt" | head -5
 ```
 
 If found, read and extract:
-- `summary.avg_latency_us`, `summary.p99_latency_us`, `summary.throughput_streams_per_sec`
+- `summary.avg_latency_us`, `summary.p99_latency_us`, `summary.throughput_frames_per_sec`
 - `summary.scheduling_overhead_diagnostic.overhead_pct` and `interpretation`
 - `critical_path.max_node_factor`, `critical_path.length_nodes`
 - `optimization_suggestions` (ranked list of recommended actions)

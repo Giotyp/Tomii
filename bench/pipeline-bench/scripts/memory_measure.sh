@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Measure per-slot RSS growth rate for Tomii vs Taskflow pipeline-bench.
-# Runs both frameworks at S=1 and S=8 (W=4, N=256, 200 streams) and
+# Runs both frameworks at S=1 and S=8 (W=4, N=256, 200 frames) and
 # computes (RSS@S=8 - RSS@S=1) / 7 = kB per additional slot.
 #
 # Usage: bash bench/pipeline-bench/scripts/memory_measure.sh
@@ -21,14 +21,14 @@ BENCH_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT="$(cd "$BENCH_DIR/../.." && pwd)"
 OUT="$BENCH_DIR/memory_results.txt"
 
-STREAMS=200
+FRAMES=200
 W=4
 N=256
 S_LOW=1
 S_HIGH=64
 
 echo "=== Tomii vs Taskflow per-slot RSS growth rate ===" | tee "$OUT"
-echo "=== W=$W N=$N, S in {$S_LOW, $S_HIGH}, $STREAMS streams ===" | tee -a "$OUT"
+echo "=== W=$W N=$N, S in {$S_LOW, $S_HIGH}, $FRAMES frames ===" | tee -a "$OUT"
 echo "Date: $(date)" | tee -a "$OUT"
 echo "" | tee -a "$OUT"
 
@@ -92,7 +92,7 @@ for s in "$S_LOW" "$S_HIGH"; do
     for i in 1 2 3; do
         kb=$(measure_rss "$TOMII_BIN" \
             --json "$TOMII_JSON" --dylib "$TOMII_SO" \
-            --workers "$W" --slots "$s" --max-streams "$STREAMS")
+            --workers "$W" --slots "$s" --max-frames "$FRAMES")
         echo "    run $i: ${kb} kB" | tee -a "$OUT"
         if [[ "$s" == "$S_LOW" ]]; then TOMII_LOW+=("$kb")
         else TOMII_HIGH+=("$kb"); fi
@@ -107,7 +107,7 @@ if [[ "$TF_PRESENT" == 1 ]]; then
         echo "  S=$s:" | tee -a "$OUT"
         for i in 1 2 3; do
             kb=$(measure_rss "$TF_BIN" \
-                --workers "$W" --slots "$s" --streams "$STREAMS")
+                --workers "$W" --slots "$s" --frames "$FRAMES")
             echo "    run $i: ${kb} kB" | tee -a "$OUT"
             if [[ "$s" == "$S_LOW" ]]; then TF_LOW+=("$kb")
             else TF_HIGH+=("$kb"); fi

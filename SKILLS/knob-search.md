@@ -50,8 +50,8 @@ Try each boolean knob independently. For each, toggle from the baseline and run:
 app.run(
     dylib=build_result.dylib,
     workers=<baseline_workers>,
-    max_streams=20,
-    exclude_streams=5,
+    max_frames=20,
+    exclude_frames=5,
     report="report.json",
     coalesce_barriers=True,   # toggle this knob
     # all other knobs at baseline
@@ -63,7 +63,7 @@ Knobs to try:
 2. `inline_continuation=True` — helps for graphs with long linear chains (check `critical_path.length_nodes > 20`)
 3. `slot_priority=True` — helps when `slots > 1`; skip if running with `slots=1`
 
-> **Warning**: `coalesce_barriers=True` suppresses `total_tasks_per_stream` in subsequent
+> **Warning**: `coalesce_barriers=True` suppresses `total_tasks_per_frame` in subsequent
 > `report.json` outputs (field becomes `null`). Confirm graph structure is correct before enabling.
 
 For each, record: `{knob, value, avg_latency_us, delta_pct}`.
@@ -122,13 +122,13 @@ Run the best configuration 3 times:
 
 ```python
 for trial in range(3):
-    run with best_config, max_streams=30, exclude_streams=5, report=f"report_trial{trial}.json"
+    run with best_config, max_frames=30, exclude_frames=5, report=f"report_trial{trial}.json"
 ```
 
 For each trial, read `avg_latency_us`. Compute mean and std_dev across the 3 trials.
 
 If `std_dev > 0.1 * mean`:
-- Increase `max_streams` to 50 or `exclude_streams` to 10
+- Increase `max_frames` to 50 or `exclude_frames` to 10
 - Re-run 3 trials with the larger sample
 
 ## Logging
@@ -159,7 +159,7 @@ Best config:  avg_latency_us=X  (-Y.Y% improvement)
 
 Trial log: <see above>
 
-If improvement > 5%: run [run-validate](run-validate.md) to confirm with full stream count.
+If improvement > 5%: run [run-validate](run-validate.md) to confirm with full frame count.
 If overhead_pct is still > 40% after best config: proceed to [graph-coarsen](graph-coarsen.md).
 ```
 

@@ -38,7 +38,7 @@ class MimoOptConfig:
     )
 
     # ── Harness settings ─────────────────────────────────────────────────────
-    max_streams: int = 500  # streams per benchmark run (skill_runner uses this)
+    max_frames: int = 500  # frames per benchmark run (skill_runner uses this)
     run_script: str = os.path.join(REPO_ROOT, "examples/mimolib/scripts/run_mimo.sh")
     reference_report: str = os.path.join(REPO_ROOT, "examples/mimolib/report.json")
     output_dir: str = os.path.join(REPO_ROOT, "mimo-bench/results")

@@ -85,8 +85,8 @@ rm -f "$OUTPUT" "$TIMING_FILE" "$SCHED_FILE"
     --workers $WORKERS \
     --output "$OUTPUT" \
     --slots $SLOTS \
-    --max-streams $EXP_STREAMS \
-    --exclude-streams $EXCLUDE_STREAMS \
+    --max-frames $EXP_STREAMS \
+    --exclude-frames $EXCLUDE_STREAMS \
     --report "$REPORT_FILE" \
     --sched-flush-threshold $SCHED_FLUSH_THRESHOLD \
     --spin-iterations $SPIN_ITERATIONS \

@@ -49,7 +49,7 @@ def add_common_args(p: argparse.ArgumentParser) -> None:
         help="benchmark to tune (see workloads.py)",
     )
     p.add_argument("--iterations", type=int, default=50)
-    p.add_argument("--streams", type=int, default=500)
+    p.add_argument("--frames", type=int, default=500)
     p.add_argument("--warmup", type=int, default=50)
     p.add_argument(
         "--results-dir",
@@ -81,12 +81,12 @@ def setup_arm(args: argparse.Namespace) -> tuple[Workload, dict[str, Any], Path]
 
 
 def establish_baseline(
-    streams: int = 500,
+    frames: int = 500,
     warmup: int = 50,
     results_dir: Path | None = None,
     workload: Workload | None = None,
 ) -> float:
-    """Run the workload's baseline knobs and return ms_per_stream.
+    """Run the workload's baseline knobs and return ms_per_frame.
 
     Writes results_dir/baseline.json. Falls back to 0.0 on failure.
     """
@@ -97,16 +97,16 @@ def establish_baseline(
         f"[harness] establishing {workload.name} baseline with default knobs ...",
         flush=True,
     )
-    result = workload.evaluate(knobs, streams=streams, warmup=warmup)
+    result = workload.evaluate(knobs, frames=frames, warmup=warmup)
 
-    if not result.verifier_ok or result.ms_per_stream is None:
+    if not result.verifier_ok or result.ms_per_frame is None:
         reason = result.rejection_reason or "unknown"
         print(f"[harness] WARNING: baseline run failed: {reason}", flush=True)
         baseline_ms = 0.0
     else:
-        baseline_ms = result.ms_per_stream
+        baseline_ms = result.ms_per_frame
         print(
-            f"[harness] baseline = {baseline_ms:.4f} ms/stream  "
+            f"[harness] baseline = {baseline_ms:.4f} ms/frame  "
             f"(wall {result.wall_seconds:.1f}s)",
             flush=True,
         )
@@ -115,7 +115,7 @@ def establish_baseline(
         results_dir.mkdir(parents=True, exist_ok=True)
         data: dict[str, Any] = {
             "workload": workload.name,
-            "baseline_ms_per_stream": baseline_ms,
+            "baseline_ms_per_frame": baseline_ms,
             "verifier_ok": result.verifier_ok,
             "rejection_reason": result.rejection_reason,
             "wall_seconds": result.wall_seconds,
@@ -133,13 +133,13 @@ def establish_baseline(
 
 def evaluate(
     knobs: dict[str, Any],
-    streams: int = 500,
+    frames: int = 500,
     warmup: int = 50,
     space: dict[str, Any] | None = None,
 ) -> EvalResult:
     """Evaluate on stream-analytics (legacy single-workload entry point)."""
     return get_workload("stream-analytics").evaluate(
-        knobs, streams=streams, warmup=warmup, space=space
+        knobs, frames=frames, warmup=warmup, space=space
     )
 
 
@@ -161,7 +161,7 @@ def log_trial(record: TrialRecord, log_file: Path) -> None:
         "notes": record.notes,
         "knobs": record.knobs,
         "verifier_ok": record.result.verifier_ok,
-        "ms_per_stream": record.result.ms_per_stream,
+        "ms_per_frame": record.result.ms_per_frame,
         "rejection_reason": record.result.rejection_reason,
         "wall_seconds": record.result.wall_seconds,
     }
@@ -181,12 +181,12 @@ def _main() -> None:
 
     workload, _space, results_dir = setup_arm(args)
     baseline = establish_baseline(
-        streams=args.streams,
+        frames=args.frames,
         warmup=args.warmup,
         results_dir=results_dir,
         workload=workload,
     )
-    print(f"baseline ms/stream: {baseline:.4f}")
+    print(f"baseline ms/frame: {baseline:.4f}")
 
 
 if __name__ == "__main__":

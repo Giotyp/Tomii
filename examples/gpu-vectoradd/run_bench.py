@@ -3,7 +3,7 @@
 Implements a 6-node GPU vector-add DAG using CUDA C++ plugin functions
 compiled from src/gpu_vadd.cu via nvcc.
 
-Pipeline per stream:
+Pipeline per frame:
   gen_vec_a ─► copy_h2d_a ─►─┐
                               ├─► vadd_gpu ─► copy_d2h ─► validate
   gen_vec_b ─► copy_h2d_b ─►─┘
@@ -14,7 +14,7 @@ their own per-thread CUDA stream (--default-stream per-thread in Makefile).
 
 Usage (from repo root, with venv active):
     python examples/gpu-vectoradd/run_bench.py
-    python examples/gpu-vectoradd/run_bench.py --workers 4 --max-streams 32
+    python examples/gpu-vectoradd/run_bench.py --workers 4 --max-frames 32
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--workers",        type=int, default=4)
     p.add_argument("--system-threads", type=int, default=3)
     p.add_argument("--slots",          type=int, default=2)
-    p.add_argument("--max-streams",    type=int, default=4)
+    p.add_argument("--max-frames",    type=int, default=4)
     p.add_argument("--max-runtime",    type=int, default=60)
     p.add_argument("--vec-size",       type=int, default=1024 * 1024,
                    help="Number of float elements per vector (default 1M)")
@@ -134,7 +134,7 @@ def main() -> None:
         workers=args.workers,
         system_threads=args.system_threads,
         slots=args.slots,
-        max_streams=args.max_streams,
+        max_frames=args.max_frames,
         max_runtime=args.max_runtime,
         timing=str(timing_file),
         record=args.record,

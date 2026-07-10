@@ -38,7 +38,7 @@ JSONL_NAMES = {
 
 
 def _load_best_so_far(path: Path) -> list[float]:
-    """Return list of best-so-far ms_per_stream at each iteration index."""
+    """Return list of best-so-far ms_per_frame at each iteration index."""
     if not path.exists():
         return []
     best: float | None = None
@@ -51,7 +51,7 @@ def _load_best_so_far(path: Path) -> list[float]:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
-        ms = rec.get("ms_per_stream") if rec.get("verifier_ok") else None
+        ms = rec.get("ms_per_frame") if rec.get("verifier_ok") else None
         if ms is not None and (best is None or ms < best):
             best = ms
         if best is not None:
@@ -65,7 +65,7 @@ def plot(results_dir: Path, out_path: Path) -> None:
     if baseline_file.exists():
         try:
             data = json.loads(baseline_file.read_text())
-            baseline_ms = data.get("baseline_ms_per_stream")
+            baseline_ms = data.get("baseline_ms_per_frame")
         except Exception:
             pass
 
@@ -88,7 +88,7 @@ def plot(results_dir: Path, out_path: Path) -> None:
         )
 
     ax.set_xlabel("Iteration (passing trials only)")
-    ax.set_ylabel("Best-so-far ms/stream")
+    ax.set_ylabel("Best-so-far ms/frame")
     ax.set_title("Agent-tuning convergence — stream-analytics workload")
     ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)

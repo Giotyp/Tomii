@@ -5,7 +5,7 @@ description: Use when report.json shows overhead_pct > 60% (scheduling dominates
 
 # Skill: graph-coarsen
 
-Reduce scheduling overhead by decreasing the number of tasks per stream. This is the
+Reduce scheduling overhead by decreasing the number of tasks per frame. This is the
 primary remedy when `overhead_pct > 60%` (scheduling dominates compute). Four coarsening
 strategies are available; `optimization_suggestions` in `report.json` identifies which
 applies.
@@ -21,7 +21,7 @@ applies.
 Read `report.json` and extract:
 - `summary.scheduling_overhead_diagnostic.overhead_pct`
 - `critical_path.max_node_factor`
-- `summary.total_tasks_per_stream`
+- `summary.total_tasks_per_frame`
 - `optimization_suggestions[0]` (priority-1 entry: `knob`, `suggested_value`, `action`)
 
 ## Decision tree
@@ -127,8 +127,8 @@ build_result = app.build(..., clean=False)
 app.run(
     dylib=build_result.dylib,
     workers=<your_workers>,
-    max_streams=20,
-    exclude_streams=5,
+    max_frames=20,
+    exclude_frames=5,
     report="report.json",
 )
 ```
@@ -136,8 +136,8 @@ app.run(
 4. Read the new `report.json`. Compare:
 
 ```
-Before: total_tasks_per_stream=X, overhead_pct=Y%, avg_latency_us=Z
-After:  total_tasks_per_stream=X', overhead_pct=Y'%, avg_latency_us=Z'
+Before: total_tasks_per_frame=X, overhead_pct=Y%, avg_latency_us=Z
+After:  total_tasks_per_frame=X', overhead_pct=Y'%, avg_latency_us=Z'
 ```
 
 ## Iteration criteria
@@ -173,5 +173,5 @@ Next: [knob-search](knob-search.md) to tune scheduler knobs on the coarsened gra
 
 - [knob-search](knob-search.md) — follow-up tuning after coarsening
 - [plugin-author](plugin-author.md) — if the tile kernel requires non-trivial Rust changes
-- [run-validate](run-validate.md) — to measure the coarsened graph with a full stream count
+- [run-validate](run-validate.md) — to measure the coarsened graph with a full frame count
 - [AGENT.md](../AGENT.md) — Graph Coarsening Recipe (canonical reference)

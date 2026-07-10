@@ -21,16 +21,16 @@ pub struct SlotStats {
     pub task_times: RapidHashMap<String, Vec<(usize, Duration)>>,
     pub total_time: Duration,
     pub slot_id: usize,
-    pub stream_count: usize,
+    pub frame_count: usize,
 }
 
 impl SlotStats {
-    pub fn new(slot_id: usize, stream_count: usize) -> Self {
+    pub fn new(slot_id: usize, frame_count: usize) -> Self {
         Self {
             task_times: RapidHashMap::new(),
             total_time: Duration::ZERO,
             slot_id,
-            stream_count,
+            frame_count,
         }
     }
 
@@ -112,7 +112,7 @@ pub enum TimingRequest {
     PrintStats {
         bench_name: String,
         out_file: Option<String>,
-        exclude_streams: usize,
+        exclude_frames: usize,
         response_tx: mpsc::Sender<()>,
     },
     Shutdown,
@@ -224,16 +224,16 @@ impl TimeBufferManager {
     }
 
     /// Print statistics to stdout or file
-    pub fn print_stats(&self, bench_name: &str, out_file: Option<&str>, exclude_streams: usize) {
+    pub fn print_stats(&self, bench_name: &str, out_file: Option<&str>, exclude_frames: usize) {
         if self.is_async {
             if let Some(ref async_buf) = self.async_buffer {
-                if let Err(e) = async_buf.print_stats(bench_name, out_file, exclude_streams) {
+                if let Err(e) = async_buf.print_stats(bench_name, out_file, exclude_frames) {
                     tracing::warn!(error = %e, "failed to print stats");
                 }
             }
         } else if let Some(ref sync_buf) = self.sync_buffer {
             if let Ok(buf) = sync_buf.lock() {
-                buf.print_stats(bench_name, out_file, exclude_streams);
+                buf.print_stats(bench_name, out_file, exclude_frames);
             }
         }
     }
@@ -243,17 +243,17 @@ impl TimeBufferManager {
         &self,
         graph_edges: &[(String, Vec<String>)],
         path: &str,
-        exclude_streams: usize,
+        exclude_frames: usize,
     ) {
         if self.is_async {
             if let Some(ref async_buf) = self.async_buffer {
-                if let Err(e) = async_buf.write_json_report(graph_edges, path, exclude_streams) {
+                if let Err(e) = async_buf.write_json_report(graph_edges, path, exclude_frames) {
                     tracing::warn!(error = %e, "failed to write JSON report");
                 }
             }
         } else if let Some(ref sync_buf) = self.sync_buffer {
             if let Ok(buf) = sync_buf.lock() {
-                buf.write_json_report(graph_edges, path, exclude_streams);
+                buf.write_json_report(graph_edges, path, exclude_frames);
             }
         }
     }

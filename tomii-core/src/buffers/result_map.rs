@@ -65,7 +65,7 @@ fn decode_inline(tag: u8, val: u64) -> tomii_types::CmTypes {
 ///
 /// Small copy types (F64, I64, U64, F32, all integer/bool/char variants ≤ 64 bits) are stored
 /// inline in a parallel `AtomicU64` array, eliminating one `Box` heap allocation per cell per
-/// stream for the common case. Non-primitive types (Arc-wrapped, Vec, Any, Bytes, …) are boxed
+/// frame for the common case. Non-primitive types (Arc-wrapped, Vec, Any, Bytes, …) are boxed
 /// as before.
 ///
 /// The invariant assumed by the runtime (and not verified here) is: `get` is only called on a
@@ -235,7 +235,7 @@ impl LockFreeResultMap {
         self.inline_tag[idx].load(Ordering::Acquire) != 0
     }
 
-    /// Clear a slot for reuse by the next stream.
+    /// Clear a slot for reuse by the next frame.
     ///
     /// SeqCst on `inline_tag.swap(0)` is the primary ordering point; it ensures the reset is
     /// visible to all threads before the slot is re-dispatched. Boxed values are freed when the

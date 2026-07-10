@@ -60,7 +60,7 @@ let my_sched: Arc<dyn TaskScheduler> = MyScheduler::new(/* ... */);
 let compiled = spec.compile(&placeholder_rayon_sched);
 let rt = TomiiRtBuilder::new_with_plugin(compiled, my_sched)
     .slots(4)
-    .max_streams(1000)
+    .max_frames(1000)
     .build();
 
 rt.run();

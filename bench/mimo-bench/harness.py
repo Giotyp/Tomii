@@ -56,7 +56,7 @@ def extract_key_metrics(report: dict) -> dict:
     return {
         "avg_latency_us": summary.get("avg_latency_us"),
         "p99_latency_us": summary.get("p99_latency_us"),
-        "total_streams": summary.get("total_streams"),
+        "total_frames": summary.get("total_frames"),
         "overhead_pct": diag.get("overhead_pct"),
         "critical_path_us": cp.get("estimated_latency_us"),
         "worker_busy_pct": util.get("worker_busy_pct", []),

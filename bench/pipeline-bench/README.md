@@ -1,7 +1,7 @@
-# pipeline-bench: Multi-stream Pipeline S-scaling (Tomii vs Taskflow)
+# pipeline-bench: Multi-frame Pipeline S-scaling (Tomii vs Taskflow)
 
 A self-contained streaming benchmark (no external/MKL dependencies) that measures how
-Tomii's per-stream scheduling overhead amortises as the number of concurrent slots (S)
+Tomii's per-frame scheduling overhead amortises as the number of concurrent slots (S)
 grows. Both frameworks run the **same 4-stage fan-out/fan-in DAG** with an identical
 heavy compute kernel, so timing differences reflect scheduling, not kernel work.
 
@@ -19,9 +19,9 @@ emit              (returns the mean)
 
 | Parameter | Value |
 |---|---|
-| N (items per stream) | 256 |
+| N (items per frame) | 256 |
 | TRANSFORM_ITERS | 8192 (~64 µs/task) |
-| Total streams | 2000 (+200 warmup) |
+| Total frames | 2000 (+200 warmup) |
 | S (concurrent slots) sweep | {1, 4, 16, 64} |
 | W (worker threads) sweep | {1, 2, 4, 8} |
 
@@ -38,21 +38,21 @@ cd bench/pipeline-bench
 python tomii/verify.py --transform-iters 8192
 
 # Tomii side:
-python tomii/run_bench.py --workers 4 --slots 1 4 16 64 --streams 2000
+python tomii/run_bench.py --workers 4 --slots 1 4 16 64 --frames 2000
 
 # Taskflow side:
-python taskflow/run_bench.py --workers 4 --slots 1 4 16 64 --streams 2000
+python taskflow/run_bench.py --workers 4 --slots 1 4 16 64 --frames 2000
 ```
 
 ## Metric
 
 ```
-ms_per_stream = total_wall_seconds * 1000 / total_streams
+ms_per_frame = total_wall_seconds * 1000 / total_frames
 ```
 
-Both sides report wall-clock **throughput** (warmup streams excluded from the
+Both sides report wall-clock **throughput** (warmup frames excluded from the
 denominator). Tomii is timed via `time.monotonic()` around `graph.run()`; Taskflow runs
-S graph clones across one shared `tf::Executor` and divides total wall time by streams.
+S graph clones across one shared `tf::Executor` and divides total wall time by frames.
 
 ## Tomii runtime configuration
 
@@ -64,9 +64,9 @@ published numbers therefore reflect its **recommended** streaming configuration.
 ## What the sweep shows
 
 Tomii does **not** win this benchmark on absolute throughput. The point of the S-sweep
-is to show how the per-stream gap *closes* as multi-slot amortisation distributes the
+is to show how the per-frame gap *closes* as multi-slot amortisation distributes the
 resolution-thread cost across concurrent lanes, and that per-slot RSS growth is lower
-than Taskflow's (relevant to long-running services with many concurrent streams, not S=1
+than Taskflow's (relevant to long-running services with many concurrent frames, not S=1
 jobs). Measured per-slot memory growth comes from `scripts/memory_measure.sh` (peak RSS,
 S=1 vs S=64). Comparison numbers are published in the project documentation.
 

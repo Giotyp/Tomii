@@ -4,7 +4,7 @@ set -euo pipefail
 # Usage: ./run_all.sh [iterations] [workload] [extra args passed to every arm]
 #   ./run_all.sh                          # 50 iterations, stream-analytics
 #   ./run_all.sh 50 pipeline
-#   ./run_all.sh 30 mimo --streams 200 --warmup 20
+#   ./run_all.sh 30 mimo --frames 200 --warmup 20
 ITERATIONS=${1:-50}
 WORKLOAD=${2:-stream-analytics}
 shift $(( $# > 2 ? 2 : $# )) || true

@@ -155,7 +155,7 @@ def build_mimo_graph(config_path: str = AGORA_CONFIG, dump: bool = False) -> tm.
         socket_type="udp",
         num_sockets=antennas,
         packet_length=packet_length,
-        stream_packets=packets_per_frame,
+        frame_packets=packets_per_frame,
         buffer_depth=2000,
         address=server_address,
         start_port=base_port,

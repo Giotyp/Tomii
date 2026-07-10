@@ -12,7 +12,7 @@ use super::{gen_pack, gen_unpack_gen, gen_unpack_val};
 /// # Generational design
 ///
 /// Each `AtomicU64` packs a 32-bit generation counter (upper) and a 32-bit value
-/// (lower). When a slot starts a new stream, the runtime increments the
+/// (lower). When a slot starts a new frame, the runtime increments the
 /// `slot_generation` counter. On the next access to an entry, if the stored
 /// generation differs from the current one, the entry lazily reinitialises itself
 /// to its initial value — no O(N) sweep required at slot reset time.
@@ -134,7 +134,7 @@ impl NodeDependencyEntry {
         for g in g_start..g_end {
             // Atomically decrement this group's counter with lazy generational reinit.
             // If the stored generation differs from slot_gen, treat the value as the
-            // initial deps_per_group (stale entry from a previous stream).
+            // initial deps_per_group (stale entry from a previous frame).
             let init_val = self.deps_per_group;
             let prev_packed = self.remaining_deps[g]
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |packed| {
@@ -673,7 +673,7 @@ mod tests {
         entry.decrease_and_get_ready_into(0, None, 1, Some(3), &mut ready);
         assert_eq!(ready, vec![3]);
 
-        // Simulate new stream: gen=1 → stale gen=0 entry reinits, instance 3 can fire again
+        // Simulate new frame: gen=1 → stale gen=0 entry reinits, instance 3 can fire again
         let mut ready2 = Vec::new();
         entry.decrease_and_get_ready_into(1, None, 1, Some(3), &mut ready2);
         assert_eq!(ready2, vec![3]);

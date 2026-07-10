@@ -429,7 +429,7 @@ pub struct Node {
     pub id: IdType,
     /// Arguments used only inside a loop body (if this node loops).
     pub loop_args: Option<Vec<Arg>>,
-    /// Number of parallel instances (stream fan-out factor).
+    /// Number of parallel instances (frame fan-out factor).
     pub factor: usize,
     /// If set, instances are grouped in batches of this size before the node fires.
     pub group_size: Option<usize>,
@@ -458,7 +458,7 @@ impl Node {
     }
 }
 
-/// User-supplied function that extracts a stream ID from a received packet.
+/// User-supplied function that extracts a frame ID from a received packet.
 ///
 /// The function receives the predecessor node's output plus any extra `args`
 /// and returns a `CmTypes` value used to map the packet to the correct slot.
@@ -474,7 +474,7 @@ pub struct IdFunction {
 
 /// User-supplied function that maps a packet to a node-instance index.
 ///
-/// Called after the stream ID is resolved; the returned value selects which
+/// Called after the frame ID is resolved; the returned value selects which
 /// parallel instance of the downstream node should receive the packet.
 #[derive(Clone, Debug)]
 pub struct IndexFunction {
@@ -495,9 +495,9 @@ pub struct GraphNetworkConfig {
     pub num_sockets: usize,
     /// Expected byte length of every incoming packet.
     pub packet_length: usize,
-    /// Total number of packets that constitute one complete stream.
-    pub stream_packets: usize,
-    /// How many streams can be buffered before back-pressure is applied.
+    /// Total number of packets that constitute one complete frame.
+    pub frame_packets: usize,
+    /// How many frames can be buffered before back-pressure is applied.
     pub buffer_depth: usize,
     /// IP address to bind sockets on.
     pub address: String,
@@ -505,7 +505,7 @@ pub struct GraphNetworkConfig {
     pub start_port: usize,
     /// Optional function that extracts a payload slice from the raw packet bytes.
     pub extract_packet_func: Option<CmPtr>,
-    /// Optional function that derives a stream ID from packet bytes.
+    /// Optional function that derives a frame ID from packet bytes.
     pub id_function: Option<CmPtr>,
     /// Optional function that maps a packet to a specific node-instance index.
     pub index_function: Option<IndexFunction>,

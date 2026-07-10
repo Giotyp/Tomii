@@ -1,14 +1,14 @@
 //! Slot lifecycle orchestration: completion detection, state reset, and post-completion routing.
 //!
 //! [`check_slots`] is the top-level function called unconditionally on every resolution-loop
-//! iteration.  It iterates all slots that have an assigned stream, skips buffering or idle
+//! iteration.  It iterates all slots that have an assigned frame, skips buffering or idle
 //! slots, and delegates to four private helpers:
 //! - `detect_and_claim_slot_completion` — SeqCst counter check + CAS ownership claim.
 //! - `reset_slot_state` — bumps generation and resets all per-slot counters/flags.
 //! - `activate_buffered_slot` — in slot-priority mode, activates the next queued slot.
-//! - `restart_slot_nonnetwork` — in non-network mode, re-registers the slot for a new stream.
+//! - `restart_slot_nonnetwork` — in non-network mode, re-registers the slot for a new frame.
 //!
-//! This module does **not** own the slot allocation primitives (`assign_stream_to_available_slot`,
+//! This module does **not** own the slot allocation primitives (`assign_frame_to_available_slot`,
 //! `release_slot`, `activate_next_slot`) — those live in `slot_management`.  The split keeps
 //! "what happens when a slot completes" separate from "how slots are allocated and released".
 
@@ -19,14 +19,14 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-/// Iterate all active slots and process any that have completed their stream.
+/// Iterate all active slots and process any that have completed their frame.
 ///
 /// Called unconditionally every resolution-loop iteration to ensure completions are
 /// never missed (Bug #21 fix: conditional calling caused hangs when all threads went idle).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_slots(
     shared: &Arc<SharedData>,
-    stream_slot_activity: &mut HashMap<usize, bool>,
+    frame_slot_activity: &mut HashMap<usize, bool>,
     thread_id: usize,
     thread_core: usize,
     thread_slot: usize,
@@ -34,18 +34,18 @@ pub(super) fn check_slots(
     cached_slots: &mut Vec<usize>,
     slots_dirty: &mut bool,
 ) {
-    // Refresh cached slot list only when dirty (stream assigned or completed).
-    // Avoids acquiring running_streams.read() on every iteration in the hot path.
+    // Refresh cached slot list only when dirty (frame assigned or completed).
+    // Avoids acquiring running_frames.read() on every iteration in the hot path.
     if *slots_dirty || cached_slots.is_empty() {
-        let running_streams = shared.slot_data.running_streams.read();
+        let running_frames = shared.slot_data.running_frames.read();
         cached_slots.clear();
-        cached_slots.extend(running_streams.iter().map(|(_, slot)| *slot));
+        cached_slots.extend(running_frames.iter().map(|(_, slot)| *slot));
         *slots_dirty = false;
     }
 
     // Clear activity map AFTER getting slots to check (not before).
     // This prevents redundant checking while ensuring we don't miss completions.
-    stream_slot_activity.clear();
+    frame_slot_activity.clear();
 
     // Load active bitmap once — avoids per-slot RwLock read.
     let active_bitmap = if shared.config.slot_priority_enabled {
@@ -81,14 +81,14 @@ pub(super) fn check_slots(
         reset_slot_state(shared, proc_slot);
 
         let can_restart = process_slot_completion(shared, proc_slot);
-        stream_slot_activity.remove(&proc_slot);
-        *slots_dirty = true; // release_slot modified running_streams
+        frame_slot_activity.remove(&proc_slot);
+        *slots_dirty = true; // release_slot modified running_frames
 
         activate_buffered_slot(
             shared,
             proc_slot,
             cond_indexes,
-            stream_slot_activity,
+            frame_slot_activity,
             thread_core,
             thread_id,
             thread_slot,
@@ -104,7 +104,7 @@ pub(super) fn check_slots(
 // Private helpers — each handles one responsibility of the slot lifecycle
 // ---------------------------------------------------------------------------
 
-/// Check if a slot has truly completed its stream and claim exclusive ownership.
+/// Check if a slot has truly completed its frame and claim exclusive ownership.
 ///
 /// Loads the three counters with SeqCst, tries a CAS via `try_complete_slot`, then
 /// re-reads to rule out a stale win. Returns `true` iff this thread now owns the
@@ -135,7 +135,7 @@ fn detect_and_claim_slot_completion(slot_data: &SlotData, exec: &ExecCtx, slot: 
     true
 }
 
-/// Reset all per-slot counters and flags for the next stream.
+/// Reset all per-slot counters and flags for the next frame.
 ///
 /// Must be called immediately after `detect_and_claim_slot_completion` returns `true`,
 /// before any other thread can observe the reset state. Bumps generation FIRST (before
@@ -160,12 +160,12 @@ fn reset_slot_state(shared: &SharedData, slot: usize) {
         )
     });
 
-    // Unmark so the slot can complete again for the next stream.
+    // Unmark so the slot can complete again for the next frame.
     shared.exec.resolution_state.unmark_slot_completed(slot);
 
     print_debug(|| {
         format!(
-            "Cleared all state for slot {} before spawning new stream",
+            "Cleared all state for slot {} before spawning new frame",
             slot
         )
     });
@@ -177,7 +177,7 @@ fn activate_buffered_slot(
     shared: &Arc<SharedData>,
     completing_slot: usize,
     cond_indexes: &[Vec<usize>],
-    stream_slot_activity: &mut HashMap<usize, bool>,
+    frame_slot_activity: &mut HashMap<usize, bool>,
     thread_core: usize,
     thread_id: usize,
     thread_slot: usize,
@@ -231,20 +231,20 @@ fn activate_buffered_slot(
             thread_id,
             thread_slot,
             cond_indexes,
-            stream_slot_activity,
+            frame_slot_activity,
             start_ns,
         );
     }
 }
 
-/// In non-network mode: restart the completing slot in-place for the next stream.
+/// In non-network mode: restart the completing slot in-place for the next frame.
 ///
 /// `process_slot_completion` already released the slot (Inactive). This re-registers
-/// it in `running_streams` and marks it Active so the new stream's completion can be
+/// it in `running_frames` and marks it Active so the new frame's completion can be
 /// detected by `check_slots`.
 ///
 /// Not called in network mode: the packet loop re-activates the slot via
-/// `assign_stream_to_available_slot`, which handles gen bumps and initial spawning
+/// `assign_frame_to_available_slot`, which handles gen bumps and initial spawning
 /// atomically. Spawning here would race with that path and cause counter underflow.
 fn restart_slot_nonnetwork(
     shared: &Arc<SharedData>,
@@ -256,9 +256,9 @@ fn restart_slot_nonnetwork(
         return;
     }
 
-    // Lock ordering: running_streams → slot_states (global protocol).
+    // Lock ordering: running_frames → slot_states (global protocol).
     {
-        let mut running_streams = shared.slot_data.running_streams.write();
+        let mut running_frames = shared.slot_data.running_frames.write();
         let mut slot_states = shared.slot_data.states.write();
 
         // Count Active/Buffering slots (proc_slot is Inactive after release_slot, so excluded).
@@ -268,18 +268,18 @@ fn restart_slot_nonnetwork(
             .count();
         let completed = shared
             .telemetry
-            .stream_complete_counter
+            .frame_complete_counter
             .load(Ordering::Acquire);
-        // Monotonically increasing stream ID: avoids conflicts with IDs assigned during init.
-        let next_stream_id = completed + currently_active;
+        // Monotonically increasing frame ID: avoids conflicts with IDs assigned during init.
+        let next_frame_id = completed + currently_active;
 
         slot_states[slot] = SlotState::Active;
         shared
             .slot_data
             .active_bitmap
             .fetch_or(1u64 << slot, Ordering::Release);
-        shared.slot_data.stream_id[slot].store(next_stream_id, Ordering::Relaxed);
-        running_streams.push((next_stream_id, slot));
+        shared.slot_data.frame_id[slot].store(next_frame_id, Ordering::Relaxed);
+        running_frames.push((next_frame_id, slot));
     }
     // slots_dirty was already set by the caller after process_slot_completion.
 

@@ -42,7 +42,7 @@ pub(super) fn process_batch_inner(
     thread_id: usize,
     thread_slot: usize,
     cond_indexes: &[Vec<usize>],
-    stream_slot_activity: &mut HashMap<usize, bool>,
+    frame_slot_activity: &mut HashMap<usize, bool>,
     sched: &mut Vec<NodeInfo>,
     ready: &mut Vec<usize>,
     batch_sched: &mut Vec<NodeInfo>,
@@ -53,8 +53,8 @@ pub(super) fn process_batch_inner(
     let sctx = shared.sched_ctx();
 
     for (node_info, result_opt) in batch.drain(..) {
-        // Mark stream activity for all nodes (including network nodes id=0)
-        stream_slot_activity.insert(node_info.slot, true);
+        // Mark frame activity for all nodes (including network nodes id=0)
+        frame_slot_activity.insert(node_info.slot, true);
 
         if node_info.post_node {
             // For post_nodes: result pre-stored by execute_task (None here).

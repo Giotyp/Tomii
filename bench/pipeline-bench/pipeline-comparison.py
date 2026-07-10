@@ -4,7 +4,7 @@ pipeline-comparison.py
 ======================
 Tomii vs Taskflow comparison for the 4-stage linear pipeline benchmark.
 
-  Fan-out/fan-in pipeline, N=256 items per stream
+  Fan-out/fan-in pipeline, N=256 items per frame
   S concurrent slots/lines in {1, 4, 16, 64}
   Fixed worker count W=4 (override with --workers)
 
@@ -55,6 +55,17 @@ _ITERS_LABEL = {1: "~0 µs", 512: "~4 µs", 2048: "~16 µs", 8192: "~64 µs"}
 # ---------------------------------------------------------------------------
 
 
+def _ms_col(row: dict, default: str | None = None) -> str | None:
+    """Per-frame latency column; archived CSVs use the legacy `ms_per_stream` name."""
+    if "ms_per_frame" in row:
+        return row["ms_per_frame"]
+    if "ms_per_stream" in row:
+        return row["ms_per_stream"]
+    if default is None:
+        raise KeyError("ms_per_frame")
+    return default
+
+
 def _load_throughput(
     path: str,
     system_filter: str | None,
@@ -63,7 +74,7 @@ def _load_throughput(
     n: int,
     transform_iters: int | None = None,
 ) -> list[float | None]:
-    """Return throughput (streams/s) for each slot count at a fixed worker count.
+    """Return throughput (frames/s) for each slot count at a fixed worker count.
 
     If transform_iters is given and the CSV has that column, only rows with that
     exact iters value are used (prevents mixing kernel sizes in combined CSVs).
@@ -87,9 +98,9 @@ def _load_throughput(
                 if w != workers:
                     continue
                 s = int(row["slots"])
-                ms = float(row["ms_per_stream"])
+                ms = float(_ms_col(row))
                 if ms > 0.0:
-                    tp = 1000.0 / ms  # streams/s
+                    tp = 1000.0 / ms  # frames/s
                     # Keep best (highest) throughput if multiple rows match.
                     if s not in data or tp > data[s]:
                         data[s] = tp
@@ -160,7 +171,7 @@ def _load_ratio_vs_kernel(
                         and int(row["transform_iters"]) != iters
                     ):
                         continue
-                    ms = float(row["ms_per_stream"])
+                    ms = float(_ms_col(row))
                     if ms > 0.0:
                         tp = 1000.0 / ms
                         if best is None or tp > best:
@@ -281,7 +292,7 @@ def figure_pipeline(workers: int, transform_iters: int | None = None) -> None:
         pad=4,
     )
     ax.set_xlabel("Concurrent slots (S)", fontsize=8)
-    ax.set_ylabel("Throughput (streams/s)", fontsize=8)
+    ax.set_ylabel("Throughput (frames/s)", fontsize=8)
     ax.grid(True, which="major")
     ax.grid(True, which="minor", linewidth=0.2, alpha=0.2)
     ax.legend(
@@ -378,7 +389,7 @@ def figure_kernel_sweep(
 def _load_highS(
     path: str, system_filter: str | None, workers: int, n: int
 ) -> tuple[list[int], list[float | None], list[float | None]]:
-    """Return (slots, ms_per_stream_list, rss_mb_list) from a high-S CSV.
+    """Return (slots, ms_per_frame_list, rss_mb_list) from a high-S CSV.
 
     The high-S CSV has an extra peak_rss_kb column appended by the sweep
     script.  Falls back gracefully if the column is absent.
@@ -402,7 +413,7 @@ def _load_highS(
                 if int(row["workers"]) != workers:
                     continue
                 s = int(row["slots"])
-                ms_str = row.get("ms_per_stream", "")
+                ms_str = _ms_col(row, default="")
                 ms = float(ms_str) if ms_str and ms_str != "NaN" else None
                 rss_str = row.get("peak_rss_kb", "")
                 rss_mb = (
@@ -436,12 +447,12 @@ def figure_highS(
     workers: int = 4,
     n: int = N_ITEMS,
 ) -> None:
-    """Two-panel plot: throughput (streams/s) and RSS (MB) vs S (log-log).
+    """Two-panel plot: throughput (frames/s) and RSS (MB) vs S (log-log).
 
     Left panel: throughput — both systems, log-log.
     Right panel: peak RSS — both systems, log-log.
     Shows whether Tomii's slot memory scales better than Taskflow's clone-mode
-    at high concurrent-stream counts.
+    at high concurrent-frame counts.
     """
     plt.rcParams.update(RC)
     fig, (ax_tp, ax_rss) = plt.subplots(1, 2, figsize=(7.2, 3.0))
@@ -459,7 +470,7 @@ def figure_highS(
     ax_tp.set_xscale("log")
     ax_tp.set_yscale("log")
     ax_tp.set_xlabel("Concurrent slots (S)", fontsize=8)
-    ax_tp.set_ylabel("Throughput (streams/s)", fontsize=8)
+    ax_tp.set_ylabel("Throughput (frames/s)", fontsize=8)
     ax_tp.set_title(rf"Throughput vs S, $N={n}$, $W={workers}$", fontsize=9, pad=4)
     ax_tp.yaxis.set_major_formatter(mticker.FuncFormatter(fmt_throughput))
     ax_tp.yaxis.set_minor_formatter(mticker.NullFormatter())
@@ -603,7 +614,7 @@ def main() -> None:
         help="slot counts shown on x-axis",
     )
     p.add_argument(
-        "--n", type=int, default=N_ITEMS, help="items per stream to filter on"
+        "--n", type=int, default=N_ITEMS, help="items per frame to filter on"
     )
     p.add_argument(
         "--tomii-csv",

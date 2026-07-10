@@ -1,8 +1,8 @@
-"""Stream-analytics benchmark — Python API equivalent of graph.json.
+"""Frame-analytics benchmark — Python API equivalent of graph.json.
 
 This file builds and runs the same graph as graph.json using the tomii
 Python API, demonstrating conditional nodes, grouped barriers, $dep ordering
-edges, priority levels, and post-stream cleanup — all without the heavy
+edges, priority levels, and post-frame cleanup — all without the heavy
 dependencies of a real MIMO pipeline.
 
 Usage:
@@ -39,11 +39,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--workers",        type=int, default=2)
     p.add_argument("--system-threads", type=int, default=3)
     p.add_argument("--slots",          type=int, default=2)
-    p.add_argument("--max-streams",    type=int, default=1)
+    p.add_argument("--max-frames",    type=int, default=1)
     p.add_argument("--max-runtime",    type=int, default=60)
     p.add_argument("--batching-size",  type=int, default=1)
     p.add_argument("--batching-limit", type=int, default=10)
-    p.add_argument("--exclude-streams",type=int, default=0)
+    p.add_argument("--exclude-frames",type=int, default=0)
     p.add_argument("--no-clean",  dest="clean",  action="store_false", default=True)
     p.add_argument("--no-record", dest="record", action="store_false", default=True)
     p.add_argument("--no-inits",  dest="inits",  action="store_false", default=True)
@@ -167,7 +167,7 @@ def build_graph() -> tm.Graph:
         args=[result_file, aggregate.out(0, num_sensors)],
     )
 
-    # --- Post-stream cleanup ---
+    # --- Post-frame cleanup ---
     app.post_node("cleanup", func="cleanup_state", args=[])
 
     return app
@@ -205,11 +205,11 @@ def main() -> None:
         workers=args.workers,
         system_threads=args.system_threads,
         slots=args.slots,
-        max_streams=args.max_streams,
+        max_frames=args.max_frames,
         max_runtime=args.max_runtime,
         batching_size=args.batching_size,
         batching_limit=args.batching_limit,
-        exclude_streams=args.exclude_streams,
+        exclude_frames=args.exclude_frames,
         output=str(out_file),
         timing=str(timing_file),
         record=args.record,

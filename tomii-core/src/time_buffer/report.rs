@@ -24,10 +24,10 @@ pub(super) struct ReportCriticalPath {
 
 // ── Free helpers for print_stats ─────────────────────────────────────────────
 
-/// Collect per-stream total times and per-stream task maps from worker slots,
+/// Collect per-frame total times and per-frame task maps from worker slots,
 /// and collect system-thread task times grouped by slot.
 ///
-/// Returns `(global_total_times, per_stream_task_data, system_task_data_by_slot, total_streams)`.
+/// Returns `(global_total_times, per_frame_task_data, system_task_data_by_slot, total_frames)`.
 #[allow(clippy::type_complexity)]
 pub(super) fn collect_print_stats_data(
     slot_statistics: &[Vec<SlotStats>],
@@ -40,13 +40,13 @@ pub(super) fn collect_print_stats_data(
     usize,
 ) {
     let mut global_total_times: Vec<Duration> = Vec::new();
-    let mut per_stream_task_data: Vec<std::collections::HashMap<String, Vec<(usize, Duration)>>> =
+    let mut per_frame_task_data: Vec<std::collections::HashMap<String, Vec<(usize, Duration)>>> =
         Vec::new();
     let mut system_task_data_by_slot: std::collections::HashMap<
         usize,
         std::collections::HashMap<String, Vec<Duration>>,
     > = std::collections::HashMap::new();
-    let mut total_streams = 0;
+    let mut total_frames = 0;
 
     for (slot_id, slot_stats) in slot_statistics.iter().enumerate().take(slots) {
         if slot_stats.is_empty() {
@@ -68,46 +68,46 @@ pub(super) fn collect_print_stats_data(
             continue;
         }
 
-        total_streams += slot_stats.len();
+        total_frames += slot_stats.len();
 
         for stats in slot_stats {
             global_total_times.push(stats.total_time);
 
-            let mut stream_tasks: std::collections::HashMap<String, Vec<(usize, Duration)>> =
+            let mut frame_tasks: std::collections::HashMap<String, Vec<(usize, Duration)>> =
                 std::collections::HashMap::new();
             for (task_name, times) in &stats.task_times {
-                stream_tasks.insert(task_name.clone(), times.clone());
+                frame_tasks.insert(task_name.clone(), times.clone());
             }
-            per_stream_task_data.push(stream_tasks);
+            per_frame_task_data.push(frame_tasks);
         }
     }
 
     (
         global_total_times,
-        per_stream_task_data,
+        per_frame_task_data,
         system_task_data_by_slot,
-        total_streams,
+        total_frames,
     )
 }
 
-/// Aggregate per-task durations and per-worker counts/totals across included streams
-/// (i.e. after skipping the first `exclude_streams` streams).
+/// Aggregate per-task durations and per-worker counts/totals across included frames
+/// (i.e. after skipping the first `exclude_frames` frames).
 ///
 /// Returns `(global_task_data, per_worker_counts, per_worker_totals)`.
 #[allow(clippy::type_complexity)]
 pub(super) fn aggregate_task_data(
-    per_stream_task_data: &[std::collections::HashMap<String, Vec<(usize, Duration)>>],
-    exclude_streams: usize,
+    per_frame_task_data: &[std::collections::HashMap<String, Vec<(usize, Duration)>>],
+    exclude_frames: usize,
 ) -> (
     std::collections::HashMap<String, Vec<Duration>>,
     std::collections::HashMap<String, std::collections::HashMap<usize, usize>>,
     std::collections::HashMap<String, std::collections::HashMap<usize, Duration>>,
 ) {
-    let excluded_count = exclude_streams.min(per_stream_task_data.len());
-    let streams_to_analyze: Vec<_> = if excluded_count > 0 {
-        per_stream_task_data.iter().skip(excluded_count).collect()
+    let excluded_count = exclude_frames.min(per_frame_task_data.len());
+    let frames_to_analyze: Vec<_> = if excluded_count > 0 {
+        per_frame_task_data.iter().skip(excluded_count).collect()
     } else {
-        per_stream_task_data.iter().collect()
+        per_frame_task_data.iter().collect()
     };
 
     let mut global_task_data: std::collections::HashMap<String, Vec<Duration>> =
@@ -121,8 +121,8 @@ pub(super) fn aggregate_task_data(
         std::collections::HashMap<usize, Duration>,
     > = std::collections::HashMap::new();
 
-    for stream_tasks in streams_to_analyze {
-        for (task_name, times) in stream_tasks {
+    for frame_tasks in frames_to_analyze {
+        for (task_name, times) in frame_tasks {
             let task_durations = global_task_data.entry(task_name.clone()).or_default();
 
             for (worker_id, duration) in times {
@@ -148,36 +148,36 @@ pub(super) fn aggregate_task_data(
     )
 }
 
-/// Format the header and global timing statistics block (stream counts, averages, min/max).
+/// Format the header and global timing statistics block (frame counts, averages, min/max).
 pub(super) fn format_timing_summary(
     global_total_times: &[Duration],
     global_task_data: &std::collections::HashMap<String, Vec<Duration>>,
-    total_streams: usize,
-    exclude_streams: usize,
+    total_frames: usize,
+    exclude_frames: usize,
     worker_slots_end: usize,
     slot_statistics: &[Vec<SlotStats>],
     filler: &str,
 ) -> String {
     let mut out = format!("{}\nAggregated Statistics (All Slots):\n", filler);
-    out.push_str(&format!("  Total Streams Processed: {}\n", total_streams));
+    out.push_str(&format!("  Total Frames Processed: {}\n", total_frames));
 
-    // Per-slot stream breakdown (worker slots only)
-    out.push_str("  Streams per Slot: ");
-    let mut slot_stream_items: Vec<String> = Vec::new();
+    // Per-slot frame breakdown (worker slots only)
+    out.push_str("  Frames per Slot: ");
+    let mut slot_frame_items: Vec<String> = Vec::new();
     for (slot_id, slot_stats) in slot_statistics.iter().enumerate().take(worker_slots_end) {
-        slot_stream_items.push(format!("Slot {}: {}", slot_id, slot_stats.len()));
+        slot_frame_items.push(format!("Slot {}: {}", slot_id, slot_stats.len()));
     }
-    out.push_str(&format!("{}\n", slot_stream_items.join(", ")));
+    out.push_str(&format!("{}\n", slot_frame_items.join(", ")));
 
-    let excluded_count = exclude_streams.min(total_streams);
-    let steady_state_count = total_streams.saturating_sub(excluded_count);
+    let excluded_count = exclude_frames.min(total_frames);
+    let steady_state_count = total_frames.saturating_sub(excluded_count);
 
     if !global_total_times.is_empty() {
         let global_total: Duration = global_total_times.iter().sum();
 
         if excluded_count > 0 {
             out.push_str(&format!(
-                "  Excluded Streams (warm-up): {} (Steady-state: {} streams)\n",
+                "  Excluded Frames (warm-up): {} (Steady-state: {} frames)\n",
                 excluded_count, steady_state_count
             ));
         }
@@ -198,7 +198,7 @@ pub(super) fn format_timing_summary(
             Duration::ZERO
         };
 
-        let std_dev_stream = if !steady_state_times.is_empty() {
+        let std_dev_frame = if !steady_state_times.is_empty() {
             let mean_ns = avg_total_time.as_nanos() as f64;
             Duration::from_nanos(
                 (steady_state_times
@@ -235,16 +235,16 @@ pub(super) fn format_timing_summary(
         let avg_compute_time = if steady_state_count > 0 {
             total_compute_time_all / steady_state_count as u32
         } else {
-            total_compute_time_all / total_streams as u32
+            total_compute_time_all / total_frames as u32
         };
 
         out.push_str(&format!("  Total Runtime: {:.4?}\n", global_total));
         out.push_str(&format!(
-            "  Avg Time Per Stream: {:.4?} (std: {:.4?})\n",
-            avg_total_time, std_dev_stream
+            "  Avg Time Per Frame: {:.4?} (std: {:.4?})\n",
+            avg_total_time, std_dev_frame
         ));
         out.push_str(&format!(
-            "  Min/Max Per Stream: {:.4?} / {:.4?}\n",
+            "  Min/Max Per Frame: {:.4?} / {:.4?}\n",
             min_total_time, max_total_time
         ));
         out.push_str(&format!(
@@ -252,7 +252,7 @@ pub(super) fn format_timing_summary(
             total_compute_time_all
         ));
         out.push_str(&format!(
-            "  Avg Compute Time Per Stream: {:.4?}\n",
+            "  Avg Compute Time Per Frame: {:.4?}\n",
             avg_compute_time
         ));
     }
@@ -320,7 +320,7 @@ pub(super) fn format_per_task_analysis(
             ));
 
             out.push_str(&format!(
-                "    Timing - Avg/Stream: {:.4?}, Avg/Task: {:.4?}, Std: {:.4?}, Min: {:.4?}, Max: {:.4?}, Total: {:.4?}\n",
+                "    Timing - Avg/Frame: {:.4?}, Avg/Task: {:.4?}, Std: {:.4?}, Min: {:.4?}, Max: {:.4?}, Total: {:.4?}\n",
                 avg_time, avg_task, std_dev_task, min_time, max_time, total_time
             ));
 
@@ -415,42 +415,42 @@ pub(super) fn format_system_thread_stats(
 
 // ── Free helpers for write_json_report ───────────────────────────────────────
 
-/// Collect per-stream total times and per-stream task maps for included streams
+/// Collect per-frame total times and per-frame task maps for included frames
 /// (worker slots only, with warm-up exclusion applied).
 ///
-/// Returns `None` if no streams remain after exclusion.
+/// Returns `None` if no frames remain after exclusion.
 #[allow(clippy::type_complexity)]
-pub(super) fn collect_report_stream_data(
+pub(super) fn collect_report_frame_data(
     slot_statistics: &[Vec<SlotStats>],
     worker_slots_end: usize,
-    exclude_streams: usize,
+    exclude_frames: usize,
 ) -> Option<(
     Vec<Duration>,
     Vec<std::collections::HashMap<String, Vec<(usize, Duration)>>>,
 )> {
-    let mut stream_total_times: Vec<Duration> = Vec::new();
-    let mut per_stream_tasks: Vec<std::collections::HashMap<String, Vec<(usize, Duration)>>> =
+    let mut frame_total_times: Vec<Duration> = Vec::new();
+    let mut per_frame_tasks: Vec<std::collections::HashMap<String, Vec<(usize, Duration)>>> =
         Vec::new();
 
     for stats_list in slot_statistics.iter().take(worker_slots_end) {
         for stats in stats_list {
-            stream_total_times.push(stats.total_time);
+            frame_total_times.push(stats.total_time);
             let mut m: std::collections::HashMap<String, Vec<(usize, Duration)>> =
                 std::collections::HashMap::new();
             for (name, entries) in &stats.task_times {
                 m.insert(name.clone(), entries.clone());
             }
-            per_stream_tasks.push(m);
+            per_frame_tasks.push(m);
         }
     }
 
-    let total_streams = stream_total_times.len();
-    let excluded = exclude_streams.min(total_streams);
+    let total_frames = frame_total_times.len();
+    let excluded = exclude_frames.min(total_frames);
 
     let included_total_times: Vec<Duration> =
-        stream_total_times.iter().skip(excluded).copied().collect();
+        frame_total_times.iter().skip(excluded).copied().collect();
     let included_tasks: Vec<std::collections::HashMap<String, Vec<(usize, Duration)>>> =
-        per_stream_tasks.into_iter().skip(excluded).collect();
+        per_frame_tasks.into_iter().skip(excluded).collect();
 
     if included_total_times.is_empty() {
         return None;
@@ -459,7 +459,7 @@ pub(super) fn collect_report_stream_data(
     Some((included_total_times, included_tasks))
 }
 
-/// Aggregate per-node execution times across included streams and compute `NodeStats`
+/// Aggregate per-node execution times across included frames and compute `NodeStats`
 /// for each node. Also returns per-worker busy time in microseconds.
 ///
 /// Returns `(node_stats_map, worker_busy_us)`.
@@ -475,8 +475,8 @@ pub(super) fn compute_node_stats(
     let mut worker_busy_us: std::collections::HashMap<usize, f64> =
         std::collections::HashMap::new();
 
-    for stream_map in included_tasks {
-        for (name, entries) in *stream_map {
+    for frame_map in included_tasks {
+        for (name, entries) in *frame_map {
             let bucket = node_entries.entry(name.clone()).or_default();
             for &(wid, dur) in entries {
                 let us = dur.as_nanos() as f64 / 1_000.0;
@@ -625,7 +625,7 @@ pub(super) fn compute_critical_path_report(
 pub(super) fn generate_optimization_suggestions(
     overhead_pct: f64,
     max_cp_factor: usize,
-    total_tasks_per_stream: usize,
+    total_tasks_per_frame: usize,
     critical_path: Option<&ReportCriticalPath>,
     worker_busy_pct: &[f64],
 ) -> Vec<serde_json::Value> {
@@ -643,9 +643,9 @@ pub(super) fn generate_optimization_suggestions(
                 "category": "graph_topology",
                 "description": format!(
                     "Critical path has {} nodes; highest-factor critical-path node has \
-                     factor {} ({} total tasks/stream). Graph coarsening will cut \
+                     factor {} ({} total tasks/frame). Graph coarsening will cut \
                      scheduling overhead by ~{}x.",
-                    cp.length_nodes, max_cp_factor, total_tasks_per_stream,
+                    cp.length_nodes, max_cp_factor, total_tasks_per_frame,
                     max_cp_factor / 8
                 ),
                 "action": format!(
@@ -662,7 +662,7 @@ pub(super) fn generate_optimization_suggestions(
     }
 
     // A'. High sequential-node-count, low per-node factor: wrong graph structure.
-    if overhead_pct > 60.0 && max_cp_factor < 16 && total_tasks_per_stream > 200 {
+    if overhead_pct > 60.0 && max_cp_factor < 16 && total_tasks_per_frame > 200 {
         if let Some(cp) = critical_path {
             if cp.length_nodes > 50 {
                 suggestions.push(json!({
@@ -744,14 +744,14 @@ pub(super) fn generate_optimization_suggestions(
     }
 
     // C. batching_size for high task counts.
-    if total_tasks_per_stream > 10_000 && overhead_pct > 40.0 {
+    if total_tasks_per_frame > 10_000 && overhead_pct > 40.0 {
         suggestions.push(json!({
             "priority": 3,
             "category": "runtime_flags",
             "description": format!(
-                "{} tasks/stream creates high scheduler-submission pressure. \
+                "{} tasks/frame creates high scheduler-submission pressure. \
                  Larger batching_size amortizes per-batch overhead.",
-                total_tasks_per_stream
+                total_tasks_per_frame
             ),
             "action": "Try batching_size=64 (or 16, 256) in graph.run()",
             "knob": "batching_size",
@@ -804,8 +804,8 @@ pub(super) fn build_json_report_value(
     avg_latency_us: f64,
     p50_latency_us: f64,
     p99_latency_us: f64,
-    throughput_streams_per_sec: f64,
-    total_tasks_per_stream: usize,
+    throughput_frames_per_sec: f64,
+    total_tasks_per_frame: usize,
     cp_exec_us: f64,
     overhead_us: f64,
     overhead_pct: f64,
@@ -874,12 +874,12 @@ pub(super) fn build_json_report_value(
 
     json!({
         "summary": {
-            "total_streams": num_included,
+            "total_frames": num_included,
             "avg_latency_us": (avg_latency_us * 100.0).round() / 100.0,
             "p50_latency_us": (p50_latency_us * 100.0).round() / 100.0,
             "p99_latency_us": (p99_latency_us * 100.0).round() / 100.0,
-            "throughput_streams_per_sec": (throughput_streams_per_sec * 10.0).round() / 10.0,
-            "total_tasks_per_stream": total_tasks_per_stream,
+            "throughput_frames_per_sec": (throughput_frames_per_sec * 10.0).round() / 10.0,
+            "total_tasks_per_frame": total_tasks_per_frame,
             "scheduling_overhead_diagnostic": {
                 "critical_path_exec_us": cp_exec_us,
                 "overhead_us": (overhead_us * 100.0).round() / 100.0,

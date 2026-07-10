@@ -42,7 +42,7 @@ def main() -> None:
     )
 
     baseline = establish_baseline(
-        streams=args.streams,
+        frames=args.frames,
         warmup=args.warmup,
         results_dir=results_dir,
         workload=workload,
@@ -52,24 +52,24 @@ def main() -> None:
     for i in range(args.iterations):
         knobs = tomii_knobs.sample(space, rng)
         result = workload.evaluate(
-            knobs, streams=args.streams, warmup=args.warmup, space=space
+            knobs, frames=args.frames, warmup=args.warmup, space=space
         )
         record = TrialRecord(iteration=i, knobs=knobs, result=result, arm="random")
         log_trial(record, log_file)
 
-        if result.verifier_ok and result.ms_per_stream is not None:
-            if result.ms_per_stream < best_ms:
-                best_ms = result.ms_per_stream
+        if result.verifier_ok and result.ms_per_frame is not None:
+            if result.ms_per_frame < best_ms:
+                best_ms = result.ms_per_frame
                 if baseline > 0.0:
                     delta_pct = (baseline - best_ms) / baseline * 100.0
                     print(
-                        f"[random {i}] new best: {best_ms:.4f} ms/stream "
+                        f"[random {i}] new best: {best_ms:.4f} ms/frame "
                         f"(delta: {delta_pct:.1f}%)",
                         flush=True,
                     )
                 else:
                     print(
-                        f"[random {i}] new best: {best_ms:.4f} ms/stream",
+                        f"[random {i}] new best: {best_ms:.4f} ms/frame",
                         flush=True,
                     )
         else:
@@ -83,7 +83,7 @@ def main() -> None:
             f"({improvement:.1f}% improvement)"
         )
     else:
-        print(f"\nRandom search complete. best={best_ms:.4f} ms/stream")
+        print(f"\nRandom search complete. best={best_ms:.4f} ms/frame")
 
 
 if __name__ == "__main__":

@@ -31,7 +31,7 @@ pub trait DependencyCounter: Send + Sync {
     fn reset_sent(&self, slot: usize, node_id: usize, index: usize, slot_gen: u32);
 
     /// Remove `slot` from the completed-slots bitmask (called at the start of a
-    /// new stream iteration on the same slot).
+    /// new frame iteration on the same slot).
     fn unmark_slot_completed(&self, slot: usize);
 
     /// Atomically claim slot completion: returns `true` only for the one thread

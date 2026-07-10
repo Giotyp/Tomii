@@ -37,7 +37,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 from ._runner import list_knobs_json
 
-SPACE_VERSION = 2
+SPACE_VERSION = 3
 
 # Multiplier ladder used for factor-like graph knobs: base/4 … base*4,
 # keeping only integer values >= 1.

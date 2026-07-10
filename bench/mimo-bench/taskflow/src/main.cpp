@@ -667,7 +667,7 @@ static void print_usage(const char* prog) {
         << "Usage: " << prog << " [options]\n"
         << "  --slots    N    concurrent slot count (default: 1)\n"
         << "  --workers  N    tf::Executor thread count (default: 4)\n"
-        << "  --streams  N    frames to time after warmup (default: 2000)\n"
+        << "  --frames  N    frames to time after warmup (default: 2000)\n"
         << "  --warmup   N    warmup frames (default: 200)\n"
         << "  --output   FILE CSV output path (default: tf_mimo_sweep.csv)\n"
         << "  --config   FILE tddconfig JSON (default: ../tomii/graphs/tddconfig-4x4.json)\n";
@@ -699,7 +699,7 @@ int main(int argc, char* argv[]) {
             num_slots = std::stoull(argv[++i]);
         else if ((arg == "--workers" || arg == "-w") && i + 1 < argc)
             num_workers = std::stoull(argv[++i]);
-        else if (arg == "--streams" && i + 1 < argc)
+        else if (arg == "--frames" && i + 1 < argc)
             num_streams = std::stoull(argv[++i]);
         else if (arg == "--warmup" && i + 1 < argc)
             num_warmup = std::stoull(argv[++i]);
@@ -735,7 +735,7 @@ int main(int argc, char* argv[]) {
               << "\n";
     std::cout << "Benchmark: slots=" << num_slots
               << " workers=" << num_workers
-              << " streams=" << num_streams
+              << " frames=" << num_streams
               << " warmup=" << num_warmup << "\n";
 
     // --- Allocate per-slot buffers ---
@@ -795,15 +795,15 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     if (write_header) {
-        csv << "system,slots,workers,streams,ms_per_slot\n";
+        csv << "system,slots,workers,frames,ms_per_slot\n";
     }
 
-    // Timing methodology (matches Tomii's "Avg Time Per Stream"):
+    // Timing methodology (matches Tomii's "Avg Time Per Frame"):
     //   slot_first_pkt_time: when the FIRST packet of a frame arrives at a slot.
     //   slot_submit_time:    when the LAST packet arrives and the DAG is submitted.
     //   Latency reported = t_complete - slot_first_pkt_time (first-pkt → done).
     // This is the same window Tomii measures: from when the slot first receives
-    // data for a stream to when all tasks finish — a true end-to-end pipeline view.
+    // data for a frame to when all tasks finish — a true end-to-end pipeline view.
     using Clock = std::chrono::steady_clock;
     using TimePoint = Clock::time_point;
     std::vector<TimePoint> slot_submit_time(num_slots);
@@ -812,7 +812,7 @@ int main(int argc, char* argv[]) {
     double total_pipeline_ms = 0.0;   // first-pkt → complete (primary metric)
     double total_compute_ms = 0.0;    // submit → complete (reference)
     size_t timed_frames = 0;
-    // Wall-clock timing (total elapsed / total streams)
+    // Wall-clock timing (total elapsed / total frames)
     Clock::time_point t_start;
     bool timing_started = false;
 
@@ -946,7 +946,7 @@ int main(int argc, char* argv[]) {
     double ms_per_slot_compute = (timed_frames > 0)
         ? (total_compute_ms / static_cast<double>(timed_frames))
         : 0.0;
-    // Wall-clock: total elapsed / total streams (sender-rate limited)
+    // Wall-clock: total elapsed / total frames (sender-rate limited)
     double ms_per_slot_wall = 0.0;
     if (timing_started && num_streams > 0) {
         auto t_end = Clock::now();
@@ -960,7 +960,7 @@ int main(int argc, char* argv[]) {
               << ms_per_slot_compute  << " ms/slot (compute, submit→done) | "
               << ms_per_slot_wall     << " ms/slot (wall)\n";
 
-    // Pipeline latency matches Tomii's "Avg Time Per Stream" (first-pkt → last-task-done).
+    // Pipeline latency matches Tomii's "Avg Time Per Frame" (first-pkt → last-task-done).
     csv << "taskflow," << num_slots << "," << num_workers << ","
         << num_streams << "," << ms_per_slot_pipeline << "\n";
 

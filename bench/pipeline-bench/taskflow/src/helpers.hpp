@@ -35,11 +35,11 @@ static void append_pipeline_csv(
     const std::string &path,
     const std::string &system,
     int n,
-    int items_per_stream,
+    int items_per_frame,
     int slots,
     int workers,
-    int streams,
-    double ms_per_stream,
+    int frames,
+    double ms_per_frame,
     int transform_iters)
 {
     bool write_header = false;
@@ -49,14 +49,14 @@ static void append_pipeline_csv(
     }
     std::ofstream f(path, std::ios::app);
     if (write_header)
-        f << "system,n,items_per_stream,slots,workers,streams,ms_per_stream,transform_iters\n";
+        f << "system,n,items_per_frame,slots,workers,frames,ms_per_frame,transform_iters\n";
     f << system << ','
       << n << ','
-      << items_per_stream << ','
+      << items_per_frame << ','
       << slots << ','
       << workers << ','
-      << streams << ','
-      << ms_per_stream << ','
+      << frames << ','
+      << ms_per_frame << ','
       << transform_iters << '\n';
 }
 
@@ -66,10 +66,10 @@ static void append_pipeline_csv(
 
 struct Cli
 {
-    int n        = 256;   // items per stream (pipeline width)
-    int slots    = 1;     // concurrent streams (S)
-    int streams  = 2000;  // total streams (T)
-    int warmup   = 200;   // warmup streams
+    int n        = 256;   // items per frame (pipeline width)
+    int slots    = 1;     // concurrent frames (S)
+    int frames  = 2000;  // total frames (T)
+    int warmup   = 200;   // warmup frames
     int workers  = 4;     // executor thread count (W)
     std::string mode   = "clone";     // clone | sequential
     std::string output = "tf_pipeline.csv";
@@ -89,7 +89,7 @@ static Cli parse_args(int argc, char **argv)
         };
         if      (a == "--n")       c.n       = std::stoi(val());
         else if (a == "--slots")   c.slots   = std::stoi(val());
-        else if (a == "--streams") c.streams = std::stoi(val());
+        else if (a == "--frames") c.frames = std::stoi(val());
         else if (a == "--warmup")  c.warmup  = std::stoi(val());
         else if (a == "--workers") c.workers = std::stoi(val());
         else if (a == "--mode")

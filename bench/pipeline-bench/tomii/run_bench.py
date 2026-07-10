@@ -1,7 +1,7 @@
 """Tomii 4-stage linear pipeline benchmark.
 
 Sweeps S (concurrent slots) and W (workers) for a fan-out/fan-in pipeline
-of T total streams, each processing N items.  Writes per-stream timing to
+of T total frames, each processing N items.  Writes per-frame timing to
 results/pipeline_sweep.csv so it can be compared with the Taskflow output.
 
 Pipeline topology
@@ -46,9 +46,9 @@ from tomii._serialize import to_json
 
 
 def _parse_avg_ms(timing_file: Path) -> float:
-    """Extract 'Avg Time Per Stream' (latency) from a Tomii timing file."""
+    """Extract 'Avg Time Per Frame' (latency) from a Tomii timing file."""
     text = timing_file.read_text()
-    m = re.search(r"Avg Time Per Stream:\s+([\d.]+)(ms|µs|us|s)", text)
+    m = re.search(r"Avg Time Per Frame:\s+([\d.]+)(ms|µs|us|s)", text)
     if not m:
         return float("nan")
     val, unit = float(m.group(1)), m.group(2)
@@ -70,14 +70,14 @@ def _probe_binary_rss(
     dylib: str,
     workers: int,
     slots: int,
-    streams: int = 200,
+    frames: int = 200,
     warmup: int = 50,
 ) -> int | None:
     """Return peak RSS (kB) of the tomii-core binary for the given config.
 
     Runs a short probe invocation (not a full timed sweep) under
     /usr/bin/time -v and parses VmHWM from the output.  Returns None if
-    measurement fails.  The probe streams are enough to stabilize RSS but
+    measurement fails.  The probe frames are enough to stabilize RSS but
     not so many that the probe dominates wall time.
     """
     import tempfile
@@ -102,9 +102,9 @@ def _probe_binary_rss(
             core_offset=1,
             system_threads=1,
             slots=slots,
-            max_streams=streams + warmup,
+            max_frames=frames + warmup,
             batching_size=1,
-            exclude_streams=warmup,
+            exclude_frames=warmup,
             custom=True,
             use_rdtsc=True,
             coalesce_barriers=True,
@@ -140,7 +140,7 @@ def build_pipeline(n: int) -> tm.Graph:
     Parameters
     ----------
     n:
-        Number of items per stream (= factor width for ingest/transform).
+        Number of items per frame (= factor width for ingest/transform).
     """
     app = tm.Graph()
 
@@ -160,7 +160,7 @@ def build_pipeline(n: int) -> tm.Graph:
     # transform.out(0, n) uses the concrete Python int as the range bound.
     aggregate = app.node("aggregate", func="pl_aggregate", args=[transform.out(0, n)])
 
-    # Stage 4: emit — scalar result from aggregate; stream_id=0 placeholder.
+    # Stage 4: emit — scalar result from aggregate; frame_id=0 placeholder.
     app.node("emit", func="pl_emit", args=[aggregate.out(), tm.usize(0)])
 
     return app
@@ -176,20 +176,20 @@ def run_one(
     n: int,
     slots: int,
     workers: int,
-    total_streams: int,
+    total_frames: int,
     warmup: int,
     results_dir: Path,
     dylib: str,
     transform_iters: int,
     measure_rss: bool = False,
 ) -> tuple[float, int | None]:
-    """Run one (slots, workers) config; return (ms_per_stream, peak_rss_kb).
+    """Run one (slots, workers) config; return (ms_per_frame, peak_rss_kb).
 
     Wall time is measured externally around the single graph.run() call and
-    divided by total_streams (not total_streams+warmup) for direct comparison
-    with Taskflow's total_ms/total_streams metric.  The warmup phase runs
+    divided by total_frames (not total_frames+warmup) for direct comparison
+    with Taskflow's total_ms/total_frames metric.  The warmup phase runs
     inside the same graph.run(), so runtime and Rayon pool startup cost is
-    paid once — warmup streams add ~10 % upward bias to the wall time at
+    paid once — warmup frames add ~10 % upward bias to the wall time at
     warmup=200/total=2000, which is consistent across all S×W cells and
     does not affect relative comparisons.
 
@@ -215,8 +215,8 @@ def run_one(
         core_offset=1,
         system_threads=1,
         slots=slots,
-        max_streams=total_streams + warmup,
-        exclude_streams=warmup,
+        max_frames=total_frames + warmup,
+        exclude_frames=warmup,
         batching_size=1,
         timing=str(timing_file),
         use_rdtsc=True,
@@ -227,11 +227,11 @@ def run_one(
     t1 = time.monotonic()
 
     wall_ms = (t1 - t0) * 1000.0
-    throughput_ms = wall_ms / total_streams
+    throughput_ms = wall_ms / total_frames
     latency_ms = _parse_avg_ms(timing_file)
     print(
-        f"  throughput: {throughput_ms:.4f} ms/stream  "
-        f"(latency: {latency_ms:.4f} ms/stream,  "
+        f"  throughput: {throughput_ms:.4f} ms/frame  "
+        f"(latency: {latency_ms:.4f} ms/frame,  "
         f"wall: {wall_ms:.1f} ms)",
         flush=True,
     )
@@ -244,7 +244,7 @@ def run_one(
             dylib=dylib,
             workers=workers,
             slots=slots,
-            streams=max(50, min(200, total_streams // 10)),
+            frames=max(50, min(200, total_frames // 10)),
             warmup=20,
         )
         print(f"  binary RSS: {rss_kb} kB", flush=True)
@@ -262,7 +262,7 @@ def main() -> None:
         description="Tomii pipeline benchmark sweep over slots and workers."
     )
     p.add_argument(
-        "--n", type=int, default=256, help="items per stream (pipeline width)"
+        "--n", type=int, default=256, help="items per frame (pipeline width)"
     )
     p.add_argument(
         "--slots",
@@ -279,13 +279,13 @@ def main() -> None:
         help="worker thread counts to sweep",
     )
     p.add_argument(
-        "--streams",
+        "--frames",
         type=int,
         default=2000,
-        help="total streams to process (excluding warmup)",
+        help="total frames to process (excluding warmup)",
     )
     p.add_argument(
-        "--warmup", type=int, default=200, help="warmup streams excluded from timing"
+        "--warmup", type=int, default=200, help="warmup frames excluded from timing"
     )
     p.add_argument("--results-dir", type=Path, default=HERE / "results")
     p.add_argument(
@@ -368,7 +368,7 @@ def main() -> None:
     rss_col = ",peak_rss_kb" if args.measure_rss else ""
     with open(csv_path, "w") as f:
         f.write(
-            f"system,n,items_per_stream,slots,workers,streams,ms_per_stream,transform_iters{rss_col}\n"
+            f"system,n,items_per_frame,slots,workers,frames,ms_per_frame,transform_iters{rss_col}\n"
         )
 
     # ------------------------------------------------------------------
@@ -380,7 +380,7 @@ def main() -> None:
                 n=args.n,
                 slots=s,
                 workers=w,
-                total_streams=args.streams,
+                total_frames=args.frames,
                 warmup=args.warmup,
                 results_dir=args.results_dir,
                 dylib=dylib,
@@ -393,7 +393,7 @@ def main() -> None:
             with open(csv_path, "a") as f:
                 f.write(
                     f"tomii,{args.n},{args.n},{s},{w},"
-                    f"{args.streams},{ms:.6f},{args.transform_iters}{rss_field}\n"
+                    f"{args.frames},{ms:.6f},{args.transform_iters}{rss_field}\n"
                 )
 
     print(f"\nResults written to: {csv_path}", flush=True)

@@ -2,18 +2,18 @@
 use super::shared_data::{RuntimeConfig, SlotData};
 use std::sync::atomic::Ordering;
 
-/// Check if we should record for a given slot based on its current stream ID.
-/// Returns true if recording is enabled for all streams (None) or if the slot's
-/// current stream matches the target stream.
+/// Check if we should record for a given slot based on its current frame ID.
+/// Returns true if recording is enabled for all frames (None) or if the slot's
+/// current frame matches the target frame.
 #[inline(always)]
 pub(super) fn should_record_slot(
     config: &RuntimeConfig,
     slot_data: &SlotData,
     slot: usize,
 ) -> bool {
-    match config.record_stream {
-        None => true, // Record all streams
-        Some(target_stream) => slot_data.stream_id[slot].load(Ordering::Relaxed) == target_stream,
+    match config.record_frame {
+        None => true, // Record all frames
+        Some(target_frame) => slot_data.frame_id[slot].load(Ordering::Relaxed) == target_frame,
     }
 }
 
@@ -22,14 +22,14 @@ impl super::TomiiRt {
         &self,
         bench_name: &str,
         out_file: Option<&str>,
-        exclude_streams: usize,
+        exclude_frames: usize,
     ) {
         self.shared
             .telemetry
-            .with_timing(|tb| tb.print_stats(bench_name, out_file, exclude_streams));
+            .with_timing(|tb| tb.print_stats(bench_name, out_file, exclude_frames));
     }
 
-    pub fn write_json_report(&self, path: &str, exclude_streams: usize) {
+    pub fn write_json_report(&self, path: &str, exclude_frames: usize) {
         self.shared.telemetry.with_timing(|tb| {
             let graph_edges: Vec<(String, Vec<String>)> = self
                 .shared
@@ -49,7 +49,7 @@ impl super::TomiiRt {
                     (node.name.clone(), succs)
                 })
                 .collect();
-            tb.write_json_report(&graph_edges, path, exclude_streams);
+            tb.write_json_report(&graph_edges, path, exclude_frames);
         });
     }
 

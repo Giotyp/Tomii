@@ -29,7 +29,7 @@ pub fn pl_init_output(n: usize) -> Vec<f64> {
     vec![0.0f64; n]
 }
 
-/// Stage 1 — ingest: produce item `idx` for a stream of `n` items.
+/// Stage 1 — ingest: produce item `idx` for a frame of `n` items.
 ///
 /// Returns `(idx + 1) / n` as a normalised f64 in `(0, 1]`.
 #[tomii_export]
@@ -61,22 +61,22 @@ pub fn pl_aggregate(chunks: Vec<f64>) -> f64 {
 
 /// Stage 4 — emit: write the computed mean into the shared output buffer.
 ///
-/// `stream_id` is unused at runtime (the slot index is tracked by the
-/// runtime) but is kept for debugging and future per-stream accounting.
+/// `frame_id` is unused at runtime (the slot index is tracked by the
+/// runtime) but is kept for debugging and future per-frame accounting.
 /// Returns `mean` so downstream nodes can observe it if needed.
 #[tomii_export]
-pub fn pl_emit(mean: f64, stream_id: usize) -> f64 {
-    let _ = stream_id;
+pub fn pl_emit(mean: f64, frame_id: usize) -> f64 {
+    let _ = frame_id;
     mean
 }
 
 /// Stage 4 (verification variant) — emit mean and append to a result file.
 ///
 /// Identical signature to pl_emit; additionally writes the mean to the path in
-/// PIPELINE_BENCH_RESULT (if set) so verify.py can capture per-stream values.
+/// PIPELINE_BENCH_RESULT (if set) so verify.py can capture per-frame values.
 #[tomii_export]
-pub fn pl_emit_to_file(mean: f64, stream_id: usize) -> f64 {
-    let _ = stream_id;
+pub fn pl_emit_to_file(mean: f64, frame_id: usize) -> f64 {
+    let _ = frame_id;
     if let Ok(path) = std::env::var("PIPELINE_BENCH_RESULT") {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new()

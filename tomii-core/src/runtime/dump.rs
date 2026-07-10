@@ -7,7 +7,7 @@
 //! never blocks the hot path beyond those.
 //!
 //! The output is a single JSON object: per-slot state (lifecycle state,
-//! stream id, generation, pending counters), global progress counters,
+//! frame id, generation, pending counters), global progress counters,
 //! scheduler totals, and — on network builds — receiver-side counters
 //! including parked out-of-window packets.
 
@@ -49,20 +49,20 @@ impl StateDumper {
                 })
                 .collect()
         };
-        let running_streams: Vec<(usize, usize)> = shared.slot_data.running_streams.read().clone();
+        let running_frames: Vec<(usize, usize)> = shared.slot_data.running_frames.read().clone();
 
         let slot_entries: Vec<Value> = (0..slots)
             .map(|slot| {
-                let stream_id = shared.slot_data.stream_id[slot].load(Ordering::Relaxed);
-                let stream_id_json = if stream_id == usize::MAX {
+                let frame_id = shared.slot_data.frame_id[slot].load(Ordering::Relaxed);
+                let frame_id_json = if frame_id == usize::MAX {
                     Value::Null
                 } else {
-                    json!(stream_id)
+                    json!(frame_id)
                 };
                 json!({
                     "slot": slot,
                     "state": states.get(slot),
-                    "stream_id": stream_id_json,
+                    "frame_id": frame_id_json,
                     "generation": shared.slot_data.generation[slot].load(Ordering::Relaxed),
                     "pending_tasks": shared.slot_data.pending_tasks[slot].load(Ordering::Relaxed),
                     "pending_cond_tasks": shared.slot_data.pending_cond_tasks[slot].load(Ordering::Relaxed),
@@ -77,17 +77,17 @@ impl StateDumper {
         let mut root = json!({
             "graph": {
                 "nodes": shared.graph.nodes.len(),
-                "total_tasks_per_stream": shared.graph_cache.total_tasks,
-                "total_cond_tasks_per_stream": shared.graph_cache.total_cond_tasks,
+                "total_tasks_per_frame": shared.graph_cache.total_tasks,
+                "total_cond_tasks_per_frame": shared.graph_cache.total_cond_tasks,
             },
             "config": {
                 "slots": slots,
-                "max_streams": shared.config.max_streams,
+                "max_frames": shared.config.max_frames,
                 "workers": shared.config.workers,
                 "system_threads": shared.config.system_threads,
             },
             "progress": {
-                "streams_completed": shared.telemetry.stream_complete_counter.load(Ordering::Relaxed),
+                "frames_completed": shared.telemetry.frame_complete_counter.load(Ordering::Relaxed),
                 "jobs_recorded": shared.telemetry.job_counter.load(Ordering::Relaxed),
                 "shutdown": shared.shutdown_flag.load(Ordering::Relaxed),
             },
@@ -99,7 +99,7 @@ impl StateDumper {
             "slot_data": {
                 "active_bitmap": format!("{:#x}", shared.slot_data.active_bitmap.load(Ordering::Relaxed)),
                 "last_assigned": shared.slot_data.last_assigned.load(Ordering::Relaxed),
-                "running_streams": running_streams,
+                "running_frames": running_frames,
                 "slots": slot_entries,
             },
         });
@@ -107,11 +107,11 @@ impl StateDumper {
         #[cfg(feature = "network")]
         {
             root["network"] = json!({
-                "streams_received": shared.net.streams_receive_counter.load(Ordering::Relaxed),
-                "dropped_streams": shared.net.dropped_streams.load(Ordering::Relaxed),
+                "frames_received": shared.net.frames_receive_counter.load(Ordering::Relaxed),
+                "dropped_frames": shared.net.dropped_frames.load(Ordering::Relaxed),
                 "receive_finished": shared.net.receive_finished.load(Ordering::Relaxed),
                 "parked_packets": shared.net.pending_count.load(Ordering::Relaxed),
-                "parked_streams": shared
+                "parked_frames": shared
                     .net
                     .pending_frames
                     .lock()
