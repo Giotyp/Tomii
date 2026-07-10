@@ -164,7 +164,7 @@ impl AsyncRecorder {
         writeln!(writer, "slot,job_id,start_ns,end_ns,worker,task_id,index")?;
 
         let mut total_written = 0;
-        for (_slot, record_vec) in records.iter() {
+        for record_vec in records.values() {
             for rec in record_vec {
                 writeln!(
                     writer,

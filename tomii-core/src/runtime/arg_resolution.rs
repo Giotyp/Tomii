@@ -336,10 +336,8 @@ fn fetch_res_results(
         if let Some(result) = shared.exec.node_results.get(&node_info) {
             result_vec.push(result);
         } else {
-            match spin_wait_for_result(shared, &node_info, exec_slot, exec_gen, stale) {
-                Some(result) => result_vec.push(result),
-                None => return None,
-            }
+            let result = spin_wait_for_result(shared, &node_info, exec_slot, exec_gen, stale)?;
+            result_vec.push(result);
         }
     }
     if result_vec.len() == indexes.len() {
