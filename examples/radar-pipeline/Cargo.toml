@@ -1,0 +1,16 @@
+[workspace]
+
+[package]
+name = "radar-pipeline-tomii"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["dylib", "rlib"]
+
+[dependencies]
+tomii-types = { path = "../../tomii-types" }
+tomii-macro = { path = "../../tomii-macro" }
+
+[profile.release]
+debug = true
