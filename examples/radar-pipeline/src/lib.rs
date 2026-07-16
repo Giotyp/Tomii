@@ -371,7 +371,92 @@ pub fn range_fft_cm(
             slot,
         );
     }
+    stage_done_idx(frame_id, 0, packet.chirp_id as usize);
     CmTypes::Usize(frame_id)
+}
+
+// Debug instrumentation (TOMII_RADAR_CHECK=1): count stage completions per
+// frame and report when a stage starts before its predecessor barrier should
+// have allowed it. Mutex acquire/release gives the happens-before edge, so a
+// short count here means the runtime really did fire the successor early.
+static STAGE_COUNTS: std::sync::Mutex<Option<std::collections::HashMap<(usize, u8), usize>>> =
+    std::sync::Mutex::new(None);
+
+fn check_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("TOMII_RADAR_CHECK").is_ok_and(|v| v == "1"))
+}
+
+// Per-(frame, stage) instance-completion times, for duplicate / late detection.
+type InstanceMap =
+    std::collections::HashMap<(usize, u8), std::collections::HashMap<usize, std::time::Instant>>;
+static STAGE_INSTANCES: std::sync::Mutex<Option<InstanceMap>> = std::sync::Mutex::new(None);
+
+fn stage_done(frame_id: usize, stage: u8) {
+    stage_done_idx(frame_id, stage, usize::MAX);
+}
+
+fn stage_done_idx(frame_id: usize, stage: u8, instance: usize) {
+    if !check_enabled() {
+        return;
+    }
+    {
+        let mut guard = STAGE_INSTANCES.lock().unwrap();
+        let m = guard.get_or_insert_with(Default::default);
+        if instance != usize::MAX {
+            if let Some(first) = m
+                .entry((frame_id, stage))
+                .or_default()
+                .insert(instance, std::time::Instant::now())
+            {
+                eprintln!(
+                    "RADAR_CHECK DUPLICATE: stage {stage} frame {frame_id} instance {instance} \
+                     completed again {:.1}us after first (thread {:?})",
+                    first.elapsed().as_nanos() as f64 / 1e3,
+                    std::thread::current().id(),
+                );
+            }
+        }
+        // Completion arriving after the NEXT stage already began on this frame
+        // means this task raced a reader of its output buffer.
+        if m.contains_key(&(frame_id, stage + 1)) {
+            eprintln!(
+                "RADAR_CHECK LATE: stage {stage} frame {frame_id} instance {instance} \
+                 completed after stage {} started",
+                stage + 1
+            );
+        }
+    }
+    let mut guard = STAGE_COUNTS.lock().unwrap();
+    *guard
+        .get_or_insert_with(Default::default)
+        .entry((frame_id, stage))
+        .or_insert(0) += 1;
+}
+
+fn stage_expect(frame_id: usize, prev_stage: u8, expected: usize, who: &str) {
+    if !check_enabled() {
+        return;
+    }
+    // Mark this stage as started so late predecessor completions are flagged.
+    {
+        let mut guard = STAGE_INSTANCES.lock().unwrap();
+        guard
+            .get_or_insert_with(Default::default)
+            .entry((frame_id, prev_stage + 1))
+            .or_default();
+    }
+    let guard = STAGE_COUNTS.lock().unwrap();
+    let got = guard
+        .as_ref()
+        .and_then(|m| m.get(&(frame_id, prev_stage)).copied())
+        .unwrap_or(0);
+    if got != expected {
+        eprintln!(
+            "RADAR_CHECK VIOLATION: {who} frame {frame_id} started with {got}/{expected} \
+             predecessor completions"
+        );
+    }
 }
 
 /// doppler_fft — chirp-axis FFT + power for this tile's range rows.
@@ -392,7 +477,9 @@ pub fn doppler_fft_cm(
     let power = unsafe { &*raw_mut::<PowerBuffer>(power) };
 
     let slot = (frame_id % config.frame_wnd) as u32;
+    stage_expect(frame_id, 0, config.n_chirps, "doppler_fft");
     unsafe { rk_doppler_fft(ctx.0, ws.0, tile as u32, rd.0, power.0, slot) };
+    stage_done_idx(frame_id, 1, tile);
     CmTypes::Usize(frame_id)
 }
 
@@ -412,7 +499,9 @@ pub fn cfar_cm(
     let dets = unsafe { &*raw_mut::<DetsBuffer>(dets) };
 
     let slot = (frame_id % config.frame_wnd) as u32;
+    stage_expect(frame_id, 1, config.n_tiles, "cfar");
     let count = unsafe { rk_cfar(ctx.0, tile as u32, power.0, dets.0, slot) };
+    stage_done_idx(frame_id, 2, tile);
     CmTypes::Usize(count as usize)
 }
 
@@ -425,6 +514,7 @@ pub fn cluster_cm(config: &CmTypes, ctx: &CmTypes, dets: &CmTypes, frame_id: usi
     let dets = unsafe { &*raw_mut::<DetsBuffer>(dets) };
 
     let slot = (frame_id % config.frame_wnd) as u32;
+    stage_expect(frame_id, 2, config.n_tiles, "cluster");
     let mut out = vec![RkDetection::default(); MAX_CLUSTER_OUT];
     let n = unsafe { rk_cluster(ctx.0, dets.0, slot, out.as_mut_ptr(), MAX_CLUSTER_OUT as u32) }
         as usize;
