@@ -71,19 +71,25 @@ def main():
     p.add_argument("--frame-period", type=float, default=0.01)
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--skip-tomii", action="store_true")
+    p.add_argument("--repeats", type=int, default=5, help="median-of-N runs")
     args = p.parse_args()
 
-    rows = []
-    if not args.skip_tomii:
-        rows.append(run_tomii(args.frames, args.frame_period, args.warmup))
-    rows.append(run_gnuradio(args.frames, args.frame_period, args.warmup))
+    import statistics
 
-    print(f"\n{'system':<14} {'frames':>6} {'p50 us':>9} {'p99 us':>9} "
-          f"{'p99.9 us':>9} {'max us':>9}")
-    for r in rows:
-        v = r["lat"]
-        print(f"{r['system']:<14} {r['frames']:>6} {pct(v, 50):>9.0f} "
-              f"{pct(v, 99):>9.0f} {pct(v, 99.9):>9.0f} {v[-1]:>9.0f}")
+    systems = ([] if args.skip_tomii else [("tomii", run_tomii)]) + [
+        ("gnuradio-3.10", run_gnuradio)
+    ]
+    print(f"\n{'system':<14} {'runs':>4} {'frames':>6} {'p50 us':>9} "
+          f"{'p99 us':>9} {'p99.9 us':>9} {'max us':>9}   (median of runs)")
+    for name, fn in systems:
+        reps = []
+        for rep in range(args.repeats):
+            r = fn(args.frames, args.frame_period, args.warmup)
+            v = r["lat"]
+            reps.append((pct(v, 50), pct(v, 99), pct(v, 99.9), v[-1], r["frames"]))
+        med = [statistics.median(x[i] for x in reps) for i in range(4)]
+        print(f"{name:<14} {len(reps):>4} {reps[0][4]:>6} {med[0]:>9.0f} "
+              f"{med[1]:>9.0f} {med[2]:>9.0f} {med[3]:>9.0f}")
 
 
 if __name__ == "__main__":

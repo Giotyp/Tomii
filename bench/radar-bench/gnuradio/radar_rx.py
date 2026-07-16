@@ -72,45 +72,53 @@ class ChirpUdpSource(gr.sync_block):
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32 << 20)
         self.sock.bind(("0.0.0.0", port))
         self.sock.settimeout(0.2)
-        self.pending = np.empty(0, dtype=np.complex64)
-        self.pending_tags = []  # (sample_offset_in_pending, frame_id, t_ns)
+        from collections import deque
+        self.chunks = deque()  # fixed-size per-packet sample arrays
+        self.chunk_off = 0  # consumed samples of chunks[0]
+        self.tags = deque()  # (abs_sample_index, frame_id, t_ns)
+        self.abs_in = 0  # samples enqueued
+        self.abs_out = 0  # samples emitted
         self.frames_seen = set()
         self.done = False
-        self.scale = np.float32(1.0)
 
     def work(self, input_items, output_items):
         out = output_items[0]
         produced = 0
-        # Drain pending first
         while produced < len(out):
-            if len(self.pending):
-                n = min(len(out) - produced, len(self.pending))
-                out[produced : produced + n] = self.pending[:n]
-                for off, fid, t_ns in self.pending_tags:
-                    if off < n:
-                        self._add_tag(produced + off, fid, t_ns)
-                self.pending_tags = [
-                    (off - n, fid, t) for off, fid, t in self.pending_tags if off >= n
-                ]
-                self.pending = self.pending[n:]
+            if self.chunks:
+                chunk = self.chunks[0]
+                avail = len(chunk) - self.chunk_off
+                n = min(len(out) - produced, avail)
+                out[produced : produced + n] = chunk[self.chunk_off : self.chunk_off + n]
                 produced += n
+                self.chunk_off += n
+                if self.chunk_off == len(chunk):
+                    self.chunks.popleft()
+                    self.chunk_off = 0
                 continue
             if self.done:
-                return produced if produced else -1
+                break
             try:
                 pkt, _ = self.sock.recvfrom(65536)
             except socket.timeout:
                 if self.frames_seen and len(self.frames_seen) >= self.expected_frames:
                     self.done = True
-                return produced
+                break
             t_ns = time.perf_counter_ns()
-            frame_id, chirp_id, _chan, n_samp = struct.unpack_from("<4I", pkt)
+            frame_id, chirp_id, _chan, _n_samp = struct.unpack_from("<4I", pkt)
             iq = np.frombuffer(pkt, dtype="<i2", offset=DATA_OFFSET).astype(np.float32)
-            samples = (iq[0::2] + 1j * iq[1::2]).astype(np.complex64)
+            self.chunks.append((iq[0::2] + 1j * iq[1::2]).astype(np.complex64))
             if chirp_id == 0:
-                self.pending_tags.append((len(self.pending), frame_id, t_ns))
+                self.tags.append((self.abs_in, frame_id, t_ns))
+            self.abs_in += self.n_samples
             self.frames_seen.add(frame_id)
-            self.pending = np.concatenate([self.pending, samples])
+        # attach tags whose absolute sample index falls in this window
+        while self.tags and self.tags[0][0] < self.abs_out + produced:
+            idx, fid, t_ns = self.tags.popleft()
+            self._add_tag(idx - self.abs_out, fid, t_ns)
+        self.abs_out += produced
+        if produced == 0 and self.done:
+            return -1
         return produced
 
     def _add_tag(self, offset, frame_id, t_ns):
