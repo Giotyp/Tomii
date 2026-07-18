@@ -38,12 +38,16 @@ def run_tomii(frames, period, warmup):
     return {"system": "tomii", "frames": len(lat), "lat": sorted(lat)}
 
 
-def run_gnuradio(frames, period, warmup):
+def run_gnuradio(frames, period, warmup, cpp=False):
     out_dir = HERE / "gnuradio" / "results"
-    gr = subprocess.Popen(
-        [str(GR_PY), str(HERE / "gnuradio" / "radar_rx.py"),
-         "--frames", str(frames), "--port", "8101"],
-    )
+    if cpp:
+        cmd = [str(HERE / "gnuradio" / "radar_rx_cpp"), "8101", "1024", "128",
+               "8", "2", "8", "15.0", str(frames),
+               str(out_dir / "gr_detections.txt"), str(out_dir / "gr_latency.csv")]
+    else:
+        cmd = [str(GR_PY), str(HERE / "gnuradio" / "radar_rx.py"),
+               "--frames", str(frames), "--port", "8101"]
+    gr = subprocess.Popen(cmd)
     time.sleep(6)
     subprocess.run(
         [sys.executable, str(RADAR / "sender.py"), "--frames", str(frames),
@@ -60,7 +64,7 @@ def run_gnuradio(frames, period, warmup):
     lat = []
     for line in (out_dir / "gr_latency.csv").read_text().splitlines()[1:]:
         fid, us = line.split(",")
-        if int(fid) >= warmup:
+        if int(fid) >= warmup and int(fid) != frames - 1:  # last frame: EOS flush artifact
             lat.append(float(us))
     return {"system": "gnuradio-3.10", "frames": len(lat), "lat": sorted(lat)}
 
