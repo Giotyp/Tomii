@@ -38,10 +38,15 @@ def run_tomii(frames, period, warmup):
     return {"system": "tomii", "frames": len(lat), "lat": sorted(lat)}
 
 
-def run_gnuradio(frames, period, warmup, cpp=False):
-    out_dir = HERE / "gnuradio" / "results"
-    if cpp:
+def run_gnuradio(frames, period, warmup, variant="py"):
+    out_dir = HERE / ("gnuradio4" if variant == "gr4" else "gnuradio") / "results"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if variant == "cpp":
         cmd = [str(HERE / "gnuradio" / "radar_rx_cpp"), "8101", "1024", "128",
+               "8", "2", "8", "15.0", str(frames),
+               str(out_dir / "gr_detections.txt"), str(out_dir / "gr_latency.csv")]
+    elif variant == "gr4":
+        cmd = [str(HERE / "gnuradio4" / "radar_rx4"), "8101", "1024", "128",
                "8", "2", "8", "15.0", str(frames),
                str(out_dir / "gr_detections.txt"), str(out_dir / "gr_latency.csv")]
     else:
