@@ -36,11 +36,15 @@ from build_graph import build_radar_graph, radar_dims_from_scene
 SENDER_DELAY_S = 5  # receiver-first startup order
 
 
-def build_all(clean: bool) -> tuple[str, str]:
+def build_all(clean: bool, gpu: bool = False) -> tuple[str, str]:
     print("Building radar kernels (FFTW)...", flush=True)
     subprocess.run(["make", "-C", str(HERE / "kernels")], check=True)
-
     env = {**os.environ, "FUNC_PATH": str(HERE / "src" / "lib.rs")}
+    if gpu:
+        print("Building radar kernels (CUDA/cuFFT)...", flush=True)
+        subprocess.run(["make", "-C", str(HERE / "kernels"), "gpu"], check=True)
+        # build.rs links/rpaths libradar_kernels.so from this dir instead.
+        env["RADAR_KERNELS_DIR"] = str(HERE / "kernels" / "gpu")
     if clean:
         subprocess.run(
             ["cargo", "clean", "--manifest-path", str(HERE / "Cargo.toml")], check=True
@@ -223,6 +227,8 @@ def main() -> None:
     p.add_argument("--results-dir", type=Path, default=HERE / "results")
     p.add_argument("--csv-out", type=Path, default=None,
                    help="summary CSV path (default: results/radar_sweep.csv)")
+    p.add_argument("--gpu", action="store_true",
+                   help="link the CUDA kernel twin (kernels/gpu) instead of FFTW")
     p.add_argument("--no-verify", dest="verify", action="store_false", default=True)
     p.add_argument("--no-clean", dest="clean", action="store_false", default=True)
     p.add_argument("--graph", type=Path, default=None, help="graph JSON override")
@@ -241,7 +247,7 @@ def main() -> None:
     frames = args.frames if args.frames is not None else scene_meta["radar"]["n_frames"]
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
-    dylib, binary = build_all(clean=args.clean)
+    dylib, binary = build_all(clean=args.clean, gpu=args.gpu)
 
     workers_list = args.sweep_workers or [args.workers]
     slots_list = args.sweep_slots or [args.slots]

@@ -109,7 +109,10 @@ static size_t dets_stride(const rk_ctx *ctx) {
 
 void *rk_alloc_dets(void *ctx_p) {
     rk_ctx *ctx = ctx_p;
-    return calloc((size_t)ctx->frame_wnd * ctx->n_tiles, dets_stride(ctx));
+    size_t bytes = (size_t)ctx->frame_wnd * ctx->n_tiles * dets_stride(ctx);
+    void *buf = fftwf_malloc(bytes);
+    memset(buf, 0, bytes);
+    return buf;
 }
 
 void rk_free_buf(void *buf) { fftwf_free(buf); }

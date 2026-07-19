@@ -104,12 +104,7 @@ handle!(KernelCtx, rk_free);
 handle!(FftWs, rk_free_ws);
 handle!(RdBuffer, rk_free_buf);
 handle!(PowerBuffer, rk_free_buf);
-// dets buffer comes from calloc, not fftwf_malloc
-handle!(DetsBuffer, libc_free);
-extern "C" {
-    #[link_name = "free"]
-    fn libc_free(p: *mut c_void);
-}
+handle!(DetsBuffer, rk_free_buf);
 
 // Obtain a *mut T from CmTypes::Any or CmTypes::AnyHeld (zero-lock bulk path).
 unsafe fn raw_mut<T: std::any::Any + Send + Sync + 'static>(cm: &CmTypes) -> *mut T {
