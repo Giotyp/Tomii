@@ -47,6 +47,12 @@ def main(argv=None) -> int:
     )
     p.add_argument("--tol", type=float, default=2.0, help="bin match tolerance")
     p.add_argument(
+        "--expect-frames",
+        type=int,
+        default=None,
+        help="fail unless exactly this many frames were processed (coverage gate)",
+    )
+    p.add_argument(
         "--max-fa",
         type=float,
         default=None,
@@ -66,6 +72,12 @@ def main(argv=None) -> int:
     frames = parse_detections(args.detections)
     if not frames:
         print("FAIL: no frames in detections file")
+        return 1
+    if args.expect_frames is not None and len(frames) != args.expect_frames:
+        print(
+            f"FAIL: coverage — {len(frames)}/{args.expect_frames} frames processed "
+            "(overload drops or early exit)"
+        )
         return 1
 
     total_miss = 0

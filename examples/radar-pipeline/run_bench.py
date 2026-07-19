@@ -179,6 +179,7 @@ def run_cell(
                 sys.executable, str(HERE / "verify.py"),
                 "--scene", str(args.scene),
                 "--detections", str(verify_path),
+                "--expect-frames", str(frames),
             ]
         ).returncode
         verified = rc == 0

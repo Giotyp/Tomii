@@ -387,10 +387,6 @@ type InstanceMap =
     std::collections::HashMap<(usize, u8), std::collections::HashMap<usize, std::time::Instant>>;
 static STAGE_INSTANCES: std::sync::Mutex<Option<InstanceMap>> = std::sync::Mutex::new(None);
 
-fn stage_done(frame_id: usize, stage: u8) {
-    stage_done_idx(frame_id, stage, usize::MAX);
-}
-
 fn stage_done_idx(frame_id: usize, stage: u8, instance: usize) {
     if !check_enabled() {
         return;
