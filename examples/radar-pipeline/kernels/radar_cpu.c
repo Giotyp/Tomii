@@ -25,10 +25,15 @@ typedef struct {
     float *win_d; /* Hann, length m */
 } rk_ctx;
 
+/* One workspace serves every slot sharing this (chirp|tile) index; up to
+ * frame_wnd frames run concurrently, so each slot gets its OWN plan+scratch.
+ * A shared fftwf plan executed with shared in/out arrays from two in-flight
+ * frames silently corrupts (the GPU twin deadlocks instead — same root). */
 typedef struct {
-    fftwf_complex *in;
-    fftwf_complex *out;
-    fftwf_plan plan;
+    uint32_t nsub; /* = frame_wnd */
+    fftwf_complex **in;
+    fftwf_complex **out;
+    fftwf_plan *plan;
 } rk_ws;
 
 /* FFTW plan creation/destruction is not thread-safe. */
@@ -66,27 +71,45 @@ void rk_free(void *ctx_p) {
     free(ctx);
 }
 
-static void *make_ws(uint32_t len) {
+static void *make_ws(uint32_t len, uint32_t frame_wnd) {
+    uint32_t nsub = frame_wnd ? frame_wnd : 1;
     rk_ws *ws = malloc(sizeof(rk_ws));
-    ws->in = fftwf_malloc(len * sizeof(fftwf_complex));
-    ws->out = fftwf_malloc(len * sizeof(fftwf_complex));
-    pthread_mutex_lock(&plan_lock);
-    ws->plan = fftwf_plan_dft_1d((int)len, ws->in, ws->out, FFTW_FORWARD,
-                                 FFTW_ESTIMATE);
-    pthread_mutex_unlock(&plan_lock);
+    ws->nsub = nsub;
+    ws->in = malloc(nsub * sizeof(fftwf_complex *));
+    ws->out = malloc(nsub * sizeof(fftwf_complex *));
+    ws->plan = malloc(nsub * sizeof(fftwf_plan));
+    for (uint32_t s = 0; s < nsub; s++) {
+        ws->in[s] = fftwf_malloc(len * sizeof(fftwf_complex));
+        ws->out[s] = fftwf_malloc(len * sizeof(fftwf_complex));
+        pthread_mutex_lock(&plan_lock);
+        ws->plan[s] = fftwf_plan_dft_1d((int)len, ws->in[s], ws->out[s],
+                                        FFTW_FORWARD, FFTW_ESTIMATE);
+        pthread_mutex_unlock(&plan_lock);
+    }
     return ws;
 }
 
-void *rk_make_range_ws(void *ctx_p) { return make_ws(((rk_ctx *)ctx_p)->n); }
-void *rk_make_doppler_ws(void *ctx_p) { return make_ws(((rk_ctx *)ctx_p)->m); }
+void *rk_make_range_ws(void *ctx_p) {
+    rk_ctx *ctx = ctx_p;
+    return make_ws(ctx->n, ctx->frame_wnd);
+}
+void *rk_make_doppler_ws(void *ctx_p) {
+    rk_ctx *ctx = ctx_p;
+    return make_ws(ctx->m, ctx->frame_wnd);
+}
 
 void rk_free_ws(void *ws_p) {
     rk_ws *ws = ws_p;
-    pthread_mutex_lock(&plan_lock);
-    fftwf_destroy_plan(ws->plan);
-    pthread_mutex_unlock(&plan_lock);
-    fftwf_free(ws->in);
-    fftwf_free(ws->out);
+    for (uint32_t s = 0; s < ws->nsub; s++) {
+        pthread_mutex_lock(&plan_lock);
+        fftwf_destroy_plan(ws->plan[s]);
+        pthread_mutex_unlock(&plan_lock);
+        fftwf_free(ws->in[s]);
+        fftwf_free(ws->out[s]);
+    }
+    free(ws->in);
+    free(ws->out);
+    free(ws->plan);
     free(ws);
 }
 
@@ -129,18 +152,20 @@ void rk_range_fft(void *ctx_p, void *ws_p, const int16_t *iq,
     fftwf_complex *rd = rd_p;
     (void)n_samples;
 
+    fftwf_complex *win = ws->in[slot % ws->nsub];
+    fftwf_complex *fft = ws->out[slot % ws->nsub];
     for (uint32_t i = 0; i < ctx->n; i++) {
-        ws->in[i][0] = (float)iq[2 * i] * ctx->win_r[i];
-        ws->in[i][1] = (float)iq[2 * i + 1] * ctx->win_r[i];
+        win[i][0] = (float)iq[2 * i] * ctx->win_r[i];
+        win[i][1] = (float)iq[2 * i + 1] * ctx->win_r[i];
     }
-    fftwf_execute(ws->plan);
+    fftwf_execute(ws->plan[slot % ws->nsub]);
 
     /* Corner turn: chirp chirp_id becomes a strided column of the
      * range-major rd matrix. Disjoint per-chirp writes; no locking. */
     fftwf_complex *base = rd + (size_t)slot * ctx->n * ctx->m + chirp_id;
     for (uint32_t r = 0; r < ctx->n; r++) {
-        base[(size_t)r * ctx->m][0] = ws->out[r][0];
-        base[(size_t)r * ctx->m][1] = ws->out[r][1];
+        base[(size_t)r * ctx->m][0] = fft[r][0];
+        base[(size_t)r * ctx->m][1] = fft[r][1];
     }
 }
 
@@ -153,17 +178,18 @@ void rk_doppler_fft(void *ctx_p, void *ws_p, uint32_t tile, const void *rd_p,
 
     const size_t slot_off = (size_t)slot * ctx->n * ctx->m;
     const uint32_t r0 = tile_start(ctx, tile), r1 = tile_start(ctx, tile + 1);
+    fftwf_complex *win = ws->in[slot % ws->nsub];
+    fftwf_complex *fft = ws->out[slot % ws->nsub];
     for (uint32_t r = r0; r < r1; r++) {
         const fftwf_complex *row = rd + slot_off + (size_t)r * ctx->m;
         for (uint32_t c = 0; c < ctx->m; c++) {
-            ws->in[c][0] = row[c][0] * ctx->win_d[c];
-            ws->in[c][1] = row[c][1] * ctx->win_d[c];
+            win[c][0] = row[c][0] * ctx->win_d[c];
+            win[c][1] = row[c][1] * ctx->win_d[c];
         }
-        fftwf_execute(ws->plan);
+        fftwf_execute(ws->plan[slot % ws->nsub]);
         float *prow = power + slot_off + (size_t)r * ctx->m;
         for (uint32_t d = 0; d < ctx->m; d++)
-            prow[d] = ws->out[d][0] * ws->out[d][0] +
-                      ws->out[d][1] * ws->out[d][1];
+            prow[d] = fft[d][0] * fft[d][0] + fft[d][1] * fft[d][1];
     }
 }
 
