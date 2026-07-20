@@ -86,7 +86,9 @@ def main():
     import statistics
 
     systems = ([] if args.skip_tomii else [("tomii", run_tomii)]) + [
-        ("gnuradio-3.10", run_gnuradio)
+        ("gnuradio-3.10-py", run_gnuradio),
+        ("gnuradio-3.10-cpp", lambda f, pr, w: run_gnuradio(f, pr, w, variant="cpp")),
+        ("gnuradio-4.0", lambda f, pr, w: run_gnuradio(f, pr, w, variant="gr4")),
     ]
     print(f"\n{'system':<14} {'runs':>4} {'frames':>6} {'p50 us':>9} "
           f"{'p99 us':>9} {'p99.9 us':>9} {'max us':>9}   (median of runs)")
