@@ -7,10 +7,12 @@
  * them. Chirp IQ arrives in host memory (H2D per chirp); detections return to
  * the host in rk_cluster.
  *
- * Concurrency model: each workspace (one per task instance) owns a CUDA
- * stream; every rk_ call synchronizes its stream before returning so Tomii's
- * barrier semantics (a successor runs only after its predecessors returned)
- * carry over to device work.
+ * Concurrency model: one workspace is shared by every slot that maps to the
+ * same (chirp|tile) index, so each workspace holds frame_wnd private
+ * sub-resources (plan/stream/scratch) selected by `slot` — concurrent frames
+ * must never share a cuFFT plan. Every rk_ call synchronizes its slot's stream
+ * before returning so Tomii's barrier semantics (a successor runs only after
+ * its predecessors returned) carry over to device work.
  *
  * Algorithm parity with radar_cpu.c / data/reference_check.py: symmetric Hann
  * windows, per-cell CA-CFAR with wrapping training window (direct window sums
@@ -54,13 +56,25 @@ typedef struct {
     float pfa_scale;
     float *d_win_r; /* device Hann, length n */
     float *d_win_d; /* device Hann, length m */
+    /* CFAR has no workspace node in the graph, so its stream lives here: one
+     * per (slot, tile) so concurrent CFAR launches never touch the legacy
+     * default stream (which globally serializes against every workspace
+     * stream, 8x/frame). Indexed [slot * n_tiles + tile]. */
+    cudaStream_t *cfar_streams; /* [frame_wnd * n_tiles] */
 } rk_ctx;
 
+/* One workspace serves every slot that shares this (chirp|tile) index. Because
+ * up to frame_wnd frames run concurrently (--slots), each slot needs its OWN
+ * plan/stream/scratch: cuFFT plans are NOT safe to execute from two host
+ * threads at once, so a shared plan wedges cudaStreamSynchronize. Index the
+ * per-slot sub-workspace by the `slot` argument the kernel already receives. */
 typedef struct {
-    cufftHandle plan;
-    cudaStream_t stream;
-    int16_t *d_iq;         /* range ws: raw chirp staging (2n i16) */
-    cufftComplex *d_work;  /* range: n; doppler: tile_rows * m     */
+    uint32_t nsub;         /* = ctx->frame_wnd */
+    cufftHandle *plan;     /* [nsub] */
+    cudaStream_t *stream;  /* [nsub] */
+    int16_t **h_iq;        /* [nsub], range ws: PINNED host chirp staging (2n) */
+    int16_t **d_iq;        /* [nsub], range ws: raw chirp staging (2n i16) */
+    cufftComplex **d_work; /* [nsub], range: n; doppler: tile_rows * m */
     const rk_ctx *ctx;
 } rk_ws;
 
@@ -91,51 +105,90 @@ extern "C" void *rk_init(uint32_t n_samples, uint32_t n_chirps,
     ctx->max_dets = max_dets_per_tile;
     ctx->d_win_r = make_hann_device(n_samples);
     ctx->d_win_d = make_hann_device(n_chirps);
+    const uint32_t nstreams = (frame_wnd ? frame_wnd : 1) * n_tiles;
+    ctx->cfar_streams =
+        (cudaStream_t *)calloc(nstreams, sizeof(cudaStream_t));
+    for (uint32_t i = 0; i < nstreams; i++)
+        CUDA_CK(cudaStreamCreateWithFlags(&ctx->cfar_streams[i],
+                                          cudaStreamNonBlocking));
     return ctx;
 }
 
 extern "C" void rk_free(void *ctx_p) {
     rk_ctx *ctx = (rk_ctx *)ctx_p;
+    const uint32_t nstreams = (ctx->frame_wnd ? ctx->frame_wnd : 1) * ctx->n_tiles;
+    for (uint32_t i = 0; i < nstreams; i++)
+        cudaStreamDestroy(ctx->cfar_streams[i]);
+    free(ctx->cfar_streams);
     cudaFree(ctx->d_win_r);
     cudaFree(ctx->d_win_d);
     free(ctx);
 }
 
-extern "C" void *rk_make_range_ws(void *ctx_p) {
-    rk_ctx *ctx = (rk_ctx *)ctx_p;
+/* Allocate the per-slot arrays shared by both workspace kinds. */
+static rk_ws *alloc_ws(rk_ctx *ctx) {
     rk_ws *ws = (rk_ws *)calloc(1, sizeof(rk_ws));
     ws->ctx = ctx;
-    CUDA_CK(cudaStreamCreateWithFlags(&ws->stream, cudaStreamNonBlocking));
-    CUDA_CK(cudaMalloc(&ws->d_iq, 2u * ctx->n * sizeof(int16_t)));
-    CUDA_CK(cudaMalloc(&ws->d_work, ctx->n * sizeof(cufftComplex)));
-    CUFFT_CK(cufftPlan1d(&ws->plan, (int)ctx->n, CUFFT_C2C, 1));
-    CUFFT_CK(cufftSetStream(ws->plan, ws->stream));
+    ws->nsub = ctx->frame_wnd ? ctx->frame_wnd : 1;
+    ws->plan = (cufftHandle *)calloc(ws->nsub, sizeof(cufftHandle));
+    ws->stream = (cudaStream_t *)calloc(ws->nsub, sizeof(cudaStream_t));
+    ws->h_iq = (int16_t **)calloc(ws->nsub, sizeof(int16_t *));
+    ws->d_iq = (int16_t **)calloc(ws->nsub, sizeof(int16_t *));
+    ws->d_work = (cufftComplex **)calloc(ws->nsub, sizeof(cufftComplex *));
+    return ws;
+}
+
+extern "C" void *rk_make_range_ws(void *ctx_p) {
+    rk_ctx *ctx = (rk_ctx *)ctx_p;
+    rk_ws *ws = alloc_ws(ctx);
+    for (uint32_t s = 0; s < ws->nsub; s++) {
+        CUDA_CK(cudaStreamCreateWithFlags(&ws->stream[s], cudaStreamNonBlocking));
+        /* Pinned host staging so the chirp H2D is a true async DMA instead of a
+         * synchronous copy from pageable packet memory (which stalls the worker
+         * for the whole transfer). */
+        CUDA_CK(cudaMallocHost(&ws->h_iq[s], 2u * ctx->n * sizeof(int16_t)));
+        CUDA_CK(cudaMalloc(&ws->d_iq[s], 2u * ctx->n * sizeof(int16_t)));
+        CUDA_CK(cudaMalloc(&ws->d_work[s], ctx->n * sizeof(cufftComplex)));
+        CUFFT_CK(cufftPlan1d(&ws->plan[s], (int)ctx->n, CUFFT_C2C, 1));
+        CUFFT_CK(cufftSetStream(ws->plan[s], ws->stream[s]));
+    }
     return ws;
 }
 
 extern "C" void *rk_make_doppler_ws(void *ctx_p) {
     rk_ctx *ctx = (rk_ctx *)ctx_p;
-    rk_ws *ws = (rk_ws *)calloc(1, sizeof(rk_ws));
-    ws->ctx = ctx;
+    rk_ws *ws = alloc_ws(ctx);
     const uint32_t rows = ctx->n / ctx->n_tiles;
-    CUDA_CK(cudaStreamCreateWithFlags(&ws->stream, cudaStreamNonBlocking));
-    CUDA_CK(cudaMalloc(&ws->d_work, (size_t)rows * ctx->m * sizeof(cufftComplex)));
-    /* Batched m-point FFTs over `rows` contiguous rows of the range-major rd
-     * matrix: stride 1, dist m — exactly the rd layout. */
     int nfft = (int)ctx->m;
-    CUFFT_CK(cufftPlanMany(&ws->plan, 1, &nfft, NULL, 1, nfft, NULL, 1, nfft,
-                           CUFFT_C2C, (int)rows));
-    CUFFT_CK(cufftSetStream(ws->plan, ws->stream));
+    for (uint32_t s = 0; s < ws->nsub; s++) {
+        CUDA_CK(cudaStreamCreateWithFlags(&ws->stream[s], cudaStreamNonBlocking));
+        CUDA_CK(cudaMalloc(&ws->d_work[s],
+                           (size_t)rows * ctx->m * sizeof(cufftComplex)));
+        /* Batched m-point FFTs over `rows` contiguous rows of the range-major
+         * rd matrix: stride 1, dist m — exactly the rd layout. */
+        CUFFT_CK(cufftPlanMany(&ws->plan[s], 1, &nfft, NULL, 1, nfft, NULL, 1,
+                               nfft, CUFFT_C2C, (int)rows));
+        CUFFT_CK(cufftSetStream(ws->plan[s], ws->stream[s]));
+    }
     return ws;
 }
 
 extern "C" void rk_free_ws(void *ws_p) {
     rk_ws *ws = (rk_ws *)ws_p;
-    cufftDestroy(ws->plan);
-    if (ws->d_iq)
-        cudaFree(ws->d_iq);
-    cudaFree(ws->d_work);
-    cudaStreamDestroy(ws->stream);
+    for (uint32_t s = 0; s < ws->nsub; s++) {
+        cufftDestroy(ws->plan[s]);
+        if (ws->h_iq[s])
+            cudaFreeHost(ws->h_iq[s]);
+        if (ws->d_iq[s])
+            cudaFree(ws->d_iq[s]);
+        cudaFree(ws->d_work[s]);
+        cudaStreamDestroy(ws->stream[s]);
+    }
+    free(ws->plan);
+    free(ws->stream);
+    free(ws->h_iq);
+    free(ws->d_iq);
+    free(ws->d_work);
     free(ws);
 }
 
@@ -197,18 +250,27 @@ extern "C" void rk_range_fft(void *ctx_p, void *ws_p, const int16_t *iq,
     rk_ws *ws = (rk_ws *)ws_p;
     (void)n_samples;
     const uint32_t n = ctx->n, m = ctx->m;
+    /* Pick this frame's private sub-workspace so concurrent slots never share a
+     * cuFFT plan / scratch / stream (that wedges cudaStreamSynchronize). */
+    const uint32_t sub = slot % ws->nsub;
+    cudaStream_t stream = ws->stream[sub];
+    int16_t *h_iq = ws->h_iq[sub];
+    int16_t *d_iq = ws->d_iq[sub];
+    cufftComplex *d_work = ws->d_work[sub];
 
-    CUDA_CK(cudaMemcpyAsync(ws->d_iq, iq, 2u * n * sizeof(int16_t),
-                            cudaMemcpyHostToDevice, ws->stream));
+    /* Stage into pinned host memory, then async DMA: the copy from pageable
+     * packet memory becomes a fast host memcpy and the H2D no longer blocks. */
+    memcpy(h_iq, iq, 2u * n * sizeof(int16_t));
+    CUDA_CK(cudaMemcpyAsync(d_iq, h_iq, 2u * n * sizeof(int16_t),
+                            cudaMemcpyHostToDevice, stream));
     const uint32_t tpb = 256;
-    k_window_i16<<<(n + tpb - 1) / tpb, tpb, 0, ws->stream>>>(
-        ws->d_iq, ctx->d_win_r, ws->d_work, n);
-    CUFFT_CK(cufftExecC2C(ws->plan, ws->d_work, ws->d_work, CUFFT_FORWARD));
+    k_window_i16<<<(n + tpb - 1) / tpb, tpb, 0, stream>>>(d_iq, ctx->d_win_r,
+                                                          d_work, n);
+    CUFFT_CK(cufftExecC2C(ws->plan[sub], d_work, d_work, CUFFT_FORWARD));
     cufftComplex *rd_col =
         (cufftComplex *)rd_p + (size_t)slot * n * m + chirp_id;
-    k_corner_turn<<<(n + tpb - 1) / tpb, tpb, 0, ws->stream>>>(ws->d_work,
-                                                               rd_col, n, m);
-    CUDA_CK(cudaStreamSynchronize(ws->stream));
+    k_corner_turn<<<(n + tpb - 1) / tpb, tpb, 0, stream>>>(d_work, rd_col, n, m);
+    CUDA_CK(cudaStreamSynchronize(stream));
 }
 
 __global__ void k_window_rows(const cufftComplex *src, const float *win,
@@ -238,13 +300,17 @@ extern "C" void rk_doppler_fft(void *ctx_p, void *ws_p, uint32_t tile,
     const size_t off = (size_t)slot * n * m + (size_t)r0 * m;
     const uint32_t count = rows * m;
     const uint32_t tpb = 256;
+    /* Per-slot sub-workspace: see rk_range_fft. */
+    const uint32_t sub = slot % ws->nsub;
+    cudaStream_t stream = ws->stream[sub];
+    cufftComplex *d_work = ws->d_work[sub];
 
-    k_window_rows<<<(count + tpb - 1) / tpb, tpb, 0, ws->stream>>>(
-        (const cufftComplex *)rd_p + off, ctx->d_win_d, ws->d_work, rows, m);
-    CUFFT_CK(cufftExecC2C(ws->plan, ws->d_work, ws->d_work, CUFFT_FORWARD));
-    k_magnitude<<<(count + tpb - 1) / tpb, tpb, 0, ws->stream>>>(
-        ws->d_work, (float *)power_p + off, count);
-    CUDA_CK(cudaStreamSynchronize(ws->stream));
+    k_window_rows<<<(count + tpb - 1) / tpb, tpb, 0, stream>>>(
+        (const cufftComplex *)rd_p + off, ctx->d_win_d, d_work, rows, m);
+    CUFFT_CK(cufftExecC2C(ws->plan[sub], d_work, d_work, CUFFT_FORWARD));
+    k_magnitude<<<(count + tpb - 1) / tpb, tpb, 0, stream>>>(
+        d_work, (float *)power_p + off, count);
+    CUDA_CK(cudaStreamSynchronize(stream));
 }
 
 /* Per-cell CA-CFAR with wrap on both axes; direct window sums (the window is
@@ -297,17 +363,21 @@ extern "C" uint32_t rk_cfar(void *ctx_p, uint32_t tile, const void *power_p,
 
     uint8_t *tile_block = (uint8_t *)dets_p +
                           ((size_t)slot * ctx->n_tiles + tile) * dets_stride(ctx);
-    /* CFAR has no dedicated workspace/stream; use the default stream. Reset the
-     * count, run, and read the count back (implicit sync via D2H copy). */
-    CUDA_CK(cudaMemset(tile_block, 0, sizeof(uint32_t)));
+    /* Private (slot, tile) stream: keeps CFAR off the legacy default stream so
+     * concurrent tiles/slots don't globally serialize. Reset the count, run,
+     * then read the count back on the same stream (the async D2H + stream sync
+     * orders correctly without a global barrier). */
+    cudaStream_t stream = ctx->cfar_streams[slot * ctx->n_tiles + tile];
+    CUDA_CK(cudaMemsetAsync(tile_block, 0, sizeof(uint32_t), stream));
     const uint32_t count_cells = rows * m, tpb = 256;
-    k_cfar<<<(count_cells + tpb - 1) / tpb, tpb>>>(
+    k_cfar<<<(count_cells + tpb - 1) / tpb, tpb, 0, stream>>>(
         (const float *)power_p + (size_t)slot * n * m, n, m, tile * rows, rows,
         K, G, ctx->pfa_scale, n_train, tile_block, ctx->max_dets);
     CUDA_CK(cudaGetLastError());
     uint32_t cnt = 0;
-    CUDA_CK(cudaMemcpy(&cnt, tile_block, sizeof(uint32_t),
-                       cudaMemcpyDeviceToHost));
+    CUDA_CK(cudaMemcpyAsync(&cnt, tile_block, sizeof(uint32_t),
+                            cudaMemcpyDeviceToHost, stream));
+    CUDA_CK(cudaStreamSynchronize(stream));
     return cnt < ctx->max_dets ? cnt : ctx->max_dets;
 }
 

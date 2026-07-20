@@ -56,8 +56,10 @@ def main(argv=None):
     p.add_argument(
         "--chirp-gap-us",
         type=float,
-        default=0.0,
-        help="optional pause between chirp packets within a frame [us]",
+        default=None,
+        help="spacing between chirp packets within a frame [us] "
+        "(default: the scene's chirp_interval_s, i.e. realistic front-end "
+        "pacing; 0 blasts the whole frame as one burst)",
     )
     p.add_argument(
         "--start-delay",
@@ -97,25 +99,37 @@ def main(argv=None):
     if args.start_delay:
         time.sleep(args.start_delay)
 
-    chirp_gap = args.chirp_gap_us * 1e-6
-    sent_packets = 0
-    t0 = time.perf_counter()
-    for frame_id in range(total_frames):
-        deadline = t0 + frame_id * frame_period
+    # Default to the scene's physical chirp interval so chirps stream across the
+    # CPI like a real front-end, instead of one instantaneous burst per frame.
+    # A burst can overrun the receiver's socket buffer (kernel-capped at
+    # net.core.rmem_max), dropping chirps and stalling that frame's slot.
+    if args.chirp_gap_us is None:
+        chirp_gap = radar.get("chirp_interval_s", 0.0)
+    else:
+        chirp_gap = args.chirp_gap_us * 1e-6
+
+    def _spin_until(deadline: float) -> None:
         while True:
             now = time.perf_counter()
             if now >= deadline:
-                break
-            time.sleep(min(deadline - now, 1e-3))
+                return
+            if deadline - now > 1e-3:
+                time.sleep(deadline - now - 1e-3)  # coarse sleep, then busy-wait
+
+    sent_packets = 0
+    t0 = time.perf_counter()
+    for frame_id in range(total_frames):
+        frame_start = t0 + frame_id * frame_period
+        _spin_until(frame_start)
 
         base = (frame_id % file_frames) * frame_len
         for chirp_id in range(n_chirps):
+            if chirp_gap:
+                _spin_until(frame_start + chirp_id * chirp_gap)
             header = HEADER.pack(frame_id, chirp_id, 0, n_samples)
             off = base + chirp_id * payload_len
             sock.sendto(header + iq[off : off + payload_len], dest)
             sent_packets += 1
-            if chirp_gap:
-                time.sleep(chirp_gap)
 
     elapsed = time.perf_counter() - t0
     sock.close()
