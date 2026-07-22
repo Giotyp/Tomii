@@ -124,27 +124,61 @@ Tomii's p50→p99.9 spread is ~150 µs; GR 4.0's is ~3.9 ms. GNU Radio 4.0's
 rewrite genuinely improves on 3.10 (≈3.5× at the tail) — and Tomii still
 leads it ≈6× on processing tail with far tighter jitter.
 
-**CPU↔GPU crossover** (RTX 4090 box, same graph/verifier, kernel `.so` swap
-only):
+**CPU↔GPU comparison** (RTX 4090 / GPU 5, same graph & verifier, kernel `.so`
+swap only; all runs verifier-gated). Two regimes, because latency and
+throughput point in *opposite* directions:
 
-| CPI | Tomii CPU | Tomii GPU | verdict |
+*Latency — processing tail after the last chirp lands* (physical pacing, both
+systems sustain and PASS; median-of-3, 2000 steady-state frames at 4096×512 /
+190 at 1024×128; tail = p50 latency − chirp-arrival floor, which is 511×200 µs
+= 102.2 ms at 4096×512 and 127×50 µs = 6.35 ms at 1024×128):
+
+| CPI | CPU p50 tail | CPU p99 tail | GPU p50 tail | GPU p99 tail | jitter (std) |
+|---|---|---|---|---|---|
+| 1024×128 | ~0.9 ms | ~1.0 ms | ~0.3 ms | ~0.3 ms | CPU 88 µs / GPU 67 µs |
+| 4096×512 | ~6.9 ms | ~13.4 ms | ~0.9 ms | ~1.0 ms | CPU ~1.7 ms / GPU <0.3 ms |
+
+At 4096×512 the GPU's post-arrival tail is ~7× lower at p50 and ~13× lower at
+p99, with ~10× tighter jitter — once the CPI is resident, cuFFT + CFAR clear it
+almost instantly. At 1024×128 both tails are sub-millisecond: a wash.
+
+*Sustained frame rate* (compressed **streamed** pacing — chirps spread evenly
+across the period, never bursted, so the receiver socket buffer is never the
+bottleneck; boundary re-confirmed with the coverage gate ON; slots=2, workers=8):
+
+| CPI | CPU sustains | GPU sustains | who sustains faster |
 |---|---|---|---|
-| 1024×128 | ~2.8 ms | ~2.0 ms | wash — GPU overhead-bound at tiny FFTs |
-| 4096×512 (16×) | 19.4 ms, falls behind real-time | 10.4 ms, keeps up | GPU 1.9×; only GPU sustains the rate |
+| 4096×512 | ~26 ms / 38 fps | ~49 ms / 20 fps | **CPU ~1.85×** |
+
+The direction reverses: the 8-core CPU sustains ~1.85× the GPU's frame rate.
+The GPU is capped by per-chirp H2D + kernel-launch + stream-sync overhead (512
+chirps/frame) that scaling frame concurrency barely relieves (slots=4 moves the
+GPU boundary only 49→46.5 ms). This is *not* a socket artifact — at the GPU's
+49 ms boundary the packet stream is ~170 MB/s and the CPU sustained 2× that
+rate cleanly. (This overturns an earlier draft's "only GPU sustains the rate,
+GPU 1.9×", which was an artifact of bursted pacing on the pre-fix kernels.)
 
 **What this showcases:**
 1. *Predictable low latency*: declarative DAG + pinned runtime beats both
    generations of flowgraph schedulers on the same DSP, with microsecond-
    scale jitter instead of millisecond-scale.
-2. *Modularity*: CPU→GPU is a deployment decision (`RADAR_KERNELS_DIR`),
-   not a rewrite, and pays off exactly where the compute grows — with the
-   verifier proving numerics are unchanged across the swap.
+2. *Modularity with an honest trade-off*: CPU→GPU is a deployment decision
+   (`RADAR_KERNELS_DIR`), not a rewrite — and the verifier proves numerics are
+   unchanged across the swap. At 4096×512 the swap buys a ~7–13× lower, ~10×
+   tighter latency tail but *costs* ~1.85× sustained throughput, so the right
+   kernel depends on whether the SLA is per-frame latency/jitter or aggregate
+   frame rate. The same framework measures both cleanly.
 3. *The verifier-gated methodology has teeth*: it caught a real runtime
    race, a real kernel thread-safety bug (both fixed), and an overload
    coverage hole — silent wrongness could not have shipped as a number.
 
 **Caveats:** cross-machine numbers are not comparable (different CPUs; the
-GPU box is noisy); the large-CPI percentiles rest on few steady-state frames
-(12 CPU / 44 GPU) and deserve a longer run; GR baselines have not been run
-on the GPU box; incomplete-frame eviction remains open (any real packet loss
-wedges a slot — the honest next fix, in tomii-core).
+GPU box is shared/noisy); the large-CPI tail table is median-of-3 over 2000
+steady-state frames each, so its percentiles are now well-powered. The
+sustained-rate boundary is *bistable* (a frame that falls behind wedges rather
+than degrading gracefully), so it is reported as a "sustains / does-not"
+threshold, not a smooth curve — and the verified boundary is a hair slower than
+the unverified one because the per-frame detection dump adds load. GR baselines
+have not been run on the GPU box. Incomplete-frame eviction remains the open
+item: any real packet loss wedges a slot instead of dropping one frame (the
+honest next fix, in tomii-core), which is also what makes the boundary bistable.

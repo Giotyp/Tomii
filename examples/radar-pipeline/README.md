@@ -112,8 +112,9 @@ predecessor barrier — useful when debugging scheduling regressions.
 | `--receiver-threads` | 2 | Dedicated UDP receiver threads |
 | `--frames` | scene | Frames to send/process |
 | `--frame-period` | scene | Sender CPI interval [s] |
-| `--chirp-gap-us` | scene | Inter-chirp spacing [us] (default: `chirp_interval_s`) |
+| `--chirp-gap-us` | scene | Inter-chirp spacing [us] (unset: `chirp_interval_s`; `0`: burst; `frame_period/n_chirps`: compressed streamed pacing) |
 | `--warmup` | 10 | Leading frames excluded from timing |
+| `--repeat` | 1 | Repeat each cell N times, report the per-column median (snapshots `radar_report_<tag>_rN.json`) |
 | `--tiles` | 8 | Range tiles (must divide `n_samples`) |
 | `--guard` / `--train` | 2 / 8 | CA-CFAR guard / training cells |
 | `--pfa-scale` | 15.0 | CFAR threshold scale |
@@ -134,11 +135,20 @@ barriers, inline continuation, slot priority, RDTSC timing).
 
 ## CPU vs GPU
 
-Same graph, same verifier — only the kernel `.so` changes. At the default
-1024x128 CPI the FFTs are small and the GPU is overhead-bound (per-chirp H2D,
-launch, and stream-sync costs dominate), so a well-fed CPU is competitive. The
-GPU pulls ahead as the CPI grows (e.g. the 4096x512 scene above, ~16x the
-compute), where the CPU can no longer keep the per-frame budget.
+Same graph, same verifier — only the kernel `.so` changes, and latency and
+throughput point in opposite directions. At the default 1024x128 CPI both
+processing tails are sub-millisecond — a wash. At the 4096x512 CPI (~16x the
+compute) the GPU's post-arrival latency tail is far lower and much tighter
+(~0.9 ms vs ~6.9 ms p50, ~10x tighter jitter) — once the CPI is resident,
+cuFFT clears it almost instantly. But *sustained frame rate* reverses: the
+8-core CPU sustains ~1.85x the GPU's rate, because the GPU is capped by
+per-chirp H2D + launch + stream-sync overhead (512 chirps/frame) that scaling
+`--slots` barely relieves. So the kernel choice is an SLA decision — per-frame
+latency/jitter (GPU) vs aggregate throughput (CPU) — measured cleanly by the
+same harness. Use compressed streamed pacing (`--chirp-gap-us`
+= frame_period/n_chirps) to probe the sustained-rate boundary; a burst
+(`--chirp-gap-us 0`) overruns the receiver socket buffer and measures drops,
+not compute.
 
 ## Layout
 
@@ -146,4 +156,5 @@ compute), where the CPU can no longer keep the per-frame budget.
 - `kernels/radar_cpu.c` — FFTW kernels; `kernels/radar_gpu.cu` — cuFFT twin
 - `build_graph.py` — Python graph builder; `data/make_scene.py` — scene generator
 - `sender.py` — UDP chirp streamer; `verify.py` — detection/coverage checker
+- `bisect_rate.py` — sustained-frame-rate finder (compressed streamed pacing)
 - `data/reference_check.py` — reference DSP the verifier's bin math matches
