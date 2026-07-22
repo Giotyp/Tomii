@@ -20,6 +20,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -89,6 +91,24 @@ def latency_summary(report_path: Path) -> dict:
     return out
 
 
+def aggregate_median(runs: list[dict]) -> dict:
+    """Median-of-N across repeat runs of one cell (matches compare.py's method)."""
+    if len(runs) == 1:
+        return runs[0]
+    keys = ["avg_us", "p50_us", "p99_us", "p999_us", "throughput_fps",
+            "min_us", "max_us", "std_us"]
+    out = dict(runs[0])  # carry workers/slots/frames/etc from the first run
+    for k in keys:
+        vals = [r[k] for r in runs if r.get(k) is not None]
+        if vals:
+            out[k] = statistics.median(vals)
+    out["repeats"] = len(runs)
+    out["verified"] = None if any(r["verified"] is None for r in runs) \
+        else all(r["verified"] for r in runs)
+    out["wall_s"] = sum(r["wall_s"] for r in runs)
+    return out
+
+
 def run_cell(
     *,
     args,
@@ -99,6 +119,7 @@ def run_cell(
     slots: int,
     frames: int,
     frame_period: float,
+    run_index: int | None = None,
 ) -> dict:
     tag = f"s{slots}_w{workers}"
     timing_file = args.results_dir / f"radar_{tag}.txt"
@@ -153,7 +174,10 @@ def run_cell(
         "--frame-period", str(frame_period),
         "--quiet",
     ]
-    if args.chirp_gap_us:
+    # Forward the gap whenever the user set it explicitly (including 0, which the
+    # sender interprets as "burst the whole frame"). Leaving it unset lets the
+    # sender fall back to the scene's physical chirp_interval_s.
+    if args.chirp_gap_us is not None:
         sender_cmd += ["--chirp-gap-us", str(args.chirp_gap_us)]
     sender_proc = subprocess.Popen(sender_cmd)
 
@@ -186,6 +210,13 @@ def run_cell(
         if not verified:
             raise RuntimeError(f"verification FAILED for slots={slots} workers={workers}")
 
+    # Snapshot the per-run report so repeats don't overwrite each other's
+    # provenance (the fixed {tag} name is reused every run).
+    if run_index is not None:
+        shutil.copyfile(
+            report_file, args.results_dir / f"radar_report_{tag}_r{run_index}.json"
+        )
+
     stats = latency_summary(report_file)
     stats.update(workers=workers, slots=slots, wall_s=wall_s, verified=verified)
     print(
@@ -205,8 +236,12 @@ def main() -> None:
                    help="frames to send/process (default: frames in the scene)")
     p.add_argument("--frame-period", type=float, default=None,
                    help="sender frame period in seconds (default: scene value)")
-    p.add_argument("--chirp-gap-us", type=float, default=0.0,
-                   help="sender pause between chirp packets [us]")
+    p.add_argument("--chirp-gap-us", type=float, default=None,
+                   help="sender pause between chirp packets [us]; unset -> sender "
+                        "uses the scene's physical chirp_interval_s. Pass 0 to force "
+                        "a single burst per frame (note: bursts can overrun the "
+                        "receiver socket buffer). For compressed streamed pacing, "
+                        "set this to frame_period/n_chirps.")
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--slots", type=int, default=2)
     p.add_argument("--sweep-workers", type=int, nargs="+", default=None,
@@ -223,6 +258,9 @@ def main() -> None:
     p.add_argument("--port", type=int, default=8100)
     p.add_argument("--warmup", type=int, default=10,
                    help="leading frames excluded from timing averages")
+    p.add_argument("--repeat", type=int, default=1,
+                   help="repeat each cell N times and report the per-column median "
+                        "(each run's report is snapshotted to radar_report_<tag>_rN.json)")
     p.add_argument("--max-runtime", type=int, default=None,
                    help="watchdog seconds (default: derived from frames x period)")
     p.add_argument("--results-dir", type=Path, default=HERE / "results")
@@ -279,7 +317,7 @@ def main() -> None:
                 tmp.close()
                 graph_json = Path(tmp.name)
 
-            results.append(
+            cell_runs = [
                 run_cell(
                     args=args,
                     dylib=dylib,
@@ -289,8 +327,18 @@ def main() -> None:
                     slots=slots,
                     frames=frames,
                     frame_period=frame_period,
+                    run_index=(i if args.repeat > 1 else None),
                 )
-            )
+                for i in range(args.repeat)
+            ]
+            agg = aggregate_median(cell_runs)
+            if args.repeat > 1:
+                print(
+                    f"  median-of-{args.repeat}: p50={agg['p50_us']:.0f} "
+                    f"p99={agg['p99_us']:.0f} p99.9={agg['p999_us']:.0f} us",
+                    flush=True,
+                )
+            results.append(agg)
 
     if sweep or args.csv_out:
         csv_path = args.csv_out or (args.results_dir / "radar_sweep.csv")
