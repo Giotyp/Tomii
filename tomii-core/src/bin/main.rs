@@ -383,6 +383,9 @@ fn main() {
     if let Some(report_path) = &args.report {
         synrt.write_json_report(report_path, args.exclude_frames);
     }
+
+    // TOMII_DEP_PROF=1: dependency-resolution cycle profile (diagnostic).
+    tomii_core::dump_dep_prof();
 }
 
 #[allow(clippy::too_many_arguments)]
