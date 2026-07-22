@@ -29,6 +29,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 
+def fmt_ms(us: float | None) -> str:
+    """Format microseconds as ms, tolerating None (wedged run, no report)."""
+    return f"{us / 1e3:.2f}ms" if us is not None else "n/a"
+
+
 def run_at_period(args, period: float, *, verify: bool) -> tuple[bool, float | None, int]:
     """Run one cell at frame period `period`. Returns (sustained, p50_us, frames)."""
     gap_us = period / args.n_chirps * 1e6
@@ -108,7 +113,7 @@ def main() -> None:
     hi, lo = args.hi, args.lo  # hi sustains, lo does not (invariant we maintain)
     s_hi, p50_hi, f_hi = run_at_period(args, hi, verify=False)
     print(f"[{label}] P={hi*1e3:6.1f}ms -> sustained={s_hi} "
-          f"p50={p50_hi and p50_hi/1e3:.2f}ms frames={f_hi}", flush=True)
+          f"p50={fmt_ms(p50_hi)} frames={f_hi}", flush=True)
     if not s_hi:
         print(f"[{label}] WARNING: upper bound {hi*1e3:.1f}ms did not sustain; "
               f"raise --hi. Aborting.", flush=True)
@@ -120,7 +125,7 @@ def main() -> None:
         mid = (hi + lo) / 2.0
         sustained, p50, frames = run_at_period(args, mid, verify=False)
         print(f"[{label}] P={mid*1e3:6.1f}ms -> sustained={sustained} "
-              f"p50={p50 and p50/1e3:.2f}ms frames={frames}", flush=True)
+              f"p50={fmt_ms(p50)} frames={frames}", flush=True)
         if sustained:
             hi = mid
             best_sustained = mid
@@ -129,7 +134,7 @@ def main() -> None:
             lo = mid
 
     print(f"\n[{label}] sustained-rate boundary P* ~= {best_sustained*1e3:.1f}ms "
-          f"({1.0/best_sustained:.1f} fps), unverified p50={p50_at_best/1e3:.2f}ms",
+          f"({1.0/best_sustained:.1f} fps), unverified p50={fmt_ms(p50_at_best)}",
           flush=True)
 
     if args.confirm:
@@ -137,7 +142,7 @@ def main() -> None:
               flush=True)
         ok, p50, frames = run_at_period(args, best_sustained, verify=True)
         verdict = "VERIFIED-sustains" if ok else "FAILED verification (nudge P* up)"
-        print(f"[{label}] {verdict}: p50={p50 and p50/1e3:.2f}ms frames={frames}", flush=True)
+        print(f"[{label}] {verdict}: p50={fmt_ms(p50)} frames={frames}", flush=True)
 
 
 if __name__ == "__main__":
