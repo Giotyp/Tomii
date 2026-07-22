@@ -29,7 +29,13 @@ buffers are sized `frame_wnd = slots` and indexed `frame_id % frame_wnd`).
 ## Requirements
 
 - Rust toolchain, Python 3.10+
-- **CPU kernel:** FFTW single-precision (`libfftw3f-dev`, for `pkg-config fftw3f`)
+- **CPU kernel:** FFTW single-precision (`libfftw3f-dev`, for `pkg-config fftw3f`).
+  If FFTW's dev files aren't system-installed (no `fftw3.h` / `fftw3f.pc`) but
+  live in a conda env, point the build at them, e.g.:
+  ```bash
+  export PKG_CONFIG_PATH=$HOME/miniconda3/envs/radar/lib/pkgconfig
+  export LD_LIBRARY_PATH=$HOME/miniconda3/envs/radar/lib   # so the .so resolves at runtime
+  ```
 - **GPU kernel (`--gpu`):** NVIDIA GPU + CUDA 12 with cuFFT (`nvcc`); the
   `kernels/Makefile` defaults to `CUDA_ARCH=sm_89` — override for other GPUs,
   e.g. `make -C kernels gpu CUDA_ARCH=sm_80`.
