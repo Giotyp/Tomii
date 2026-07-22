@@ -55,6 +55,7 @@ pub fn fft_op_cm(
     let fft_buffer = unsafe { &*raw_mut::<FftBuffer>(fft_buffer) };
 
     let frame_id = packet.frame_id as usize;
+    crate::mimo_count(1, frame_id);
     let frame_slot = frame_id % FrameWnd;
 
     let ant_id = packet.ant_id as usize;

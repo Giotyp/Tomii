@@ -110,6 +110,7 @@ pub fn beam_op_cm(
     // (which is UB and miscompiles under W>1).
     let ul_beam_matrices_ref = unsafe { &*raw_mut::<UlBeamMatrix>(ul_beam_matrices) };
 
+    crate::mimo_count(2, frame_id);
     let frame_slot = frame_id % FrameWnd;
     let beam_block = config_ref.beam_block_size();
     let last_sc_id = base_sc_id + min(beam_block, config_ref.ofdm_data_num() - base_sc_id);

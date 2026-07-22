@@ -106,6 +106,7 @@ pub fn demul_op_cm(
     // raw `cell_ptr`, never forming an aliased `&mut DemodBuffer`.
     let demod_buffers = unsafe { &*raw_mut::<DemodBuffer>(demod_buffers) };
 
+    crate::mimo_count(3, frame_id);
     let frame_slot = frame_id % FrameWnd;
     let base_sc_id = demul_base_scs[node_index % demul_base_scs.len()];
 
