@@ -7,6 +7,36 @@ latency/jitter. The DSP kernels live behind a C ABI (`kernels/radar.h`) with two
 interchangeable implementations — **FFTW on the CPU** and **cuFFT on the GPU** —
 so the same graph and verifier run on either by swapping the kernel `.so`.
 
+## What it does
+
+A radar front-end (here `sender.py`, replaying a synthetic scene) streams one
+UDP packet per chirp. The pipeline turns each frame of chirps into a target
+list and checks it against the scene's ground truth:
+
+```
+UDP chirp packets ──► range_fft     one FFT per chirp:
+(1024 IQ samples          │         echo delay → distance bins
+ each, paced at the       ▼
+ chirp interval)      doppler_fft   one FFT per distance bin, across chirps:
+                          │         phase drift → velocity bins
+                          ▼
+                      cfar          adaptive threshold vs local noise →
+                          │         detection cells in the range×velocity map
+                          ▼
+                      cluster       merge adjacent cells → target list:
+                          │         "target at 80 m, closing at 5 m/s"
+                          ▼
+                      verify.py     every target matched against ground truth,
+                                    every frame accounted for
+
+      CPU (FFTW) ◄─── kernels/libradar_kernels.so ───► GPU (cuFFT)
+          same graph, same verifier — the kernel .so is the only change
+```
+
+Because the scene generator records where every target is, the verifier knows
+the right answer for every frame — performance numbers exist only for runs
+that got every detection right.
+
 ## Graph topology
 
 ```

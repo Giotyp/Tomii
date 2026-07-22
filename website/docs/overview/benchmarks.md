@@ -20,8 +20,9 @@ Every comparison on this page follows the same rules:
 - **Same-binary attribution.** Runtime feature costs are measured with
   environment-variable toggles on one binary, never by rebuilding with source
   edits.
-- MIMO kernel parity: the Tomii and Taskflow MIMO harnesses link the *same*
-  compiled kernel libraries, so timing differences are pure scheduling.
+- **Kernel parity.** Comparative harnesses link the *same* compiled kernel
+  libraries (Tomii vs Taskflow on MIMO; Tomii vs GNU Radio on radar), so
+  timing differences are pure scheduling.
 
 ## Massive-MIMO uplink vs Agora: the cost of generality
 
@@ -79,6 +80,79 @@ arrives, while Taskflow must collect all packets before submitting the DAG.
 At 4×4 this overlap recovers 280–360 µs per frame. The advantage persists
 from the sender-rate-limited regime (4×4) to the compute-limited regime
 (16×16).
+
+## FMCW radar vs GNU Radio (reproducible)
+
+A software radar receiver: a sender streams one chirp per UDP packet; the
+pipeline runs range FFT → Doppler FFT → CA-CFAR detection → clustering and
+reports per-frame latency. Four orchestrators run the same workload: Tomii,
+GNU Radio 3.10 with Python blocks, GNU Radio 3.10 with native C++ blocks, and
+GNU Radio 4.0. Source: `bench/radar-bench/` (`compare.py`); the workload is
+`examples/radar-pipeline/`.
+
+The baselines are the recommended implementations, not a strawman:
+
+- Stock schedulers (3.10 thread-per-block, 4.0 `multiThreaded`), the stock
+  native FFT block for the range FFT, and custom source/sink blocks written
+  the way GNU Radio documentation prescribes (`gr.sync_block` /
+  `gr::Block<>`).
+- Both the common deployment style (Python blocks) and the
+  latency-practitioner style (native C++ blocks) are measured. They agree
+  within 2% at p50 — the gap below is the scheduler, not the block language.
+- GNU Radio 4.0 is the ground-up C++23 rewrite built to address 3.10's
+  latency. It is included as the strongest available baseline (pinned to
+  commit `92278b6`), and it does improve on 3.10: ~3.5× at the tail.
+- One deliberate deviation, disclosed: the Doppler/CFAR/clustering stages
+  call the same compiled kernel `.so` in every system, so the DSP is
+  byte-identical and the measurement isolates orchestration.
+
+Fixtures follow the rules above: same UDP stream and seeded scene, chirps
+paced at the physical chirp interval, warm-up excluded, median of 3 runs.
+The radar verifier gates every run: all ground-truth targets detected in
+every frame, and full frame coverage (a run that drops frames fails, it is
+not measured).
+
+Per-frame latency at a 1024-sample × 128-chirp CPI, 100 frames/s, all four
+systems on the same Linux machine. Every system carries the same ~6.35 ms
+chirp-arrival floor (127 chirp intervals × 50 µs — physics, not software),
+so the last column is the informative one:
+
+| System | p50 | p99 | p99.9 | Tail after last chirp |
+|---|---|---|---|---|
+| **Tomii (CPU kernels)** | **6.92 ms** | **6.97 ms** | **7.07 ms** | **~0.6 ms** |
+| GNU Radio 4.0 | 10.1 ms | 10.7 ms | 14.0 ms | ~3.8 ms |
+| GNU Radio 3.10, C++ blocks | 13.8 ms | 14.5 ms | 14.7 ms | ~7.5 ms |
+| GNU Radio 3.10, Python blocks | 14.1 ms | 14.5 ms | 17.7 ms | ~7.7 ms |
+
+Tomii's p50→p99.9 spread is ~150 µs; GNU Radio 4.0's is ~3.9 ms. The
+mechanism is the same one the MIMO row measures: Tomii dispatches a
+range-FFT task the moment each chirp packet arrives, and finishing the frame
+after the last chirp costs microseconds of scheduling, not milliseconds of
+buffered hand-offs.
+
+### CPU vs GPU on the same radar graph
+
+The radar kernels exist twice behind one C ABI — FFTW (CPU) and cuFFT (GPU) —
+and `run_bench.py --gpu` swaps the `.so` with no graph or plugin change.
+Measured on a separate machine (RTX 4090; `examples/radar-pipeline/`,
+`run_bench.py --repeat 3` and `bisect_rate.py`); these numbers are not
+comparable with the table above. Latency and throughput point in opposite
+directions:
+
+| CPI | CPU tail p50 / p99 | GPU tail p50 / p99 | Sustained frame rate |
+|---|---|---|---|
+| 1024×128 | 0.9 / 1.0 ms | 0.3 / 0.3 ms | both sustain |
+| 4096×512 | 6.9 / 13.4 ms | 0.9 / 1.0 ms | **CPU 1.85× higher** (38 vs 20 frames/s) |
+
+At the large CPI the GPU's post-arrival tail is ~7× lower at p50 and ~13×
+lower at p99, with ~10× tighter jitter. Sustained frame rate reverses: the
+8-core CPU sustains 1.85× the GPU's rate, because the GPU pays per-chirp
+host-to-device copy, kernel-launch, and stream-sync costs 512 times per
+frame — raising `--slots` from 2 to 4 moves the GPU's rate boundary only
+from 49 ms to 46.5 ms, so the cap is launch overhead, not frame concurrency.
+The kernel choice is a service-level decision: per-frame latency and jitter
+(GPU) or aggregate frame rate (CPU). The boundary rates come from runs
+re-confirmed with the coverage gate on.
 
 ## Multi-frame pipeline vs Taskflow (reproducible)
 
