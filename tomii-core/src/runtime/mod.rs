@@ -413,6 +413,7 @@ impl TomiiRtBuilder {
                 processing_count: Arc::new((0..slots).map(|_| AtomicUsize::new(0)).collect()),
                 needs_check: Arc::new((0..slots).map(|_| AtomicBool::new(false)).collect()),
                 packet_counters: Arc::new((0..slots).map(|_| AtomicUsize::new(0)).collect()),
+                last_packet_ns: Arc::new((0..slots).map(|_| std::sync::atomic::AtomicU64::new(0)).collect()),
                 packet_complete: Arc::new((0..slots).map(|_| AtomicBool::new(false)).collect()),
                 frame_id: Arc::new((0..slots).map(|_| AtomicUsize::new(usize::MAX)).collect()),
                 active_bitmap: Arc::new(AtomicU64::new(0)),
@@ -426,6 +427,7 @@ impl TomiiRtBuilder {
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "network")]
             net: NetworkInfra {
+                frame_packets: AtomicUsize::new(0),
                 receive_finished: Arc::new(AtomicBool::new(false)),
                 packet_sender,
                 packet_receiver,

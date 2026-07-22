@@ -67,6 +67,12 @@ def main(argv=None):
         default=0.0,
         help="seconds to wait before the first packet (receiver warm-up)",
     )
+    p.add_argument(
+        "--drop-chirp",
+        default=None,
+        metavar="FRAME:CHIRP",
+        help="deliberately skip sending one packet (packet-loss testing)",
+    )
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args(argv)
 
@@ -124,6 +130,8 @@ def main(argv=None):
 
         base = (frame_id % file_frames) * frame_len
         for chirp_id in range(n_chirps):
+            if args.drop_chirp == f"{frame_id}:{chirp_id}":
+                continue
             if chirp_gap:
                 _spin_until(frame_start + chirp_id * chirp_gap)
             header = HEADER.pack(frame_id, chirp_id, 0, n_samples)

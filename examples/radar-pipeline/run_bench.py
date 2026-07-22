@@ -150,6 +150,7 @@ def run_cell(
         coalesce_barriers=True,
         inline_continuation=True,
         slot_priority=True,
+        frame_timeout_ms=(args.frame_timeout_ms or None),
     )
 
     env = {**os.environ}
@@ -177,6 +178,8 @@ def run_cell(
     # Forward the gap whenever the user set it explicitly (including 0, which the
     # sender interprets as "burst the whole frame"). Leaving it unset lets the
     # sender fall back to the scene's physical chirp_interval_s.
+    if args.drop_chirp:
+        sender_cmd += ["--drop-chirp", args.drop_chirp]
     if args.chirp_gap_us is not None:
         sender_cmd += ["--chirp-gap-us", str(args.chirp_gap_us)]
     sender_proc = subprocess.Popen(sender_cmd)
@@ -256,6 +259,10 @@ def main() -> None:
     p.add_argument("--pfa-scale", type=float, default=15.0)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8100)
+    p.add_argument("--frame-timeout-ms", type=int, default=0,
+                   help="evict incomplete frames after this idle time (0=off)")
+    p.add_argument("--drop-chirp", default=None, metavar="FRAME:CHIRP",
+                   help="sender skips one packet (eviction testing; use --no-verify)")
     p.add_argument("--warmup", type=int, default=10,
                    help="leading frames excluded from timing averages")
     p.add_argument("--repeat", type=int, default=1,

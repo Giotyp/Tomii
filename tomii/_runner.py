@@ -25,6 +25,7 @@ _INT_FLAGS: Dict[str, str] = {
     "batching_size": "--batching-size",
     "batching_limit": "--batching-limit",
     "exclude_frames": "--exclude-frames",
+    "frame_timeout_ms": "--frame-timeout-ms",
     "record_frame": "--record-frame",
 }
 
