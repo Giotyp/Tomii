@@ -70,15 +70,13 @@ pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> 
             "slot completed frame, starting new"
         );
 
-        // Clear completed nodes BEFORE releasing the slot.
-        // reinit_slot must finish before release_slot makes the slot available for a new
-        // frame assignment.  If release_slot ran first, assign_frame_to_available_slot
-        // could pick up the Inactive slot, spawn initial tasks (storing results), and then
-        // reinit_slot would clear those new-frame results → panic in legitimate tasks.
+        // Clear completed nodes BEFORE the caller releases the slot.
+        // reinit_slot must finish before release makes the slot available for a
+        // new frame assignment (Bug #16: releasing first lets
+        // assign_frame_to_available_slot spawn new-frame tasks whose results
+        // reinit would then clear).  The release itself happens in
+        // release_and_activate_next, atomically with the next promotion.
         shared.exec.node_results.reinit_slot(slot);
-
-        // Release the slot (makes it available for next frame assignment)
-        release_slot(shared, slot);
 
         true // Signal to caller: slot should restart
     } else {
@@ -90,10 +88,7 @@ pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> 
             "slot completed, max frames reached"
         );
 
-        // Release the slot
-        release_slot(shared, slot);
-
-        false // Signal to caller: no restart needed
+        false // Signal to caller: no restart needed (caller still releases)
     }
 }
 
@@ -244,19 +239,43 @@ pub(super) fn assign_frame_to_available_slot(
     None
 }
 
-pub(super) fn release_slot(shared: &Arc<SharedData>, slot: usize) {
+/// Atomically release a completed/evicted slot and promote the next
+/// `Buffering` slot — one linearizable transition under a single
+/// `running_frames` + `slot_states` lock scope.
+///
+/// Splitting these into separate lock scopes (the old `release_slot` +
+/// `activate_next_slot` pair) left a window where the released slot was
+/// `Inactive` while `last_assigned` still pointed at it: a concurrently
+/// admitting resolution thread could activate that slot for a brand-new frame
+/// via the `assign_frame_to_available_slot` fast path, jumping the entire
+/// buffering queue and running two DAGs at once under `--slot-priority`
+/// (measured: ~1e-3 of TOMII_SLOT_CHECK samples at 16 slots / 2 resolution
+/// threads). Holding both locks across release AND promotion closes it:
+/// when the locks drop, either the buffering queue was empty (stealing the
+/// free slot is then legitimate) or `last_assigned` points at the newly
+/// promoted `Active` slot.
+///
+/// Returns `Some((promoted_slot, buffered_packets))` when a `Buffering` slot
+/// was promoted (slot-priority mode only); the caller dispatches the batch.
+///
+/// **Lock ordering**: `running_frames` (write) → `slot_states` (write) →
+/// `buffers` (write), consistent with the module protocol.
+#[allow(clippy::type_complexity)]
+pub(super) fn release_and_activate_next(
+    shared: &Arc<SharedData>,
+    slot: usize,
+) -> Option<(usize, Vec<(NodeInfo, Option<CmTypes>)>)> {
     let mut running_frames = shared.slot_data.running_frames.write();
     let mut slot_states = shared.slot_data.states.write();
 
+    // --- release `slot` (formerly release_slot) ---
     let old_state = slot_states[slot];
-    slot_states[slot] = SlotState::Inactive; // Mark as inactive
+    slot_states[slot] = SlotState::Inactive;
     shared
         .slot_data
         .active_bitmap
         .fetch_and(!(1u64 << slot), Ordering::Release);
     shared.slot_data.frame_id[slot].store(usize::MAX, Ordering::Relaxed);
-
-    // Remove from running frames
     if let Some(pos) = running_frames.iter().position(|&(_, s_id)| s_id == slot) {
         let (frame_id, _) = running_frames.remove(pos);
         print_debug(|| {
@@ -265,95 +284,55 @@ pub(super) fn release_slot(shared: &Arc<SharedData>, slot: usize) {
                 slot, frame_id, old_state
             )
         });
-    } else {
-        print_debug(|| {
-            format!(
-                "Released slot {} with no assigned frame (had state: {:?})",
-                slot, old_state
-            )
-        });
     }
-    drop(slot_states);
-    drop(running_frames);
-}
 
-/// Activate the next buffering slot in round-robin order
-/// Returns (activated_slot_id, buffered_nodes) for processing
-/// When slot-priority is enabled, automatically uses round-robin activation
-#[allow(clippy::type_complexity)]
-pub(super) fn activate_next_slot(
-    shared: &Arc<SharedData>,
-    completing_slot: Option<usize>,
-) -> Option<(usize, Vec<(NodeInfo, Option<CmTypes>)>)> {
     if !shared.config.slot_priority_enabled {
         return None;
     }
 
-    // 1. Acquire running_frames (Read) FIRST
-    let running_frames = shared.slot_data.running_frames.read();
-
-    // 2. Then acquire slot_states (Write)
-    let mut states = shared.slot_data.states.write();
-
-    // Find and activate next buffering slot in round-robin order
-    let activated_slot = if let Some(completed) = completing_slot {
-        let mut found_slot = None;
-        // We can safely iterate running_frames while holding the lock
-        for (frame, slot) in running_frames.iter() {
-            if states[*slot] == SlotState::Buffering {
-                states[*slot] = SlotState::Active;
-                shared
-                    .slot_data
-                    .active_bitmap
-                    .fetch_or(1u64 << *slot, Ordering::Release);
-                shared.slot_data.needs_check[*slot].store(true, Ordering::Release);
-                shared
-                    .slot_data
-                    .last_assigned
-                    .store(*slot, Ordering::SeqCst);
-                print_debug(|| {
-                    format!(
-                        "Round-Robin: Activated slot {} for frame {} after completing slot {}",
-                        slot, frame, completed
-                    )
-                });
-                found_slot = Some(*slot);
-                break; // Activate only ONE slot per completion
-            }
+    // --- promote the next Buffering slot, oldest admitted frame first ---
+    let mut activated: Option<usize> = None;
+    for (frame, s) in running_frames.iter() {
+        if slot_states[*s] == SlotState::Buffering {
+            slot_states[*s] = SlotState::Active;
+            shared
+                .slot_data
+                .active_bitmap
+                .fetch_or(1u64 << *s, Ordering::Release);
+            shared.slot_data.needs_check[*s].store(true, Ordering::Release);
+            shared.slot_data.last_assigned.store(*s, Ordering::SeqCst);
+            print_debug(|| {
+                format!(
+                    "Round-Robin: Activated slot {} for frame {} after releasing slot {}",
+                    s, frame, slot
+                )
+            });
+            activated = Some(*s);
+            break; // Activate only ONE slot per completion
         }
-        found_slot
-    } else {
-        None
-    };
-
-    // Retrieve buffered nodes while still holding slot_states lock
-    if let Some(slot_id) = activated_slot {
-        let mut slot_buffers = shared.slot_data.buffers.write();
-        let buffered = std::mem::take(&mut slot_buffers[slot_id]);
-
-        // Drop locks in LIFO order
-        drop(slot_buffers);
-        drop(states);
-        drop(running_frames); // Release the first lock last
-
-        // Bump slot generation for the new frame — lazily reinitialises all
-        // NodeDependencyEntry, instances_sent, and cond_instances_to_spawn entries.
-        // Done here (new-frame start, Buffering → Active) so that old-frame tasks
-        // still in the batch_queue use the old generation and cannot corrupt the
-        // new frame's dependency counters or cause spurious task spawning.
-        shared.slot_data.generation[slot_id].fetch_add(1, Ordering::SeqCst);
-
-        shared
-            .telemetry
-            .with_timing(|tb| tb.start_slot_processing(slot_id));
-
-        Some((slot_id, buffered))
-    } else {
-        drop(states);
-        drop(running_frames);
-        None
     }
+    let slot_id = activated?;
+
+    // Retrieve buffered packets while still holding both locks.
+    let mut slot_buffers = shared.slot_data.buffers.write();
+    let buffered = std::mem::take(&mut slot_buffers[slot_id]);
+    drop(slot_buffers);
+    drop(slot_states);
+    drop(running_frames);
+
+    // Bump slot generation for the new frame — lazily reinitialises all
+    // NodeDependencyEntry, instances_sent, and cond_instances_to_spawn entries.
+    // Done here (Buffering → Active) so old-frame tasks still in the batch
+    // queue use the old generation and cannot corrupt the new frame's counters.
+    shared.slot_data.generation[slot_id].fetch_add(1, Ordering::SeqCst);
+
+    shared
+        .telemetry
+        .with_timing(|tb| tb.start_slot_processing(slot_id));
+
+    Some((slot_id, buffered))
 }
+
 
 pub(super) fn initial_nodes(graph: &Graph, slots: Vec<usize>) -> Vec<NodeInfo> {
     let mut node_infos = Vec::new();

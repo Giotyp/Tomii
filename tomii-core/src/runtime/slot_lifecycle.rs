@@ -13,7 +13,7 @@
 //! "what happens when a slot completes" separate from "how slots are allocated and released".
 
 use super::shared_data::{ExecCtx, SharedData, SlotData, SlotState};
-use super::slot_management::{activate_next_slot, initial_nodes, process_slot_completion};
+use super::slot_management::{initial_nodes, process_slot_completion};
 use crate::debug::print_debug;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -91,11 +91,10 @@ fn try_evict_stalled_slots(
 
         reset_slot_state(shared, slot);
         shared.exec.node_results.reinit_slot(slot);
-        super::slot_management::release_slot(shared, slot);
         *slots_dirty = true;
         frame_slot_activity.remove(&slot);
 
-        activate_buffered_slot(
+        release_and_dispatch_next(
             shared,
             slot,
             cond_indexes,
@@ -184,9 +183,9 @@ pub(super) fn check_slots(
 
         let can_restart = process_slot_completion(shared, proc_slot);
         frame_slot_activity.remove(&proc_slot);
-        *slots_dirty = true; // release_slot modified running_frames
+        *slots_dirty = true; // release modifies running_frames
 
-        activate_buffered_slot(
+        release_and_dispatch_next(
             shared,
             proc_slot,
             cond_indexes,
@@ -273,9 +272,12 @@ fn reset_slot_state(shared: &SharedData, slot: usize) {
     });
 }
 
-/// In slot-priority mode: activate the next buffering slot, spawn its initial nodes,
-/// and process any network packets that arrived while it was buffering.
-fn activate_buffered_slot(
+/// Release `completing_slot` and — in slot-priority mode — atomically promote the
+/// next buffering slot, then spawn its initial nodes and process any network
+/// packets that arrived while it was buffering. Release and promotion happen in
+/// one lock scope (`release_and_activate_next`) so a concurrent packet-admission
+/// fast path can never steal the just-released slot ahead of the buffering queue.
+fn release_and_dispatch_next(
     shared: &Arc<SharedData>,
     completing_slot: usize,
     cond_indexes: &[Vec<usize>],
@@ -284,19 +286,15 @@ fn activate_buffered_slot(
     thread_id: usize,
     thread_slot: usize,
 ) {
-    if !shared.config.slot_priority_enabled {
-        return;
-    }
-
     let Some((activated_slot, mut buffered_batch)) =
-        activate_next_slot(shared, Some(completing_slot))
+        super::slot_management::release_and_activate_next(shared, completing_slot)
     else {
-        return;
+        return; // released; nothing was buffering (or slot-priority disabled)
     };
 
     print_debug(|| {
         format!(
-            "Activated slot {} from Buffering to Active (completing slot: {})",
+            "Activated slot {} from Buffering to Active (released slot: {})",
             activated_slot, completing_slot
         )
     });
