@@ -118,6 +118,23 @@ back-to-back bursting a whole frame can overrun the receiver's UDP socket buffer
 to force a single burst per frame. For very high packet rates, raise the cap
 (`sudo sysctl -w net.core.rmem_max=67108864`).
 
+Whatever the cause — a socket overrun, or a genuinely lost chirp on a real link —
+a frame that never receives all `n_chirps` packets otherwise wedges its slot
+forever: the per-chirp tasks never all fire, the frame never completes, and the
+slot is never recycled. With `slots` small this stalls the whole pipeline, as the
+pending-frame buffer fills behind the stuck frame and later frames are dropped for
+want of a slot. `--frame-timeout-ms T` guards against this: a slot that has
+received some but not all of its packets, has no work in flight, and has gone idle
+for `T` ms is evicted — its frame counted as dropped (so the coverage gate reports
+the shortfall) and its slot recycled. A single lost chirp then costs one dropped
+frame instead of a permanent wedge, and the run completes normally. Reproduce the
+wedge deterministically with `--drop-chirp FRAME:CHIRP` (the sender skips exactly
+that packet): without `--frame-timeout-ms` the run burns its full `--max-runtime`
+with the slot stuck; with it, the frame is evicted within `T` ms and the run
+finishes. (On loopback the receiver threads usually drain a whole-frame burst
+before the socket buffer overruns, so bursting alone rarely wedges here — eviction
+is aimed at real loss on a real link.)
+
 ## Verify
 
 The benchmark is **verifier-gated**: a latency number is reported only when
@@ -149,6 +166,8 @@ predecessor barrier — useful when debugging scheduling regressions.
 | `--frames` | scene | Frames to send/process |
 | `--frame-period` | scene | Sender CPI interval [s] |
 | `--chirp-gap-us` | scene | Inter-chirp spacing [us] (unset: `chirp_interval_s`; `0`: burst; `frame_period/n_chirps`: compressed streamed pacing) |
+| `--frame-timeout-ms` | 0 (off) | Evict a partially-filled slot idle this long — recovers from lost packets instead of wedging the slot |
+| `--drop-chirp` | — | Sender skips one packet `FRAME:CHIRP` (deterministic eviction/loss testing; pair with `--no-verify`) |
 | `--warmup` | 10 | Leading frames excluded from timing |
 | `--repeat` | 1 | Repeat each cell N times, report the per-column median (snapshots `radar_report_<tag>_rN.json`) |
 | `--tiles` | 8 | Range tiles (must divide `n_samples`) |
