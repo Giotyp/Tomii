@@ -52,7 +52,6 @@ pub struct NodeDependencyEntry {
     is_condition: bool,
 }
 
-
 /// TOMII_DEP_PROF=1: rdtsc cycle accounting for dependency resolution
 /// (diagnostic; printed at shutdown via `dump_dep_prof`).
 pub static DEP_PROF_CYCLES: AtomicU64 = AtomicU64::new(0);

@@ -92,7 +92,6 @@ pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> 
     }
 }
 
-
 /// TOMII_SLOT_CHECK=1: samples how many slots are Active simultaneously.
 /// Under --slot-priority the invariant is "at most one"; any sample above one
 /// is a violation of the sequential round-robin handoff (diagnostic for the
@@ -332,7 +331,6 @@ pub(super) fn release_and_activate_next(
 
     Some((slot_id, buffered))
 }
-
 
 pub(super) fn initial_nodes(graph: &Graph, slots: Vec<usize>) -> Vec<NodeInfo> {
     let mut node_infos = Vec::new();
