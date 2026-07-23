@@ -112,6 +112,11 @@ impl Default for BatchConfig {
 pub struct RuntimeConfig {
     pub slots: usize,
     pub max_frames: usize,
+    /// Evict an incomplete network frame whose slot has been idle (no packet,
+    /// no task in flight) for this many ms; 0 disables. The evicted frame is
+    /// counted via the dropped-frames path so the run terminates cleanly
+    /// instead of wedging on a permanently incomplete frame.
+    pub frame_timeout_ms: u64,
     pub max_runtime: Option<u64>,
     pub system_threads: usize,
     pub receiver_threads: usize,
@@ -137,6 +142,7 @@ impl Default for RuntimeConfig {
             slots: 1,
             max_frames: 1,
             max_runtime: None,
+            frame_timeout_ms: 0,
             system_threads: 1,
             receiver_threads: 0,
             workers: 1,
@@ -164,6 +170,10 @@ pub struct SlotData {
     pub processing_count: Arc<Vec<AtomicUsize>>,
     pub needs_check: Arc<Vec<AtomicBool>>,
     pub packet_counters: Arc<Vec<AtomicUsize>>,
+
+    /// Per-slot ns timestamp (base_instant-relative) of the last admitted packet.
+    /// Drives incomplete-frame eviction (`frame_timeout_ms`).
+    pub last_packet_ns: Arc<Vec<AtomicU64>>,
     pub packet_complete: Arc<Vec<AtomicBool>>,
     pub frame_id: Arc<Vec<AtomicUsize>>,
     pub active_bitmap: Arc<AtomicU64>,
@@ -194,6 +204,9 @@ pub struct PendingPacket {
 /// Network receiver infrastructure — present only when the `network` feature is enabled.
 #[cfg(feature = "network")]
 pub struct NetworkInfra {
+    /// Packets per frame, published by the packet-processing loop for the
+    /// incomplete-frame eviction check (0 until the first drain).
+    pub frame_packets: AtomicUsize,
     pub receive_finished: Arc<AtomicBool>,
     /// Flume MPSC channel from network receivers to resolution threads.
     pub packet_sender: Sender<PacketMessage>,

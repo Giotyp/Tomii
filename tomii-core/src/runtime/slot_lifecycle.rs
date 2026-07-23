@@ -13,11 +13,98 @@
 //! "what happens when a slot completes" separate from "how slots are allocated and released".
 
 use super::shared_data::{ExecCtx, SharedData, SlotData, SlotState};
-use super::slot_management::{activate_next_slot, initial_nodes, process_slot_completion};
+use super::slot_management::{initial_nodes, process_slot_completion};
 use crate::debug::print_debug;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+
+/// Evict incomplete network frames whose slots have gone silent.
+///
+/// A frame that loses even one packet can never complete: its per-packet tasks
+/// never fire, `packet_complete` never trips, and the slot wedges forever.
+/// When `config.frame_timeout_ms > 0`, a slot that (a) has received some but
+/// not all of its packets, (b) has no task in flight, and (c) has seen no new
+/// packet for the timeout, is claimed via the same `packet_complete` CAS the
+/// completion path uses, its frame counted through the dropped-frames path
+/// (which also advances the admission window), and the slot recycled.
+#[cfg(feature = "network")]
+#[allow(clippy::too_many_arguments)]
+fn try_evict_stalled_slots(
+    shared: &Arc<SharedData>,
+    cached_slots: &[usize],
+    slots_dirty: &mut bool,
+    cond_indexes: &[Vec<usize>],
+    frame_slot_activity: &mut HashMap<usize, bool>,
+    thread_core: usize,
+    thread_id: usize,
+    thread_slot: usize,
+) {
+    let timeout_ns = shared.config.frame_timeout_ms.saturating_mul(1_000_000);
+    if timeout_ns == 0 {
+        return;
+    }
+    let frame_packets = shared.net.frame_packets.load(Ordering::Relaxed);
+    if frame_packets == 0 {
+        return; // non-network run: nothing to evict
+    }
+    let now_ns = shared.telemetry.base_instant.elapsed().as_nanos() as u64;
+
+    for &slot in cached_slots {
+        let received = shared.slot_data.packet_counters[slot].load(Ordering::SeqCst);
+        if received == 0 || received >= frame_packets {
+            continue; // untouched (buffering) or complete: not eviction's business
+        }
+        let idle_since = shared.slot_data.last_packet_ns[slot].load(Ordering::Relaxed);
+        if now_ns.saturating_sub(idle_since) < timeout_ns {
+            continue;
+        }
+        // NOTE: pending_tasks stays nonzero on a wedged frame (it counts the
+        // tasks that can never fire), so it must NOT gate eviction. A task
+        // actually executing shows in processing_count; anything merely queued
+        // would have run long before a multi-hundred-ms idle window elapsed.
+        if shared.slot_data.processing_count[slot].load(Ordering::SeqCst) != 0 {
+            continue; // work still in flight — not actually stalled
+        }
+        // Exclusive claim: the same flag the completion path swaps. A frame
+        // missing packets cannot legitimately complete, so winning this CAS
+        // makes this thread the slot's sole finisher.
+        if shared.slot_data.packet_complete[slot].swap(true, Ordering::SeqCst) {
+            continue;
+        }
+        let frame = shared.slot_data.frame_id[slot].load(Ordering::Relaxed);
+        tracing::warn!(
+            slot,
+            frame,
+            received,
+            expected = frame_packets,
+            timeout_ms = shared.config.frame_timeout_ms,
+            "evicting incomplete frame (packet loss)"
+        );
+        // Counts the frame as dropped AND advances frame_complete_counter, so
+        // shutdown accounting and the admission window both move on.
+        super::packet_processing::mark_frame_dropped(
+            shared,
+            frame,
+            "incomplete frame evicted (timeout)",
+        );
+
+        reset_slot_state(shared, slot);
+        shared.exec.node_results.reinit_slot(slot);
+        *slots_dirty = true;
+        frame_slot_activity.remove(&slot);
+
+        release_and_dispatch_next(
+            shared,
+            slot,
+            cond_indexes,
+            frame_slot_activity,
+            thread_core,
+            thread_id,
+            thread_slot,
+        );
+    }
+}
 
 /// Iterate all active slots and process any that have completed their frame.
 ///
@@ -42,6 +129,20 @@ pub(super) fn check_slots(
         cached_slots.extend(running_frames.iter().map(|(_, slot)| *slot));
         *slots_dirty = false;
     }
+
+    super::slot_management::slot_check_sample(shared);
+
+    #[cfg(feature = "network")]
+    try_evict_stalled_slots(
+        shared,
+        &cached_slots.clone(),
+        slots_dirty,
+        cond_indexes,
+        frame_slot_activity,
+        thread_core,
+        thread_id,
+        thread_slot,
+    );
 
     // Clear activity map AFTER getting slots to check (not before).
     // This prevents redundant checking while ensuring we don't miss completions.
@@ -82,9 +183,9 @@ pub(super) fn check_slots(
 
         let can_restart = process_slot_completion(shared, proc_slot);
         frame_slot_activity.remove(&proc_slot);
-        *slots_dirty = true; // release_slot modified running_frames
+        *slots_dirty = true; // release modifies running_frames
 
-        activate_buffered_slot(
+        release_and_dispatch_next(
             shared,
             proc_slot,
             cond_indexes,
@@ -171,9 +272,12 @@ fn reset_slot_state(shared: &SharedData, slot: usize) {
     });
 }
 
-/// In slot-priority mode: activate the next buffering slot, spawn its initial nodes,
-/// and process any network packets that arrived while it was buffering.
-fn activate_buffered_slot(
+/// Release `completing_slot` and — in slot-priority mode — atomically promote the
+/// next buffering slot, then spawn its initial nodes and process any network
+/// packets that arrived while it was buffering. Release and promotion happen in
+/// one lock scope (`release_and_activate_next`) so a concurrent packet-admission
+/// fast path can never steal the just-released slot ahead of the buffering queue.
+fn release_and_dispatch_next(
     shared: &Arc<SharedData>,
     completing_slot: usize,
     cond_indexes: &[Vec<usize>],
@@ -182,19 +286,15 @@ fn activate_buffered_slot(
     thread_id: usize,
     thread_slot: usize,
 ) {
-    if !shared.config.slot_priority_enabled {
-        return;
-    }
-
     let Some((activated_slot, mut buffered_batch)) =
-        activate_next_slot(shared, Some(completing_slot))
+        super::slot_management::release_and_activate_next(shared, completing_slot)
     else {
-        return;
+        return; // released; nothing was buffering (or slot-priority disabled)
     };
 
     print_debug(|| {
         format!(
-            "Activated slot {} from Buffering to Active (completing slot: {})",
+            "Activated slot {} from Buffering to Active (released slot: {})",
             activated_slot, completing_slot
         )
     });

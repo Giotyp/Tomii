@@ -38,6 +38,15 @@ pool is itself built on Rayon.
 answers a different question — elastic throughput for data science — rather
 than single-machine, millisecond-latency streaming with pinned cores.
 
+**GNU Radio** is the standard framework for software-defined radio: a large
+block library, a mature ecosystem, and hardware drivers Tomii does not have.
+If you need those, use GNU Radio. What it lacks is a latency-predictable
+frame model: on an FMCW radar workload with identical DSP kernels, Tomii
+completes a frame ~0.6 ms after the last packet arrives against ~3.8 ms for
+GNU Radio 4.0 and ~7.5 ms for 3.10, with a p50→p99.9 spread of ~150 µs
+against several milliseconds
+([benchmarks](/docs/overview/benchmarks), `bench/radar-bench/`).
+
 No framework in this family offers a single declarative DAG that mixes Rust,
 C, and Python kernels at node granularity without a custom wrapper layer.
 

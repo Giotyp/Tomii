@@ -32,6 +32,11 @@ pub(super) fn poll_and_process_network_packets(
     thread_slot: usize,
 ) {
     let frame_packets = network_config.frame_packets;
+    // Publish for the eviction check in check_slots (cheap; once per drain).
+    shared
+        .net
+        .frame_packets
+        .store(frame_packets, Ordering::Relaxed);
     let packet_process_func = network_config.extract_packet_func.unwrap();
 
     // Cache index_function pointer outside packet loop to avoid
@@ -344,7 +349,7 @@ fn reinject_pending_frames(
 /// Marks `frame` dropped exactly once: sets the drop bit (so later packets are
 /// discarded on the fast path), advances the completion counter (so the admission
 /// window keeps moving — the degrade-instead-of-hang invariant), and counts it.
-fn mark_frame_dropped(shared: &Arc<SharedData>, frame: usize, reason: &str) {
+pub(super) fn mark_frame_dropped(shared: &Arc<SharedData>, frame: usize, reason: &str) {
     if frame >= shared.net.frame_dropped.len() {
         return;
     }
@@ -458,10 +463,18 @@ fn assign_packet_to_slot(
         full_args.extend(additional_args);
         let idx_result = idx_fn(&full_args);
         shared.slot_data.packet_counters[assigned_slot].fetch_add(1, Ordering::SeqCst);
+        shared.slot_data.last_packet_ns[assigned_slot].store(
+            shared.telemetry.base_instant.elapsed().as_nanos() as u64,
+            Ordering::Relaxed,
+        );
         idx_result
             .valid_number_to_usize()
             .expect("index_function must return usize")
     } else {
+        shared.slot_data.last_packet_ns[assigned_slot].store(
+            shared.telemetry.base_instant.elapsed().as_nanos() as u64,
+            Ordering::Relaxed,
+        );
         shared.slot_data.packet_counters[assigned_slot].fetch_add(1, Ordering::SeqCst)
     };
 

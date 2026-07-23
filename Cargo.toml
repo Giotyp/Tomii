@@ -12,6 +12,9 @@ exclude = [
     "examples/matrix-compute-C",
     "examples/mapreduce",
     "examples/gpu-vectoradd",
+    # Own workspace: links kernels/libradar_kernels.so (FFTW / CUDA twin),
+    # which must be built with Make first — keep out of plain `cargo build`.
+    "examples/radar-pipeline",
     # Pure-Python examples: no Rust source; bridge is in tomii/_python_bridge/.
     "examples/matrix-compute-python",
     # Stale worktree remnant from a prunable branch; exclude to avoid broken path dep.

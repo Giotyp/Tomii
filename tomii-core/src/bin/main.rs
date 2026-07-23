@@ -218,6 +218,17 @@ struct Args {
     spin_wait_park_ns: u64,
     #[clap(
         long,
+        value_name = "MS",
+        required = false,
+        default_value = "0",
+        help = "Evict an incomplete network frame after its slot has been idle this many \
+                ms (no packet, no task in flight). The frame is counted as dropped and \
+                the slot recycled, so packet loss degrades the run instead of wedging \
+                it. 0 disables (default)."
+    )]
+    frame_timeout_ms: u64,
+    #[clap(
+        long,
         value_name = "STRATEGY",
         required = false,
         default_value = "multi-slot-batch",
@@ -312,6 +323,7 @@ fn main() {
         slots: args.slots,
         max_frames: args.max_frames,
         max_runtime: runtime,
+        frame_timeout_ms: args.frame_timeout_ms,
         // system_threads, receiver_threads, workers, core_offset, receiver_core_offset,
         // and single_slot_mode are resolved at build time from the scheduler; these
         // initial values are overwritten by TomiiRtBuilder::build().
@@ -383,6 +395,10 @@ fn main() {
     if let Some(report_path) = &args.report {
         synrt.write_json_report(report_path, args.exclude_frames);
     }
+
+    // TOMII_DEP_PROF=1: dependency-resolution cycle profile (diagnostic).
+    tomii_core::dump_dep_prof();
+    tomii_core::runtime::dump_slot_check();
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -672,6 +672,7 @@ impl TimeBuffer {
         };
         let p50_latency_us = percentile(50.0);
         let p99_latency_us = percentile(99.0);
+        let p999_latency_us = percentile(99.9);
 
         let total_wall_us: f64 = included_total_times
             .iter()
@@ -822,6 +823,8 @@ impl TimeBuffer {
             avg_latency_us,
             p50_latency_us,
             p99_latency_us,
+            p999_latency_us,
+            &sorted_latencies,
             throughput_frames_per_sec,
             total_tasks_per_frame,
             cp_exec_us,

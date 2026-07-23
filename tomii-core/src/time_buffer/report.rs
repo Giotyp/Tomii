@@ -804,6 +804,8 @@ pub(super) fn build_json_report_value(
     avg_latency_us: f64,
     p50_latency_us: f64,
     p99_latency_us: f64,
+    p999_latency_us: f64,
+    sorted_frame_latencies_us: &[f64],
     throughput_frames_per_sec: f64,
     total_tasks_per_frame: usize,
     cp_exec_us: f64,
@@ -878,6 +880,7 @@ pub(super) fn build_json_report_value(
             "avg_latency_us": (avg_latency_us * 100.0).round() / 100.0,
             "p50_latency_us": (p50_latency_us * 100.0).round() / 100.0,
             "p99_latency_us": (p99_latency_us * 100.0).round() / 100.0,
+            "p999_latency_us": (p999_latency_us * 100.0).round() / 100.0,
             "throughput_frames_per_sec": (throughput_frames_per_sec * 10.0).round() / 10.0,
             "total_tasks_per_frame": total_tasks_per_frame,
             "scheduling_overhead_diagnostic": {
@@ -888,6 +891,12 @@ pub(super) fn build_json_report_value(
             },
         },
         "per_node": per_node_entries,
+        // Sorted steady-state per-frame latencies — jitter analysis (CDFs,
+        // arbitrary percentiles) without re-running.
+        "frame_latencies_us": sorted_frame_latencies_us
+            .iter()
+            .map(|&v| (v * 100.0).round() / 100.0)
+            .collect::<Vec<f64>>(),
         "critical_path": critical_path_json,
         "resource_utilization": {
             "worker_busy_pct": worker_busy_pct_rounded,

@@ -249,12 +249,25 @@ pub(crate) fn build_predecessor_tables(
                 group_by[succ_id][pred_id] = Some(gb);
             }
 
-            // 1:1 non-barrier single-index $res with equal factors: store offset so we can
-            // fire the exact successor instance that reads this predecessor.
+            // 1:1 non-barrier $res: store offset so we can fire the exact successor
+            // instance that reads this predecessor. Two shapes qualify:
+            //  - single index with equal factors (succ[j] reads pred[j + k]);
+            //  - contiguous index range of length succ_factor (succ[j] reads
+            //    pred[start + j]) — e.g. a $network range edge. Without exact
+            //    dispatch these fall to the ordinal threshold scan, where two
+            //    resolution threads racing on the instance-claim CAS can pair an
+            //    instance with the WRONG predecessor's index; the pred_index-based
+            //    $res fetch then reads one predecessor twice and another never.
+            // TOMII_DISABLE_RANGE_1TO1: same-binary A/B toggle (diagnostic only —
+            // disabling restores the pre-fix ordinal path and its dispatch race).
+            let range_1to1_enabled = std::env::var("TOMII_DISABLE_RANGE_1TO1").is_err();
+            let single_1to1 = pred.indexes.len() == 1 && succ_factor == pred_factor;
+            let contiguous_range_1to1 = range_1to1_enabled
+                && pred.indexes.len() == succ_factor
+                && pred.indexes.windows(2).all(|w| w[1] == w[0] + 1);
             if !arg.is_barrier()
                 && pred.group_by.is_none()
-                && pred.indexes.len() == 1
-                && succ_factor == pred_factor
+                && (single_1to1 || contiguous_range_1to1)
                 && succ_factor > 1
             {
                 succ_1to1_offset[succ_id][pred_id] = Some(pred.indexes[0]);

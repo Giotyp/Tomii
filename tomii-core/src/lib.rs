@@ -1,5 +1,6 @@
 pub mod async_recorder;
 pub(crate) mod buffers;
+pub use buffers::dump_dep_prof;
 pub(crate) mod core_alloc;
 pub(crate) mod custom_scheduler;
 pub mod debug;

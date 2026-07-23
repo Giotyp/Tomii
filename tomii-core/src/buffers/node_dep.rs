@@ -52,6 +52,29 @@ pub struct NodeDependencyEntry {
     is_condition: bool,
 }
 
+/// TOMII_DEP_PROF=1: rdtsc cycle accounting for dependency resolution
+/// (diagnostic; printed at shutdown via `dump_dep_prof`).
+pub static DEP_PROF_CYCLES: AtomicU64 = AtomicU64::new(0);
+pub static DEP_PROF_CALLS: AtomicU64 = AtomicU64::new(0);
+
+#[inline(always)]
+fn dep_prof_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("TOMII_DEP_PROF").is_ok_and(|v| v == "1"))
+}
+
+/// Print the dependency-resolution profile (call at shutdown).
+pub fn dump_dep_prof() {
+    if dep_prof_enabled() {
+        let cy = DEP_PROF_CYCLES.load(Ordering::Relaxed);
+        let n = DEP_PROF_CALLS.load(Ordering::Relaxed);
+        eprintln!(
+            "DEP_PROF: decrease_and_get_ready_into calls={n} cycles={cy} avg={:.0}",
+            cy as f64 / n.max(1) as f64
+        );
+    }
+}
+
 impl NodeDependencyEntry {
     /// Create a new dependency entry for a node in a slot
     /// group_size_opt: None or Some(factor) → single group (backward compatible)
@@ -124,6 +147,11 @@ impl NodeDependencyEntry {
         ready: &mut Vec<usize>,
     ) {
         ready.clear();
+        let prof_t0 = if dep_prof_enabled() {
+            Some(unsafe { core::arch::x86_64::_rdtsc() })
+        } else {
+            None
+        };
 
         let (g_start, g_end) = match group {
             Some(g) if g < self.num_groups => (g, g + 1),
@@ -258,6 +286,13 @@ impl NodeDependencyEntry {
                     }
                 }
             }
+        }
+        if let Some(t0) = prof_t0 {
+            DEP_PROF_CYCLES.fetch_add(
+                unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(t0),
+                Ordering::Relaxed,
+            );
+            DEP_PROF_CALLS.fetch_add(1, Ordering::Relaxed);
         }
     }
 

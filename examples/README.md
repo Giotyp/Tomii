@@ -14,6 +14,7 @@ Each subdirectory is a self-contained workload. All share the same structure:
 | [stream-analytics](stream-analytics/) | Rust | conditional branches, grouped barriers, `$dep` ordering, priority levels | `verify.py` |
 | [mapreduce](mapreduce/) | C | fan-out / fan-in (Map→Reduce), variadic barrier | `verify.sh` |
 | [gpu-vectoradd](gpu-vectoradd/) | CUDA C++ | `use_workers` GPU-thread pinning, host↔device copies | inline |
+| [radar-pipeline](radar-pipeline/) | Rust + C (FFTW) / CUDA (cuFFT) | UDP `$network` source, 1:1 packet edges, grouped barriers, kernel-`.so` swap (CPU↔GPU) | `verify.py` (ground truth + coverage) |
 
 ## Quick start
 
@@ -35,6 +36,9 @@ python examples/mapreduce/run_bench.py
 
 # CUDA vector-add (GPU required):
 python examples/gpu-vectoradd/run_bench.py
+
+# FMCW radar over UDP (needs fftw3f; --gpu needs CUDA 12 + cuFFT):
+python examples/radar-pipeline/run_bench.py --frames 400
 ```
 
 All commands are run from the repo root with the Tomii Python package available

@@ -13,9 +13,13 @@ build/
 *.log
 *.csv
 *.svg
+*.*
 shared/**
 examples/**
 tomii.egg-info/*
+
+# Claude working files (plans, analyses, app notes) — local only, never commit.
+.claude/
 
 # Benchmark and example run outputs — regenerate locally, never commit.
 # Only the empty-dir placeholders are tracked.

@@ -19,6 +19,7 @@ to the repository.
 | [stream-analytics](https://github.com/Giotyp/Tomii/tree/main/examples/stream-analytics) | Rust | conditional branches, grouped barriers, `$dep` ordering, priorities | `verify.py` | none |
 | [mapreduce](https://github.com/Giotyp/Tomii/tree/main/examples/mapreduce) | C | fan-out / fan-in, variadic barrier | `verify.sh` | none (GCC) |
 | [gpu-vectoradd](https://github.com/Giotyp/Tomii/tree/main/examples/gpu-vectoradd) | CUDA C++ | `use_workers` GPU-thread pinning, host↔device copies | inline | CUDA GPU |
+| [radar-pipeline](https://github.com/Giotyp/Tomii/tree/main/examples/radar-pipeline) | Rust + C (FFTW) / CUDA (cuFFT) | UDP `$network` source, 1:1 packet edges, grouped barriers, kernel-`.so` swap (CPU↔GPU) | `verify.py` (ground truth + coverage) | `libfftw3f`; CUDA 12 for `--gpu` |
 | [agent-tuning](https://github.com/Giotyp/Tomii/tree/main/examples/agent-tuning) | — (harness) | 4-arm verifier-gated knob search | per-workload gate | Optuna, `claude` CLI |
 | [scheduler-plugin](https://github.com/Giotyp/Tomii/tree/main/examples/scheduler-plugin) | Rust | pluggable `TaskScheduler` (FIFO) | — | none |
 
@@ -34,6 +35,7 @@ bash   examples/matrix-compute-python/run_bench.sh   # Python plugin
 python examples/stream-analytics/run_bench.py        # conditional branching
 python examples/mapreduce/run_bench.py               # Map→Reduce wordcount
 python examples/gpu-vectoradd/run_bench.py           # CUDA (GPU required)
+python examples/radar-pipeline/run_bench.py          # FMCW radar over UDP
 ```
 
 ## Where each one is covered in this guide
@@ -47,6 +49,10 @@ python examples/gpu-vectoradd/run_bench.py           # CUDA (GPU required)
 - mapreduce and matrix-compute-C appear in [C plugins](/docs/guide/plugins/c).
 - agent-tuning is documented in
   [Agent tuning](/docs/guide/tuning/agent-tuning).
+- radar-pipeline is the network-driven example in
+  [Network sources](/docs/guide/graphs/network-sources) and the subject of the
+  radar section of the [benchmarks page](/docs/overview/benchmarks); its
+  README carries the signal-chain diagram and full runbook.
 
 Comparator benchmarks against Taskflow and TBB live under `bench/`, not
 `examples/` — see the [benchmarks page](/docs/overview/benchmarks) for

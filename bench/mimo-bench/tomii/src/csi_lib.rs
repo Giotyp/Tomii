@@ -48,6 +48,7 @@ pub fn csi_op_cm(
     let csi_buffer = unsafe { &*raw_mut::<CsiBuffer>(csi_buffer) };
 
     let frame_id = packet.frame_id as usize;
+    crate::mimo_count(0, frame_id);
     let frame_slot = frame_id % FrameWnd;
 
     let ant_id = packet.ant_id as usize;

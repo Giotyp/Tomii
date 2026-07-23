@@ -106,9 +106,26 @@ a permanently incomplete frame
 `tomii-core/src/runtime/packet_processing.rs`). Dropped frames are counted
 and reported.
 
-## A complete example
+A frame that loses a packet mid-stream is a different failure: it occupies a
+slot it can never complete. `--frame-timeout-ms T` evicts such a frame after
+its slot has been idle for `T` ms — counted as dropped, slot recycled — so
+real packet loss degrades the run instead of wedging it. Off by default.
+
+## Complete examples
 
 The 4×4 MIMO uplink benchmark under `bench/mimo-bench/` is the reference
 network workload: an Agora sender emits frames over UDP, and per-packet FFT
 tasks dispatch as packets arrive. Start the Tomii receiver first, then the
 sender (`bench/mimo-bench/README.md`).
+
+`examples/radar-pipeline/` is the self-contained one: an FMCW radar receiver
+where one UDP packet carries one chirp. The packet header holds `frame_id`
+and `chirp_id`; `id_function` (`get_frame_id`) groups packets into frames and
+`index_function` (`get_chirp_index`) maps each packet to its `range_fft`
+instance, so a range FFT dispatches the moment its chirp arrives — the graph
+does not wait for the frame. Barriers then gate the Doppler FFT, CFAR
+detection, and clustering stages. The sender paces chirps at the scene's
+physical chirp interval; a whole-frame burst can overrun the kernel socket
+buffer and drop packets before Tomii ever sees them. The example README has
+the signal-chain diagram, the runbook, and the CPU/GPU kernel swap; measured
+results are on the [benchmarks page](/docs/overview/benchmarks).

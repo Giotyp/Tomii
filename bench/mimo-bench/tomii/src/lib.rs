@@ -78,6 +78,26 @@ pub fn get_packet_slot(packet: &CmTypes, config: &CmTypes) -> usize {
         .expect("Failed to access Packet struct or wrong type")
 }
 
+
+/// TOMII_MIMO_CHECK=1: per-frame stage execution counters (radar-style).
+/// Prints "MIMO_CHECK frame N: csi=..fft=..beam=..demul=.." once frame N+3 starts.
+pub fn mimo_count(stage: usize, frame_id: usize) {
+    use std::sync::{Mutex, OnceLock};
+    static ON: OnceLock<bool> = OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("TOMII_MIMO_CHECK").is_ok_and(|v| v == "1")) {
+        return;
+    }
+    static M: Mutex<Option<std::collections::BTreeMap<usize, [usize; 4]>>> = Mutex::new(None);
+    let mut g = M.lock().unwrap();
+    let m = g.get_or_insert_with(Default::default);
+    m.entry(frame_id).or_insert([0; 4])[stage] += 1;
+    let done: Vec<usize> = m.range(..frame_id.saturating_sub(3)).map(|(k, _)| *k).collect();
+    for k in done {
+        let c = m.remove(&k).unwrap();
+        eprintln!("MIMO_CHECK frame {k}: csi={} fft={} beam={} demul={}", c[0], c[1], c[2], c[3]);
+    }
+}
+
 #[tomii_export]
 pub fn create_config(config_file: String) -> Config {
     let mut config = Config::new(&config_file);
