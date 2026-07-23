@@ -106,6 +106,11 @@ a permanently incomplete frame
 `tomii-core/src/runtime/packet_processing.rs`). Dropped frames are counted
 and reported.
 
+A frame that loses a packet mid-stream is a different failure: it occupies a
+slot it can never complete. `--frame-timeout-ms T` evicts such a frame after
+its slot has been idle for `T` ms — counted as dropped, slot recycled — so
+real packet loss degrades the run instead of wedging it. Off by default.
+
 ## Complete examples
 
 The 4×4 MIMO uplink benchmark under `bench/mimo-bench/` is the reference

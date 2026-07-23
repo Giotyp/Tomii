@@ -158,7 +158,9 @@ lower at p99, with ~10× tighter jitter. Sustained frame rate reverses: the
 8-core CPU sustains 1.85× the GPU's rate, because the GPU pays per-chirp
 host-to-device copy, kernel-launch, and stream-sync costs 512 times per
 frame — raising `--slots` from 2 to 4 moves the GPU's rate boundary only
-from 49 ms to 46.5 ms, so the cap is launch overhead, not frame concurrency.
+from 49 ms to 46.5 ms, and `TOMII_SLOT_CHECK` records zero slot-priority
+violations at those slot counts, so the cap is launch overhead, not frame
+concurrency or a slot-handoff race.
 The kernel choice is a service-level decision: per-frame latency and jitter
 (GPU) or aggregate frame rate (CPU). The boundary rates come from runs
 re-confirmed with the coverage gate on.
