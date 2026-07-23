@@ -97,6 +97,53 @@ pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> 
     }
 }
 
+
+/// TOMII_SLOT_CHECK=1: samples how many slots are Active simultaneously.
+/// Under --slot-priority the invariant is "at most one"; any sample above one
+/// is a violation of the sequential round-robin handoff (diagnostic for the
+/// release->promote TOCTOU race). Printed at shutdown via `dump_slot_check`.
+pub(super) static SLOT_CHECK_SAMPLES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(super) static SLOT_CHECK_VIOLATIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(super) static SLOT_CHECK_MAX_ACTIVE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[inline(always)]
+pub(super) fn slot_check_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("TOMII_SLOT_CHECK").is_ok_and(|v| v == "1"))
+}
+
+#[inline(always)]
+pub(super) fn slot_check_sample(shared: &SharedData) {
+    if !slot_check_enabled() || !shared.config.slot_priority_enabled {
+        return;
+    }
+    let active = shared
+        .slot_data
+        .active_bitmap
+        .load(Ordering::Acquire)
+        .count_ones() as u64;
+    SLOT_CHECK_SAMPLES.fetch_add(1, Ordering::Relaxed);
+    if active > 1 {
+        SLOT_CHECK_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+    }
+    SLOT_CHECK_MAX_ACTIVE.fetch_max(active, Ordering::Relaxed);
+}
+
+/// Print the slot-concurrency diagnostic (call at shutdown).
+pub fn dump_slot_check() {
+    if slot_check_enabled() {
+        eprintln!(
+            "SLOT_CHECK: samples={} violations={} max_active={}",
+            SLOT_CHECK_SAMPLES.load(Ordering::Relaxed),
+            SLOT_CHECK_VIOLATIONS.load(Ordering::Relaxed),
+            SLOT_CHECK_MAX_ACTIVE.load(Ordering::Relaxed),
+        );
+    }
+}
+
 /// Assign `frame` to an available slot and return `(slot_id, newly_activated)`.
 ///
 /// Prefers the `last_assigned` slot (sequential assignment keeps slot 0, 1, 2, … in order so
@@ -156,6 +203,7 @@ pub(super) fn assign_frame_to_available_slot(
             .telemetry
             .with_timing(|tb| tb.start_slot_processing(last_slot_assigned));
 
+        slot_check_sample(shared);
         return Some((last_slot_assigned, true)); // Newly activated from Inactive → Active
     }
 

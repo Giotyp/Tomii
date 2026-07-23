@@ -39,6 +39,7 @@ mod scheduling;
 mod shared_data;
 mod slot_lifecycle;
 mod slot_management;
+pub use slot_management::dump_slot_check;
 mod successor;
 /// Flattened successor-edge arena consumed by the Phase-3 hot loops.
 pub(crate) mod successor_arena;

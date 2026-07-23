@@ -131,6 +131,8 @@ pub(super) fn check_slots(
         *slots_dirty = false;
     }
 
+    super::slot_management::slot_check_sample(shared);
+
     #[cfg(feature = "network")]
     try_evict_stalled_slots(
         shared,

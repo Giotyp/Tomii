@@ -398,6 +398,7 @@ fn main() {
 
     // TOMII_DEP_PROF=1: dependency-resolution cycle profile (diagnostic).
     tomii_core::dump_dep_prof();
+    tomii_core::runtime::dump_slot_check();
 }
 
 #[allow(clippy::too_many_arguments)]
