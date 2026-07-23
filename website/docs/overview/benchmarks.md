@@ -72,14 +72,23 @@ packets. Source: `bench/mimo-bench/`.
 |---|---|---|---|
 | 4×4, W=4, S=4 | 0.926 ms/slot | 1.168 ms/slot | **Tomii 1.26× faster** |
 | 4×4, full W×S sweep | 0.923–3.259 | 1.168–1.283 | Tomii 1.26–1.39× faster |
-| 16×16, W=24, S=4 | 47.98 ms/slot | 55.18 ms/slot | Tomii 1.15× faster |
-| 16×16, W=24, S=16 | 14.41 ms/slot | 20.58 ms/slot | Tomii 1.41× faster |
+| 16×16, W=24, S=4 | 11.61 ms/slot | 17.80 ms/slot | **Tomii 1.53× faster** |
+| 16×16, W=24, S=16 | 10.06 ms/slot | 8.99 ms/slot | Taskflow 1.12× faster |
+
+The 16×16 rows are median-of-5 with the sender paced at
+`ceil(48 ms / slots)` per frame (12 ms at S=4, 3 ms at S=16); both systems
+report first-packet-to-done latency. The 4×4 rows are from the original
+single-run sweep. Run-to-run spread at 16×16 S=16 is ±1.3 ms for Tomii
+against ±0.03 ms for Taskflow — treat single-run deltas below ~2 ms in that
+cell as noise.
 
 The mechanism is architectural: Tomii dispatches FFT tasks as each UDP packet
 arrives, while Taskflow must collect all packets before submitting the DAG.
-At 4×4 this overlap recovers 280–360 µs per frame. The advantage persists
-from the sender-rate-limited regime (4×4) to the compute-limited regime
-(16×16).
+That overlap wins while packet arrival overlaps compute — 1.5× at S=4. It
+does not win everywhere: at S=16 the 3 ms sender keeps 16 frames in flight,
+arrival overlap is already fully hidden, and Taskflow's collect-then-submit
+model edges ahead (1.12×) with far lower variance. Tomii does not win that
+cell.
 
 ## FMCW radar vs GNU Radio (reproducible)
 
