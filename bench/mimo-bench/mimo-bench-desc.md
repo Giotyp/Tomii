@@ -219,3 +219,134 @@ per frame and cannot share workers across pending frames during packet reception
    16×16 graph. Run `tomii/verify.py --config graphs/tddconfig-16x16.json
    --sender-config files/config/ci/tddconfig-16x16.json` (the graph, including the
    determinism dump node, is generated from the config via `build_graph.py`).
+
+---
+
+## 64×16 Configuration (massive-MIMO scale)
+
+**Config**: `tddconfig-64x16.json` — 64 BS antennas, 16 UEs, FFT=2048, 1200 OFDM
+subcarriers, 16 pilot + 13 UL symbols per slot (same frame schedule as 16×16).
+This matches the 64×16 row of the paper's Tomii-vs-Agora table, making the
+Taskflow comparison directly cross-referenceable with the Agora numbers.
+
+### Configuration parameters
+
+| Parameter | 16×16 | 64×16 |
+|---|---|---|
+| BS antennas | 16 | 64 |
+| UE antennas | 16 | 16 |
+| FFT size | 2048 | 2048 |
+| Total packets/frame | 464 | 1856 |
+| UDP sockets | 16 | 64 |
+| FFT tasks/slot | 208 | 832 |
+| CSI tasks/slot | 256 | 1024 |
+| Beam tasks/slot | 400 | 400 (heavier: 64×16 CHERK + Cholesky per task) |
+
+Like 16×16, the workload is **compute-limited** under `MKL_NUM_THREADS=1`; the
+beam stage grows ~4× per task (CHERK cost scales with bs_ant_num at fixed UE
+count) and the FFT stage carries 4× the tasks. Multi-slot amortisation, not
+per-packet streaming overlap, is the dominant effect being measured.
+
+### Running
+
+```bash
+# Calibrate: one S=1 cell to measure per-slot processing time at the target W
+python mimo-bench/tomii/run_bench.py --config graphs/tddconfig-64x16.json \
+    --sender-config files/config/ci/tddconfig-64x16.json \
+    --slots 1 --workers 24
+
+# Sweep: pass the measured per-slot µs as --min-slot-us so the sender
+# frame_duration floor (ceil(min_slot_us/S)) matches this config
+python mimo-bench/tomii/run_bench.py --config graphs/tddconfig-64x16.json \
+    --sender-config files/config/ci/tddconfig-64x16.json \
+    --slots 4 16 --workers 24 --min-slot-us <measured>
+
+python mimo-bench/taskflow/run_bench.py \
+    --config mimo-bench/tomii/graphs/tddconfig-64x16.json \
+    --sender-config files/config/ci/tddconfig-64x16.json \
+    --slots 4 16 --workers 24 --frame-duration <measured/S>
+```
+
+The sender-side data file `ul_rx_data_2048_bsant64_ueant16.bin` must exist in
+`~/Agora/files/experiment/` (regenerate with `~/Agora/build/data_generator`
+against the same tddconfig if missing). The config must also be mirrored to
+`~/Agora/files/config/ci/tddconfig-64x16.json` for the sender.
+
+### Results (2026-07-15, W=24, 500 frames sent, 20 warmup)
+
+Same `frame_duration` per cell on both sides (50 ms at S=4, 15 ms at S=16 —
+identical to the 16×16 cells). Metric: first-pkt→done per frame.
+
+**Tomii (first-pkt→done):**
+
+| W\S | S=4 | S=16 |
+|-----|-----|------|
+| W=24 | 48.64 ms (500/500 frames) | 21.45 ms (464/500 frames) |
+
+**Taskflow (first-pkt→done):**
+
+| W\S | S=4 | S=16 |
+|-----|-----|------|
+| W=24 | 73.27 ms (450 timed) | 38.42 ms (400 timed) |
+
+**Speedup (Taskflow / Tomii):**
+
+| W\S | S=4 | S=16 |
+|-----|-----|------|
+| W=24 | **1.51×** | **1.79×** |
+
+The advantage is larger than at 16×16 (1.15× / 1.41×): with 1856 packets/frame,
+the receive span a collect-then-submit model cannot overlap is 4× wider, and at
+S=16 Tomii interleaves ~2,500 tasks/frame across pending slots while Taskflow
+rebuilds a fresh `tf::Taskflow` per frame. Per-frame total task compute measured
+by Tomii's timing report: 53.1 ms (sender-limited calibration run at 150 ms
+pacing; CSI 18.4 ms, demul 23.1 ms, FFT 11.7 ms).
+
+### Paper-regime cell (burst sender, paper worker config)
+
+The paper's Tomii-vs-Agora table used the mimolib harness configuration
+(26 workers, 8 resolution threads, 4 receiver threads, 10 slots) with a
+**burst** sender profile (`--frame_duration=1000 --inter_frame_delay=...`):
+each frame's packets burst in ~1–4 ms followed by a silence gap, so measured
+latency reflects processing, not receive span. Reproducing that regime on this
+bench (burst + 30 ms gap ≈ 31 ms cadence, `--batching-size 32`):
+
+| System | first-pkt→done | Frames |
+|---|---|---|
+| Tomii (W=26, sys=8, recv=4, S=10) | **14.01 ms** (std 2.3 ms) | 500/500 |
+| Taskflow (W=26, S=10) | **31.00 ms** (compute 27.9 ms) | 450 timed |
+| Speedup | **2.21×** | |
+
+Taskflow saturates at this cadence (pipeline latency = the 31 ms cadence; its
+compute alone is 27.9 ms/frame), while Tomii runs with ~2× headroom. At a 13 ms
+cadence (the 16×16 sender script's profile) Tomii also saturates at 64×16
+(53.9 ms with 17 % dropped frames) — the cadence must be re-derived per config.
+
+**Relation to the paper's 9.33 ms**: the paper's 64×16 Tomii number
+(9.33 default / 8.37 AI-opt) came from the mimolib harness in the pre-rename
+repo, which no longer exists here. This bench's closest reconstruction lands at
+14.0 ms — same order, ~1.5× off. Known residual deltas: the mimolib graph vs
+this bench's public 4-node graph, exact sender cadence, sender burst reality
+(~4 ms actual transmit time for 15 MB at 64×16, so the true receive span is
+~4 ms not 1 ms), and runtime drift since the paper runs. The paper number is
+not reproducible from this repository (as `website/docs/overview/benchmarks.md`
+already states for the Agora side).
+
+### Honest caveats (64×16)
+
+1. **Verifier.** Two-pass byte-for-bit equality passes at W=24 (2026-07-15):
+   `tomii/verify.py --config graphs/tddconfig-64x16.json --sender-config
+   files/config/ci/tddconfig-64x16.json --frame-duration 400000
+   --inter-frame-delay 200000 --num-frames 10`. Zero packets dropped.
+2. **Dropped frames at S=16.** Tomii completed 464/500 frames (7%) at 15 ms
+   pacing; the 16×16 run saw 1.5–2.5%. The latency average is over completed
+   frames. Taskflow's drop count is not directly observable (it times the
+   first `--frames` frames it fully assembles); its frame targets (450/400)
+   were met from the 500 sent.
+3. **Not comparable to the paper's Agora table.** The paper's 64×16 numbers
+   (Agora 2.90 ms, Tomii 8.37–9.33 ms) use a different harness, sender pacing,
+   and metric; this bench's first-pkt→done values are dominated by the receive
+   span at 50/15 ms pacing. Only the relative Tomii-vs-Taskflow column is
+   meaningful here.
+4. **S ∈ {4, 16} only.** Per-slot buffers are ~4× the 16×16 footprint; S=64
+   adds no methodological value in the compute-limited regime.

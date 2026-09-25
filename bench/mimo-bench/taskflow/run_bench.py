@@ -66,7 +66,7 @@ def build_cmake(clean: bool) -> None:
 
 
 def _start_sender(
-    sender_config: str, frame_duration: int = 1000
+    sender_config: str, frame_duration: int = 1000, inter_frame_delay: int = 0
 ) -> "subprocess.Popen[bytes]":
     sender_bin = AGORA_DIR / "build" / "sender"
     cmd = [
@@ -75,7 +75,7 @@ def _start_sender(
         "--core_offset=55",
         f"--frame_duration={frame_duration}",
         "--enable_slow_start=0",
-        "--inter_frame_delay=0",
+        f"--inter_frame_delay={inter_frame_delay}",
         f"--conf_file={sender_config}",
     ]
     return subprocess.Popen(cmd, cwd=str(AGORA_DIR), env=os.environ.copy())
@@ -95,6 +95,7 @@ def run_one(
     config: Path,
     sender_config: str,
     frame_duration: int,
+    inter_frame_delay: int,
     output_csv: Path,
     sender_delay: int = 5,
 ) -> None:
@@ -130,7 +131,11 @@ def run_one(
     tf_proc = subprocess.Popen(cmd, env=bench_env)
 
     time.sleep(sender_delay)
-    sender_proc = _start_sender(sender_config, frame_duration=frame_duration)
+    sender_proc = _start_sender(
+        sender_config,
+        frame_duration=frame_duration,
+        inter_frame_delay=inter_frame_delay,
+    )
     print("  sender started", flush=True)
 
     ret = tf_proc.wait()
@@ -192,6 +197,14 @@ def main() -> None:
         help="sender --frame_duration in µs (use ≥2000 for 16×16)",
     )
     p.add_argument(
+        "--inter-frame-delay",
+        type=int,
+        default=0,
+        dest="inter_frame_delay",
+        help="sender --inter_frame_delay in µs; silence gap after each frame's "
+        "packets (0 = continuous pacing)",
+    )
+    p.add_argument(
         "--config", type=Path, default=DEFAULT_CONFIG, help="tddconfig JSON path"
     )
     p.add_argument(
@@ -226,6 +239,7 @@ def main() -> None:
                 config=args.config,
                 sender_config=args.sender_config,
                 frame_duration=args.frame_duration,
+                inter_frame_delay=args.inter_frame_delay,
                 output_csv=output_csv,
             )
 

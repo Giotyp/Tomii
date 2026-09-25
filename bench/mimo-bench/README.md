@@ -94,4 +94,15 @@ Both sides write `ms_per_slot` (wall-clock ms ÷ frames) to a CSV:
 
 `mimo-comparison.py` reads both CSVs and emits `mimo-comparison.png`.
 
+## Configurations
+
+| Config | BS×UE | Regime | Notes |
+|---|---|---|---|
+| `tomii/graphs/tddconfig-4x4.json` | 4×4 | sender-rate limited | default |
+| `tomii/graphs/tddconfig-16x16.json` | 16×16 | compute limited | results in `mimo-bench-desc.md` |
+| `tomii/graphs/tddconfig-64x16.json` | 64×16 | compute limited, massive-MIMO scale | matches the paper's Agora table row; results in `mimo-bench-desc.md` |
+
+Pass a config via `--config` (both sides) and `--sender-config` (path relative
+to `~/Agora`; the same tddconfig must be mirrored there for the sender).
+
 See `mimo-bench-desc.md` for full methodology, metric definition, and caveats.

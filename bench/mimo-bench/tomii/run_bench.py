@@ -47,7 +47,7 @@ def _parse_avg_ms(timing_file: Path) -> float:
 
 
 def _start_sender(
-    sender_config: str, frame_duration: int = 1000
+    sender_config: str, frame_duration: int = 1000, inter_frame_delay: int = 0
 ) -> "subprocess.Popen[bytes]":
     sender_bin = AGORA_DIR / "build" / "sender"
     cmd = [
@@ -56,7 +56,7 @@ def _start_sender(
         "--core_offset=55",
         f"--frame_duration={frame_duration}",
         "--enable_slow_start=0",
-        "--inter_frame_delay=0",
+        f"--inter_frame_delay={inter_frame_delay}",
         f"--conf_file={sender_config}",
     ]
     return subprocess.Popen(cmd, cwd=str(AGORA_DIR), env=os.environ.copy())
@@ -72,6 +72,9 @@ def run_one(
     max_runtime: int,
     sender_config: str,
     frame_duration: int,
+    inter_frame_delay: int,
+    batching_size: int | None,
+    batching_limit: int | None,
     graph_json: Path,
     results_dir: Path,
     dylib: str,
@@ -95,6 +98,8 @@ def run_one(
         max_frames=5000,
         exclude_frames=warmup,
         max_runtime=max_runtime,
+        batching_size=batching_size,
+        batching_limit=batching_limit,
         timing=str(timing_file),
         use_rdtsc=True,
         custom=True,
@@ -116,7 +121,11 @@ def run_one(
 
     # Give Tomii time to bind sockets before the sender fires.
     time.sleep(sender_delay)
-    sender_proc = _start_sender(sender_config, frame_duration=frame_duration)
+    sender_proc = _start_sender(
+        sender_config,
+        frame_duration=frame_duration,
+        inter_frame_delay=inter_frame_delay,
+    )
     print("  sender started", flush=True)
 
     # Wait for Tomii — it exits via max_runtime after the sender finishes.
@@ -204,8 +213,42 @@ def main() -> None:
         type=int,
         default=50000,
         dest="frame_duration",
-        help="sender --frame_duration in µs; floored per cell at ceil(48000/slots) "
-        "to prevent sender from outrunning the receiver",
+        help="sender --frame_duration in µs; floored per cell at "
+        "ceil(min_slot_us/slots) to prevent sender from outrunning the receiver",
+    )
+    p.add_argument(
+        "--batching-size",
+        type=int,
+        default=None,
+        dest="batching_size",
+        help="scheduler --batching-size (binary default: 1; the paper-era "
+        "mimolib harness used 32)",
+    )
+    p.add_argument(
+        "--batching-limit",
+        type=int,
+        default=None,
+        dest="batching_limit",
+        help="scheduler --batching-limit in µs (binary default: 10)",
+    )
+    p.add_argument(
+        "--inter-frame-delay",
+        type=int,
+        default=0,
+        dest="inter_frame_delay",
+        help="sender --inter_frame_delay in µs; silence gap after each frame's "
+        "packets. 0 (default) spreads packets continuously at frame_duration "
+        "pacing; the paper-era mimolib harness used burst mode "
+        "(frame_duration=1000, inter_frame_delay=12000)",
+    )
+    p.add_argument(
+        "--min-slot-us",
+        type=int,
+        default=48_000,
+        dest="min_slot_us",
+        help="measured single-slot processing time in µs at the sweep's worker "
+        "count; sets the per-cell frame_duration floor (48000 = 16x16 @ W=24; "
+        "re-measure for other configs, e.g. 64x16, with a single S=1 run)",
     )
     p.add_argument(
         "--graph",
@@ -284,8 +327,8 @@ def main() -> None:
 
     for w in args.workers:
         for s in args.slots:
-            # Floor so sender never fires faster than receiver throughput (~48 ms/slot).
-            cell_frame_dur = max(args.frame_duration, -(-48_000 // s))
+            # Floor so sender never fires faster than receiver throughput.
+            cell_frame_dur = max(args.frame_duration, -(-args.min_slot_us // s))
             # max_runtime must exceed sender_delay + full send window (500 frames).
             sender_runtime_s = (500 * cell_frame_dur) // 1_000_000
             cell_max_runtime = max(args.max_runtime, 5 + sender_runtime_s + 15)
@@ -298,6 +341,9 @@ def main() -> None:
                 max_runtime=cell_max_runtime,
                 sender_config=args.sender_config,
                 frame_duration=cell_frame_dur,
+                inter_frame_delay=args.inter_frame_delay,
+                batching_size=args.batching_size,
+                batching_limit=args.batching_limit,
                 graph_json=graph_json,
                 results_dir=args.results_dir,
                 dylib=dylib,
