@@ -18,7 +18,15 @@ gpu/libradar_kernels.so: radar_gpu.cu radar.h
 	mkdir -p gpu
 	$(NVCC) -O2 -arch=$(CUDA_ARCH) -Xcompiler -fPIC -shared -o $@ radar_gpu.cu -lcufft -lcudart
 
-clean:
-	rm -f libradar_kernels.so gpu/libradar_kernels.so
+# Hybrid twin: CPU/FFTW range_fft, GPU/cuFFT doppler+cfar, CPU cluster.
+# Same soname in hybrid/ so RADAR_KERNELS_DIR=$(PWD)/hybrid selects it.
+hybrid: hybrid/libradar_kernels.so
 
-.PHONY: all gpu clean
+hybrid/libradar_kernels.so: radar_hybrid.cu radar.h
+	mkdir -p hybrid
+	$(NVCC) -O2 -arch=$(CUDA_ARCH) -Xcompiler -fPIC $(FFTW_CFLAGS) -shared -o $@ radar_hybrid.cu $(FFTW_LIBS) -lcufft -lcudart
+
+clean:
+	rm -f libradar_kernels.so gpu/libradar_kernels.so hybrid/libradar_kernels.so
+
+.PHONY: all gpu hybrid clean
