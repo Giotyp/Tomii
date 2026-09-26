@@ -427,14 +427,19 @@ pub(super) fn collect_report_frame_data(
 ) -> Option<(
     Vec<Duration>,
     Vec<std::collections::HashMap<String, Vec<(usize, Duration)>>>,
+    Vec<(Duration, Duration)>,
 )> {
     let mut frame_total_times: Vec<Duration> = Vec::new();
     let mut per_frame_tasks: Vec<std::collections::HashMap<String, Vec<(usize, Duration)>>> =
         Vec::new();
+    // (start_offset, end_offset) from the TimeBuffer base, per frame — used to
+    // reconstruct the wall-clock span across overlapping frames.
+    let mut frame_offsets: Vec<(Duration, Duration)> = Vec::new();
 
     for stats_list in slot_statistics.iter().take(worker_slots_end) {
         for stats in stats_list {
             frame_total_times.push(stats.total_time);
+            frame_offsets.push((stats.start_offset, stats.end_offset));
             let mut m: std::collections::HashMap<String, Vec<(usize, Duration)>> =
                 std::collections::HashMap::new();
             for (name, entries) in &stats.task_times {
@@ -451,12 +456,41 @@ pub(super) fn collect_report_frame_data(
         frame_total_times.iter().skip(excluded).copied().collect();
     let included_tasks: Vec<std::collections::HashMap<String, Vec<(usize, Duration)>>> =
         per_frame_tasks.into_iter().skip(excluded).collect();
+    let included_offsets: Vec<(Duration, Duration)> =
+        frame_offsets.iter().skip(excluded).copied().collect();
 
     if included_total_times.is_empty() {
         return None;
     }
 
-    Some((included_total_times, included_tasks))
+    Some((included_total_times, included_tasks, included_offsets))
+}
+
+/// Wall-clock span, in microseconds, covering a set of frames given their
+/// `(start_offset, end_offset)` pairs relative to a common base reference.
+///
+/// This is `max(end) − min(start)` — the elapsed real time from the first frame
+/// starting to the last frame finishing — which correctly accounts for frames that
+/// overlap across concurrent slots. Summing per-frame latencies (the previous
+/// behaviour) instead double-counts overlapping work and makes throughput collapse
+/// to `1 / avg_latency` regardless of how many slots run concurrently.
+///
+/// Returns `0.0` for an empty input.
+pub(super) fn compute_wall_span_us(frame_offsets: &[(Duration, Duration)]) -> f64 {
+    let mut min_start = Duration::MAX;
+    let mut max_end = Duration::ZERO;
+    for &(start, end) in frame_offsets {
+        if start < min_start {
+            min_start = start;
+        }
+        if end > max_end {
+            max_end = end;
+        }
+    }
+    if frame_offsets.is_empty() || max_end <= min_start {
+        return 0.0;
+    }
+    (max_end - min_start).as_nanos() as f64 / 1_000.0
 }
 
 /// Aggregate per-node execution times across included frames and compute `NodeStats`
@@ -904,4 +938,92 @@ pub(super) fn build_json_report_value(
         "bottleneck_hints": hints,
         "optimization_suggestions": suggestions,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(slot: usize, frame_count: usize, start_us: u64, end_us: u64) -> SlotStats {
+        let mut s = SlotStats::new(slot, frame_count);
+        s.start_offset = Duration::from_micros(start_us);
+        s.end_offset = Duration::from_micros(end_us);
+        s.total_time = Duration::from_micros(end_us - start_us);
+        s
+    }
+
+    fn summed_latency_us(offsets: &[(Duration, Duration)]) -> f64 {
+        offsets
+            .iter()
+            .map(|(s, e)| (*e - *s).as_nanos() as f64 / 1_000.0)
+            .sum()
+    }
+
+    #[test]
+    fn wall_span_empty_is_zero() {
+        assert_eq!(compute_wall_span_us(&[]), 0.0);
+    }
+
+    #[test]
+    fn wall_span_single_frame_equals_latency() {
+        let offs = vec![(Duration::from_micros(10), Duration::from_micros(60))];
+        assert!((compute_wall_span_us(&offs) - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn wall_span_accounts_for_overlap() {
+        // Two frames overlapping across two slots: A[0,100] and B[50,150] µs.
+        // Summed latency is 200 µs, but the real wall-clock span is only 150 µs.
+        let offs = vec![
+            (Duration::from_micros(0), Duration::from_micros(100)),
+            (Duration::from_micros(50), Duration::from_micros(150)),
+        ];
+        let span = compute_wall_span_us(&offs);
+        assert!((span - 150.0).abs() < 1e-9, "span={span}");
+        assert!(
+            span < summed_latency_us(&offs),
+            "wall span must be strictly less than summed latency under overlap"
+        );
+    }
+
+    #[test]
+    fn wall_span_degenerate_span_is_zero() {
+        // All frames report the same start and end (e.g. a zero-length degenerate
+        // measurement): span collapses to zero so the caller falls back safely.
+        let offs = vec![(Duration::from_micros(5), Duration::from_micros(5))];
+        assert_eq!(compute_wall_span_us(&offs), 0.0);
+    }
+
+    #[test]
+    fn collect_report_frame_data_propagates_offsets_and_exclusion() {
+        // Regression guard for the #17 throughput/utilisation bug: the report must
+        // derive throughput from the real wall-clock span, not from the sum of
+        // per-frame latencies (which collapses throughput to 1/avg_latency and
+        // fed a bogus "underutilisation" signal to the tuning agent).
+        //
+        // Frames flattened slot-major: slot0 warm-up [0,100], slot0 steady [200,260],
+        // slot1 steady [210,300]. Excluding the one leading warm-up frame leaves two
+        // overlapping steady frames whose real span is 300-200 = 100 µs.
+        let stats = vec![
+            vec![frame(0, 0, 0, 100), frame(0, 1, 200, 260)],
+            vec![frame(1, 0, 210, 300)],
+        ];
+        let (lat, _tasks, offs) =
+            collect_report_frame_data(&stats, 2, 1).expect("frames after exclusion");
+
+        assert_eq!(lat.len(), 2, "one warm-up frame excluded");
+        assert_eq!(offs.len(), 2);
+
+        let span = compute_wall_span_us(&offs);
+        assert!((span - 100.0).abs() < 1e-9, "wall span={span}");
+
+        let num = lat.len() as f64;
+        let tput_wall = num / (span / 1e6);
+        let tput_summed = num / (summed_latency_us(&offs) / 1e6); // the old, buggy value
+        assert!(
+            tput_wall > tput_summed,
+            "wall-span throughput ({tput_wall}) must exceed the summed-latency value \
+             ({tput_summed}) whenever frames overlap"
+        );
+    }
 }

@@ -1,8 +1,8 @@
 use super::report::{
     aggregate_task_data, build_json_report_value, collect_print_stats_data,
     collect_report_frame_data, compute_critical_path_report, compute_node_stats,
-    format_per_task_analysis, format_system_thread_stats, format_timing_summary,
-    generate_optimization_suggestions,
+    compute_wall_span_us, format_per_task_analysis, format_system_thread_stats,
+    format_timing_summary, generate_optimization_suggestions,
 };
 use super::{SlotStats, TimingMethod, TimingRequest};
 use crate::utils_rdtsc::{cycles_to_ns, rdtsc};
@@ -336,12 +336,21 @@ pub struct TimeBuffer {
     slot_statistics: Vec<Vec<SlotStats>>, // [slot][frame]
     // Use rdtsc timing instead of Instant
     use_rdtsc: bool,
+    // Common reference captured at construction, before any frame runs. Per-frame
+    // start/end offsets are measured against this so the report can reconstruct a
+    // real wall-clock span across overlapping frames.
+    base_time: TimingMethod,
 }
 
 impl TimeBuffer {
     /// Create a new TimeBuffer for the specified number of slots
     /// Use rdtsc_timing=true for high-precision timing, false for Instant-based timing
     pub fn new(slots: usize, system_threads: usize, use_rdtsc: bool) -> Self {
+        let base_time = if use_rdtsc {
+            TimingMethod::Rdtsc(rdtsc())
+        } else {
+            TimingMethod::Instant(Instant::now())
+        };
         TimeBuffer {
             slots,
             system_threads,
@@ -349,6 +358,7 @@ impl TimeBuffer {
             current_slot_tasks: vec![RapidHashMap::new(); slots],
             slot_statistics: vec![Vec::new(); slots],
             use_rdtsc,
+            base_time,
         }
     }
 
@@ -482,18 +492,26 @@ impl TimeBuffer {
             )
         });
 
-        let total_time = match (start_time, end_time) {
-            (TimingMethod::Instant(start), TimingMethod::Instant(end)) => end.duration_since(start),
+        let total_time = match (&start_time, &end_time) {
+            (TimingMethod::Instant(start), TimingMethod::Instant(end)) => end.duration_since(*start),
             (TimingMethod::Rdtsc(start_cycles), TimingMethod::Rdtsc(end_cycles)) => {
-                let cycles = end_cycles.saturating_sub(start_cycles);
+                let cycles = end_cycles.saturating_sub(*start_cycles);
                 Duration::from_nanos(cycles_to_ns(cycles) as u64)
             }
             _ => panic!("Cannot mix Instant and Rdtsc timing methods"),
         };
 
+        // Offsets from the common base reference, so the report can compute a real
+        // wall-clock span (max end − min start) across frames rather than summing
+        // per-frame latencies (which ignores overlap between concurrent slots).
+        let start_offset = self.measure_duration(self.base_time.clone(), start_time);
+        let end_offset = self.measure_duration(self.base_time.clone(), end_time);
+
         let frame_count = self.slot_statistics[slot_id].len();
         let mut slot_stats = SlotStats::new(slot_id, frame_count);
         slot_stats.total_time = total_time;
+        slot_stats.start_offset = start_offset;
+        slot_stats.end_offset = end_offset;
 
         // Copy task times from current slot to slot stats
         for (task_name, times) in &self.current_slot_tasks[slot_id] {
@@ -641,17 +659,18 @@ impl TimeBuffer {
         let worker_slots_end = self.slots.saturating_sub(self.system_threads);
 
         // ── 2+3. Collect and apply exclusion ──────────────────────────────────────
-        let (included_total_times, per_frame_tasks) = match collect_report_frame_data(
-            &self.slot_statistics,
-            worker_slots_end,
-            exclude_frames,
-        ) {
-            Some(data) => data,
-            None => {
-                tracing::warn!("no frames to report after exclusion");
-                return;
-            }
-        };
+        let (included_total_times, per_frame_tasks, included_offsets) =
+            match collect_report_frame_data(
+                &self.slot_statistics,
+                worker_slots_end,
+                exclude_frames,
+            ) {
+                Some(data) => data,
+                None => {
+                    tracing::warn!("no frames to report after exclusion");
+                    return;
+                }
+            };
 
         let num_included = included_total_times.len();
         let included_tasks: Vec<&std::collections::HashMap<String, Vec<(usize, Duration)>>> =
@@ -674,10 +693,22 @@ impl TimeBuffer {
         let p99_latency_us = percentile(99.0);
         let p999_latency_us = percentile(99.9);
 
-        let total_wall_us: f64 = included_total_times
+        // Real wall-clock span (first frame start → last frame end) across the
+        // included frames. Using the sum of per-frame latencies here — the previous
+        // behaviour — ignores overlap between concurrent slots and makes throughput
+        // collapse to 1/avg_latency, understating it whenever more than one slot runs
+        // at a time. Fall back to the summed latencies only if offsets are missing
+        // (e.g. a single frame, or a degenerate span), so throughput stays finite.
+        let summed_latency_us: f64 = included_total_times
             .iter()
             .map(|d| d.as_nanos() as f64 / 1_000.0)
             .sum();
+        let wall_span_us = compute_wall_span_us(&included_offsets);
+        let total_wall_us = if wall_span_us > 0.0 {
+            wall_span_us
+        } else {
+            summed_latency_us
+        };
         let throughput_frames_per_sec = if total_wall_us > 0.0 {
             (num_included as f64) / (total_wall_us / 1_000_000.0)
         } else {
@@ -691,7 +722,11 @@ impl TimeBuffer {
         let critical_path = compute_critical_path_report(graph_edges, &node_stats_map);
 
         // ── 8. Worker utilization ─────────────────────────────────────────────────
-        let worker_denom = avg_latency_us * num_included as f64;
+        // Fraction of real wall-clock time each worker was busy. The previous
+        // denominator (avg_latency × num_frames = summed latency) ignored frame
+        // overlap and inflated the apparent idle time, which fed a bogus
+        // "underutilisation" signal into the tuning-agent hints.
+        let worker_denom = total_wall_us;
         let max_worker_id = worker_busy_us.keys().copied().max().unwrap_or(0);
         let worker_busy_pct: Vec<f64> = (0..=max_worker_id)
             .map(|wid| {
