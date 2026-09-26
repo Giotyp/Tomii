@@ -23,9 +23,17 @@ exact frame count). Regenerate with `bench/radar-bench/gpu_crossover.py`.
   GPU-class latency/jitter using ~8 GPU launches/frame instead of 512.** On robust
   throughput it beats CPU (2048×256: 111 vs 91 fps) and ties GPU at 4096×512 (45.5),
   but does **not** exceed pure GPU on a single dedicated graph.
+- **Where the hybrid actually pays off: shared/contended GPU.** Running N pipelines
+  on one GPU, hybrid sustains far more aggregate throughput at 2048×256 (N=4: 167 fps
+  vs all-GPU cannot sustain N=4 at all; N=2: 200 vs 125), and under an adversarial GPU
+  hog it keeps GPU-class latency (2048: 8.5 ms, fully sustained) where all-GPU is
+  starved (wedged; 4096: 197 ms). It does *not* help at 4096×512, which is GPU-compute
+  -bound. So decoupling buys resilience when the pipeline is GPU-**launch**-bound or
+  the GPU is contended — via one `.so` swap, no graph/runtime change.
 - Net: the kernel choice is an **SLA/parallelism decision** measured cleanly by one
-  harness — GPU (or the launch-frugal hybrid) for per-frame latency and jitter; CPU
-  when GPU cores are the scarce resource.
+  harness — GPU (or the launch-frugal hybrid) for per-frame latency and jitter; the
+  hybrid to share a contended GPU across pipelines; CPU when GPU cores are the scarce
+  resource.
 
 ## Provenance
 
@@ -190,6 +198,56 @@ Result — **parity with all-GPU at a fraction of the GPU launches, not a win:**
   (4096); a 3/3-repeat check cut that to 45.5 fps. Boundary rates here are bistable —
   report the robust (multi-pass) number.
 
+## Shared-GPU: concurrent pipelines & contention (the decoupling payoff)
+
+Does launch-frugal mixed placement let more radar pipelines share one GPU? `N`
+independent Tomii processes (N∈{1,2,4}) share the one RTX 4090, each pinned to a
+disjoint CPU core set (4 workers, stride 6) with its own UDP port, sender, graph and
+report — no CUDA MPS. Only the kernel `.so` differs (all-GPU vs hybrid). Coverage
+gate is *soft* here: detection-correct **and** ≥98% of frames present (tolerates the
+1-frame EOS-flush artifact; real overload loses far more). Harness:
+`bench/radar-bench/shared_gpu.py`. Part B is single-trial per grid point (boundary is
+bistable — read the direction, not the last digit); Part C is single-trial.
+
+**Part B — max aggregate sustained rate (fps) vs N** (per-pipeline fps = agg / N):
+
+| CPI | backend | N=1 | N=2 | N=4 |
+|-----|---------|----:|----:|----:|
+| 2048×256 | GPU | 142.9 | 125.0 | **fail** |
+| 2048×256 | **hybrid** | **166.7** | **200.0** | **166.7** |
+| 4096×512 | GPU | 38.5 | 41.7 | 45.5 |
+| 4096×512 | hybrid | 45.5 | 38.5 | 38.5 |
+
+- **2048×256: hybrid wins concurrency decisively.** All-GPU aggregate *drops* as N
+  grows (143 → 125 → cannot sustain N=4 even at the slowest grid); hybrid *holds/rises*
+  (167 → 200 → 167). Moving the 256 per-chirp range launches/frame off the GPU removes
+  the launch/context contention that N all-GPU pipelines pile onto the device.
+- **4096×512: no hybrid advantage.** Both sit at ~40–45 fps aggregate regardless of N
+  — here the GPU is *compute*-bound on the 16×-larger Doppler/CFAR, which both
+  placements still run on the GPU, so freeing the range launches doesn't add capacity.
+
+**Part C — adversarial GPU hog** (a background cuBLAS matmul loop pins the device at
+~100%), N=1 radar pipeline at the fixed rate (2048: 8 ms; 4096: 30 ms):
+
+| CPI | GPU (all) | hybrid |
+|-----|-----------|--------|
+| 2048×256 | **wedged** — no frames complete | **PASS**, p50 8.5 ms, all frames |
+| 4096×512 | **starved** — p50 197 ms, 2 frames | p50 ~30 ms (GPU-class) but drops >2% → soft-fail |
+
+- Under GPU contention the all-GPU pipeline is starved (its 256–512 range launches/
+  frame fight the hog); the hybrid runs range on the CPU and lands only ~8 GPU
+  launches/frame, which slot between the hog's kernels — keeping GPU-class latency
+  (2048: fully sustained; 4096: ~6× lower tail than all-GPU even while shedding a few
+  frames).
+
+**Takeaway for "decoupling buys you something":** mixed placement pays off precisely
+when the pipeline is GPU-**launch**-bound — a smaller CPI (2048×256) where per-chirp
+launches dominate, and under GPU **contention** (concurrent pipelines or a co-tenant).
+It does **not** help when the pipeline is GPU-**compute**-bound (4096×512 Doppler/CFAR
+saturates the device either way). The lever is one kernel `.so` swap — no graph,
+plugin or `tomii-core` change — which is the paper-relevant point: per-stage placement
+is a cheap knob that recovers a contended accelerator.
+
 ## Caveats
 
 1. Numbers are from one shared multi-GPU host; absolute rates depend on the box.
@@ -206,6 +264,9 @@ Result — **parity with all-GPU at a fraction of the GPU launches, not a win:**
    on current main (ffb51d3): the GPU is 1.09× ahead robustly, and ahead at every
    size.** Likely the 1.85× predates the per-slot cuFFT / CFAR-stream fixes or used a
    different GPU. Reconcile the source before relying on a CPU-throughput-win claim.
+6. Shared-GPU (Part B/C) is single-trial per grid point with the soft coverage gate
+   and no CUDA MPS; read the *direction* (large gaps like N=4 fail-vs-167 fps), not the
+   last digit. A 3/3-robust + MPS-on sweep would firm up the concurrency boundary.
 
 ## Reproduce
 
@@ -221,6 +282,12 @@ python3 bench/radar-bench/gpu_crossover.py --gpu-device 1 --phase all   # cpu, g
 python3 bench/radar-bench/robust_rate.py --gpu-device 1
 ```
 
+```bash
+# shared-GPU concurrent-pipelines + adversarial-hog experiment (Table B/C):
+python3 bench/radar-bench/shared_gpu.py            # parts B,C by default
+```
+
 Underlying harness (all committed): `run_bench.py --gpu|--hybrid`,
 `bisect_rate.py --gate-search [--gpu|--hybrid]`, `robust_rate.py` (3/3 grid),
-`kernels/radar_hybrid.cu` (+ `make -C kernels hybrid`).
+`shared_gpu.py` (N concurrent pipelines + GPU hog), `kernels/radar_hybrid.cu`
+(+ `make -C kernels hybrid`).
