@@ -23,13 +23,15 @@ exact frame count). Regenerate with `bench/radar-bench/gpu_crossover.py`.
   GPU-class latency/jitter using ~8 GPU launches/frame instead of 512.** On robust
   throughput it beats CPU (2048×256: 111 vs 91 fps) and ties GPU at 4096×512 (45.5),
   but does **not** exceed pure GPU on a single dedicated graph.
-- **Where the hybrid actually pays off: shared/contended GPU.** Running N pipelines
-  on one GPU, hybrid sustains far more aggregate throughput at 2048×256 (N=4: 167 fps
-  vs all-GPU cannot sustain N=4 at all; N=2: 200 vs 125), and under an adversarial GPU
-  hog it keeps GPU-class latency (2048: 8.5 ms, fully sustained) where all-GPU is
-  starved (wedged; 4096: 197 ms). It does *not* help at 4096×512, which is GPU-compute
-  -bound. So decoupling buys resilience when the pipeline is GPU-**launch**-bound or
-  the GPU is contended — via one `.so` swap, no graph/runtime change.
+- **Sharing one GPU across N pipelines: CUDA MPS is the lever, not placement.**
+  Without MPS both all-GPU and hybrid collapse at N≥2 (context serialization); with MPS
+  both scale to N=4 (2048×256: 200 fps agg). Hybrid keeps only a modest edge (2048 N=2:
+  200 vs 125 fps). **The durable hybrid win is an *uncontrolled* co-tenant:** under a
+  GPU hog, all-GPU is starved (0/5 runs pass) while the hybrid holds GPU-class latency
+  (4096×512: 5/5, p50 29.6 ms) — because it lands ~25× fewer GPU launches (32 vs ~800/
+  frame, nsys) that slot between the hog's kernels. MPS can't help there (the hog
+  saturates compute). Neither helps the GPU-compute-bound 4096 concurrency case. All via
+  one `.so` swap (0 graph/runtime lines; the GR4 equivalent is ~80–150 lines of block code).
 - Net: the kernel choice is an **SLA/parallelism decision** measured cleanly by one
   harness — GPU (or the launch-frugal hybrid) for per-frame latency and jitter; the
   hybrid to share a contended GPU across pipelines; CPU when GPU cores are the scarce
@@ -203,50 +205,79 @@ Result — **parity with all-GPU at a fraction of the GPU launches, not a win:**
 Does launch-frugal mixed placement let more radar pipelines share one GPU? `N`
 independent Tomii processes (N∈{1,2,4}) share the one RTX 4090, each pinned to a
 disjoint CPU core set (4 workers, stride 6) with its own UDP port, sender, graph and
-report — no CUDA MPS. Only the kernel `.so` differs (all-GPU vs hybrid). Coverage
-gate is *soft* here: detection-correct **and** ≥98% of frames present (tolerates the
-1-frame EOS-flush artifact; real overload loses far more). Harness:
-`bench/radar-bench/shared_gpu.py`. Part B is single-trial per grid point (boundary is
-bistable — read the direction, not the last digit); Part C is single-trial.
+report. Only the kernel `.so` differs (all-GPU vs hybrid). Soft coverage gate:
+detection-correct **and** ≥98% frames present (tolerates the 1-frame EOS-flush
+artifact; real overload loses far more). Harness: `shared_gpu.py` (single-trial
+explore) + `shared_gpu_firm.py` (**Part B: 3/3-robust with CUDA MPS off/on; Part C:
+5-repeat hog; nsys mechanism**). MPS is scoped to a private pipe on GPU 1 (daemon
+`CUDA_VISIBLE_DEVICES=1`, clients device 0), so other tenants are unaffected.
 
-**Part B — max aggregate sustained rate (fps) vs N** (per-pipeline fps = agg / N):
+**Part B — max aggregate sustained rate (fps) vs N, MPS off vs on** (3/3-robust; the
+concurrent boundary is bistable, so `~` marks cells whose 3/3 result is noisy — read
+the direction). Headline: **MPS, not placement, is the lever for pure concurrency.**
 
-| CPI | backend | N=1 | N=2 | N=4 |
-|-----|---------|----:|----:|----:|
-| 2048×256 | GPU | 142.9 | 125.0 | **fail** |
-| 2048×256 | **hybrid** | **166.7** | **200.0** | **166.7** |
-| 4096×512 | GPU | 38.5 | 41.7 | 45.5 |
-| 4096×512 | hybrid | 45.5 | 38.5 | 38.5 |
+| CPI | backend | off N1 | off N2 | off N4 | on N1 | on N2 | on N4 |
+|-----|---------|------:|------:|------:|-----:|-----:|-----:|
+| 2048×256 | GPU    | 143 | 143 | **fail** | ~fail | 125 | **200** |
+| 2048×256 | hybrid | 143 | 143 | **fail** | 154 | 200 | **200** |
+| 4096×512 | GPU    | 42 | **fail** | **fail** | 46 | 46 | **48** |
+| 4096×512 | hybrid | 46 | ~fail | ~34 | 42 | ~fail | **48** |
 
-- **2048×256: hybrid wins concurrency decisively.** All-GPU aggregate *drops* as N
-  grows (143 → 125 → cannot sustain N=4 even at the slowest grid); hybrid *holds/rises*
-  (167 → 200 → 167). Moving the 256 per-chirp range launches/frame off the GPU removes
-  the launch/context contention that N all-GPU pipelines pile onto the device.
-- **4096×512: no hybrid advantage.** Both sit at ~40–45 fps aggregate regardless of N
-  — here the GPU is *compute*-bound on the 16×-larger Doppler/CFAR, which both
-  placements still run on the GPU, so freeing the range launches doesn't add capacity.
+- **Without MPS, concurrent GPU pipelines collapse — for *both* placements.** At N=4
+  every no-MPS cell fails; at 4096 even N=2 fails. N independent processes time-slice
+  one GPU context, so they serialize and drop frames regardless of placement.
+- **MPS fixes it — for both.** With MPS the kernels from separate processes actually
+  overlap and both all-GPU and hybrid scale to N=4 (2048: 200 fps agg; 4096: 48 fps).
+  So the honest answer to "does MPS fix all-GPU's launch contention?" is **yes** — MPS
+  is the primary lever; hybrid's launch-frugality is a *secondary* edge (a modest lead
+  at 2048×256 N=2, 200 vs 125). This corrects an earlier single-trial reading that
+  credited the concurrency win to placement; with MPS the placements are close.
 
-**Part C — adversarial GPU hog** (a background cuBLAS matmul loop pins the device at
-~100%), N=1 radar pipeline at the fixed rate (2048: 8 ms; 4096: 30 ms):
+**Part C — adversarial GPU hog** (background cuBLAS matmul pins device ~100%), 5
+repeats/cell, N=1 radar at the fixed rate (2048: 8 ms; 4096: 30 ms), no MPS:
 
-| CPI | GPU (all) | hybrid |
-|-----|-----------|--------|
-| 2048×256 | **wedged** — no frames complete | **PASS**, p50 8.5 ms, all frames |
-| 4096×512 | **starved** — p50 197 ms, 2 frames | p50 ~30 ms (GPU-class) but drops >2% → soft-fail |
+| CPI | backend | pass | p50 | p99 | p99.9 |
+|-----|---------|-----:|----:|----:|------:|
+| 2048×256 | GPU | **0/5** | — | — | — (starved, no frames) |
+| 2048×256 | **hybrid** | **4/5** | 8.75 | 8.88 | 8.91 ms |
+| 4096×512 | GPU | **0/5** | — | — | — (starved, p50 ~197 ms when it limps) |
+| 4096×512 | **hybrid** | **5/5** | 29.61 | 31.98 | 32.86 ms |
 
-- Under GPU contention the all-GPU pipeline is starved (its 256–512 range launches/
-  frame fight the hog); the hybrid runs range on the CPU and lands only ~8 GPU
-  launches/frame, which slot between the hog's kernels — keeping GPU-class latency
-  (2048: fully sustained; 4096: ~6× lower tail than all-GPU even while shedding a few
-  frames).
+- **This is the durable, MPS-independent win.** Against an uncontrolled co-tenant that
+  saturates the GPU, all-GPU is starved every run (its ~800 range+doppler launches/
+  frame fight the hog); the hybrid runs range on the CPU and lands only ~32 GPU
+  kernels/frame, which slot between the hog's kernels — holding GPU-class latency
+  (4096: 5/5 at 29.6 ms p50). MPS does not help here: the hog saturates compute, not
+  just the launch queue. (N=2 under the hog fails for both — hog + 2 pipelines is too
+  much GPU.)
 
-**Takeaway for "decoupling buys you something":** mixed placement pays off precisely
-when the pipeline is GPU-**launch**-bound — a smaller CPI (2048×256) where per-chirp
-launches dominate, and under GPU **contention** (concurrent pipelines or a co-tenant).
-It does **not** help when the pipeline is GPU-**compute**-bound (4096×512 Doppler/CFAR
-saturates the device either way). The lever is one kernel `.so` swap — no graph,
-plugin or `tomii-core` change — which is the paper-relevant point: per-stage placement
-is a cheap knob that recovers a contended accelerator.
+**Mechanism (nsys, single pipeline, 2048×256, per frame):**
+
+| placement | GPU kernels/frame | H2D copies/frame |
+|-----------|------------------:|-----------------:|
+| all-GPU | **~800** (768 range = 3/chirp × 256 chirps + 32 Doppler/CFAR) | 256 |
+| **hybrid** | **32** (Doppler/CFAR only — zero range kernels) | 8 |
+
+≈25× fewer GPU launches and 32× fewer H2D copies — the concrete reason the hybrid
+slots into a contended GPU. (Measured: `k_window_i16`/`vector_fft<2048>`/`k_corner_turn`
+= 10,240 instances each over 40 frames for all-GPU, and **absent** for hybrid.)
+
+**Edit cost — the paper-relevant point.** A hybrid placement in Tomii is **one kernel
+`.so` swap: 0 graph / plugin / `tomii-core` lines changed** (the C-ABI kernel boundary
+hides the device choice). The equivalent in the GR4 flowgraph (`gnuradio4/radar_rx4.cc`,
+255 lines) is a **code change**: the DSP is baked into typed `gr::Block<>` classes
+(`RangeFft` with inline FFTW ~40 lines, `DetectSink` calling the kernels ~50 lines),
+so moving a stage across devices means rewriting that block's `processBulk` with CUDA +
+device-buffer/staging handling (host `gr::PortIn/Out<std::complex<float>>` don't carry
+device memory), likely a new copy/staging block, and recompiling — rough order ~80–150
+lines across 1–2 block classes, vs 0 for Tomii.
+
+**Takeaway.** Two regimes: (1) *you control the workload* → CUDA MPS lets both
+placements share the GPU; placement is a minor lever. (2) *an uncontrolled co-tenant
+saturates the GPU* → the launch-frugal hybrid (range on CPU, ~25× fewer GPU launches)
+keeps GPU-class latency where all-GPU starves — and it's reached by swapping one `.so`,
+no graph/runtime change. Neither regime helps the GPU-**compute**-bound case (4096×512
+Doppler/CFAR saturates the device either way).
 
 ## Caveats
 
@@ -264,9 +295,10 @@ is a cheap knob that recovers a contended accelerator.
    on current main (ffb51d3): the GPU is 1.09× ahead robustly, and ahead at every
    size.** Likely the 1.85× predates the per-slot cuFFT / CFAR-stream fixes or used a
    different GPU. Reconcile the source before relying on a CPU-throughput-win claim.
-6. Shared-GPU (Part B/C) is single-trial per grid point with the soft coverage gate
-   and no CUDA MPS; read the *direction* (large gaps like N=4 fail-vs-167 fps), not the
-   last digit. A 3/3-robust + MPS-on sweep would firm up the concurrency boundary.
+6. Shared-GPU Part B is 3/3-robust but the concurrent boundary is bistable (some cells
+   marked `~` are noisy); read the direction (no-MPS collapse vs MPS-on scaling), not
+   the last digit. Part C hog is 5 reps/cell. nsys mechanism is one pipeline. No CUDA
+   MPS during the hog (Part C) by design. GR4 edit cost is a code estimate, not built.
 
 ## Reproduce
 
@@ -283,11 +315,12 @@ python3 bench/radar-bench/robust_rate.py --gpu-device 1
 ```
 
 ```bash
-# shared-GPU concurrent-pipelines + adversarial-hog experiment (Table B/C):
-python3 bench/radar-bench/shared_gpu.py            # parts B,C by default
+# shared-GPU: single-trial explore, then 3/3-robust + MPS on/off + 5-rep hog:
+python3 bench/radar-bench/shared_gpu.py            # explore (parts B,C)
+python3 bench/radar-bench/shared_gpu_firm.py       # 3/3 + MPS off/on + 5-rep hog
 ```
 
 Underlying harness (all committed): `run_bench.py --gpu|--hybrid`,
 `bisect_rate.py --gate-search [--gpu|--hybrid]`, `robust_rate.py` (3/3 grid),
-`shared_gpu.py` (N concurrent pipelines + GPU hog), `kernels/radar_hybrid.cu`
-(+ `make -C kernels hybrid`).
+`shared_gpu.py` + `shared_gpu_firm.py` (N concurrent pipelines, MPS, GPU hog, nsys),
+`kernels/radar_hybrid.cu` (+ `make -C kernels hybrid`).
