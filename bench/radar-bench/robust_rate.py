@@ -20,7 +20,7 @@ CONDA = Path.home() / "miniconda3" / "envs" / "radar" / "lib"
 # key -> (scene subdir, n_chirps, descending period grid [ms])
 GRIDS = {
     "1024x128": ("cpi_1024x128", 128, [7.0, 6.5, 6.0, 5.6, 5.2, 4.8]),
-    "2048x256": ("cpi_2048x256", 256, [11, 10, 9, 8, 7, 6.5, 6.0]),
+    "2048x256": ("cpi_2048x256", 256, [13, 12, 11, 10, 9, 8, 7, 6.5, 6.0]),
     "4096x512": ("cpi_4096x512", 512, [26, 24, 22, 20, 18, 16]),
 }
 BACKENDS = ["cpu", "gpu", "hybrid"]
