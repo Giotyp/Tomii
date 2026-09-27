@@ -254,16 +254,19 @@ impl TimeBufferManager {
         graph_edges: &[(String, Vec<String>)],
         path: &str,
         exclude_frames: usize,
+        stale_drops: usize,
     ) {
         if self.is_async {
             if let Some(ref async_buf) = self.async_buffer {
-                if let Err(e) = async_buf.write_json_report(graph_edges, path, exclude_frames) {
+                if let Err(e) =
+                    async_buf.write_json_report(graph_edges, path, exclude_frames, stale_drops)
+                {
                     tracing::warn!(error = %e, "failed to write JSON report");
                 }
             }
         } else if let Some(ref sync_buf) = self.sync_buffer {
             if let Ok(buf) = sync_buf.lock() {
-                buf.write_json_report(graph_edges, path, exclude_frames);
+                buf.write_json_report(graph_edges, path, exclude_frames, stale_drops);
             }
         }
     }
