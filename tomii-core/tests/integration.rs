@@ -317,13 +317,17 @@ fn test_slot_priority_single_slot_nonnetwork_restarts() {
         .expect("JSON parse failed")
         .compile(&scheduler);
 
-    // Budget generously above the success target so the runtime's own
-    // `completed == max_frames` stop never front-runs the predicate; `max_runtime`
-    // bounds a regressed (hanging) run so the test fails fast instead of wedging.
+    // max_frames must be far above the success target AND large enough that the run
+    // cannot finish the whole budget within the first ~10 ms poll tick — otherwise the
+    // wait loop sees `completed == max_frames` on its first check and returns before the
+    // predicate is ever called, leaving `observed` at 0. This tiny 3-task/frame graph
+    // runs thousands of frames per 10 ms, so 1000 was too small (flaky on fast/idle
+    // machines); 10M matches `test_run_until_predicate_terminates_run`. `max_runtime`
+    // still bounds a regressed (stalling) run so a real hang fails within 5 s.
     const TARGET_FRAMES: usize = 8;
     let mut rt = TomiiRtBuilder::new(compiled, scheduler)
         .slots(1)
-        .max_frames(1000)
+        .max_frames(10_000_000)
         .max_runtime(Some(5))
         .slot_priority_enabled(true)
         .inline_continuation(true)
@@ -403,7 +407,9 @@ fn test_fanout_bulk_filtered_successor_completes() {
         scheduler,
         RuntimeConfig {
             slots: 1,
-            max_frames: 1000,
+            // Large enough that the run cannot finish before the predicate observes
+            // TARGET_FRAMES (see the note in the slot-priority test above).
+            max_frames: 10_000_000,
             max_runtime: Some(5),
             system_threads: 1,
             workers: 4,
@@ -459,7 +465,9 @@ fn run_capturing_stale_drops(
         scheduler,
         RuntimeConfig {
             slots: 1,
-            max_frames: 100_000,
+            // Large budget so the run outlives the predicate's first observation of
+            // `target_frames` regardless of how fast the graph is (avoids front-run).
+            max_frames: 10_000_000,
             max_runtime: Some(5),
             system_threads: 1,
             workers,
