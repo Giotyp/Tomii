@@ -14,35 +14,58 @@ exact frame count). Regenerate with `bench/radar-bench/gpu_crossover.py`.
   **5× / 21× / 83×** tighter. Once a CPI is resident, cuFFT clears it almost
   instantly and deterministically.
 - **Sustained throughput: GPU wins at every CPI (robust 3/3).** 1024×128 all three
-  tie at the receiver-bound grid floor (≥208 fps). 2048×256 GPU sustains **1.69×**
-  the CPU rate (153.8 vs 90.9 fps); 4096×512 GPU keeps **1.09×** (45.5 vs 41.7). The
-  per-chirp H2D + launch + sync tax (512×/frame at 4096) shrinks the GPU's margin as
-  `n_chirps` grows, but on this box it never flips to a CPU win. **The website's "CPU
-  sustains 1.85× GPU at 4096×512" does not reproduce on current main.**
+  tie at the receiver-bound grid floor (≥208 fps). 4096×512 GPU sustains **1.30×** the
+  CPU rate (50.0 vs 38.5 fps). 2048×256 GPU is highest but the boundary is
+  high-variance run-to-run (GPU ~111–167 vs CPU ~83–91 fps — read as a range). It
+  never flips to a CPU win on this box. **The website's "CPU sustains 1.85× GPU at
+  4096×512" does not reproduce on current main.**
 - **Mixed placement (hybrid: CPU range → GPU doppler/CFAR → CPU cluster) reaches
-  GPU-class latency/jitter using ~8 GPU launches/frame instead of 512.** On robust
-  throughput it beats CPU (2048×256: 111 vs 91 fps) and ties GPU at 4096×512 (45.5),
-  but does **not** exceed pure GPU on a single dedicated graph.
+  GPU-class latency/jitter using ~32 GPU launches/frame instead of ~800 (nsys).** On
+  robust throughput it sits between CPU and GPU; it does **not** exceed pure GPU on a
+  single dedicated graph.
 - **Sharing one GPU across N pipelines: CUDA MPS is the lever, not placement.**
-  Without MPS both all-GPU and hybrid collapse at N≥2 (context serialization); with MPS
-  both scale to N=4 (2048×256: 200 fps agg). Hybrid keeps only a modest edge (2048 N=2:
-  200 vs 125 fps). **The durable hybrid win is an *uncontrolled* co-tenant:** under a
-  GPU hog, all-GPU is starved (0/5 runs pass) while the hybrid holds GPU-class latency
-  (4096×512: 5/5, p50 29.6 ms) — because it lands ~25× fewer GPU launches (32 vs ~800/
-  frame, nsys) that slot between the hog's kernels. MPS can't help there (the hog
-  saturates compute). Neither helps the GPU-compute-bound 4096 concurrency case. All via
+  Without MPS concurrent pipelines contend on one GPU context; MPS lets both all-GPU
+  and hybrid scale to N=4. (On current main the P0 fixes already improved no-MPS
+  concurrency, so MPS's incremental role is smaller than on old main.) **The durable
+  hybrid win is an *uncontrolled* co-tenant:** under a GPU hog, all-GPU is starved
+  (**0/5** runs pass) while the hybrid holds GPU-class latency (4096×512: **4/5**, p50
+  29.6 ms) — it lands ~25× fewer GPU launches (32 vs ~800/frame, nsys) that slot
+  between the hog's kernels. MPS can't help there (the hog saturates compute). All via
   one `.so` swap (0 graph/runtime lines; the GR4 equivalent is ~80–150 lines of block code).
 - Net: the kernel choice is an **SLA/parallelism decision** measured cleanly by one
   harness — GPU (or the launch-frugal hybrid) for per-frame latency and jitter; the
   hybrid to share a contended GPU across pipelines; CPU when GPU cores are the scarce
   resource.
 
+## Refresh on new main (`bc9e5d9`, 2026-09-27)
+
+The eval branch was rebased onto main after PR #7 ("runtime P0 stabilization":
+packet-admission race, `--slot-priority` restart, parallel slot activation, report
+accuracy) and the full campaign re-run. **The story holds; a couple of things
+improved.** Tables below are the new-main (`bc9e5d9`) numbers.
+
+- **Latency/tail unchanged or better.** GPU tail/jitter advantage still grows with
+  CPI; CPU 4096×512 processing tail **improved ~15% (9.69 → 8.25 ms)** — consistent
+  with the report/warm-up accuracy fixes.
+- **Hog resilience reproduces cleanly:** all-GPU **0/5**, hybrid **4/5** (4096 N=1,
+  p50 29.6 ms) — the durable "decoupling buys resilience" result stands.
+- **P0 fixes improved no-MPS concurrency:** all-GPU 4096×512 now sustains N=4 without
+  MPS (44 fps) where old main collapsed — so MPS's *incremental* role is smaller than
+  on old main, though hybrid still sustains N=4 at 2048×256 where all-GPU cannot.
+- **Caveat — 2048×256 sustained rate is high-variance** on this shared box: across
+  three re-runs GPU landed 111–167, hybrid 77–154, CPU 83–91 fps. The bistable
+  boundary + strict 3/3 gate is not reproducible to a single fps there; only the
+  ordering (**GPU highest**) and the 1024/4096 cells are stable. Read 2048 as a range.
+- Two latent harness bugs were fixed en route (commit `0500433`): `PKG_CONFIG_PATH`
+  dropped `/lib` (broke a clean FFTW/hybrid kernel build), and `robust_rate.py` used
+  the wrong repo-root `parents[]`. Both were masked before by pre-built `.so`s.
+
 ## Provenance
 
 | | |
 |---|---|
-| Branch / base | `eval/radar-gpu` off `main` `ffb51d3` |
-| Tomii SHA | `ffb51d30558c4c09c6958217e56679cc525edbd5` |
+| Branch / base | `eval/radar-gpu` rebased onto `main` `bc9e5d9` (originally `ffb51d3`) |
+| Tomii SHA | `bc9e5d9` (PR #7 runtime P0 stabilization); original eval `ffb51d3` |
 | GPU | NVIDIA GeForce RTX 4090 (device index 1) |
 | Driver / CUDA | 575.57.08 / CUDA 12.9 (`nvcc` 12.9.r12.9), `sm_89` |
 | CPU FFTW | fftw3f 3.3.11 (conda env `radar`) |
@@ -113,24 +136,25 @@ Latency cells at 1.45× physical CPI, physical chirp pacing.
 
 | CPI | backend | p50 (ms) | p99 (ms) | p99.9 (ms) | jitter p99.9−p50 (µs) | proc. tail (ms) |
 |-----|---------|---------:|---------:|-----------:|----------------------:|----------------:|
-| 1024×128 | CPU | 7.31 | 7.65 | 7.82 | 509 | 0.77 |
-| 1024×128 | **GPU** | **6.62** | **6.68** | **6.72** | **95** | **0.17** |
-| 1024×128 | hybrid | 6.63 | 6.68 | 6.79 | 156 | 0.19 |
-| 2048×256 | CPU | 29.03 | 30.24 | 30.89 | 1858 | 2.51 |
-| 2048×256 | **GPU** | **25.89** | **25.96** | **25.98** | **87** | **0.25** |
-| 2048×256 | hybrid | 26.08 | 26.13 | 26.16 | 81 | 0.38 |
-| 4096×512 | CPU | 115.69 | 119.60 | 123.06 | 7373 | 9.69 |
-| 4096×512 | **GPU** | **103.11** | **103.19** | **103.20** | **89** | **0.56** |
-| 4096×512 | hybrid | 104.04 | 104.15 | 104.16 | 118 | 1.18 |
+| 1024×128 | CPU | 7.35 | 7.80 | 7.83 | 477 | 0.78 |
+| 1024×128 | **GPU** | **6.59** | **6.65** | **6.67** | **82** | **0.16** |
+| 1024×128 | hybrid | 6.63 | 6.68 | 6.88 | 247 | 0.19 |
+| 2048×256 | CPU | 28.99 | 30.18 | 30.87 | 1878 | 2.30 |
+| 2048×256 | **GPU** | **25.89** | **25.95** | **25.96** | **73** | **0.25** |
+| 2048×256 | hybrid | 26.10 | 26.15 | 26.16 | 65 | 0.38 |
+| 4096×512 | CPU | 109.51 | 116.88 | 119.22 | 9708 | 8.25 |
+| 4096×512 | **GPU** | **103.10** | **103.18** | **103.22** | **111** | **0.56** |
+| 4096×512 | hybrid | 104.04 | 104.15 | 104.19 | 147 | 1.17 |
 
 *hybrid* = CPU/FFTW range-FFT → GPU/cuFFT doppler+CFAR → CPU cluster (mixed
 placement; see below). It tracks GPU latency and jitter closely at every size.
 
-- **Processing-tail advantage (GPU):** 4.4× (1024) → 10.0× (2048) → 17.3× (4096).
-- **Jitter advantage (GPU):** 5× → 21× → 83×. GPU p99.9−p50 stays ~90 µs at every
+- **Processing-tail advantage (GPU):** 4.9× (1024) → 9.2× (2048) → 14.7× (4096).
+- **Jitter advantage (GPU):** ~6× → 26× → 87×. GPU p99.9−p50 stays ~70–110 µs at every
   size; CPU jitter grows with CPI (more chirps → more scheduling variance).
 - p50 is arrival-dominated (≈ physical CPI) by construction; the CPU/GPU gap in
-  p50 (0.7 / 3.1 / 12.6 ms) is exactly the processing-tail gap.
+  p50 (0.8 / 3.1 / 6.4 ms) is the processing-tail gap. (CPU 4096 tail improved from
+  9.69 ms on old main `ffb51d3` to 8.25 ms here — the P0 report/warm-up fixes.)
 
 ## Table 2 — Max sustained frame rate (robust 3/3, verifier-gated)
 
@@ -141,22 +165,21 @@ single-run bisect is not used here.
 | CPI | CPU fps | GPU fps | hybrid fps | note |
 |-----|--------:|--------:|-----------:|------|
 | 1024×128 | ≥208 | ≥208 | ≥208 | tie — all pass at the grid floor (4.8 ms); receiver/loopback-bound, not compute |
-| 2048×256 | 90.9 | **153.8** | 111.1 | **GPU 1.69× CPU**; hybrid 1.22× CPU |
-| 4096×512 | 41.7 | **45.5** | **45.5** | **GPU & hybrid 1.09× CPU** |
+| 2048×256 | ~83–91 | **~111–167** | ~77–154 | **GPU highest**; high run-to-run variance (see Refresh note) — read as a range |
+| 4096×512 | 38.5 | **50.0** | 45.5 | **GPU 1.30× CPU**, hybrid 1.18× CPU |
 
 - **Why 3/3 and not the single-run bisect.** Sustained-rate boundaries here are
   *bistable*: a period can pass once and fail on a re-run. The single-run gated
-  bisect over-reports — e.g. it claimed 2048 CPU 124 fps (robust 90.9), 4096 GPU
-  47.8 / hybrid 61.3 fps (robust 45.5 / 45.5). So every rate above is the fastest
-  period passing 3 consecutive gated runs (CPU 2048 fails at 10 ms; GPU 2048 at
-  6.0 ms; hybrid 2048 at 8 ms; at 4096 CPU fails at 22 ms, GPU/hybrid at 20 ms).
-  1024×128 still passes 3/3 at the fastest grid point (4.8 ms, ≥208 fps) for all
-  three — the loopback receiver path binds there, not compute.
-- **GPU wins throughput at every CPI**; the margin is largest at mid CPI (2048,
-  1.69×) and narrows to 1.09× at 4096 as the per-chirp launch tax (512×/frame H2D +
-  launch + sync) grows. It does **not** flip to a CPU win at any size on this box —
-  contrary to the website's "CPU 1.85× at 4096×512" (see Interpretation).
-- **Hybrid** sits between CPU and GPU on throughput, reaching GPU parity at 4096.
+  bisect over-reports. So every rate above is the fastest period passing 3
+  consecutive gated runs — but even 3/3 is not fully reproducible at 2048×256, where
+  the bistable boundary swings a lot run-to-run (GPU 111–167, hybrid 77–154, CPU
+  83–91 fps across three re-runs); only the ordering (GPU highest) is stable there.
+  1024×128 passes 3/3 at the fastest grid point (4.8 ms, ≥208 fps) for all three —
+  the loopback receiver path binds, not compute.
+- **GPU wins throughput at every CPI** (or ties at the 1024 floor). It does **not**
+  flip to a CPU win at any size on this box — contrary to the website's "CPU 1.85× at
+  4096×512" (see Interpretation).
+- **Hybrid** sits between CPU and GPU on throughput.
 
 ## Interpretation
 
@@ -223,6 +246,12 @@ the direction). Headline: **MPS, not placement, is the lever for pure concurrenc
 | 4096×512 | GPU    | 42 | **fail** | **fail** | 46 | 46 | **48** |
 | 4096×512 | hybrid | 46 | ~fail | ~34 | 42 | ~fail | **48** |
 
+> Table values above are from old main `ffb51d3`. **Refresh on `bc9e5d9`:** the
+> direction holds, with one shift — the P0 fixes improved *no-MPS* concurrency, so
+> all-GPU 4096×512 now sustains N=4 even without MPS (~44 fps). MPS's incremental role
+> is therefore smaller on current main, but hybrid still sustains N=4 at 2048×256 where
+> all-GPU cannot, and Part C (below) is unchanged. Cells remain bistable — read direction.
+
 - **Without MPS, concurrent GPU pipelines collapse — for *both* placements.** At N=4
   every no-MPS cell fails; at 4096 even N=2 fails. N independent processes time-slice
   one GPU context, so they serialize and drop frames regardless of placement.
@@ -239,9 +268,9 @@ repeats/cell, N=1 radar at the fixed rate (2048: 8 ms; 4096: 30 ms), no MPS:
 | CPI | backend | pass | p50 | p99 | p99.9 |
 |-----|---------|-----:|----:|----:|------:|
 | 2048×256 | GPU | **0/5** | — | — | — (starved, no frames) |
-| 2048×256 | **hybrid** | **4/5** | 8.75 | 8.88 | 8.91 ms |
+| 2048×256 | **hybrid** | **4/5** | 8.69 | 8.82 | 8.86 ms |
 | 4096×512 | GPU | **0/5** | — | — | — (starved, p50 ~197 ms when it limps) |
-| 4096×512 | **hybrid** | **5/5** | 29.61 | 31.98 | 32.86 ms |
+| 4096×512 | **hybrid** | **4/5** | 29.61 | 31.85 | 32.06 ms |
 
 - **This is the durable, MPS-independent win.** Against an uncontrolled co-tenant that
   saturates the GPU, all-GPU is starved every run (its ~800 range+doppler launches/
