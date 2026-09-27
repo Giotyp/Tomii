@@ -928,6 +928,7 @@ pub(super) fn build_json_report_value(
     hints: &[String],
     suggestions: Vec<serde_json::Value>,
     critical_path_node_set: &std::collections::HashSet<&str>,
+    stale_drops: usize,
 ) -> serde_json::Value {
     use serde_json::json;
 
@@ -992,6 +993,10 @@ pub(super) fn build_json_report_value(
             "p999_latency_us": (p999_latency_us * 100.0).round() / 100.0,
             "throughput_frames_per_sec": (throughput_frames_per_sec * 10.0).round() / 10.0,
             "total_tasks_per_frame": total_tasks_per_frame,
+            // Instances discarded by the stale-task guard over the run. 0 in a healthy
+            // run; non-zero means dispatched work was dropped (premature-completion bug
+            // or incomplete-frame eviction).
+            "stale_task_drops": stale_drops,
             "scheduling_overhead_diagnostic": {
                 "critical_path_exec_us": cp_exec_us,
                 "overhead_us": (overhead_us * 100.0).round() / 100.0,

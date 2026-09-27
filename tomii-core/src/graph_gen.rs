@@ -241,9 +241,12 @@ impl GraphSpec {
             &pred_succ_1to1_offset,
         );
 
+        // Includes initial (root) nodes; must match build_slot_counters (this value
+        // seeds the per-slot RESET, that one seeds the initial per-slot pending). See
+        // the note in init.rs::build_slot_counters for why roots are counted.
         let total_tasks: usize = node_cache
             .iter()
-            .filter(|nc| !nc.is_initial && !nc.is_condition)
+            .filter(|nc| !nc.is_condition)
             .map(|nc| nc.factor)
             .sum();
         let total_cond_tasks: usize = node_cache

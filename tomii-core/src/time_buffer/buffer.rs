@@ -302,9 +302,10 @@ impl AsyncTimeBuffer {
         graph_edges: &[(String, Vec<String>)],
         path: &str,
         exclude_frames: usize,
+        stale_drops: usize,
     ) -> Result<(), &'static str> {
         if let Ok(buf) = self.time_buffer.lock() {
-            buf.write_json_report(graph_edges, path, exclude_frames);
+            buf.write_json_report(graph_edges, path, exclude_frames, stale_drops);
             Ok(())
         } else {
             Err("Failed to acquire lock on time buffer")
@@ -656,6 +657,7 @@ impl TimeBuffer {
         graph_edges: &[(String, Vec<String>)],
         path: &str,
         exclude_frames: usize,
+        stale_drops: usize,
     ) {
         // ── 1. Determine slot ranges (same split as print_stats) ──────────────────
         let worker_slots_end = self.slots.saturating_sub(self.system_threads);
@@ -879,6 +881,7 @@ impl TimeBuffer {
             &hints,
             suggestions,
             &critical_path_node_set,
+            stale_drops,
         );
 
         // ── 12. Write to file ─────────────────────────────────────────────────────

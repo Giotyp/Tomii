@@ -465,6 +465,7 @@ impl TomiiRtBuilder {
                 base_instant: Arc::new(self.base_instant),
                 job_counter: Arc::new(AtomicUsize::new(0)),
                 frame_complete_counter: Arc::new(AtomicUsize::new(0)),
+                stale_tasks_dropped: Arc::new(AtomicUsize::new(0)),
             },
         });
 
@@ -510,6 +511,9 @@ pub struct RunProgress {
     pub max_frames: usize,
     /// Number of slots currently marked active.
     pub active_slots: u32,
+    /// Task instances dropped by the stale-task guard so far. Stays 0 in a healthy run
+    /// with no incomplete-frame evictions; non-zero means dispatched work was discarded.
+    pub stale_drops: usize,
 }
 
 impl TomiiRt {
@@ -622,6 +626,11 @@ impl TomiiRt {
                                 .active_bitmap
                                 .load(Ordering::Acquire)
                                 .count_ones(),
+                            stale_drops: self
+                                .shared
+                                .telemetry
+                                .stale_tasks_dropped
+                                .load(Ordering::Relaxed),
                         };
                         if pred(&progress) {
                             tracing::info!("run_until predicate satisfied, exiting");
@@ -643,6 +652,23 @@ impl TomiiRt {
 
         for handle in resolution_handles {
             handle.join().unwrap();
+        }
+
+        // Surface silently-dropped work: in a healthy run with no incomplete-frame
+        // evictions this is 0. A non-zero count means the stale-task guard discarded
+        // dispatched instances — a premature-completion bug or an eviction.
+        let stale_drops = self
+            .shared
+            .telemetry
+            .stale_tasks_dropped
+            .load(Ordering::Relaxed);
+        if stale_drops > 0 {
+            tracing::warn!(
+                stale_drops,
+                "stale-task guard dropped {} task instance(s) this run — dispatched work \
+                 was discarded (premature completion or incomplete-frame eviction)",
+                stale_drops
+            );
         }
 
         #[cfg(feature = "network")]

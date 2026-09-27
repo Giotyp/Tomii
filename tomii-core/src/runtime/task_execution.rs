@@ -90,7 +90,9 @@ pub(super) fn worker_resolve_successors(
     let node_cache_entry = &sctx.cache.node_cache[node_info.id as usize];
     if node_cache_entry.is_condition {
         sctx.slots.pending_cond_tasks[slot].fetch_sub(node_info.bulk_count, slot_gen_rmw(ssm));
-    } else if !node_cache_entry.is_initial {
+    } else {
+        // Initial (root) nodes decrement too — they are now counted in total_tasks so
+        // completion waits for every root instance to finish (see init.rs).
         sctx.slots.pending_tasks[slot].fetch_sub(node_info.bulk_count, slot_gen_rmw(ssm));
     }
 
@@ -236,6 +238,11 @@ pub(super) fn execute_task(
                     node_info.id, node_info.slot, node_info.index, node_info.gen, current_gen
                 )
             });
+            // A dropped bulk task discards all bulk_count instances it covered.
+            shared.telemetry.stale_tasks_dropped.fetch_add(
+                node_info.bulk_count.max(1),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             return None;
         }
     }

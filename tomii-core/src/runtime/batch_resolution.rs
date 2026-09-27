@@ -87,7 +87,9 @@ pub(super) fn process_batch_inner(
                     )
                 });
             }
-        } else if !node_cache_entry.is_initial {
+        } else {
+            // Initial (root) nodes decrement too — counted in total_tasks so completion
+            // waits for every root instance (see init.rs).
             let _ = rctx.slots.pending_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
         }
 

@@ -295,9 +295,21 @@ pub(super) fn build_slot_counters(
     Vec<Vec<AtomicU64>>,
     Vec<Vec<AtomicU64>>,
 ) {
+    // Count every non-condition node's instances, INCLUDING initial (root) nodes.
+    // Initial nodes were previously excluded on the assumption that a root always
+    // feeds a successor whose own count gates frame completion. That fails for a root
+    // whose instances are not all consumed by a successor — a terminal root, or one
+    // feeding a filtered/sub-range successor (e.g. root.out(5)): the uncovered
+    // instances gate nothing, so `pending_tasks` hit 0 early and the generation bump
+    // silently dropped the still-in-flight instances. Counting initial nodes here (and
+    // decrementing them on completion, see task_execution.rs / batch_resolution.rs)
+    // makes completion wait for ALL dispatched work. `$network` stays counted as
+    // before (it is not is_initial); network-fed nodes carry a `$network` predecessor
+    // so they are never initial, and pure compute roots are dispatched deterministically
+    // at slot activation, so this can never wait on undelivered packets.
     let total_tasks: usize = node_cache
         .iter()
-        .filter(|nc| !nc.is_initial && !nc.is_condition)
+        .filter(|nc| !nc.is_condition)
         .map(|nc| nc.factor)
         .sum();
     let total_cond_tasks: usize = node_cache

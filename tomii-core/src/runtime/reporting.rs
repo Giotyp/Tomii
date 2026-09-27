@@ -49,7 +49,12 @@ impl super::TomiiRt {
                     (node.name.clone(), succs)
                 })
                 .collect();
-            tb.write_json_report(&graph_edges, path, exclude_frames);
+            let stale_drops = self
+                .shared
+                .telemetry
+                .stale_tasks_dropped
+                .load(std::sync::atomic::Ordering::Relaxed);
+            tb.write_json_report(&graph_edges, path, exclude_frames, stale_drops);
         });
     }
 

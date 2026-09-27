@@ -317,13 +317,17 @@ fn test_slot_priority_single_slot_nonnetwork_restarts() {
         .expect("JSON parse failed")
         .compile(&scheduler);
 
-    // Budget generously above the success target so the runtime's own
-    // `completed == max_frames` stop never front-runs the predicate; `max_runtime`
-    // bounds a regressed (hanging) run so the test fails fast instead of wedging.
+    // max_frames must be far above the success target AND large enough that the run
+    // cannot finish the whole budget within the first ~10 ms poll tick — otherwise the
+    // wait loop sees `completed == max_frames` on its first check and returns before the
+    // predicate is ever called, leaving `observed` at 0. This tiny 3-task/frame graph
+    // runs thousands of frames per 10 ms, so 1000 was too small (flaky on fast/idle
+    // machines); 10M matches `test_run_until_predicate_terminates_run`. `max_runtime`
+    // still bounds a regressed (stalling) run so a real hang fails within 5 s.
     const TARGET_FRAMES: usize = 8;
     let mut rt = TomiiRtBuilder::new(compiled, scheduler)
         .slots(1)
-        .max_frames(1000)
+        .max_frames(10_000_000)
         .max_runtime(Some(5))
         .slot_priority_enabled(true)
         .inline_continuation(true)
@@ -403,7 +407,9 @@ fn test_fanout_bulk_filtered_successor_completes() {
         scheduler,
         RuntimeConfig {
             slots: 1,
-            max_frames: 1000,
+            // Large enough that the run cannot finish before the predicate observes
+            // TARGET_FRAMES (see the note in the slot-priority test above).
+            max_frames: 10_000_000,
             max_runtime: Some(5),
             system_threads: 1,
             workers: 4,
@@ -427,6 +433,124 @@ fn test_fanout_bulk_filtered_successor_completes() {
          {TARGET_FRAMES}); a bulk chunk overlapping c's filter [5,6) without starting \
          inside it failed to decrement its dependency"
     );
+}
+
+/// Run `json` for at least `target_frames` frames and return
+/// `(frames_completed, max_stale_drops_seen)`. A healthy run drops nothing; the
+/// stale-task guard only fires when dispatched work is discarded.
+fn run_capturing_stale_drops(
+    json: &str,
+    workers: usize,
+    inline_continuation: bool,
+    target_frames: usize,
+) -> (usize, usize) {
+    let spec = from_json_str(json, 2).expect("JSON parse failed");
+    let scheduler = create_scheduler(SchedulerConfig {
+        scheduler_type: SchedulerType::WorkStealing,
+        core_offset: 0,
+        num_workers: workers,
+        record: false,
+        external_recorder: None,
+        base_instant: std::time::Instant::now(),
+        system_threads: 1,
+        receiver_threads: 0,
+        target_batch_size: 1,
+        batch_timeout_us: 10,
+        worker_affinity: None,
+        worker_hook: None,
+    });
+    let compiled = spec.compile(&scheduler);
+    let mut rt = TomiiRtBuilder::with_config(
+        compiled,
+        scheduler,
+        RuntimeConfig {
+            slots: 1,
+            // Large budget so the run outlives the predicate's first observation of
+            // `target_frames` regardless of how fast the graph is (avoids front-run).
+            max_frames: 10_000_000,
+            max_runtime: Some(5),
+            system_threads: 1,
+            workers,
+            inline_continuation,
+            ..RuntimeConfig::default()
+        },
+    )
+    .build()
+    .expect("build failed");
+
+    let mut frames = 0usize;
+    let mut drops = 0usize;
+    rt.run_until(|p| {
+        frames = frames.max(p.frames_completed);
+        drops = drops.max(p.stale_drops);
+        p.frames_completed >= target_frames
+    })
+    .expect("run_until failed");
+    (frames, drops)
+}
+
+/// Regression test for the successor-less-root work-loss bug (2026-09 eval item 5):
+/// a graph whose only fan-out is a root with no successor had `total_tasks = 0`, so
+/// completion fired before the root's instances ran and the generation bump silently
+/// dropped them. Counting initial nodes in `pending_tasks` makes completion wait for
+/// every root instance — asserted here via zero stale drops across the flag matrix.
+#[test]
+fn test_successor_less_root_runs_all_instances() {
+    let json = r#"
+    { "nodes": [ { "name": "root", "factor": 8, "function": "noop", "args": [] } ] }
+    "#;
+    const TARGET: usize = 5;
+    for workers in [1usize, 4] {
+        for inline in [true, false] {
+            let (frames, drops) = run_capturing_stale_drops(json, workers, inline, TARGET);
+            assert!(
+                frames >= TARGET,
+                "successor-less root stalled at {frames} frames (W={workers}, inline={inline})"
+            );
+            assert_eq!(
+                drops, 0,
+                "successor-less root dropped {drops} instance(s) as stale (W={workers}, \
+                 inline={inline}) — its instances were not counted in completion"
+            );
+        }
+    }
+}
+
+/// Regression test for the partial-coverage variant: a root feeding a FILTERED
+/// successor (`a.out(3)`) leaves a's other instances consumed by nothing. Before the
+/// fix those uncovered instances gated nothing and were dropped once the covered path
+/// completed the frame. Counting the root's instances closes it.
+#[test]
+fn test_root_with_filtered_successor_runs_all_instances() {
+    let json = r#"
+    {
+        "nodes": [
+            { "name": "a", "factor": 8, "function": "noop", "args": [] },
+            {
+                "name": "b",
+                "function": "noop",
+                "args": [
+                    { "type": "$res", "predecessor": { "name": "a", "indexes": "3" } }
+                ]
+            }
+        ]
+    }
+    "#;
+    const TARGET: usize = 5;
+    for workers in [1usize, 4] {
+        for inline in [true, false] {
+            let (frames, drops) = run_capturing_stale_drops(json, workers, inline, TARGET);
+            assert!(
+                frames >= TARGET,
+                "filtered-successor root stalled at {frames} frames (W={workers}, inline={inline})"
+            );
+            assert_eq!(
+                drops, 0,
+                "filtered-successor root dropped {drops} uncovered instance(s) (W={workers}, \
+                 inline={inline})"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

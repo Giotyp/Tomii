@@ -252,6 +252,11 @@ pub struct Telemetry {
     pub base_instant: Arc<Instant>,
     pub job_counter: Arc<AtomicUsize>,
     pub frame_complete_counter: Arc<AtomicUsize>,
+    /// Count of task instances dropped by the stale-task guard over the run. In a
+    /// healthy run with no incomplete-frame evictions this stays 0; a non-zero value
+    /// means dispatched work was silently discarded (a premature-completion bug, or an
+    /// eviction). Surfaced in the JSON report and as a shutdown WARN.
+    pub stale_tasks_dropped: Arc<AtomicUsize>,
 }
 
 impl Telemetry {
