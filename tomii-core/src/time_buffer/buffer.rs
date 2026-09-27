@@ -2,7 +2,7 @@ use super::report::{
     aggregate_task_data, build_json_report_value, collect_print_stats_data,
     collect_report_frame_data, compute_critical_path_report, compute_node_stats,
     compute_wall_span_us, format_per_task_analysis, format_system_thread_stats,
-    format_timing_summary, generate_optimization_suggestions,
+    format_timing_summary, generate_optimization_suggestions, worker_id_range,
 };
 use super::{SlotStats, TimingMethod, TimingRequest};
 use crate::utils_rdtsc::{cycles_to_ns, rdtsc};
@@ -727,8 +727,14 @@ impl TimeBuffer {
         // overlap and inflated the apparent idle time, which fed a bogus
         // "underutilisation" signal into the tuning-agent hints.
         let worker_denom = total_wall_us;
-        let max_worker_id = worker_busy_us.keys().copied().max().unwrap_or(0);
-        let worker_busy_pct: Vec<f64> = (0..=max_worker_id)
+        // Worker ids are CPU core numbers (core_offset + 0..workers), so iterate over
+        // the id span rather than 0..=max: the latter prepended one zero entry per
+        // unused core below core_offset (e.g. 8 leading zeros at core_offset 8), which
+        // also diluted the average utilisation. `worker_id_first` is the lowest core so
+        // the hint below can report the real worker id.
+        let (worker_id_first, worker_id_last) =
+            worker_id_range(&worker_busy_us).unwrap_or((0, 0));
+        let worker_busy_pct: Vec<f64> = (worker_id_first..=worker_id_last)
             .map(|wid| {
                 let busy = worker_busy_us.get(&wid).copied().unwrap_or(0.0);
                 if worker_denom > 0.0 {
@@ -762,9 +768,11 @@ impl TimeBuffer {
                 .cloned()
                 .fold(f64::NEG_INFINITY, f64::max);
             let avg_pct = worker_busy_pct.iter().sum::<f64>() / worker_busy_pct.len() as f64;
-            for (wid, &pct) in worker_busy_pct.iter().enumerate() {
+            for (idx, &pct) in worker_busy_pct.iter().enumerate() {
                 let diff = max_pct - pct;
                 if diff > 10.0 {
+                    // worker_busy_pct starts at the lowest core id, not 0.
+                    let wid = worker_id_first + idx;
                     hints.push(format!(
                         "worker {} utilization ({:.1}%) is {:.1}% below average — possible load imbalance",
                         wid, pct, avg_pct - pct
