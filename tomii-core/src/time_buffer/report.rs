@@ -194,17 +194,25 @@ pub(super) fn format_timing_summary(
         // Total Runtime is the real wall-clock span of the run — from the first frame
         // starting to the last finishing — NOT the sum of per-frame latencies, which
         // double-counts work that overlapped across concurrent slots (e.g. 5.6 s summed
-        // vs 6.0 s real). Derived from the per-frame offsets on the worker slots.
-        let mut min_start = Duration::MAX;
-        let mut max_end = Duration::ZERO;
+        // vs 6.0 s real). It is measured over the SAME steady-state frames the
+        // throughput and averages use (the warm-up frames are excluded, in start-time
+        // order), so throughput * runtime stays consistent with the frame count and the
+        // figure matches the JSON report.
+        let mut frame_offsets: Vec<(Duration, Duration)> = Vec::new();
         for slot_stats in slot_statistics.iter().take(worker_slots_end) {
             for stats in slot_stats {
-                if stats.start_offset < min_start {
-                    min_start = stats.start_offset;
-                }
-                if stats.end_offset > max_end {
-                    max_end = stats.end_offset;
-                }
+                frame_offsets.push((stats.start_offset, stats.end_offset));
+            }
+        }
+        frame_offsets.sort_by_key(|f| f.0);
+        let mut min_start = Duration::MAX;
+        let mut max_end = Duration::ZERO;
+        for &(start, end) in frame_offsets.iter().skip(excluded_count) {
+            if start < min_start {
+                min_start = start;
+            }
+            if end > max_end {
+                max_end = end;
             }
         }
         let global_total: Duration = if max_end > min_start {
