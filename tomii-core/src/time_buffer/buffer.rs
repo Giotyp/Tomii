@@ -493,7 +493,9 @@ impl TimeBuffer {
         });
 
         let total_time = match (&start_time, &end_time) {
-            (TimingMethod::Instant(start), TimingMethod::Instant(end)) => end.duration_since(*start),
+            (TimingMethod::Instant(start), TimingMethod::Instant(end)) => {
+                end.duration_since(*start)
+            }
             (TimingMethod::Rdtsc(start_cycles), TimingMethod::Rdtsc(end_cycles)) => {
                 let cycles = end_cycles.saturating_sub(*start_cycles);
                 Duration::from_nanos(cycles_to_ns(cycles) as u64)
@@ -660,11 +662,8 @@ impl TimeBuffer {
 
         // ── 2+3. Collect and apply exclusion ──────────────────────────────────────
         let (included_total_times, per_frame_tasks, included_offsets) =
-            match collect_report_frame_data(
-                &self.slot_statistics,
-                worker_slots_end,
-                exclude_frames,
-            ) {
+            match collect_report_frame_data(&self.slot_statistics, worker_slots_end, exclude_frames)
+            {
                 Some(data) => data,
                 None => {
                     tracing::warn!("no frames to report after exclusion");
@@ -732,8 +731,7 @@ impl TimeBuffer {
         // unused core below core_offset (e.g. 8 leading zeros at core_offset 8), which
         // also diluted the average utilisation. `worker_id_first` is the lowest core so
         // the hint below can report the real worker id.
-        let (worker_id_first, worker_id_last) =
-            worker_id_range(&worker_busy_us).unwrap_or((0, 0));
+        let (worker_id_first, worker_id_last) = worker_id_range(&worker_busy_us).unwrap_or((0, 0));
         let worker_busy_pct: Vec<f64> = (worker_id_first..=worker_id_last)
             .map(|wid| {
                 let busy = worker_busy_us.get(&wid).copied().unwrap_or(0.0);

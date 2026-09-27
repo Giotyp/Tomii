@@ -313,7 +313,9 @@ fn test_slot_priority_single_slot_nonnetwork_restarts() {
         worker_affinity: None,
         worker_hook: None,
     });
-    let compiled = from_json_str(json, 2).expect("JSON parse failed").compile(&scheduler);
+    let compiled = from_json_str(json, 2)
+        .expect("JSON parse failed")
+        .compile(&scheduler);
 
     // Budget generously above the success target so the runtime's own
     // `completed == max_frames` stop never front-runs the predicate; `max_runtime`

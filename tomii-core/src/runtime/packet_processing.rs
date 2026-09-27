@@ -663,10 +663,11 @@ mod loom_tests {
 
             // The lost-packet stall: packet sits in the buffer while the slot is active
             // and the promoter already drained (took empty) — nothing will drain it again.
-            let lost = still_buffered
-                && (bitmap.load(Ordering::Acquire) & 1 != 0)
-                && !drained_it;
-            assert!(!lost, "packet stranded in buffer after promote+drain (findings #28)");
+            let lost = still_buffered && (bitmap.load(Ordering::Acquire) & 1 != 0) && !drained_it;
+            assert!(
+                !lost,
+                "packet stranded in buffer after promote+drain (findings #28)"
+            );
 
             // And overall it must be accounted for exactly once (unless still validly buffered
             // ahead of a promotion that has not drained it).
