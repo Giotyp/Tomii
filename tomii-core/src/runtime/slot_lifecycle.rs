@@ -195,7 +195,19 @@ pub(super) fn check_slots(
             thread_slot,
         );
 
-        if can_restart && !shared.config.slot_priority_enabled {
+        // Restart the just-released slot in place for the next frame. This is the
+        // ONLY restart path for a non-network workload: promotion in
+        // `release_and_dispatch_next` only ever activates a *Buffering* slot, and a
+        // slot becomes Buffering solely in the network packet-admission path
+        // (`assign_frame_to_available_slot`). So with `--slot-priority` on a
+        // compute-only graph, nothing is ever buffering and — before this fix — the
+        // slot went Inactive and never restarted, hanging the run (single-slot chains
+        // spun forever at ~22 GB RSS; see findings #14/#19). `restart_slot_nonnetwork`
+        // already returns early when a network config is present, so it stays a no-op
+        // in network mode regardless of slot-priority; the previous
+        // `&& !slot_priority_enabled` guard was therefore both redundant for network
+        // graphs and actively wrong for non-network ones.
+        if can_restart {
             restart_slot_nonnetwork(shared, proc_slot, thread_core, thread_slot);
         }
     }

@@ -205,6 +205,52 @@ pub(super) fn assign_frame_to_available_slot(
         let slot_id = (last_slot_assigned + i) % shared.config.slots;
         let state = slot_states.get_mut(slot_id).unwrap();
         if *state == SlotState::Inactive {
+            if !shared.config.slot_priority_enabled && shared.graph.network_config().is_some() {
+                // Parallel mode (slot-priority off — the default) on a NETWORK graph:
+                // activate the slot immediately so this frame runs concurrently with the
+                // others, exactly like the `last_assigned` fast path above. The Buffering
+                // state exists only for slot-priority's sequential promotion machinery
+                // (release_and_activate_next), which never runs when slot-priority is off
+                // — so a network slot parked as Buffering here would strand its packets
+                // forever: admit_packet routes them by the real active_bitmap (which stays
+                // clear for a Buffering slot), they land in the slot buffer, and nothing
+                // ever drains it. That silently dropped every frame after the first on a
+                // multi-slot network run (findings #29).
+                //
+                // Non-network parallel graphs are deliberately left on the Buffering path
+                // below: there the initial nodes are spawned eagerly by the caller and
+                // check_slots polls every slot (active_bitmap is treated as all-ones when
+                // slot-priority is off), so those slots complete without promotion.
+                *state = SlotState::Active;
+                shared
+                    .slot_data
+                    .active_bitmap
+                    .fetch_or(1u64 << slot_id, Ordering::Release);
+                shared.slot_data.needs_check[slot_id].store(true, Ordering::Release);
+                running_frames.push((frame, slot_id));
+                shared.slot_data.frame_id[slot_id].store(frame, Ordering::Relaxed);
+                shared
+                    .slot_data
+                    .last_assigned
+                    .store(slot_id, Ordering::SeqCst);
+                print_debug(|| {
+                    format!(
+                        "Assigned frame {} to slot {} (Inactive) -> Active (parallel)",
+                        frame, slot_id
+                    )
+                });
+                drop(running_frames); // Release lock before returning
+
+                // Bump generation for the new frame (see the last_assigned branch).
+                shared.slot_data.generation[slot_id].fetch_add(1, Ordering::SeqCst);
+                shared
+                    .telemetry
+                    .with_timing(|tb| tb.start_slot_processing(slot_id));
+                slot_check_sample(shared);
+                // Newly activated: the caller spawns this slot's initial nodes.
+                return Some((slot_id, true));
+            }
+
             *state = SlotState::Buffering; // Mark slot as Buffering
             running_frames.push((frame, slot_id));
             shared.slot_data.frame_id[slot_id].store(frame, Ordering::Relaxed);

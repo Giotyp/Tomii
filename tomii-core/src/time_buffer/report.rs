@@ -69,17 +69,35 @@ pub(super) fn collect_print_stats_data(
         }
 
         total_frames += slot_stats.len();
+    }
 
+    // Collect all worker-slot frames as (start_offset, total_time, task_map) and order
+    // them by START TIME. Warm-up exclusion downstream skips the first `exclude_frames`
+    // of these; collecting slot-major (the previous behaviour) made that drop slot 0's
+    // entire warm-up run instead of the first-N-in-time frames, skewing the steady-state
+    // latency stats. Mirrors the ordering fix in `collect_report_frame_data`.
+    let mut worker_frames: Vec<(
+        Duration,
+        Duration,
+        std::collections::HashMap<String, Vec<(usize, Duration)>>,
+    )> = Vec::new();
+    for (slot_id, slot_stats) in slot_statistics.iter().enumerate().take(slots) {
+        if slot_id >= system_slots_start {
+            continue; // system slots handled above
+        }
         for stats in slot_stats {
-            global_total_times.push(stats.total_time);
-
             let mut frame_tasks: std::collections::HashMap<String, Vec<(usize, Duration)>> =
                 std::collections::HashMap::new();
             for (task_name, times) in &stats.task_times {
                 frame_tasks.insert(task_name.clone(), times.clone());
             }
-            per_frame_task_data.push(frame_tasks);
+            worker_frames.push((stats.start_offset, stats.total_time, frame_tasks));
         }
+    }
+    worker_frames.sort_by_key(|f| f.0);
+    for (_start, total, tasks) in worker_frames {
+        global_total_times.push(total);
+        per_frame_task_data.push(tasks);
     }
 
     (
@@ -173,7 +191,36 @@ pub(super) fn format_timing_summary(
     let steady_state_count = total_frames.saturating_sub(excluded_count);
 
     if !global_total_times.is_empty() {
-        let global_total: Duration = global_total_times.iter().sum();
+        // Total Runtime is the real wall-clock span of the run — from the first frame
+        // starting to the last finishing — NOT the sum of per-frame latencies, which
+        // double-counts work that overlapped across concurrent slots (e.g. 5.6 s summed
+        // vs 6.0 s real). It is measured over the SAME steady-state frames the
+        // throughput and averages use (the warm-up frames are excluded, in start-time
+        // order), so throughput * runtime stays consistent with the frame count and the
+        // figure matches the JSON report.
+        let mut frame_offsets: Vec<(Duration, Duration)> = Vec::new();
+        for slot_stats in slot_statistics.iter().take(worker_slots_end) {
+            for stats in slot_stats {
+                frame_offsets.push((stats.start_offset, stats.end_offset));
+            }
+        }
+        frame_offsets.sort_by_key(|f| f.0);
+        let mut min_start = Duration::MAX;
+        let mut max_end = Duration::ZERO;
+        for &(start, end) in frame_offsets.iter().skip(excluded_count) {
+            if start < min_start {
+                min_start = start;
+            }
+            if end > max_end {
+                max_end = end;
+            }
+        }
+        let global_total: Duration = if max_end > min_start {
+            max_end - min_start
+        } else {
+            // Degenerate offsets (e.g. a single frame): fall back to summed latencies.
+            global_total_times.iter().sum()
+        };
 
         if excluded_count > 0 {
             out.push_str(&format!(
@@ -427,36 +474,96 @@ pub(super) fn collect_report_frame_data(
 ) -> Option<(
     Vec<Duration>,
     Vec<std::collections::HashMap<String, Vec<(usize, Duration)>>>,
+    Vec<(Duration, Duration)>,
 )> {
-    let mut frame_total_times: Vec<Duration> = Vec::new();
-    let mut per_frame_tasks: Vec<std::collections::HashMap<String, Vec<(usize, Duration)>>> =
-        Vec::new();
+    // One tuple per frame: (start_offset, end_offset, total_time, task_map). Collected
+    // slot-major, then ORDERED BY START TIME before warm-up exclusion — otherwise
+    // skipping the first `exclude_frames` in slot-major order drops slot 0's whole
+    // warm-up run instead of the first-N frames in wall-clock time, which skewed
+    // throughput (~0.95x at S>=2) and the latency percentiles.
+    let mut frames: Vec<(
+        Duration,
+        Duration,
+        Duration,
+        std::collections::HashMap<String, Vec<(usize, Duration)>>,
+    )> = Vec::new();
 
     for stats_list in slot_statistics.iter().take(worker_slots_end) {
         for stats in stats_list {
-            frame_total_times.push(stats.total_time);
             let mut m: std::collections::HashMap<String, Vec<(usize, Duration)>> =
                 std::collections::HashMap::new();
             for (name, entries) in &stats.task_times {
                 m.insert(name.clone(), entries.clone());
             }
-            per_frame_tasks.push(m);
+            frames.push((stats.start_offset, stats.end_offset, stats.total_time, m));
         }
     }
 
-    let total_frames = frame_total_times.len();
-    let excluded = exclude_frames.min(total_frames);
+    frames.sort_by_key(|f| f.0);
 
-    let included_total_times: Vec<Duration> =
-        frame_total_times.iter().skip(excluded).copied().collect();
-    let included_tasks: Vec<std::collections::HashMap<String, Vec<(usize, Duration)>>> =
-        per_frame_tasks.into_iter().skip(excluded).collect();
+    let excluded = exclude_frames.min(frames.len());
+    let mut included_total_times: Vec<Duration> = Vec::new();
+    let mut included_tasks: Vec<std::collections::HashMap<String, Vec<(usize, Duration)>>> =
+        Vec::new();
+    let mut included_offsets: Vec<(Duration, Duration)> = Vec::new();
+    for (start, end, total, tasks) in frames.into_iter().skip(excluded) {
+        included_total_times.push(total);
+        included_offsets.push((start, end));
+        included_tasks.push(tasks);
+    }
 
     if included_total_times.is_empty() {
         return None;
     }
 
-    Some((included_total_times, included_tasks))
+    Some((included_total_times, included_tasks, included_offsets))
+}
+
+/// Inclusive `(min, max)` of the worker ids present in `worker_busy_us`, or `None`
+/// when it is empty.
+///
+/// Worker ids are CPU core numbers (`core_offset + 0..workers`) — contiguous but not
+/// starting at 0 — so the worker count is the span `max - min + 1` and per-worker
+/// vectors should run over `min..=max` (indexing from 0 emits spurious leading zeros
+/// for the cores below `core_offset`).
+pub(super) fn worker_id_range(
+    worker_busy_us: &std::collections::HashMap<usize, f64>,
+) -> Option<(usize, usize)> {
+    let mut range: Option<(usize, usize)> = None;
+    for &id in worker_busy_us.keys() {
+        range = Some(match range {
+            None => (id, id),
+            Some((lo, hi)) => (lo.min(id), hi.max(id)),
+        });
+    }
+    range
+}
+
+/// Wall-clock span, in microseconds, covering a set of frames given their
+/// `(start_offset, end_offset)` pairs relative to a common base reference.
+///
+/// This is `max(end) − min(start)` — the elapsed real time from the first frame
+/// starting to the last frame finishing — which correctly accounts for frames that
+/// overlap across concurrent slots. Summing per-frame latencies (the previous
+/// behaviour) instead double-counts overlapping work and makes throughput collapse
+/// to `1 / avg_latency` regardless of how many slots run concurrently.
+///
+/// Returns `0.0` for an empty input.
+pub(super) fn compute_wall_span_us(frame_offsets: &[(Duration, Duration)]) -> f64 {
+    let mut min_start = Duration::MAX;
+    let mut max_end = Duration::ZERO;
+    for &(start, end) in frame_offsets {
+        if start < min_start {
+            min_start = start;
+        }
+        if end > max_end {
+            max_end = end;
+        }
+    }
+    if frame_offsets.is_empty() || max_end <= min_start {
+        return 0.0;
+    }
+    (max_end - min_start).as_nanos() as f64 / 1_000.0
 }
 
 /// Aggregate per-node execution times across included frames and compute `NodeStats`
@@ -488,10 +595,12 @@ pub(super) fn compute_node_stats(
         }
     }
 
-    let num_workers = {
-        let max_w = worker_busy_us.keys().copied().max().unwrap_or(0);
-        max_w + 1
-    };
+    // Worker ids in the timing data are CPU core numbers (core_offset + 0..workers),
+    // so they are contiguous but do not start at 0. The number of workers is the id
+    // span (max - min + 1), NOT max + 1 — the latter counted the unused ids below
+    // core_offset (e.g. 32 instead of 24 at core_offset 8), inflating the denominator
+    // and understating every node's pct_of_total.
+    let num_workers = worker_id_range(&worker_busy_us).map_or(0, |(lo, hi)| hi - lo + 1);
     let denominator_us = total_wall_us * (num_workers as f64).max(1.0);
 
     let mut node_stats_map: std::collections::HashMap<String, NodeStats> =
@@ -904,4 +1013,131 @@ pub(super) fn build_json_report_value(
         "bottleneck_hints": hints,
         "optimization_suggestions": suggestions,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(slot: usize, frame_count: usize, start_us: u64, end_us: u64) -> SlotStats {
+        let mut s = SlotStats::new(slot, frame_count);
+        s.start_offset = Duration::from_micros(start_us);
+        s.end_offset = Duration::from_micros(end_us);
+        s.total_time = Duration::from_micros(end_us - start_us);
+        s
+    }
+
+    fn summed_latency_us(offsets: &[(Duration, Duration)]) -> f64 {
+        offsets
+            .iter()
+            .map(|(s, e)| (*e - *s).as_nanos() as f64 / 1_000.0)
+            .sum()
+    }
+
+    #[test]
+    fn wall_span_empty_is_zero() {
+        assert_eq!(compute_wall_span_us(&[]), 0.0);
+    }
+
+    #[test]
+    fn wall_span_single_frame_equals_latency() {
+        let offs = vec![(Duration::from_micros(10), Duration::from_micros(60))];
+        assert!((compute_wall_span_us(&offs) - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn wall_span_accounts_for_overlap() {
+        // Two frames overlapping across two slots: A[0,100] and B[50,150] µs.
+        // Summed latency is 200 µs, but the real wall-clock span is only 150 µs.
+        let offs = vec![
+            (Duration::from_micros(0), Duration::from_micros(100)),
+            (Duration::from_micros(50), Duration::from_micros(150)),
+        ];
+        let span = compute_wall_span_us(&offs);
+        assert!((span - 150.0).abs() < 1e-9, "span={span}");
+        assert!(
+            span < summed_latency_us(&offs),
+            "wall span must be strictly less than summed latency under overlap"
+        );
+    }
+
+    #[test]
+    fn wall_span_degenerate_span_is_zero() {
+        // All frames report the same start and end (e.g. a zero-length degenerate
+        // measurement): span collapses to zero so the caller falls back safely.
+        let offs = vec![(Duration::from_micros(5), Duration::from_micros(5))];
+        assert_eq!(compute_wall_span_us(&offs), 0.0);
+    }
+
+    #[test]
+    fn collect_report_frame_data_propagates_offsets_and_exclusion() {
+        // Regression guard for the #17 throughput/utilisation bug: the report must
+        // derive throughput from the real wall-clock span, not from the sum of
+        // per-frame latencies (which collapses throughput to 1/avg_latency and
+        // fed a bogus "underutilisation" signal to the tuning agent).
+        //
+        // Frames flattened slot-major: slot0 warm-up [0,100], slot0 steady [200,260],
+        // slot1 steady [210,300]. Excluding the one leading warm-up frame leaves two
+        // overlapping steady frames whose real span is 300-200 = 100 µs.
+        let stats = vec![
+            vec![frame(0, 0, 0, 100), frame(0, 1, 200, 260)],
+            vec![frame(1, 0, 210, 300)],
+        ];
+        let (lat, _tasks, offs) =
+            collect_report_frame_data(&stats, 2, 1).expect("frames after exclusion");
+
+        assert_eq!(lat.len(), 2, "one warm-up frame excluded");
+        assert_eq!(offs.len(), 2);
+
+        let span = compute_wall_span_us(&offs);
+        assert!((span - 100.0).abs() < 1e-9, "wall span={span}");
+
+        let num = lat.len() as f64;
+        let tput_wall = num / (span / 1e6);
+        let tput_summed = num / (summed_latency_us(&offs) / 1e6); // the old, buggy value
+        assert!(
+            tput_wall > tput_summed,
+            "wall-span throughput ({tput_wall}) must exceed the summed-latency value \
+             ({tput_summed}) whenever frames overlap"
+        );
+    }
+
+    #[test]
+    fn exclusion_is_time_ordered_not_slot_major() {
+        // slot 0's only frame STARTS LATER (500 µs) than slot 1's (0 µs), but appears
+        // first in slot-major order. Excluding one warm-up frame must drop the
+        // time-earliest frame (slot 1's), not slot 0's — otherwise steady-state stats
+        // are skewed (~0.95x throughput at S>=2, findings #17 follow-up).
+        let stats = vec![
+            vec![frame(0, 0, 500, 600)], // later in time, first slot-major
+            vec![frame(1, 0, 0, 120)],   // earliest in time
+        ];
+        let (lat, _tasks, offs) =
+            collect_report_frame_data(&stats, 2, 1).expect("frames after exclusion");
+
+        assert_eq!(lat.len(), 1, "one warm-up frame excluded");
+        assert_eq!(
+            offs[0],
+            (Duration::from_micros(500), Duration::from_micros(600)),
+            "the time-earliest frame (slot 1) must be the one excluded, not slot 0's"
+        );
+    }
+
+    #[test]
+    fn worker_id_range_spans_core_numbers() {
+        // Worker ids are core numbers that do not start at 0 (core_offset=8, 24 workers
+        // -> ids 8..=31). The range must be (8, 31) so the worker count is the span 24,
+        // not max+1 = 32 (findings #17 follow-up (c)).
+        let mut m: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
+        for id in [8usize, 20, 31] {
+            m.insert(id, 1.0);
+        }
+        assert_eq!(worker_id_range(&m), Some((8, 31)));
+
+        assert_eq!(worker_id_range(&std::collections::HashMap::new()), None);
+
+        let mut single: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
+        single.insert(5, 1.0);
+        assert_eq!(worker_id_range(&single), Some((5, 5)));
+    }
 }

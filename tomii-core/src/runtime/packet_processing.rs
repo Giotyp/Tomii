@@ -200,14 +200,44 @@ fn admit_packet(
         SlotAssignment::Dropped => return,
     };
 
-    let slot_is_active =
-        shared.slot_data.active_bitmap.load(Ordering::Acquire) & (1u64 << node_info.slot) != 0;
-    if slot_is_active {
+    // Route the packet to the active batch if its slot is running, or into the slot
+    // buffer if the slot is still Buffering (awaiting promotion).
+    //
+    // The active case stays lock-free: an already-active slot is never concurrently
+    // drained, so an unsynchronised bitmap read is safe.
+    //
+    // The buffering case must be serialised against `release_and_activate_next`,
+    // which promotes a Buffering slot and drains its buffer while holding
+    // `states.write()` (flip → drain happen under one held lock). Previously this
+    // path read the bitmap without a lock and then pushed into the slot buffer, so a
+    // promote+drain could land between the read and the push: the slot flipped to
+    // Active, its buffer was drained, and this packet was then pushed into a buffer
+    // nothing would ever drain again — the packet was counted but its task never ran,
+    // stalling the frame permanently (findings #28; likely also the radar stall #22
+    // and the old 64x16 drops). Take `states.read()` and RE-CHECK the bitmap under it:
+    // holding the read lock excludes the promoter's `states.write()`, so either the
+    // promotion has not happened yet (push into the still-Buffering slot; the promoter
+    // drains it afterwards) or it already completed (re-check sees Active; route to the
+    // active batch). Lock order is states → buffers, matching the global protocol.
+    let slot = node_info.slot;
+    let is_active = |shared: &Arc<SharedData>| {
+        shared.slot_data.active_bitmap.load(Ordering::Acquire) & (1u64 << slot) != 0
+    };
+    if is_active(shared) {
         active_packet_batch.push((node_info.clone(), Some(packet_cm)));
     } else {
-        let mut slot_buffers = shared.slot_data.buffers.write();
-        slot_buffers[node_info.slot].push((node_info.clone(), Some(packet_cm)));
-        drop(slot_buffers);
+        let slot_states = shared.slot_data.states.read();
+        if is_active(shared) {
+            // Promoted between the first check and acquiring the lock — its buffer has
+            // already been drained, so route to the active batch instead.
+            drop(slot_states);
+            active_packet_batch.push((node_info.clone(), Some(packet_cm)));
+        } else {
+            let mut slot_buffers = shared.slot_data.buffers.write();
+            slot_buffers[slot].push((node_info.clone(), Some(packet_cm)));
+            drop(slot_buffers);
+            drop(slot_states);
+        }
     }
 
     if shared.telemetry.async_recorder.is_some()
@@ -528,5 +558,123 @@ fn check_frame_completion(
             "all frames received, receivers will shut down"
         );
         shared.net.receive_finished.store(true, Ordering::Release);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Loom model: packet-admission vs slot-promotion race (findings #28)
+// ---------------------------------------------------------------------------
+//
+// Models the exact synchronisation used by `admit_packet`'s buffering path and
+// `release_and_activate_next`'s promotion path (it does not call them — loom needs
+// its own atomics/locks). If the two ever diverge from this model, update both.
+//
+// Shared objects mirror `SlotData`:
+//   * `bitmap`  — `active_bitmap` (bit 0 = slot 0 active)
+//   * `states`  — the `states` RwLock (only its read/write exclusion matters here)
+//   * `buffer`  — the slot's entry in the `buffers` RwLock
+//
+// Promoter (release_and_activate_next): holds states.write() across the whole
+// flip→drain, i.e. `bitmap |= 1` (Release) then drains `buffer` under buffers.write().
+//
+// Admitter (admit_packet buffering path): reads the bitmap; on "inactive" it takes
+// states.read() and RE-CHECKS the bitmap before choosing buffer vs active-batch.
+//
+// Invariant: the single packet is accounted for exactly once — drained by the
+// promoter or routed to the active batch by the admitter — and is never left in the
+// buffer after the slot has gone active and been drained (that is the lost-packet
+// stall). Removing the re-check (or the states.read()) makes loom find the losing
+// interleaving.
+#[cfg(loom)]
+mod loom_tests {
+    use loom::sync::atomic::{AtomicU64, Ordering};
+    use loom::sync::{Arc, RwLock};
+
+    const PACKET: u32 = 1;
+
+    #[test]
+    fn admit_vs_promote_never_loses_packet() {
+        loom::model(|| {
+            let bitmap = Arc::new(AtomicU64::new(0)); // slot 0 starts Buffering
+            let states: Arc<RwLock<()>> = Arc::new(RwLock::new(()));
+            let buffer: Arc<RwLock<Vec<u32>>> = Arc::new(RwLock::new(Vec::new()));
+            // What the promoter drained (Some once it has run).
+            let drained: Arc<RwLock<Option<Vec<u32>>>> = Arc::new(RwLock::new(None));
+            // Whether the admitter routed the packet to the active batch.
+            let routed_active: Arc<RwLock<bool>> = Arc::new(RwLock::new(false));
+
+            // Promoter: flip → drain, all under states.write().
+            let promoter = {
+                let (bitmap, states, buffer, drained) = (
+                    Arc::clone(&bitmap),
+                    Arc::clone(&states),
+                    Arc::clone(&buffer),
+                    Arc::clone(&drained),
+                );
+                loom::thread::spawn(move || {
+                    let _sg = states.write().unwrap();
+                    bitmap.fetch_or(1, Ordering::Release);
+                    let mut buf = buffer.write().unwrap();
+                    let taken = std::mem::take(&mut *buf);
+                    *drained.write().unwrap() = Some(taken);
+                })
+            };
+
+            // Admitter: buffering-path routing with the under-lock re-check.
+            let admitter = {
+                let (bitmap, states, buffer, routed_active) = (
+                    Arc::clone(&bitmap),
+                    Arc::clone(&states),
+                    Arc::clone(&buffer),
+                    Arc::clone(&routed_active),
+                );
+                loom::thread::spawn(move || {
+                    if bitmap.load(Ordering::Acquire) & 1 != 0 {
+                        *routed_active.write().unwrap() = true; // lock-free fast path
+                    } else {
+                        let _sg = states.read().unwrap();
+                        if bitmap.load(Ordering::Acquire) & 1 != 0 {
+                            *routed_active.write().unwrap() = true;
+                        } else {
+                            buffer.write().unwrap().push(PACKET);
+                        }
+                    }
+                })
+            };
+
+            promoter.join().unwrap();
+            admitter.join().unwrap();
+
+            // Accounting: the packet is either in the promoter's drained set, or was
+            // routed active, or is still buffered *and will be drained later* — the
+            // last case is only safe if the promoter has not already drained-empty.
+            let drained = drained.read().unwrap().clone().unwrap_or_default();
+            let routed_active = *routed_active.read().unwrap();
+            let still_buffered = buffer.read().unwrap().contains(&PACKET);
+
+            let drained_it = drained.contains(&PACKET);
+            let accounted = drained_it || routed_active;
+
+            // Exactly-once: never counted twice.
+            let double = (drained_it && routed_active)
+                || (drained_it && still_buffered)
+                || (routed_active && still_buffered);
+            assert!(!double, "packet double-counted: drained={drained_it} active={routed_active} buffered={still_buffered}");
+
+            // The lost-packet stall: packet sits in the buffer while the slot is active
+            // and the promoter already drained (took empty) — nothing will drain it again.
+            let lost = still_buffered && (bitmap.load(Ordering::Acquire) & 1 != 0) && !drained_it;
+            assert!(
+                !lost,
+                "packet stranded in buffer after promote+drain (findings #28)"
+            );
+
+            // And overall it must be accounted for exactly once (unless still validly buffered
+            // ahead of a promotion that has not drained it).
+            assert!(
+                accounted || still_buffered,
+                "packet vanished: not drained, not routed active, not buffered"
+            );
+        });
     }
 }

@@ -93,6 +93,19 @@ impl SuccEdge {
             || (pred_index >= self.filter_start as usize && pred_index < self.filter_end as usize)
     }
 
+    /// The predecessor-index filter `[start, end)` for this edge, or `None` when the
+    /// edge is unfiltered (every predecessor instance drives it). Used to intersect a
+    /// bulk completion's instance range with the filter so it decrements exactly the
+    /// covered instances rather than the whole chunk.
+    #[inline]
+    pub fn filter_bounds(&self) -> Option<(usize, usize)> {
+        if self.filter_end == NO_FILTER {
+            None
+        } else {
+            (self.filter_start as usize, self.filter_end as usize).into()
+        }
+    }
+
     /// Dependency-counter group decremented by predecessor instance `pred_index`.
     ///
     /// `Some(group)` for `group_by` barriers — the group is the predecessor's index

@@ -158,6 +158,46 @@ mod tests {
         assert!(run_chunked(&[], 4, true).is_empty());
     }
 
+    // ---- findings #21 defect B: bulk completion vs filtered edge ----
+
+    #[test]
+    fn filter_overlap_chunk_starting_inside_filter_is_clamped() {
+        // range_fft chunk [0,16) driving cluster's `range_fft.out(0)` filter [0,1):
+        // must cover exactly instance 0, NOT decrement by the whole 16 (which zeroed
+        // the barrier early and fired cluster before any cfar completed).
+        assert_eq!(filter_overlap(0, 16, 0, 1), Some((0, 1)));
+    }
+
+    #[test]
+    fn filter_overlap_chunk_overlapping_without_starting_inside() {
+        // Chunk [16,32) overlaps filter [20,24) but starts outside it. The old
+        // start-only check skipped this chunk entirely, decrementing nothing and
+        // potentially hanging the successor. It must cover [20,24).
+        assert_eq!(filter_overlap(16, 16, 20, 24), Some((20, 24)));
+    }
+
+    #[test]
+    fn filter_overlap_no_overlap_is_none() {
+        // Chunk entirely below the filter, and entirely above it.
+        assert_eq!(filter_overlap(0, 8, 20, 24), None);
+        assert_eq!(filter_overlap(24, 8, 20, 24), None);
+    }
+
+    #[test]
+    fn filter_overlap_partial_tail_and_head() {
+        // Chunk tail crosses into the filter, and chunk head crosses out of it.
+        assert_eq!(filter_overlap(18, 4, 20, 24), Some((20, 22))); // [18,22) ∩ [20,24)
+        assert_eq!(filter_overlap(22, 4, 20, 24), Some((22, 24))); // [22,26) ∩ [20,24)
+    }
+
+    #[test]
+    fn filter_overlap_single_completion_replicates_passes_filter() {
+        // count<=1 behaves like a point membership test against the filter.
+        assert_eq!(filter_overlap(5, 1, 2, 6), Some((5, 6))); // inside
+        assert_eq!(filter_overlap(6, 1, 2, 6), None); // just past the end
+        assert_eq!(filter_overlap(1, 1, 2, 6), None); // just before the start
+    }
+
     #[test]
     fn test_non_contiguous_always_individual() {
         // Non-contiguous indices → individual dispatch even with coalesce=true
@@ -223,6 +263,30 @@ mod tests {
     }
 }
 
+/// Intersection of a completion's instance range `[pred_index, pred_index + count)`
+/// with an edge's predecessor filter `[filter_lo, filter_hi)`. Returns the covered
+/// sub-range `[lo, hi)` (with `lo < hi`), or `None` when they do not overlap.
+///
+/// A bulk completion must decrement exactly this sub-range: decrementing the whole
+/// chunk over-counts (firing a filtered barrier early), while skipping a chunk that
+/// overlaps the filter but starts outside it under-counts (which can hang the
+/// successor). See findings #21 defect B.
+#[inline]
+pub(super) fn filter_overlap(
+    pred_index: usize,
+    count: usize,
+    filter_lo: usize,
+    filter_hi: usize,
+) -> Option<(usize, usize)> {
+    let lo = pred_index.max(filter_lo);
+    let hi = pred_index.saturating_add(count.max(1)).min(filter_hi);
+    if lo < hi {
+        Some((lo, hi))
+    } else {
+        None
+    }
+}
+
 /// Decrement the dependency counter of the successor behind `edge` and collect any
 /// now-ready instance indices into `ready` (cleared by the callee first).
 ///
@@ -242,23 +306,71 @@ pub(super) fn decrement_and_collect_ready(
     slot_gen: u32,
     ready: &mut Vec<usize>,
 ) {
-    // When bulk_count > 1 the completing task represents N instances in one shot.
-    // The 1:1 mapping uses pred_index (the bulk start), which would fire only
-    // successor[start] — skipping the rest of the range.  Suppress 1:1 dispatch for
-    // bulk completions; the full threshold scan in decrease_and_get_ready_into
-    // handles it correctly.
-    let specific_succ_idx = if bulk_count > 1 {
-        None
-    } else {
-        edge.one_to_one_succ_idx(pred_index)
-    };
-    ctx.exec.resolution_state.decrease_and_get_ready_into(
-        slot,
-        edge.succ_id as usize,
-        slot_gen,
-        edge.pred_group(pred_index),
-        bulk_count,
-        specific_succ_idx,
-        ready,
-    );
+    match edge.filter_bounds() {
+        None => {
+            // Unfiltered edge: every completing instance drives the successor.
+            // When bulk_count > 1 the completing task represents N instances in one
+            // shot; suppress the 1:1 fast path (which uses only the chunk start) and let
+            // the threshold scan in decrease_and_get_ready_into handle the whole range.
+            let specific_succ_idx = if bulk_count > 1 {
+                None
+            } else {
+                edge.one_to_one_succ_idx(pred_index)
+            };
+            ctx.exec.resolution_state.decrease_and_get_ready_into(
+                slot,
+                edge.succ_id as usize,
+                slot_gen,
+                edge.pred_group(pred_index),
+                bulk_count,
+                specific_succ_idx,
+                ready,
+            );
+        }
+        Some((filter_lo, filter_hi)) => {
+            // Filtered edge: only predecessor instances in [filter_lo, filter_hi) drive
+            // it. Intersect the completing range [pred_index, pred_index + bulk_count)
+            // with the filter and decrement exactly the covered instances. The old code
+            // tested only the chunk START against the filter and then decremented by the
+            // whole bulk_count, so a chunk starting inside the filter over-decremented
+            // (firing barriers early) and a chunk overlapping the filter without starting
+            // inside it decremented nothing (could hang) — findings #21 defect B.
+            // pred_group underflows below filter_lo, so we must stay in range.
+            let Some((lo, hi)) = filter_overlap(pred_index, bulk_count, filter_lo, filter_hi)
+            else {
+                ready.clear();
+                return; // completion does not overlap the filter
+            };
+            if hi - lo == 1 {
+                // The common case (e.g. a `pred.out(0)` filter of [0,1)): one covered
+                // instance, decrement it directly into `ready` with no scratch.
+                ctx.exec.resolution_state.decrease_and_get_ready_into(
+                    slot,
+                    edge.succ_id as usize,
+                    slot_gen,
+                    edge.pred_group(lo),
+                    1,
+                    edge.one_to_one_succ_idx(lo),
+                    ready,
+                );
+            } else {
+                // Multiple covered instances (wider filter): decrement each with the
+                // exact single-completion semantics, accumulating ready indices.
+                ready.clear();
+                let mut scratch: Vec<usize> = Vec::new();
+                for cell in lo..hi {
+                    ctx.exec.resolution_state.decrease_and_get_ready_into(
+                        slot,
+                        edge.succ_id as usize,
+                        slot_gen,
+                        edge.pred_group(cell),
+                        1,
+                        edge.one_to_one_succ_idx(cell),
+                        &mut scratch,
+                    );
+                    ready.append(&mut scratch);
+                }
+            }
+        }
+    }
 }

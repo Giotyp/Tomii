@@ -262,6 +262,173 @@ fn test_multi_frame_single_slot() {
     rt.run().expect("run failed");
 }
 
+/// Regression test for findings #14/#19: `--slot-priority` on a **non-network**
+/// (compute-only) graph with a single slot used to hang forever. Slot-priority
+/// suppressed the in-place non-network restart and instead waited to *promote* a
+/// Buffering slot — but a slot only ever becomes Buffering in the network
+/// packet-admission path, so with one slot and no network the run stalled after
+/// frame 0 (observed at ~22 GB RSS, spinning indefinitely).
+///
+/// The test drives several frames through one slot with slot-priority +
+/// inline-continuation on the custom scheduler (the exact repro flag set) and
+/// asserts that frames keep completing. Before the fix `frames_completed` sticks
+/// at 1 and the run only ends when `max_runtime` fires, failing the assertion
+/// rather than deadlocking the test binary.
+#[test]
+fn test_slot_priority_single_slot_nonnetwork_restarts() {
+    let json = r#"
+    {
+        "nodes": [
+            { "name": "a", "function": "noop", "args": [] },
+            {
+                "name": "b",
+                "function": "noop",
+                "args": [
+                    { "type": "$res", "predecessor": { "name": "a", "indexes": "0" } }
+                ]
+            },
+            {
+                "name": "c",
+                "function": "noop",
+                "args": [
+                    { "type": "$res", "predecessor": { "name": "b", "indexes": "0" } }
+                ]
+            }
+        ]
+    }
+    "#;
+
+    // Custom (lock-free priority) scheduler to match the `--custom` repro.
+    let scheduler = create_scheduler(SchedulerConfig {
+        scheduler_type: SchedulerType::Custom,
+        core_offset: 0,
+        num_workers: 2,
+        record: false,
+        external_recorder: None,
+        base_instant: std::time::Instant::now(),
+        system_threads: 1,
+        receiver_threads: 0,
+        target_batch_size: 1,
+        batch_timeout_us: 10,
+        worker_affinity: None,
+        worker_hook: None,
+    });
+    let compiled = from_json_str(json, 2)
+        .expect("JSON parse failed")
+        .compile(&scheduler);
+
+    // Budget generously above the success target so the runtime's own
+    // `completed == max_frames` stop never front-runs the predicate; `max_runtime`
+    // bounds a regressed (hanging) run so the test fails fast instead of wedging.
+    const TARGET_FRAMES: usize = 8;
+    let mut rt = TomiiRtBuilder::new(compiled, scheduler)
+        .slots(1)
+        .max_frames(1000)
+        .max_runtime(Some(5))
+        .slot_priority_enabled(true)
+        .inline_continuation(true)
+        .build()
+        .expect("build failed");
+
+    let mut observed = 0usize;
+    rt.run_until(|p| {
+        observed = observed.max(p.frames_completed);
+        p.frames_completed >= TARGET_FRAMES
+    })
+    .expect("run_until failed");
+
+    assert!(
+        observed >= TARGET_FRAMES,
+        "single-slot slot-priority run stalled: only {observed} frame(s) completed \
+         (expected >= {TARGET_FRAMES}); the non-network restart path did not fire"
+    );
+}
+
+/// Regression test for findings #21 defect B: a bulk (fanout-bulk) completion must
+/// decrement a filtered successor edge over `|chunk ∩ filter|`, and must NOT skip a
+/// chunk that overlaps the filter without starting inside it.
+///
+/// Graph: `a`(factor=16) → `b`(factor=16, 1:1 $res) → `c`(reads `b.out(5)`). With
+/// `inline_continuation` off and W=4, `b` dispatches as 4 bulk chunks of 4; instance
+/// 5 lives in chunk `[4,8)`, which starts at 4 — OUTSIDE `c`'s filter `[5,6)`. The old
+/// start-only filter check skipped that chunk, so `c`'s dependency was never
+/// decremented and the frame never completed (hang, bounded here by `max_runtime`).
+/// The fix intersects the chunk with the filter and decrements instance 5, so the
+/// frames complete.
+#[test]
+fn test_fanout_bulk_filtered_successor_completes() {
+    let json = r#"
+    {
+        "nodes": [
+            { "name": "a", "factor": 16, "function": "noop", "args": [] },
+            {
+                "name": "b",
+                "factor": 16,
+                "function": "noop",
+                "args": [
+                    { "type": "$res", "predecessor": { "name": "a", "indexes": "0" } }
+                ]
+            },
+            {
+                "name": "c",
+                "function": "noop",
+                "args": [
+                    { "type": "$res", "predecessor": { "name": "b", "indexes": "5" } }
+                ]
+            }
+        ]
+    }
+    "#;
+
+    let spec = from_json_str(json, 2).expect("JSON parse failed");
+    let scheduler = create_scheduler(SchedulerConfig {
+        scheduler_type: SchedulerType::WorkStealing,
+        core_offset: 0,
+        num_workers: 4,
+        record: false,
+        external_recorder: None,
+        base_instant: std::time::Instant::now(),
+        system_threads: 1,
+        receiver_threads: 0,
+        target_batch_size: 1,
+        batch_timeout_us: 10,
+        worker_affinity: None,
+        worker_hook: None,
+    });
+    let compiled = spec.compile(&scheduler);
+
+    const TARGET_FRAMES: usize = 3;
+    let mut rt = TomiiRtBuilder::with_config(
+        compiled,
+        scheduler,
+        RuntimeConfig {
+            slots: 1,
+            max_frames: 1000,
+            max_runtime: Some(5),
+            system_threads: 1,
+            workers: 4,
+            inline_continuation: false, // force the fanout-bulk dispatch path
+            ..RuntimeConfig::default()
+        },
+    )
+    .build()
+    .expect("build failed");
+
+    let mut observed = 0usize;
+    rt.run_until(|p| {
+        observed = observed.max(p.frames_completed);
+        p.frames_completed >= TARGET_FRAMES
+    })
+    .expect("run_until failed");
+
+    assert!(
+        observed >= TARGET_FRAMES,
+        "fanout-bulk run stalled: only {observed} frame(s) completed (expected >= \
+         {TARGET_FRAMES}); a bulk chunk overlapping c's filter [5,6) without starting \
+         inside it failed to decrement its dependency"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Plugin scheduler test (requires `plugin-scheduler` feature)
 // ---------------------------------------------------------------------------

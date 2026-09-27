@@ -109,12 +109,13 @@ pub(super) fn worker_resolve_successors(
         // mutating `ready` and `sched` simultaneously.
         let WorkerResolutionBuffers { ready, sched, .. } = &mut *bufs;
         for edge in rctx.cache.successor_arena.edges_for(node_info.id as usize) {
-            // Skip successors whose declared index range excludes this instance.
-            if !edge.passes_filter(node_info.index) {
-                continue;
-            }
             let succ_node_id = edge.succ_id as usize;
 
+            // `decrement_and_collect_ready` applies the edge's index filter itself —
+            // including intersecting a bulk completion's range with the filter — so we
+            // must NOT pre-skip on the chunk start here: a bulk chunk that overlaps the
+            // filter without starting inside it still drives the successor (findings #21
+            // defect B). A non-overlapping completion simply yields an empty `ready`.
             decrement_and_collect_ready(
                 &rctx,
                 slot,
@@ -331,15 +332,30 @@ fn execute_bulk_task(
             // execute_task before dispatch into execute_bulk_task.
         } else {
             // Per-cell loop: Tiers 1–3 (no bulk symbol, or needs_result_store).
+            // Record each cell like the single-task path does, so bulk instances appear
+            // in per_node timing and total_tasks_per_frame (findings #21 defect C: the
+            // per-cell loop recorded nothing, e.g. 17 tasks reported instead of 145).
+            // measure_start() is None when timing is off, so this is free on perf runs.
+            let worker_id = crate::scheduler::get_current_worker_id().unwrap_or(usize::MAX);
+            let node_name = &node_cache.name;
             for inst_idx in node_info.index..node_info.index + node_info.bulk_count {
+                let start_time = sctx.telemetry.measure_start();
                 if has_dynamic {
+                    // pred_index must be THIS cell's index (inst_idx), not the chunk-wide
+                    // node_info.pred_index. For a 1:1 $res/$network edge the arg resolver
+                    // reads predecessor[pred_index], so passing the chunk's single
+                    // pred_index (the packet that triggered the bulk dispatch) made every
+                    // cell read the same predecessor instance — e.g. all range_fft cells
+                    // read the last chirp (findings #21 defect A). Barrier/collect-all and
+                    // single-explicit-index edges key off node_index and ignore pred_index,
+                    // so inst_idx is correct in every case.
                     let stale = populate_dynamic_args_into(
                         &mut buf,
                         shared,
                         args_cache,
                         inst_idx,
                         node_info.slot,
-                        node_info.pred_index,
+                        inst_idx,
                         exec_slot,
                         exec_gen,
                         workers,
@@ -350,6 +366,8 @@ fn execute_bulk_task(
                     }
                 }
                 let result = func(&buf);
+                sctx.telemetry
+                    .record_timing(start_time, node_info.slot, node_name, worker_id);
                 if node_cache.needs_result_store {
                     let mut inst_info = node_info.clone();
                     inst_info.index = inst_idx;

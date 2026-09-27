@@ -22,6 +22,14 @@ pub struct SlotStats {
     pub total_time: Duration,
     pub slot_id: usize,
     pub frame_count: usize,
+    /// Offset of this frame's processing start from the owning `TimeBuffer`'s base
+    /// reference. Together with `end_offset` this lets the report compute a real
+    /// wall-clock span (max end − min start) across frames instead of summing
+    /// per-frame latencies, which ignores frame overlap. See `write_json_report`.
+    pub start_offset: Duration,
+    /// Offset of this frame's processing end from the owning `TimeBuffer`'s base
+    /// reference.
+    pub end_offset: Duration,
 }
 
 impl SlotStats {
@@ -31,6 +39,8 @@ impl SlotStats {
             total_time: Duration::ZERO,
             slot_id,
             frame_count,
+            start_offset: Duration::ZERO,
+            end_offset: Duration::ZERO,
         }
     }
 
