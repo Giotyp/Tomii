@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse, json, os, subprocess, sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 RADAR = ROOT / "examples" / "radar-pipeline"
 CONDA = Path.home() / "miniconda3" / "envs" / "radar" / "lib"
 
@@ -27,7 +27,7 @@ BACKENDS = ["cpu", "gpu", "hybrid"]
 
 
 def env_for(be, dev):
-    e = {**os.environ, "PKG_CONFIG_PATH": str(CONDA.parent / "pkgconfig")}
+    e = {**os.environ, "PKG_CONFIG_PATH": str(CONDA / "pkgconfig")}
     if be in ("gpu", "hybrid"):
         e["CUDA_VISIBLE_DEVICES"] = str(dev)
     if be in ("cpu", "hybrid"):

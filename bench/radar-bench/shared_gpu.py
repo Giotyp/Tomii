@@ -46,13 +46,13 @@ def base_env(backend):
     e = {**os.environ}
     e["CUDA_VISIBLE_DEVICES"] = "1"
     e["LD_LIBRARY_PATH"] = f"{CONDA}:{os.environ.get('LD_LIBRARY_PATH','')}"
-    e["PKG_CONFIG_PATH"] = str(CONDA.parent / "pkgconfig")
+    e["PKG_CONFIG_PATH"] = str(CONDA / "pkgconfig")
     return e
 
 
 def build_backend(backend, log):
     """Clean-build the plugin+core for this backend once (kernel .so is dim-agnostic)."""
-    os.environ["PKG_CONFIG_PATH"] = str(CONDA.parent / "pkgconfig")
+    os.environ["PKG_CONFIG_PATH"] = str(CONDA / "pkgconfig")
     os.environ["LD_LIBRARY_PATH"] = f"{CONDA}:{os.environ.get('LD_LIBRARY_PATH','')}"
     os.environ["CUDA_VISIBLE_DEVICES"] = "1"
     log.write(f"\n=== build {backend} ===\n"); log.flush()

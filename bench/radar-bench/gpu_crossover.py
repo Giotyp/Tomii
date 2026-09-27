@@ -110,7 +110,7 @@ def gen_scene(key: str, n_samp: int, n_chirp: int, frames: int, env: dict, log) 
 def phase_env(backend: str, gpu_device: int) -> dict:
     env = {**os.environ}
     # Build-time: the CPU kernel is always compiled (needs conda FFTW headers).
-    env["PKG_CONFIG_PATH"] = str(CONDA_RADAR.parent / "pkgconfig")
+    env["PKG_CONFIG_PATH"] = str(CONDA_RADAR / "pkgconfig")
     if backend in ("gpu", "hybrid"):
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_device)
     if backend in ("cpu", "hybrid"):
