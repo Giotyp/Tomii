@@ -553,6 +553,81 @@ fn test_root_with_filtered_successor_runs_all_instances() {
     }
 }
 
+/// Correctness guard for the custom scheduler's channel sharding: at W > shard_size
+/// the default config splits workers into multiple shard channels (dispatch
+/// round-robins across them, idle workers steal across them). This exercises W=16
+/// (2 shards) with a 128-task/frame fan-out graph over many frames and asserts every
+/// task runs — no lost or stranded tasks (zero stale drops) and all frames complete.
+#[test]
+fn test_custom_scheduler_sharded_high_w_no_lost_tasks() {
+    let json = r#"
+    {
+        "nodes": [
+            { "name": "a", "factor": 64, "function": "noop", "args": [] },
+            {
+                "name": "b",
+                "factor": 64,
+                "function": "noop",
+                "args": [
+                    { "type": "$res", "predecessor": { "name": "a", "indexes": "0" } }
+                ]
+            }
+        ]
+    }
+    "#;
+    let workers = 16; // > CUSTOM_SHARD_SIZE (8) → multiple shards
+    let scheduler = create_scheduler(SchedulerConfig {
+        scheduler_type: SchedulerType::Custom,
+        core_offset: 0,
+        num_workers: workers,
+        record: false,
+        external_recorder: None,
+        base_instant: std::time::Instant::now(),
+        system_threads: 1,
+        receiver_threads: 0,
+        target_batch_size: 1,
+        batch_timeout_us: 10,
+        worker_affinity: None,
+        worker_hook: None,
+    });
+    let compiled = from_json_str(json, 2)
+        .expect("JSON parse failed")
+        .compile(&scheduler);
+    let mut rt = TomiiRtBuilder::with_config(
+        compiled,
+        scheduler,
+        RuntimeConfig {
+            slots: 1,
+            max_frames: 10_000_000,
+            max_runtime: Some(5),
+            system_threads: 1,
+            workers,
+            ..RuntimeConfig::default()
+        },
+    )
+    .build()
+    .expect("build failed");
+
+    const TARGET: usize = 50;
+    let mut frames = 0usize;
+    let mut drops = 0usize;
+    rt.run_until(|p| {
+        frames = frames.max(p.frames_completed);
+        drops = drops.max(p.stale_drops);
+        p.frames_completed >= TARGET
+    })
+    .expect("run_until failed");
+
+    assert!(
+        frames >= TARGET,
+        "sharded custom run stalled at {frames} frames (W={workers})"
+    );
+    assert_eq!(
+        drops, 0,
+        "sharded custom scheduler lost/stranded {drops} task instance(s) (W={workers})"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Plugin scheduler test (requires `plugin-scheduler` feature)
 // ---------------------------------------------------------------------------

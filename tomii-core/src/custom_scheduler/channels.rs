@@ -1,5 +1,6 @@
 use super::Priority;
 use crossbeam_channel::{Receiver, Sender};
+use std::sync::Arc;
 
 /// Recording metadata carried alongside task.
 /// Eliminates Arc::clone per spawn - worker loop handles metrics directly.
@@ -80,6 +81,15 @@ impl ChannelSet {
     pub(super) fn is_empty(&self) -> bool {
         self.high_rx.is_empty() && self.normal_rx.is_empty() && self.low_rx.is_empty()
     }
+
+    /// Total queued jobs across all priority levels. crossbeam updates these lengths
+    /// synchronously on `send`, so least-loaded dispatch reading them self-balances a
+    /// burst across shards (unlike an idle-worker count, which lags until a worker
+    /// wakes and can herd a burst onto one shard).
+    #[inline]
+    pub(super) fn load(&self) -> usize {
+        self.high_rx.len() + self.normal_rx.len() + self.low_rx.len()
+    }
 }
 
 /// Non-blocking priority-ordered receive across group and global channels.
@@ -114,6 +124,37 @@ pub(super) fn try_recv_all(
     // Global low (if allowed)
     if allow_global {
         if let Ok(t) = global.low_rx.try_recv() {
+            return Some(t);
+        }
+    }
+    None
+}
+
+/// Steal a job (priority-ordered) from any shard other than `own`, scanning from
+/// `start` so different workers probe shards in different orders. Used only in the
+/// sharded (default) config: an idle worker whose own shard is empty pulls work that
+/// another shard's workers have not reached yet, so a load imbalance across shards
+/// still drains without waiting on the park timeout.
+#[inline]
+pub(super) fn try_steal_shards(
+    shards: &[Arc<ChannelSet>],
+    own: usize,
+    start: usize,
+) -> Option<Job> {
+    let n = shards.len();
+    for k in 0..n {
+        let i = (start + k) % n;
+        if i == own {
+            continue;
+        }
+        let s = &shards[i];
+        if let Ok(t) = s.high_rx.try_recv() {
+            return Some(t);
+        }
+        if let Ok(t) = s.normal_rx.try_recv() {
+            return Some(t);
+        }
+        if let Ok(t) = s.low_rx.try_recv() {
             return Some(t);
         }
     }

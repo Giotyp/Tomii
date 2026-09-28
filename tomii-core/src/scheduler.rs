@@ -11,6 +11,12 @@ use crate::async_recorder::{set_worker_recorder, submit_record, AsyncRecorder};
 use crate::{IdType, Record};
 use tomii_types::{CoreSpec, SchedulerPriority, SchedulerWorkerRange};
 
+/// Target workers per shard for the custom scheduler's default (non-affinity) config.
+/// Each shard channel is then contended by at most ~this many workers instead of all
+/// of them; ~8 matches the custom scheduler's contention sweet spot, and W <= 8 stays a
+/// single shard (identical to the previous single-group behaviour).
+const CUSTOM_SHARD_SIZE: usize = 8;
+
 thread_local! {
     // Physical core ID where this thread is pinned. usize::MAX means unassigned.
     static WORKER_ID: Cell<usize> = const { Cell::new(usize::MAX) };
@@ -1023,14 +1029,15 @@ pub fn create_scheduler(cfg: SchedulerConfig) -> SchedulerImpl {
                     // Note: with_affinity_groups also calls worker_affinity() internally
                     builder = builder.with_affinity_groups(affinity.clone(), num_workers);
                 } else {
-                    // No affinity groups - single global group
+                    // No affinity groups — shard workers so no single channel is
+                    // contended by every worker at high W (keeps 1 shard for W <= 8).
                     builder = builder
-                        .add_workers(num_workers, 64)
+                        .add_sharded_workers(num_workers, CUSTOM_SHARD_SIZE, 64)
                         .worker_affinity(worker_affinity);
                 }
             } else {
-                // No affinity config - single global group
-                builder = builder.add_workers(num_workers, 64);
+                // No affinity config — shard workers (see above).
+                builder = builder.add_sharded_workers(num_workers, CUSTOM_SHARD_SIZE, 64);
             }
 
             if let Some(rec) = external_recorder {
