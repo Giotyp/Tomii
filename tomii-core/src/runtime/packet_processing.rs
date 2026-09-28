@@ -464,7 +464,7 @@ fn assign_packet_to_slot(
     if newly_activated {
         *slots_dirty = true;
         // Spawn initial nodes immediately so workers start while remaining packets arrive.
-        let init_nodes = initial_nodes(&shared.graph, vec![assigned_slot]);
+        let init_nodes = initial_nodes(&shared.graph, vec![assigned_slot], shared.config.workers);
         if !init_nodes.is_empty() {
             print_debug(|| {
                 format!(
