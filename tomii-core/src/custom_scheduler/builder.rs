@@ -61,6 +61,10 @@ pub struct CustomSchedulerBuilder {
     pub(super) base_instant: Instant,
     pub(super) worker_affinity: Option<crate::scheduler::WorkerAffinityConfig>,
     pub(super) worker_hook: Option<Arc<dyn crate::WorkerHook>>,
+    /// When true, the groups are treated as shards: default dispatch round-robins
+    /// across them and idle workers steal across them (set by the default,
+    /// non-affinity scheduler path to spread channel contention at high W).
+    pub(super) sharded: bool,
 }
 
 impl CustomSchedulerBuilder {
@@ -75,7 +79,48 @@ impl CustomSchedulerBuilder {
             base_instant: Instant::now(),
             worker_affinity: None,
             worker_hook: None,
+            sharded: false,
         }
+    }
+
+    /// Mark the configured groups as shards (default dispatch round-robins across them,
+    /// workers steal across them). Used by the default non-affinity scheduler path.
+    pub fn sharded(mut self, sharded: bool) -> Self {
+        self.sharded = sharded;
+        self
+    }
+
+    /// Split `num_workers` into shard groups of at most `shard_size` workers each and
+    /// mark them as shards. One group for `num_workers <= shard_size` (identical to the
+    /// previous single-group behaviour), otherwise `ceil(num_workers / shard_size)`
+    /// groups so each shard channel is contended by ~`shard_size` workers instead of all
+    /// of them.
+    pub fn add_sharded_workers(
+        mut self,
+        num_workers: usize,
+        shard_size: usize,
+        spin_iterations: usize,
+    ) -> Self {
+        let shard_size = shard_size.max(1);
+        let num_shards = num_workers.div_ceil(shard_size).max(1);
+        let base = num_workers / num_shards;
+        let extra = num_workers % num_shards;
+        for s in 0..num_shards {
+            let n = base + if s < extra { 1 } else { 0 };
+            if n == 0 {
+                continue;
+            }
+            let group_id = self.groups.len();
+            self.groups.push(WorkerGroupConfig {
+                num_workers: n,
+                core_ids: None,
+                spin_iterations,
+                group_id,
+                allow_global_steal: true,
+            });
+        }
+        self.sharded = true;
+        self
     }
 
     /// Add a worker group with configuration
@@ -258,9 +303,11 @@ impl CustomSchedulerBuilder {
         );
 
         let num_groups = self.groups.len();
+        let sharded = self.sharded && num_groups > 0;
         let total_recorders = total_workers + alloc.receiver_threads + alloc.system_threads;
         let (shared, group_channels) = create_channels_and_state(
             num_groups,
+            sharded,
             self.record,
             self.external_recorder,
             self.base_instant,
@@ -311,6 +358,7 @@ impl CustomSchedulerBuilder {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create_channels_and_state(
     num_groups: usize,
+    sharded: bool,
     record: bool,
     external_recorder: Option<Arc<AsyncRecorder>>,
     base_instant: Instant,
@@ -332,6 +380,9 @@ pub(super) fn create_channels_and_state(
     let shared = Arc::new(SharedWorkerState {
         global_channels,
         group_channels: group_channels.clone(),
+        sharded,
+        next_shard: AtomicUsize::new(0),
+        in_flight: (0..num_groups).map(|_| AtomicUsize::new(0)).collect(),
         shutdown: AtomicBool::new(false),
         total_spawned: AtomicUsize::new(0),
         total_completed: AtomicUsize::new(0),
@@ -360,13 +411,36 @@ pub(super) fn spawn_worker_threads(
 ) -> Vec<Vec<JoinHandle<()>>> {
     let num_groups = group_configs.len();
 
-    // Build worker_id -> group_idx mapping
+    // Build worker_id -> group_idx mapping.
     let mut worker_to_group_idx: Vec<usize> = vec![0; total_workers];
-    if let Some(affinity) = worker_affinity {
+    let has_affinity_groups = worker_affinity.is_some_and(|a| !a.affinity_groups.is_empty());
+    if has_affinity_groups {
+        let affinity = worker_affinity.unwrap();
         for (worker_id, slot) in worker_to_group_idx.iter_mut().enumerate() {
             let group_ids = affinity.get_worker_groups(worker_id);
             if !group_ids.is_empty() {
                 *slot = group_ids[0];
+            }
+        }
+    } else if num_groups > 1 {
+        // Sharded default config (no affinity groups): distribute workers evenly across
+        // the shard groups. Without this every worker defaulted to group 0, so shards
+        // 1.. had a channel but no worker listening on it — a task routed there could
+        // only be picked up by a still-spinning worker or after the park timeout, never
+        // by waking a parked worker (the radar work-conservation bug). `total_workers`
+        // may be below the requested sum if core allocation scaled down, so distribute
+        // the ACTUAL count; with the usual shard_size (8) num_groups <= total_workers so
+        // every group gets at least one worker.
+        let base = total_workers / num_groups;
+        let extra = total_workers % num_groups;
+        let mut wid = 0;
+        for (gidx, slot_count) in (0..num_groups)
+            .map(|g| base + usize::from(g < extra))
+            .enumerate()
+        {
+            for _ in 0..slot_count {
+                worker_to_group_idx[wid] = gidx;
+                wid += 1;
             }
         }
     }

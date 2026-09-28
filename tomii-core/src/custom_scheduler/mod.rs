@@ -306,7 +306,48 @@ impl CustomScheduler {
         self.shared.pending_tasks.fetch_add(1, Ordering::Relaxed);
 
         if group_id > 0 && group_id < self.shared.group_channels.len() {
+            // Explicit affinity routing.
             self.shared.group_channels[group_id].send(priority, Job::Node(desc));
+        } else if self.shared.sharded {
+            // Default dispatch across shard channels so no single channel is contended
+            // by every worker at high W. `sharded` implies >= 1 shard.
+            //
+            // Work-conserving routing: send to the LEAST-LOADED shard (fewest queued
+            // jobs), breaking ties by the round-robin cursor. Queue lengths update
+            // synchronously on send, so a burst self-balances across shards (each task
+            // goes to the currently-shortest queue) — keeping the anti-contention spread
+            // — while under bursty low load a task avoids a shard that is backed up and
+            // lands on one whose workers are free. Plain round-robin instead let a task
+            // sit in a busy shard while another shard's workers slept until the park
+            // timeout (the +119 us radar regression).
+            let shards = &self.shared.group_channels;
+            let n = shards.len();
+            if n == 1 {
+                // Single shard (W <= shard_size): no routing choice, no load() cost.
+                shards[0].send(priority, Job::Node(desc));
+            } else {
+                // Load = queued jobs + jobs currently running on the shard's workers, so
+                // routing follows real occupancy: a shard whose workers are all busy on
+                // long tasks (empty queue, high in_flight) is not chosen over one whose
+                // workers are free. Both terms are synchronous, so a burst self-balances.
+                let in_flight = &self.shared.in_flight;
+                let load_of = |i: usize| shards[i].load() + in_flight[i].load(Ordering::Relaxed);
+                let start = self.shared.next_shard.fetch_add(1, Ordering::Relaxed) % n;
+                let mut best = start;
+                let mut best_load = load_of(start);
+                for k in 1..n {
+                    if best_load == 0 {
+                        break; // cannot do better than a shard with no work at all
+                    }
+                    let i = (start + k) % n;
+                    let load = load_of(i);
+                    if load < best_load {
+                        best = i;
+                        best_load = load;
+                    }
+                }
+                shards[best].send(priority, Job::Node(desc));
+            }
         } else {
             self.shared.global_channels.send(priority, Job::Node(desc));
         }

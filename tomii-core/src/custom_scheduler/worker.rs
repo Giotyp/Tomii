@@ -1,4 +1,4 @@
-use super::channels::{try_recv_all, ChannelSet, Job, ScheduledTask};
+use super::channels::{try_recv_all, try_steal_shards, ChannelSet, Job, ScheduledTask};
 use super::NodeTaskDesc;
 use crate::async_recorder::{set_worker_recorder, submit_record, AsyncRecorder};
 use crate::Record;
@@ -18,8 +18,27 @@ pub(super) type NodeExecutor = Box<dyn Fn(NodeTaskDesc) + Send + Sync>;
 pub(super) struct SharedWorkerState {
     /// Global channels (fallback when group channels empty)
     pub(super) global_channels: ChannelSet,
-    /// Per-group channels
+    /// Per-group channels. In the default (non-affinity) configuration these are used
+    /// as SHARDS: dispatch round-robins across them and workers steal across them, so
+    /// no single channel is contended by every worker at high W. In an affinity
+    /// configuration they are exclusive worker groups instead (see `sharded`).
     pub(super) group_channels: Vec<Arc<ChannelSet>>,
+    /// True when `group_channels` are shards (default config): default dispatch
+    /// round-robins across them and idle workers steal across them. False for the
+    /// affinity configuration, where a `group_id == 0` task goes to the global pool and
+    /// groups are exclusive (no cross-group stealing).
+    pub(super) sharded: bool,
+    /// Round-robin cursor used as the tie-break/start point for least-loaded sharded
+    /// dispatch.
+    pub(super) next_shard: AtomicUsize,
+    /// Per-shard count of jobs currently executing on that shard's workers. A worker
+    /// increments its shard's entry just before running a job and decrements right
+    /// after (a stolen job counts under the executing worker's shard — that is the shard
+    /// whose worker is actually busy). Least-loaded dispatch adds this to the queue
+    /// length so it routes by real occupancy: a shard whose workers are all busy on
+    /// long tasks with an empty queue still reads as loaded, so a task is not routed
+    /// into it while another shard's workers sleep. Only maintained when `sharded`.
+    pub(super) in_flight: Vec<AtomicUsize>,
     /// Shutdown signal
     pub(super) shutdown: AtomicBool,
     /// Total tasks spawned (for metrics)
@@ -116,17 +135,39 @@ pub(super) fn worker_loop(
     let grp_norm = &group_channels.normal_rx;
     let grp_low = &group_channels.low_rx;
 
+    // Run a job, marking this shard busy for least-loaded dispatch while it executes.
+    // A stolen job counts under this (the executing) worker's shard, which is the
+    // shard whose worker is actually occupied.
+    let run_job = |task: Job| {
+        if shared.sharded {
+            shared.in_flight[group_id].fetch_add(1, Ordering::Relaxed);
+            execute_job(&shared, task, has_recorder);
+            shared.in_flight[group_id].fetch_sub(1, Ordering::Relaxed);
+        } else {
+            execute_job(&shared, task, has_recorder);
+        }
+    };
+
     loop {
         // Check shutdown first
         if shared.shutdown.load(Ordering::Acquire) {
             break;
         }
 
-        // Phase 1: Non-blocking priority-ordered scan
+        // Phase 1: Non-blocking priority-ordered scan of own shard + global, then (in
+        // the sharded config) steal from other shards so an imbalance drains promptly.
         if let Some(task) =
-            try_recv_all(&group_channels, &shared.global_channels, allow_global_steal)
+            try_recv_all(&group_channels, &shared.global_channels, allow_global_steal).or_else(
+                || {
+                    if shared.sharded {
+                        try_steal_shards(&shared.group_channels, group_id, group_id + 1)
+                    } else {
+                        None
+                    }
+                },
+            )
         {
-            execute_job(&shared, task, has_recorder);
+            run_job(task);
             continue;
         }
 
@@ -136,9 +177,17 @@ pub(super) fn worker_loop(
         for _ in 0..spin_iterations {
             std::hint::spin_loop();
             if let Some(task) =
-                try_recv_all(&group_channels, &shared.global_channels, allow_global_steal)
+                try_recv_all(&group_channels, &shared.global_channels, allow_global_steal).or_else(
+                    || {
+                        if shared.sharded {
+                            try_steal_shards(&shared.group_channels, group_id, group_id + 1)
+                        } else {
+                            None
+                        }
+                    },
+                )
             {
-                execute_job(&shared, task, has_recorder);
+                run_job(task);
                 found_in_spin = true;
                 break;
             }
@@ -174,7 +223,7 @@ pub(super) fn worker_loop(
         };
 
         if let Some(task) = task {
-            execute_job(&shared, task, has_recorder);
+            run_job(task);
         }
     }
 
