@@ -378,13 +378,37 @@ pub(super) fn release_and_activate_next(
     Some((slot_id, buffered))
 }
 
-pub(super) fn initial_nodes(graph: &Graph, slots: Vec<usize>) -> Vec<NodeInfo> {
+/// Build the task descriptors that seed a slot: every initial (root) node's instances.
+///
+/// Each root's `factor` instances are CHUNKED into up to `workers` contiguous bulk
+/// tasks instead of one task per instance. The resolution thread dispatches these
+/// serially, so shrinking a wide root's dispatch from `factor` to `min(factor,
+/// workers)` tasks removes the per-frame root-dispatch ceiling (a wide root spent
+/// ~1 µs/instance in `send_to_scheduler`), and the chunks execute in parallel across
+/// workers. Roots have no `$res` inputs, so bulk execution reads nothing per cell;
+/// `execute_bulk_task` still stores per-instance results for successors. A root with
+/// `factor <= workers` yields one task per instance (bulk_count 1), i.e. unchanged.
+pub(super) fn initial_nodes(graph: &Graph, slots: Vec<usize>, workers: usize) -> Vec<NodeInfo> {
     let mut node_infos = Vec::new();
     for slot in slots {
         for node_id in &graph.initial_nodes {
-            let node_factor = graph.nodes[*node_id as usize].factor;
-            for index in 0..node_factor {
-                node_infos.push(NodeInfo::new(*node_id, slot, index, 0));
+            let factor = graph.nodes[*node_id as usize].factor;
+            if factor == 0 {
+                continue;
+            }
+            let n_chunks = workers.max(1).min(factor);
+            let base = factor / n_chunks;
+            let extra = factor % n_chunks;
+            let mut start = 0usize;
+            for c in 0..n_chunks {
+                let count = base + usize::from(c < extra);
+                if count == 0 {
+                    continue;
+                }
+                let mut ni = NodeInfo::new(*node_id, slot, start, 0);
+                ni.bulk_count = count;
+                node_infos.push(ni);
+                start += count;
             }
         }
     }

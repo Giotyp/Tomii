@@ -628,6 +628,44 @@ fn test_custom_scheduler_sharded_high_w_no_lost_tasks() {
     );
 }
 
+/// Correctness guard for bulk/chunked root dispatch: a WIDE root (factor >> workers)
+/// is dispatched as a handful of bulk tasks rather than one task per instance. This
+/// item-5-shaped graph (wide root -> barrier sink) checks that every root instance
+/// still runs and its result reaches the barrier — full completion, zero stale drops
+/// — across W=8/16 and inline on/off.
+#[test]
+fn test_bulk_root_dispatch_wide_root_completes() {
+    let json = r#"
+    {
+        "nodes": [
+            { "name": "root", "factor": 512, "function": "noop", "args": [] },
+            {
+                "name": "sink",
+                "function": "noop",
+                "args": [
+                    { "type": "$barrier", "predecessor": { "name": "root", "indexes": "0-511" } }
+                ]
+            }
+        ]
+    }
+    "#;
+    const TARGET: usize = 5;
+    for workers in [8usize, 16] {
+        for inline in [true, false] {
+            let (frames, drops) = run_capturing_stale_drops(json, workers, inline, TARGET);
+            assert!(
+                frames >= TARGET,
+                "wide-root graph stalled at {frames} frames (W={workers}, inline={inline})"
+            );
+            assert_eq!(
+                drops, 0,
+                "wide-root chunked dispatch dropped {drops} instance(s) (W={workers}, \
+                 inline={inline})"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Plugin scheduler test (requires `plugin-scheduler` feature)
 // ---------------------------------------------------------------------------
