@@ -461,6 +461,67 @@ fn parse_network_config(
     Ok(nc)
 }
 
+/// Validate the `$res`/`$dep` argument layout of a node against the arg-buffer
+/// semantics used at runtime.
+///
+/// A dependency argument whose predecessor lists `indexes.len()` offsets resolves,
+/// at runtime, to a *single* value when it is 1:1 with the node — either one
+/// explicit index (`len == 1`) or one index per instance (`len == factor`). Any
+/// other count is a collect-all: it expands in place to `indexes.len()` values,
+/// which are spliced into the argument buffer starting at that argument's slot.
+/// When such a multi-value dependency is *not the last* argument, the expansion
+/// overruns the slots of the arguments after it — they end up holding predecessor
+/// results instead of their own values (e.g. a `$index`/`$ref` scalar slot holds a
+/// `$network` packet), so the typed wrapper panics with a variant mismatch
+/// ("expected Usize") and every worker fails.
+///
+/// The classic trigger is an off-by-one range on a `$network` `$res` edge: a
+/// literal inclusive end (`"0-256"` = 257 indexes) against a factor-256 node misses
+/// the 1:1 path, while the variable end (`"0-np"`, np=256) resolves 1:1 correctly
+/// (see finding #45 on inclusive-literal vs exclusive-variable range ends). This
+/// guard turns that silent buffer overrun into a clear build-time error.
+///
+/// Grouped edges (`group_by`) use a distinct grouped-resolution path and are left
+/// to their own semantics.
+fn validate_res_arg_layout(
+    node_name: &str,
+    args: &[Arg],
+    factor: usize,
+) -> Result<(), crate::TomiiError> {
+    // The runtime arg buffer skips init-condition args (see build_arg_cache's
+    // `skip_conditions`), so only non-condition args occupy buffer slots.
+    let layout: Vec<&Arg> = args.iter().filter(|a| !a.is_condition()).collect();
+    for (pos, arg) in layout.iter().enumerate() {
+        if !arg.type_.is_result() {
+            continue;
+        }
+        let Some(pred) = arg.predecessor.as_ref() else {
+            continue;
+        };
+        if pred.group_by.is_some() {
+            continue;
+        }
+        let n = pred.indexes.len();
+        let multi_value = n > 1 && n != factor;
+        let is_last = pos + 1 == layout.len();
+        if multi_value && !is_last {
+            return Err(format!(
+                "node '{node_name}': dependency argument at position {pos} lists {n} \
+                 predecessor indexes, which does not match the node factor {factor}, so \
+                 it resolves to {n} values that overrun the {trailing} argument(s) after \
+                 it in the arg buffer (they would hold predecessor results instead of \
+                 their own values). A multi-value dependency must be the last argument. \
+                 For a 1:1 per-instance dependency the index count must equal the node \
+                 factor ({factor}) — e.g. an exclusive range of {factor} indexes, not \
+                 {n} (a literal inclusive range end is the common off-by-one; see #45).",
+                trailing = layout.len() - pos - 1,
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Parse a single node JSON entry into a [`Node`] with `id` set to 0.
 /// The caller is responsible for assigning the real ID and registering the name.
 fn parse_single_node(
@@ -501,6 +562,8 @@ fn parse_single_node(
             .as_ref()
             .map_or(1, |f| f.resolve(init_vec, obj_id_map, workers)),
     });
+
+    validate_res_arg_layout(&node_json.name, &args, factor)?;
 
     let condition = node_json
         .condition
