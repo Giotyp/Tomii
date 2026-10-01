@@ -35,6 +35,13 @@ recording = []
 # Used by integration tests which run without a plugin dylib.
 test-utils = []
 rdtsc = []
+# Experimental (PoC): resolve plugin kernels from the loaded .so's
+# `__tomii_exports` table at load time (dlsym) instead of baking per-kernel
+# marshalling wrappers into the runtime binary at build time. OFF by default;
+# with it off the runtime builds exactly as the static path. With it on and no
+# FUNC_PATH set, the runtime binary carries no plugin-specific codegen, so
+# inserting a new kernel rebuilds only the plugin .so, not the runtime.
+dynamic-registration = []
 # Kept as a no-op alias for backward compatibility with crates that activate it.
 # The TaskScheduler trait and SchedulerImpl::Plugin variant are now unconditional.
 plugin-scheduler = []

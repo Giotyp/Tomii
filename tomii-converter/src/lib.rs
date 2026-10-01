@@ -85,8 +85,13 @@ enum SourceLang {
 }
 
 /// A single exported function, with the `_cm`-equivalent signature resolved.
+///
+/// Visibility note: this is `pub` solely so it can appear in the signature of
+/// the public [`render_self_contained`] (added for the dynamic-kernel-
+/// registration PoC); all fields stay crate-private, and every other item in
+/// this module continues to treat `ExportedFn` as an internal detail.
 #[derive(Debug)]
-struct ExportedFn {
+pub struct ExportedFn {
     /// The symbol name to load / call.
     /// For Rust `#[no_mangle]`: the `_cm` function name (e.g. `generate_vector_cm`).
     /// For C: the original C function name (e.g. `fft_planner`).
@@ -1246,6 +1251,448 @@ fn build_rust_sym_call(entry: &ExportedFn, variadic_idx: Option<usize>) -> Strin
 }
 
 // ---------------------------------------------------------------------------
+// Self-contained emission mode (dynamic-kernel-registration PoC)
+//
+// ADDITIVE ONLY: none of the functions below are called by `generate_from_file`
+// / `render_wrappers` / `render_registry`, and none of the existing rendering
+// functions above were modified to support this mode. This mode emits a
+// module meant to be `include!`d directly inside the plugin crate (which
+// already defines the `#[no_mangle] {cm_name}` companion fns), calling those
+// companions in-process instead of through `libloading`/`cache_sym!`, and
+// publishing a C-ABI `__tomii_exports` table the runtime can `dlsym` to
+// register the plugin's kernels dynamically.
+// ---------------------------------------------------------------------------
+
+/// Replace every byte that is not `[A-Za-z0-9_]` with `_`, producing a valid
+/// (if possibly ugly) Rust identifier fragment. Used to derive unique local
+/// binding names (`argspec_{ident}`) from a `registry_key`, defensively —
+/// in practice `registry_key` is already a valid Rust fn name.
+fn sanitize_ident(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Like [`build_rust_sym_call`], but calls the plugin's `#[no_mangle]`
+/// companion function (`entry.cm_name`) directly in-process instead of
+/// through a `cache_sym!`-cached dlsym'd function pointer. Argument
+/// expressions are identical to `build_rust_sym_call`.
+fn build_direct_rust_call(entry: &ExportedFn) -> String {
+    let args: Vec<String> = entry
+        .cm_params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| match &p.kind {
+            CmParamKind::CmTypesRef => format!("&args[{}]", i),
+            CmParamKind::Primitive(_) => p.name.clone(),
+            CmParamKind::StrRef => p.name.clone(),
+            CmParamKind::OwnedString => p.name.clone(),
+            CmParamKind::VecCmTypes => format!("&{}", p.name),
+            CmParamKind::SliceCmTypes => format!("&args[{}..]", i),
+            CmParamKind::OpaquePtr
+            | CmParamKind::ArrayPtr { .. }
+            | CmParamKind::MutArrayPtr { .. } => unreachable!("C-only kinds in Rust entry"),
+        })
+        .collect();
+
+    format!("{}({})", entry.cm_name, args.join(", "))
+}
+
+/// Like [`build_rust_sym_call_unchecked`], but calls `entry.cm_name` directly
+/// in-process. Argument expressions are identical to
+/// `build_rust_sym_call_unchecked`.
+fn build_direct_rust_call_unchecked(entry: &ExportedFn) -> String {
+    let args: Vec<String> = entry
+        .cm_params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| match &p.kind {
+            CmParamKind::CmTypesRef => format!("unsafe {{ args.get_unchecked({}) }}", i),
+            CmParamKind::Primitive(_) => p.name.clone(),
+            CmParamKind::StrRef => p.name.clone(),
+            CmParamKind::OwnedString => p.name.clone(),
+            CmParamKind::VecCmTypes => format!("&{}", p.name),
+            CmParamKind::SliceCmTypes => format!("unsafe {{ args.get_unchecked({}..) }}", i),
+            CmParamKind::OpaquePtr
+            | CmParamKind::ArrayPtr { .. }
+            | CmParamKind::MutArrayPtr { .. } => unreachable!("C-only kinds in Rust entry"),
+        })
+        .collect();
+
+    format!("{}({})", entry.cm_name, args.join(", "))
+}
+
+/// Self-contained counterpart to [`render_entry_wrapper`] for a single Rust
+/// entry: identical argument extraction and return wrapping, but the call
+/// target is the direct, in-process `entry.cm_name(...)` call (see
+/// [`build_direct_rust_call`]) instead of the dlsym'd `cache_sym!` static.
+/// No `cache_sym!` declaration is emitted.
+///
+/// Caller must ensure `entry.source_lang == SourceLang::Rust`.
+fn render_self_contained_entry_wrapper(entry: &ExportedFn) -> String {
+    let wrap_name = wrap_fn_name(&entry.cm_name);
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "pub fn {wrap_name}(args: &[CmTypes]) -> CmTypes {{\n"
+    ));
+
+    let variadic_idx = entry
+        .cm_params
+        .iter()
+        .position(|p| matches!(p.kind, CmParamKind::VecCmTypes | CmParamKind::SliceCmTypes));
+
+    for (i, param) in entry.cm_params.iter().enumerate() {
+        if matches!(
+            param.kind,
+            CmParamKind::VecCmTypes | CmParamKind::SliceCmTypes
+        ) {
+            break; // variadic handled below
+        }
+        let name = &param.name;
+        let fn_name_str = &entry.cm_name;
+        match &param.kind {
+            CmParamKind::CmTypesRef => {
+                // Passed as &args[i] — no extraction needed here; handled in call
+            }
+            CmParamKind::Primitive(pk) => {
+                let variant = pk.variant_name();
+                out.push_str(&format!(
+                    "    let {name} = match args[{i}] {{ CmTypes::{variant}(x) => x, _ => panic!(\"{fn_name_str}: expected {variant} for {name}\") }};\n"
+                ));
+            }
+            CmParamKind::StrRef => {
+                out.push_str(&format!(
+                    "    let {name}_s = match &args[{i}] {{ CmTypes::String(x) => x.to_string(), _ => panic!(\"{fn_name_str}: expected String for {name}\") }};\n"
+                ));
+                out.push_str(&format!("    let {name} = {name}_s.as_str();\n"));
+            }
+            CmParamKind::OwnedString => {
+                out.push_str(&format!(
+                    "    let {name} = match &args[{i}] {{ CmTypes::String(x) => x.to_string(), _ => panic!(\"{fn_name_str}: expected String for {name}\") }};\n"
+                ));
+            }
+            CmParamKind::VecCmTypes | CmParamKind::SliceCmTypes => unreachable!(),
+            CmParamKind::OpaquePtr
+            | CmParamKind::ArrayPtr { .. }
+            | CmParamKind::MutArrayPtr { .. } => unreachable!("C-only kinds in Rust entry"),
+        }
+    }
+
+    if let Some(vi) = variadic_idx {
+        let name = &entry.cm_params[vi].name;
+        match &entry.cm_params[vi].kind {
+            CmParamKind::VecCmTypes => {
+                out.push_str(&format!(
+                    "    let {name}: Vec<CmTypes> = args[{vi}..].iter().cloned().collect();\n"
+                ));
+            }
+            CmParamKind::SliceCmTypes => {
+                // &[CmTypes] — no local variable needed; passed as &args[vi..] in the call
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    let call = build_direct_rust_call(entry);
+    let final_ret = match &entry.cm_ret {
+        CmRet::Void => format!("    {call};\n    CmTypes::None\n"),
+        CmRet::CmTypes => format!("    {call}\n"),
+        CmRet::Primitive(pk) => {
+            let variant = pk.variant_name();
+            format!("    CmTypes::{variant}({call})\n")
+        }
+        CmRet::OwnedString => format!(
+            "    let __result = {call};\n    CmTypes::String(std::sync::Arc::from(__result.as_str()))\n"
+        ),
+        CmRet::OpaquePtr | CmRet::AllocatedArray { .. } | CmRet::AllocatedString { .. } => {
+            unreachable!("C-only return kinds in Rust entry")
+        }
+    };
+
+    out.push_str(&final_ret);
+    out.push_str("}\n");
+
+    out
+}
+
+/// Self-contained counterpart to [`render_entry_wrapper_unchecked`]: identical
+/// extraction/return-wrapping, direct in-process call target.
+///
+/// Caller must ensure `entry.source_lang == SourceLang::Rust`.
+fn render_self_contained_entry_wrapper_unchecked(entry: &ExportedFn) -> String {
+    let wrap_name = wrap_fn_name(&entry.cm_name);
+    let fn_name_str = &entry.cm_name;
+
+    let variadic_idx = entry
+        .cm_params
+        .iter()
+        .position(|p| matches!(p.kind, CmParamKind::VecCmTypes | CmParamKind::SliceCmTypes));
+    let fixed_params = variadic_idx.unwrap_or(entry.cm_params.len());
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "/// Unchecked twin of `{wrap_name}` — see `get_unchecked_func` safety contract.\n\
+         pub fn {wrap_name}_unchecked(args: &[CmTypes]) -> CmTypes {{\n"
+    ));
+    if fixed_params > 0 {
+        out.push_str(&format!(
+            "    debug_assert!(args.len() >= {fixed_params}, \"{fn_name_str}: arg count\");\n"
+        ));
+    }
+
+    for (i, param) in entry.cm_params.iter().enumerate().take(fixed_params) {
+        let name = &param.name;
+        match &param.kind {
+            CmParamKind::CmTypesRef => {} // passed inline below
+            CmParamKind::Primitive(pk) => {
+                let variant = pk.variant_name();
+                out.push_str(&format!(
+                    "    let {name} = match unsafe {{ args.get_unchecked({i}) }} {{ CmTypes::{variant}(x) => *x, _ => {{ debug_assert!(false, \"{fn_name_str}: expected {variant} for {name}\"); unsafe {{ core::hint::unreachable_unchecked() }} }} }};\n"
+                ));
+            }
+            CmParamKind::StrRef => {
+                out.push_str(&format!(
+                    "    let {name}_s = match unsafe {{ args.get_unchecked({i}) }} {{ CmTypes::String(x) => x.to_string(), _ => {{ debug_assert!(false, \"{fn_name_str}: expected String for {name}\"); unsafe {{ core::hint::unreachable_unchecked() }} }} }};\n"
+                ));
+                out.push_str(&format!("    let {name} = {name}_s.as_str();\n"));
+            }
+            CmParamKind::OwnedString => {
+                out.push_str(&format!(
+                    "    let {name} = match unsafe {{ args.get_unchecked({i}) }} {{ CmTypes::String(x) => x.to_string(), _ => {{ debug_assert!(false, \"{fn_name_str}: expected String for {name}\"); unsafe {{ core::hint::unreachable_unchecked() }} }} }};\n"
+                ));
+            }
+            _ => unreachable!("filtered by entry_argspec / fixed_params"),
+        }
+    }
+
+    if let Some(vi) = variadic_idx {
+        let name = &entry.cm_params[vi].name;
+        if matches!(entry.cm_params[vi].kind, CmParamKind::VecCmTypes) {
+            out.push_str(&format!(
+                "    let {name}: Vec<CmTypes> = args[{vi}..].iter().cloned().collect();\n"
+            ));
+        }
+    }
+
+    let call = build_direct_rust_call_unchecked(entry);
+    let final_ret = match &entry.cm_ret {
+        CmRet::Void => format!("    {call};\n    CmTypes::None\n"),
+        CmRet::CmTypes => format!("    {call}\n"),
+        CmRet::Primitive(pk) => {
+            let variant = pk.variant_name();
+            format!("    CmTypes::{variant}({call})\n")
+        }
+        CmRet::OwnedString => format!(
+            "    let __result = {call};\n    CmTypes::String(std::sync::Arc::from(__result.as_str()))\n"
+        ),
+        CmRet::OpaquePtr | CmRet::AllocatedArray { .. } | CmRet::AllocatedString { .. } => {
+            unreachable!("C-only return kinds filtered by entry_argspec")
+        }
+    };
+    out.push_str(&final_ret);
+    out.push_str("}\n");
+    out
+}
+
+/// Self-contained counterpart to [`render_bulk_entry_wrapper`]: a trivial
+/// passthrough that calls the macro-generated `{registry_key}_bulk_cm`
+/// companion directly (no `cache_sym!`, no dlsym).
+///
+/// Caller must ensure `entry.has_bulk_cm` and `entry.source_lang ==
+/// SourceLang::Rust`.
+fn render_self_contained_bulk_entry_wrapper(entry: &ExportedFn) -> String {
+    let bulk_cm_name = format!("{}_bulk_cm", entry.registry_key);
+    let wrap_name = format!("{}_bulk_cm_wrap", entry.registry_key);
+
+    format!(
+        "pub fn {wrap_name}(start: usize, end: usize, args: &[CmTypes]) -> CmTypes {{\n    {bulk_cm_name}(start, end, args)\n}}\n"
+    )
+}
+
+/// Emit a self-contained Rust module for the dynamic-kernel-registration PoC.
+///
+/// This is an ADDITIVE alternative to [`render_wrappers`]/[`render_registry`]
+/// (the dlsym-based static path, which this function does not touch or call
+/// into). The returned source is meant to be `include!`d directly inside the
+/// plugin crate that already defines the `#[no_mangle] {cm_name}` companion
+/// functions (generated by `#[tomii_export]`). Each wrapper calls its
+/// companion in-process — no `libloading`, no `cache_sym!`, no `DYN_LIB` — and
+/// the module exports a single C-ABI `__tomii_exports() -> *const ExportTable`
+/// symbol (see `tomii_types::ExportTable`) that the runtime can `dlsym` at
+/// load time to discover and register this plugin's kernels dynamically,
+/// instead of baking per-kernel marshalling wrappers into the runtime binary
+/// at build time.
+///
+/// C entries are not supported by this PoC: they are skipped with a
+/// `// skipped C entry: {name}` comment rather than wrapped or erroring,
+/// since the self-contained module intentionally carries no C-FFI/
+/// `libloading` machinery.
+#[must_use]
+pub fn render_self_contained(entries: &[ExportedFn]) -> String {
+    let mut out = String::new();
+    out.push_str("use tomii_types::*;\n");
+    out.push_str("use std::sync::OnceLock;\n\n");
+
+    for entry in entries {
+        if entry.source_lang != SourceLang::Rust {
+            out.push_str(&format!("// skipped C entry: {}\n", entry.cm_name));
+        }
+    }
+
+    let rust_entries: Vec<&ExportedFn> = entries
+        .iter()
+        .filter(|e| e.source_lang == SourceLang::Rust)
+        .collect();
+
+    for entry in &rust_entries {
+        out.push_str(&render_self_contained_entry_wrapper(entry));
+        out.push('\n');
+        if entry_argspec(entry).is_some() {
+            out.push_str(&render_self_contained_entry_wrapper_unchecked(entry));
+            out.push('\n');
+        }
+        if entry.has_bulk_cm {
+            out.push_str(&render_self_contained_bulk_entry_wrapper(entry));
+            out.push('\n');
+        }
+    }
+
+    out.push_str("#[no_mangle]\n");
+    out.push_str("pub extern \"C\" fn __tomii_exports() -> *const ExportTable {\n");
+    out.push_str("    static TABLE_PTR: OnceLock<usize> = OnceLock::new();\n");
+    out.push_str("    let p = *TABLE_PTR.get_or_init(|| {\n");
+
+    // Leak each entry's argspec array first — the entries array built below
+    // borrows these `'static` slices by pointer.
+    for entry in &rust_entries {
+        if let Some(spec) = entry_argspec(entry) {
+            let ident = sanitize_ident(&entry.registry_key);
+            out.push_str(&format!(
+                "        let argspec_{ident}: &'static [ExportArgSpec] = Box::leak(Box::new([\n"
+            ));
+            for s in &spec {
+                out.push_str(&format!(
+                    "            ExportArgSpec {{ ptr: \"{s}\".as_ptr(), len: \"{s}\".len() }},\n"
+                ));
+            }
+            out.push_str("        ]));\n");
+        }
+    }
+
+    out.push_str("        let entries: &'static [ExportEntry] = Box::leak(Box::new([\n");
+    for entry in &rust_entries {
+        let wrap_name = wrap_fn_name(&entry.cm_name);
+        let argspec = entry_argspec(entry);
+        let ident = sanitize_ident(&entry.registry_key);
+
+        let (unchecked_expr, argspec_ptr_expr, argspec_len_expr) = if argspec.is_some() {
+            (
+                format!("Some({wrap_name}_unchecked)"),
+                format!("argspec_{ident}.as_ptr()"),
+                format!("argspec_{ident}.len()"),
+            )
+        } else {
+            (
+                "None".to_string(),
+                "core::ptr::null()".to_string(),
+                "0".to_string(),
+            )
+        };
+
+        let bulk_expr = if entry.has_bulk_cm {
+            format!("Some({}_bulk_cm_wrap)", entry.registry_key)
+        } else {
+            "None".to_string()
+        };
+
+        let (ret_ptr_expr, ret_len_expr) = match entry_ret_variant(entry) {
+            Some(v) => (format!("\"{v}\".as_ptr()"), format!("\"{v}\".len()")),
+            None => ("core::ptr::null()".to_string(), "0".to_string()),
+        };
+
+        out.push_str("            ExportEntry {\n");
+        out.push_str(&format!(
+            "                name: \"{key}\".as_ptr(), name_len: \"{key}\".len(),\n",
+            key = entry.registry_key
+        ));
+        out.push_str(&format!("                wrap: {wrap_name},\n"));
+        out.push_str(&format!("                unchecked: {unchecked_expr},\n"));
+        out.push_str(&format!("                bulk: {bulk_expr},\n"));
+        out.push_str(&format!(
+            "                argspec: {argspec_ptr_expr}, argspec_len: {argspec_len_expr},\n"
+        ));
+        out.push_str(&format!(
+            "                ret_variant: {ret_ptr_expr}, ret_variant_len: {ret_len_expr},\n"
+        ));
+        out.push_str("            },\n");
+    }
+    out.push_str("        ]));\n");
+
+    out.push_str("        let table: &'static ExportTable = Box::leak(Box::new(ExportTable {\n");
+    out.push_str("            abi_version: TOMII_EXPORT_ABI_VERSION,\n");
+    out.push_str("            entries: entries.as_ptr(), entries_len: entries.len(),\n");
+    out.push_str("        }));\n");
+    out.push_str("        (table as *const ExportTable) as usize\n");
+    out.push_str("    });\n");
+    out.push_str("    p as *const ExportTable\n");
+    out.push_str("}\n");
+
+    out
+}
+
+/// Parse `func_path`, then write the self-contained module (see
+/// [`render_self_contained`]) to `out_path`.
+///
+/// This is the ADDITIVE, dynamic-kernel-registration counterpart to
+/// [`generate_from_file`]: instead of producing `wrappers.rs`/`func_reg.rs`
+/// for the dlsym-based static path, it emits a single module meant to be
+/// `include!`d directly into the plugin crate, calling the plugin's
+/// `#[tomii_export]`-generated `#[no_mangle]` companion functions in-process
+/// (no `libloading`, no symbol caching). Reuses the exact same source
+/// collection path as `generate_from_file` (`collect_entries_recursive` for
+/// `.rs`, `c_header::collect_c_entries` for `.h`/`.hpp`).
+///
+/// # Errors
+///
+/// Returns an error if the input cannot be read, cannot be parsed, has an
+/// unsupported extension, or if writing the output file fails.
+pub fn generate_self_contained_file(func_path: &Path, out_path: &Path) -> std::io::Result<()> {
+    let source = std::fs::read_to_string(func_path)?;
+
+    let ext = func_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+    let entries: Vec<ExportedFn> = match ext {
+        "rs" => {
+            let ast: File = parse_str(&source).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("cannot parse {}: {}", func_path.display(), e),
+                )
+            })?;
+            collect_entries_recursive(&ast, func_path)
+        }
+        "h" | "hpp" => c_header::collect_c_entries(&source),
+        other => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unsupported extension: {other}"),
+            ))
+        }
+    };
+
+    let code = render_self_contained(&entries);
+
+    std::fs::write(out_path, code)
+}
+
+// ---------------------------------------------------------------------------
 // C entry wrapper rendering
 // ---------------------------------------------------------------------------
 
@@ -1828,5 +2275,78 @@ mod tests {
             wf_cell_bulk_entry.unwrap().has_bulk_cm,
             "wf_cell_bulk bulk companion not detected"
         );
+    }
+
+    /// `render_self_contained` on the real radar plugin: sanity-checks the
+    /// dynamic-kernel-registration PoC emission (additive mode; does not
+    /// exercise `render_wrappers`/`render_registry` at all).
+    #[test]
+    fn test_render_self_contained_radar_pipeline() {
+        let source = std::fs::read_to_string("../examples/radar-pipeline/src/lib.rs")
+            .expect("read radar-pipeline source");
+        let file: File = parse_str(&source).expect("parse radar-pipeline source");
+        let entries =
+            collect_entries_recursive(&file, Path::new("../examples/radar-pipeline/src/lib.rs"));
+        assert!(!entries.is_empty(), "expected at least one exported entry");
+
+        let generated = render_self_contained(&entries);
+
+        // (a) exports the C-ABI entry point.
+        assert!(generated.contains("pub extern \"C\" fn __tomii_exports"));
+
+        // (b) wrapper bodies call the companion fn directly, not a SYM static.
+        let mut saw_direct_call = false;
+        for entry in entries.iter().filter(|e| e.source_lang == SourceLang::Rust) {
+            let wrap_name = wrap_fn_name(&entry.cm_name);
+            let needle_fn = format!("pub fn {wrap_name}(args: &[CmTypes])");
+            assert!(
+                generated.contains(&needle_fn),
+                "missing self-contained wrapper for {}",
+                entry.cm_name
+            );
+            let direct_call_needle = format!("{}(", entry.cm_name);
+            assert!(
+                generated.contains(&direct_call_needle),
+                "wrapper for {} does not call companion directly",
+                entry.cm_name
+            );
+            let sym_call_needle = format!("{}(", sym_static_name(&entry.cm_name));
+            assert!(
+                !generated.contains(&sym_call_needle),
+                "wrapper for {} unexpectedly calls a dlsym SYM static",
+                entry.cm_name
+            );
+            saw_direct_call = true;
+        }
+        assert!(saw_direct_call, "expected at least one Rust entry");
+
+        // (c) no libloading / cache_sym! machinery.
+        assert!(!generated.contains("libloading"));
+        assert!(!generated.contains("cache_sym"));
+        assert!(!generated.contains("DYN_LIB"));
+        assert!(!generated.contains("init_wrappers"));
+
+        // (d) parses as valid Rust.
+        syn::parse_file(&generated).expect("generated self-contained module must parse");
+    }
+
+    /// C entries are skipped (commented out), never wrapped, in the
+    /// self-contained emission mode.
+    #[test]
+    fn test_render_self_contained_skips_c_entries() {
+        let entry = ExportedFn {
+            registry_key: "cfunc".into(),
+            cm_name: "cfunc".into(),
+            cm_params: vec![],
+            cm_ret: CmRet::Void,
+            has_bulk_cm: false,
+            source_lang: SourceLang::C,
+            auto_params: Vec::new(),
+            ret_variant_hint: None,
+        };
+        let generated = render_self_contained(&[entry]);
+        assert!(generated.contains("// skipped C entry: cfunc"));
+        assert!(!generated.contains("pub fn cfunc_wrap"));
+        syn::parse_file(&generated).expect("generated self-contained module must parse");
     }
 }

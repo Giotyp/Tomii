@@ -1648,6 +1648,78 @@ impl CoreSpec {
 /// - Returns `CmTypes::None` for pure side-effecting kernels.
 pub type CmBulkPtr = fn(usize, usize, &[CmTypes]) -> CmTypes;
 
+// ============================================================================
+// Dynamic kernel-registration ABI (experimental; the `dynamic-registration` PoC)
+// ============================================================================
+//
+// A plugin `.so` may publish a self-describing export table via a C-ABI symbol
+// `__tomii_exports`, letting the runtime register that plugin's kernels at load
+// time (dlsym) instead of baking per-kernel marshalling wrappers into the
+// runtime binary at build time. Both the runtime and the plugin link the SAME
+// `tomii-types`, so the `CmPtr` / `CmBulkPtr` / `CmTypes` layouts agree;
+// `TOMII_EXPORT_ABI_VERSION` guards against a plugin built against an
+// incompatible `tomii-types` (the runtime rejects a version mismatch rather
+// than risk calling a wrapper with a differently-laid-out `CmTypes`).
+//
+// These are pure type/const definitions — they emit no machine code, so their
+// presence does not perturb a runtime built on the static (default) path.
+
+/// Export-table ABI version. Bump this whenever the `ExportTable`/`ExportEntry`
+/// layout OR the `CmTypes`/`CmPtr` marshalling contract changes. The runtime
+/// compares a loaded plugin's reported version against this and refuses a
+/// mismatch.
+pub const TOMII_EXPORT_ABI_VERSION: u32 = 1;
+
+/// One argspec element: the required `CmTypes` variant name for a single kernel
+/// argument slot (e.g. `"Usize"`, `"*"` = any, `"..."` = variadic tail). Borrowed
+/// UTF-8 published by the plugin (`'static` in the plugin image), not owned.
+#[repr(C)]
+pub struct ExportArgSpec {
+    pub ptr: *const u8,
+    pub len: usize,
+}
+
+/// One exported kernel descriptor, published by a plugin's `__tomii_exports`
+/// table and consumed by the runtime at load.
+#[repr(C)]
+pub struct ExportEntry {
+    /// Registry name (the graph node's `function` field), borrowed UTF-8 of
+    /// `name_len` bytes.
+    pub name: *const u8,
+    pub name_len: usize,
+    /// Checked slice-marshalling wrapper (always present).
+    pub wrap: CmPtr,
+    /// Unchecked twin wrapper, or `None` when the entry has no unchecked spec
+    /// (e.g. C entries); mirrors `get_unchecked_func`.
+    pub unchecked: Option<CmPtr>,
+    /// Bulk wrapper, or `None`.
+    pub bulk: Option<CmBulkPtr>,
+    /// Per-argument required-variant spec (`argspec_len` elements), or null when
+    /// the entry has no unchecked spec. Mirrors `get_func_argspec`.
+    pub argspec: *const ExportArgSpec,
+    pub argspec_len: usize,
+    /// Return-variant hint name (`ret_variant_len` bytes), or null when the
+    /// kernel's return is unconstrained (`CmTypes`-returning). Mirrors
+    /// `get_func_ret_variant`.
+    pub ret_variant: *const u8,
+    pub ret_variant_len: usize,
+}
+
+/// The table a dynamic plugin returns from its `__tomii_exports` symbol.
+#[repr(C)]
+pub struct ExportTable {
+    /// Must equal [`TOMII_EXPORT_ABI_VERSION`] or the runtime rejects the plugin.
+    pub abi_version: u32,
+    /// Pointer to `entries_len` [`ExportEntry`] descriptors (`'static` in the
+    /// plugin image).
+    pub entries: *const ExportEntry,
+    pub entries_len: usize,
+}
+
+/// Signature of the `__tomii_exports` symbol a dynamic plugin exports. Returns a
+/// pointer to a `'static` [`ExportTable`] in the plugin image (never null).
+pub type TomiiExportsFn = unsafe extern "C" fn() -> *const ExportTable;
+
 #[derive(Debug)]
 pub struct CustomError {
     details: String,

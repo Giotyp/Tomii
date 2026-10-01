@@ -120,11 +120,48 @@ pub use crate::async_recorder::AsyncRecorder;
 pub use crate::custom_scheduler::Priority;
 pub use crate::dependency_counter::{DependencyCounter, MultiThreadedCounter};
 pub use crate::runtime::{RunProgress, RuntimeConfig};
-#[cfg(build_rs_ran)]
+/// Dynamic kernel registry (PoC): resolves kernels from the loaded plugin `.so`'s
+/// `__tomii_exports` table at runtime instead of a compile-time-baked table.
+#[cfg(feature = "dynamic-registration")]
+pub mod dynamic_registry;
+
+// `func_reg` — the kernel lookup table consumed by the runtime. Three mutually
+// exclusive definitions:
+//  - dynamic-registration feature ON: forward to the runtime `dynamic_registry`
+//    (resolved from the loaded `.so`). Consumers are unchanged.
+//  - feature OFF, build.rs ran: the converter-generated (or no-FUNC_PATH stub)
+//    table baked into the binary — the static default path, unchanged.
+//  - feature OFF, build.rs did not run: inline no-op stub (check-only builds).
+#[cfg(feature = "dynamic-registration")]
+pub mod func_reg {
+    //! Dynamic forwarding shim: every lookup consults the plugin-provided table.
+    use tomii_types::{CmBulkPtr, CmPtr};
+    pub fn get_func(name: &str) -> Option<CmPtr> {
+        crate::dynamic_registry::get_func(name)
+    }
+    pub fn get_bulk_func(name: &str) -> Option<CmBulkPtr> {
+        crate::dynamic_registry::get_bulk_func(name)
+    }
+    /// # Safety
+    ///
+    /// Forwards to [`crate::dynamic_registry::get_unchecked_func`]; the caller
+    /// upholds the same unchecked-wrapper contract (the argument variants are
+    /// provably constant, discharged by `select_unchecked_wrappers`).
+    pub unsafe fn get_unchecked_func(name: &str) -> Option<CmPtr> {
+        unsafe { crate::dynamic_registry::get_unchecked_func(name) }
+    }
+    pub fn get_func_argspec(name: &str) -> Option<&'static [&'static str]> {
+        crate::dynamic_registry::get_func_argspec(name)
+    }
+    pub fn get_func_ret_variant(name: &str) -> Option<&'static str> {
+        crate::dynamic_registry::get_func_ret_variant(name)
+    }
+}
+#[cfg(all(build_rs_ran, not(feature = "dynamic-registration")))]
 pub mod func_reg {
     include!(concat!(env!("OUT_DIR"), "/func_reg.rs"));
 }
-#[cfg(not(build_rs_ran))]
+#[cfg(all(not(build_rs_ran), not(feature = "dynamic-registration")))]
 pub mod func_reg {
     use tomii_types::{CmBulkPtr, CmPtr, CmTypes};
     /// Stub used when no plugin registry has been generated (test / check-only builds).
