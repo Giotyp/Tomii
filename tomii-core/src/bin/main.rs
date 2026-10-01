@@ -283,6 +283,18 @@ fn main() {
         tomii_core::wrappers::init_wrappers();
     }
 
+    // Dynamic-registration PoC: resolve the plugin's kernels from its
+    // self-describing `__tomii_exports` table at load time, so the runtime
+    // binary carries no plugin-specific codegen. Fail fast on a missing table
+    // or an ABI mismatch rather than proceed with no kernels.
+    #[cfg(feature = "dynamic-registration")]
+    {
+        if let Err(e) = tomii_core::dynamic_registry::init(&args.dylib) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+
     let runtime = match args.max_runtime {
         0 => None,
         _ => Some(args.max_runtime),

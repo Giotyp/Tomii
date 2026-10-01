@@ -8,9 +8,18 @@ edition = "2021"
 [lib]
 crate-type = ["dylib", "rlib"]
 
+[features]
+# Experimental (PoC): emit a self-describing `__tomii_exports` table into this
+# plugin so a dynamic-registration runtime can resolve its kernels at load time.
+# OFF by default — the default build (used by the frozen campaign) is unchanged.
+dynamic-registration = []
+
 [dependencies]
 tomii-types = { path = "../../tomii-types" }
 tomii-macro = { path = "../../tomii-macro" }
+
+[build-dependencies]
+tomii-converter = { path = "../../tomii-converter" }
 
 [profile.release]
 debug = true
