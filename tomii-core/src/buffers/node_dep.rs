@@ -164,6 +164,9 @@ impl NodeDependencyEntry {
             // If the stored generation differs from slot_gen, treat the value as the
             // initial deps_per_group (stale entry from a previous frame).
             let init_val = self.deps_per_group;
+            // `fetch_update` is deprecated (renamed `try_update`) on newer stable
+            // toolchains; `try_update` is still unstable on our MSRV (1.92), so keep it.
+            #[allow(deprecated)]
             let prev_packed = self.remaining_deps[g]
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |packed| {
                     let stored_gen = gen_unpack_gen(packed);
@@ -317,6 +320,9 @@ impl NodeDependencyEntry {
             None => 0,
         };
         let init_val = self.deps_per_group;
+        // `fetch_update` is deprecated (renamed `try_update`) on newer stable
+        // toolchains; `try_update` is still unstable on our MSRV (1.92), so keep it.
+        #[allow(deprecated)]
         let prev = self.remaining_deps[g]
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |packed| {
                 let stored_gen = gen_unpack_gen(packed);

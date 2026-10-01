@@ -221,6 +221,69 @@ fn test_build_error_slots_too_large() {
     );
 }
 
+/// A multi-value `$res` (predecessor index count != node factor, so it expands to
+/// several values at runtime) placed BEFORE another argument must be rejected at
+/// graph build. Its in-place expansion would overrun the following argument's buffer
+/// slot — the classic finding-#61 arg-buffer overrun where a trailing `$index`/`$ref`
+/// slot ends up holding a `$network` result, panicking every worker with a variant
+/// mismatch ("expected Usize"). Catch it as a clear build error, not a runtime panic.
+#[test]
+fn test_build_error_multivalue_res_not_last() {
+    // `b` (factor 4) reads `a` with 3 indexes (!= factor 4 → multi-value collect-all),
+    // then a second argument whose slot the 3-value expansion would shift.
+    let json = r#"
+    {
+        "nodes": [
+            { "name": "a", "factor": 4, "function": "noop", "args": [] },
+            {
+                "name": "b",
+                "factor": 4,
+                "function": "noop",
+                "args": [
+                    { "type": "$res", "predecessor": { "name": "a", "indexes": "0-2" } },
+                    { "type": "$res", "predecessor": { "name": "a", "indexes": "0" } }
+                ]
+            }
+        ]
+    }
+    "#;
+    let msg = match from_json_str(json, 1) {
+        Ok(_) => panic!("multi-value non-last $res must be rejected at build"),
+        Err(e) => format!("{e:?}"),
+    };
+    assert!(
+        msg.contains("must be the last argument"),
+        "expected arg-layout overrun error, got: {msg}"
+    );
+}
+
+/// Control for [`test_build_error_multivalue_res_not_last`]: the same multi-value
+/// `$res` as the LAST argument is accepted — its expansion grows the buffer at the
+/// end and shifts nothing. A 1:1 dependency (count == factor) before it is fine too.
+#[test]
+fn test_build_ok_multivalue_res_last() {
+    let json = r#"
+    {
+        "nodes": [
+            { "name": "a", "factor": 4, "function": "noop", "args": [] },
+            {
+                "name": "b",
+                "factor": 4,
+                "function": "noop",
+                "args": [
+                    { "type": "$res", "predecessor": { "name": "a", "indexes": "0" } },
+                    { "type": "$res", "predecessor": { "name": "a", "indexes": "0-2" } }
+                ]
+            }
+        ]
+    }
+    "#;
+    assert!(
+        from_json_str(json, 1).is_ok(),
+        "multi-value $res as the last arg must be accepted"
+    );
+}
+
 /// Multiple frames through a single slot: verifies slot reinitialisation across
 /// frame boundaries (the core correctness invariant for Bugs #14–#22).
 #[test]

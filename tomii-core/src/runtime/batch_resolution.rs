@@ -276,6 +276,10 @@ fn dispatch_condition_successor(
         sched.push(scheduled_succ_info.clone());
         // Decrement cond_instances_to_spawn with generational lazy reinit
         let factor = shared.graph_cache.node_cache[succ_node_id].factor as u32;
+        // `fetch_update` is deprecated (renamed `try_update`) on newer stable
+        // toolchains, but `try_update` is still unstable on our MSRV (1.92), so we
+        // keep `fetch_update` and silence the forward-looking deprecation lint.
+        #[allow(deprecated)]
         let prev_packed = shared.slot_data.cond_instances_to_spawn[node_info.slot][succ_node_id]
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |packed| {
                 let stored_gen = gen_unpack_gen(packed);
