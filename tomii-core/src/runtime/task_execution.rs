@@ -37,6 +37,9 @@ pub(super) fn fanout_bulk_increment(
 ) -> usize {
     use crate::buffers::{gen_pack, gen_unpack_gen, gen_unpack_val};
     use std::sync::atomic::Ordering;
+    // `fetch_update` is deprecated (renamed `try_update`) on newer stable toolchains,
+    // but `try_update` is still unstable on our MSRV (1.92); keep `fetch_update`.
+    #[allow(deprecated)]
     let result = counter
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |packed| {
             let stored_gen = gen_unpack_gen(packed);
