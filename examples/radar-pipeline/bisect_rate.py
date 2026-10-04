@@ -58,6 +58,8 @@ def run_at_period(args, period: float, *, verify: bool) -> tuple[bool, float | N
     ]
     if args.gpu:
         cmd.append("--gpu")
+    if getattr(args, "hybrid", False):
+        cmd.append("--hybrid")
     if not verify:
         cmd.append("--no-verify")
 
@@ -81,6 +83,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--scene", type=Path, required=True)
     p.add_argument("--gpu", action="store_true")
+    p.add_argument("--hybrid", action="store_true",
+                   help="use the hybrid kernel twin (CPU range, GPU doppler/cfar)")
     p.add_argument("--frames", type=int, default=400)
     p.add_argument("--warmup", type=int, default=50)
     p.add_argument("--slots", type=int, default=2)
@@ -95,6 +99,11 @@ def main() -> None:
                    help="fraction of expected steady frames required to call it sustained")
     p.add_argument("--no-confirm", dest="confirm", action="store_false", default=True,
                    help="skip the verified re-run at the discovered P*")
+    p.add_argument("--gate-search", action="store_true",
+                   help="run the coverage/detection verifier at EVERY bisect step, not "
+                        "just the final confirm. P* is then the fastest rate that "
+                        "passes the gate (fair 'baseline at its best' max-sustained rate); "
+                        "slower, but the reported boundary needs no separate confirm.")
     p.add_argument("--results-dir", type=Path, default=HERE / "results")
     args = p.parse_args()
 
@@ -103,7 +112,7 @@ def main() -> None:
     cpi = args.n_chirps * scene["chirp_interval_s"]
     if args.hi is None:
         args.hi = round(cpi, 6)
-    label = "GPU" if args.gpu else "CPU"
+    label = "HYBRID" if getattr(args, "hybrid", False) else ("GPU" if args.gpu else "CPU")
     args.results_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[{label}] scene {args.scene.name}: n_chirps={args.n_chirps} "
@@ -111,7 +120,8 @@ def main() -> None:
           f"[{args.lo*1e3:.1f}, {args.hi*1e3:.1f}] ms", flush=True)
 
     hi, lo = args.hi, args.lo  # hi sustains, lo does not (invariant we maintain)
-    s_hi, p50_hi, f_hi = run_at_period(args, hi, verify=False)
+    gate = args.gate_search
+    s_hi, p50_hi, f_hi = run_at_period(args, hi, verify=gate)
     print(f"[{label}] P={hi*1e3:6.1f}ms -> sustained={s_hi} "
           f"p50={fmt_ms(p50_hi)} frames={f_hi}", flush=True)
     if not s_hi:
@@ -123,7 +133,7 @@ def main() -> None:
     p50_at_best = p50_hi
     while (hi - lo) * 1e3 > args.tol_ms:
         mid = (hi + lo) / 2.0
-        sustained, p50, frames = run_at_period(args, mid, verify=False)
+        sustained, p50, frames = run_at_period(args, mid, verify=gate)
         print(f"[{label}] P={mid*1e3:6.1f}ms -> sustained={sustained} "
               f"p50={fmt_ms(p50)} frames={frames}", flush=True)
         if sustained:
@@ -133,8 +143,9 @@ def main() -> None:
         else:
             lo = mid
 
+    tag = "gated" if gate else "unverified"
     print(f"\n[{label}] sustained-rate boundary P* ~= {best_sustained*1e3:.1f}ms "
-          f"({1.0/best_sustained:.1f} fps), unverified p50={fmt_ms(p50_at_best)}",
+          f"({1.0/best_sustained:.1f} fps), {tag} p50={fmt_ms(p50_at_best)}",
           flush=True)
 
     if args.confirm:
