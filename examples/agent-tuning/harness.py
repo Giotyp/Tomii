@@ -11,8 +11,12 @@ Usage (standalone — establish a baseline):
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
-from dataclasses import dataclass
+import os
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +29,12 @@ from workloads import (  # noqa: F401  (EvalResult re-exported for the arms)
 
 _HERE = Path(__file__).resolve().parent
 
+#: Exclusive measurement lock shared by every eval-campaign experiment
+#: (EVAL_PROTOCOL.md).  Held per trial only — never across LLM calls.
+LOCK_PATH = Path(
+    os.environ.get("E8_LOCK_PATH", "/home/george/Tomii/.eval-server.lock")
+)
+
 
 @dataclass
 class TrialRecord:
@@ -33,6 +43,44 @@ class TrialRecord:
     result: EvalResult
     arm: str
     notes: str = ""
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Measurement lock + per-trial evaluation
+# ---------------------------------------------------------------------------
+
+#: Accumulated lock-wait seconds for the current process (excluded from the
+#: arm's reported wall time: waiting on other experiments is not search cost).
+LOCK_WAIT_S = [0.0]
+
+
+@contextlib.contextmanager
+def server_lock():
+    """flock(2) on the campaign lock file — same lock as `flock(1)`."""
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fh = LOCK_PATH.open("a")
+    t0 = time.monotonic()
+    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    LOCK_WAIT_S[0] += time.monotonic() - t0
+    try:
+        yield
+    finally:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        fh.close()
+
+
+def run_trial(
+    workload: Workload,
+    knobs: dict[str, Any],
+    args: argparse.Namespace,
+    space: dict[str, Any],
+) -> EvalResult:
+    """Evaluate one configuration while holding the measurement lock."""
+    with server_lock():
+        return workload.evaluate(
+            knobs, frames=args.frames, warmup=args.warmup, space=space
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +110,7 @@ def add_common_args(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="restrict the search to runtime (CLI) knobs",
     )
+    p.add_argument("--seed", type=int, default=0, help="arm RNG seed / run index")
 
 
 def setup_arm(args: argparse.Namespace) -> tuple[Workload, dict[str, Any], Path]:
@@ -97,7 +146,8 @@ def establish_baseline(
         f"[harness] establishing {workload.name} baseline with default knobs ...",
         flush=True,
     )
-    result = workload.evaluate(knobs, frames=frames, warmup=warmup)
+    with server_lock():
+        result = workload.evaluate(knobs, frames=frames, warmup=warmup)
 
     if not result.verifier_ok or result.ms_per_frame is None:
         reason = result.rejection_reason or "unknown"
@@ -120,6 +170,7 @@ def establish_baseline(
             "rejection_reason": result.rejection_reason,
             "wall_seconds": result.wall_seconds,
             "knobs": knobs,
+            "report": result.report,
         }
         (results_dir / "baseline.json").write_text(json.dumps(data, indent=2))
 
@@ -164,6 +215,8 @@ def log_trial(record: TrialRecord, log_file: Path) -> None:
         "ms_per_frame": record.result.ms_per_frame,
         "rejection_reason": record.result.rejection_reason,
         "wall_seconds": record.result.wall_seconds,
+        "report": record.result.report,
+        **record.extra,
     }
     with log_file.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry) + "\n")
@@ -191,3 +244,29 @@ def _main() -> None:
 
 if __name__ == "__main__":
     _main()
+
+
+def write_run_meta(
+    results_dir: Path,
+    arm: str,
+    args: argparse.Namespace,
+    space: dict[str, Any],
+    t_start: float,
+    **extra: Any,
+) -> None:
+    """Record per-run provenance and cost (wall time excludes lock waits)."""
+    meta = {
+        "arm": arm,
+        "workload": args.workload,
+        "seed": args.seed,
+        "iterations": args.iterations,
+        "frames": args.frames,
+        "warmup": args.warmup,
+        "knob_space_version": space.get("version"),
+        "knob_names": [k["name"] for k in space["knobs"]],
+        "wall_seconds_total": time.monotonic() - t_start,
+        "lock_wait_seconds": LOCK_WAIT_S[0],
+        "wall_seconds_excl_lock": time.monotonic() - t_start - LOCK_WAIT_S[0],
+        **extra,
+    }
+    (results_dir / f"{arm}_meta.json").write_text(json.dumps(meta, indent=2))

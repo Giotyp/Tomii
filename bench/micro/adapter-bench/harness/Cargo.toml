@@ -1,0 +1,28 @@
+[workspace]
+
+[package]
+name = "adapter-bench"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+name = "rust-bench"
+path = "src/bin/rust_bench.rs"
+
+[[bin]]
+name = "c-bench"
+path = "src/bin/c_bench.rs"
+
+[dependencies]
+tomii-types = { path = "../../../../tomii-types" }
+libloading = "0.8"
+
+[build-dependencies]
+tomii-converter = { path = "../../../../tomii-converter" }
+cc = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

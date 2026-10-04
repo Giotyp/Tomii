@@ -1,0 +1,15 @@
+[workspace]
+
+[package]
+name = "root-validate-kernel"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rootval_kernel"
+crate-type = ["dylib", "rlib"]
+
+[dependencies]
+tomii-types = { path = "../../../tomii-types" }
+tomii-macro = { path = "../../../tomii-macro" }
+libc = "0.2"
