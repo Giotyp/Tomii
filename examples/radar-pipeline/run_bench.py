@@ -38,7 +38,7 @@ from build_graph import build_radar_graph, radar_dims_from_scene
 SENDER_DELAY_S = 5  # receiver-first startup order
 
 
-def build_all(clean: bool, gpu: bool = False) -> tuple[str, str]:
+def build_all(clean: bool, gpu: bool = False, hybrid: bool = False) -> tuple[str, str]:
     print("Building radar kernels (FFTW)...", flush=True)
     subprocess.run(["make", "-C", str(HERE / "kernels")], check=True)
     env = {**os.environ, "FUNC_PATH": str(HERE / "src" / "lib.rs")}
@@ -47,6 +47,10 @@ def build_all(clean: bool, gpu: bool = False) -> tuple[str, str]:
         subprocess.run(["make", "-C", str(HERE / "kernels"), "gpu"], check=True)
         # build.rs links/rpaths libradar_kernels.so from this dir instead.
         env["RADAR_KERNELS_DIR"] = str(HERE / "kernels" / "gpu")
+    elif hybrid:
+        print("Building radar kernels (hybrid CPU range + GPU doppler/cfar)...", flush=True)
+        subprocess.run(["make", "-C", str(HERE / "kernels"), "hybrid"], check=True)
+        env["RADAR_KERNELS_DIR"] = str(HERE / "kernels" / "hybrid")
     if clean:
         subprocess.run(
             ["cargo", "clean", "--manifest-path", str(HERE / "Cargo.toml")], check=True
@@ -275,6 +279,9 @@ def main() -> None:
                    help="summary CSV path (default: results/radar_sweep.csv)")
     p.add_argument("--gpu", action="store_true",
                    help="link the CUDA kernel twin (kernels/gpu) instead of FFTW")
+    p.add_argument("--hybrid", action="store_true",
+                   help="link the hybrid twin (kernels/hybrid): CPU range_fft, "
+                        "GPU doppler+cfar, CPU cluster")
     p.add_argument("--no-verify", dest="verify", action="store_false", default=True)
     p.add_argument("--no-clean", dest="clean", action="store_false", default=True)
     p.add_argument("--graph", type=Path, default=None, help="graph JSON override")
@@ -293,7 +300,9 @@ def main() -> None:
     frames = args.frames if args.frames is not None else scene_meta["radar"]["n_frames"]
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
-    dylib, binary = build_all(clean=args.clean, gpu=args.gpu)
+    if args.gpu and args.hybrid:
+        p.error("--gpu and --hybrid are mutually exclusive")
+    dylib, binary = build_all(clean=args.clean, gpu=args.gpu, hybrid=args.hybrid)
 
     workers_list = args.sweep_workers or [args.workers]
     slots_list = args.sweep_slots or [args.slots]
