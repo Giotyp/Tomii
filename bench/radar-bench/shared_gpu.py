@@ -31,8 +31,14 @@ from tomii._runner import build_command  # noqa: E402
 from build_graph import build_radar_graph, radar_dims_from_scene  # noqa: E402
 import run_bench  # noqa: E402
 
-CONDA = Path.home() / "miniconda3" / "envs" / "radar" / "lib"
-HOG_PY = Path.home() / "miniconda3" / "envs" / "verl" / "bin" / "python"
+# Override paths with TOMII_RADAR_CONDA_LIB (fftw env lib dir) and TOMII_HOG_PY
+# (a python with CUDA torch, for the Part C GPU hog).
+CONDA = Path(os.environ.get(
+    "TOMII_RADAR_CONDA_LIB",
+    str(Path.home() / "miniconda3" / "envs" / "radar" / "lib")))
+HOG_PY = Path(os.environ.get(
+    "TOMII_HOG_PY",
+    str(Path.home() / "miniconda3" / "envs" / "verl" / "bin" / "python")))
 RES = ROOT / "bench/radar-bench/results/gpu-crossover/shared_gpu"
 SENDER_DELAY = 5
 WORKERS = 4          # per pipeline; stride keeps N=4 on disjoint physical cores
@@ -42,19 +48,19 @@ SIZES = {"4096x512": ("cpi_4096x512", 4096, 512),
          "2048x256": ("cpi_2048x256", 2048, 256)}
 
 
-def base_env(backend):
+def base_env(backend, dev=1):
     e = {**os.environ}
-    e["CUDA_VISIBLE_DEVICES"] = "1"
+    e["CUDA_VISIBLE_DEVICES"] = str(dev)
     e["LD_LIBRARY_PATH"] = f"{CONDA}:{os.environ.get('LD_LIBRARY_PATH','')}"
     e["PKG_CONFIG_PATH"] = str(CONDA / "pkgconfig")
     return e
 
 
-def build_backend(backend, log):
+def build_backend(backend, log, dev=1):
     """Clean-build the plugin+core for this backend once (kernel .so is dim-agnostic)."""
     os.environ["PKG_CONFIG_PATH"] = str(CONDA / "pkgconfig")
     os.environ["LD_LIBRARY_PATH"] = f"{CONDA}:{os.environ.get('LD_LIBRARY_PATH','')}"
-    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(dev)
     log.write(f"\n=== build {backend} ===\n"); log.flush()
     dylib, binary = run_bench.build_all(clean=True, gpu=(backend == "gpu"),
                                         hybrid=(backend == "hybrid"))
@@ -99,14 +105,16 @@ class GpuSampler(threading.Thread):
 
 
 def run_set(backend, size, n_samples, n_chirps, N, period_s, frames, warmup,
-            dylib, binary, env, tag, log, sample_gpu=False):
-    """Launch N concurrent pipelines; return per-pipeline stats + all_pass."""
+            dylib, binary, env, tag, log, sample_gpu=False, gpu_device=1):
+    """Launch N concurrent pipelines; return per-pipeline stats + all_pass.
+    gpu_device is the PHYSICAL device for nvidia-smi sampling (the launched procs'
+    own CUDA_VISIBLE_DEVICES comes from `env`, which differs under MPS)."""
     d = RES / tag
     d.mkdir(parents=True, exist_ok=True)
     gap_us = period_s / n_chirps * 1e6
     max_rt = int(SENDER_DELAY + frames * period_s + 30)
     procs, senders, meta = [], [], []
-    sampler = GpuSampler() if sample_gpu else None
+    sampler = GpuSampler(dev=gpu_device) if sample_gpu else None
     for i in range(N):
         port = BASE_PORT + i
         graph = make_graph(size, n_samples, n_chirps, port)
@@ -184,13 +192,14 @@ def summarize(per):
             "n_verified": sum(p["verified"] for p in per)}
 
 
-def start_hog(log):
-    """Background GPU contender on device 1 (persistent large matmuls)."""
+def start_hog(log, dev=1):
+    """Background GPU contender on `dev` (persistent large matmuls). CUDA_VISIBLE_DEVICES
+    pins it to the one device, which is then index 0 inside the process."""
     code = ("import torch,time\n"
             "torch.cuda.set_device(0)\n"
             "a=torch.randn(4096,4096,device='cuda');b=torch.randn(4096,4096,device='cuda')\n"
             "while True:\n c=a@b; torch.cuda.synchronize()\n")
-    e = {**os.environ, "CUDA_VISIBLE_DEVICES": "1"}
+    e = {**os.environ, "CUDA_VISIBLE_DEVICES": str(dev)}
     return subprocess.Popen([str(HOG_PY), "-c", code], env=e,
                             stdout=open(RES / "hog.log", "w"), stderr=subprocess.STDOUT)
 
@@ -209,6 +218,15 @@ AGG_GRID_MS = {
 }
 
 
+def apply_agg_grid(overrides):
+    """overrides: 'SIZE:N:p1,p2,...' strings → mutate AGG_GRID_MS[SIZE][N]."""
+    for ov in overrides or []:
+        parts = ov.split(":")
+        if len(parts) != 3 or parts[0] not in AGG_GRID_MS:
+            raise SystemExit(f"--agg-grid: expected SIZE:N:p1,p2,... got {ov!r}")
+        AGG_GRID_MS[parts[0]][int(parts[1])] = [float(x) for x in parts[2].split(",")]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sizes", nargs="+", default=["4096x512", "2048x256"])
@@ -217,7 +235,12 @@ def main():
     ap.add_argument("--frames", type=int, default=250)
     ap.add_argument("--warmup", type=int, default=40)
     ap.add_argument("--parts", nargs="+", default=["B", "C"])  # A is confounded by GPU saturation
+    ap.add_argument("--gpu-device", type=int, default=1)
+    ap.add_argument("--agg-grid", action="append", metavar="SIZE:N:p1,p2,...",
+                    help="override a Part-B (size,N) period grid [ms], repeatable")
     args = ap.parse_args()
+    apply_agg_grid(args.agg_grid)
+    dev = args.gpu_device
     RES.mkdir(parents=True, exist_ok=True)
     log = open(RES / "shared_gpu.log", "a")
     out = {"A": {}, "B": {}, "C": {}}
@@ -226,8 +249,8 @@ def main():
         out.update(json.loads(op.read_text()))
 
     for backend in args.backends:
-        dylib, binary = build_backend(backend, log)
-        env = base_env(backend)
+        dylib, binary = build_backend(backend, log, dev)
+        env = base_env(backend, dev)
         for size in args.sizes:
             sub, ns, nc = SIZES[size]
             # Part A: fixed rate, scale N
@@ -236,7 +259,8 @@ def main():
                 for N in args.ns:
                     r = run_set(backend, size, ns, nc, N, per_ms / 1e3, args.frames,
                                 args.warmup, dylib, binary, env,
-                                f"A_{backend}_{size}_N{N}", log, sample_gpu=True)
+                                f"A_{backend}_{size}_N{N}", log, sample_gpu=True,
+                                gpu_device=dev)
                     out["A"].setdefault(size, {}).setdefault(backend, {})[str(N)] = \
                         {"summary": summarize(r["per_pipe"]), "all_pass": r["all_pass"],
                          "gpu": r["gpu"], "period_ms": per_ms,
@@ -252,7 +276,7 @@ def main():
                     for pm in AGG_GRID_MS[size][N]:  # descending: getting harder
                         r = run_set(backend, size, ns, nc, N, pm / 1e3, args.frames,
                                     args.warmup, dylib, binary, env,
-                                    f"B_{backend}_{size}_N{N}_{pm}", log)
+                                    f"B_{backend}_{size}_N{N}_{pm}", log, gpu_device=dev)
                         if r["all_pass"]:
                             best = {"period_ms": pm, "agg_fps": round(N / (pm/1e3), 1),
                                     "per_pipe_fps": round(1000/pm, 1)}
@@ -263,13 +287,14 @@ def main():
                     print(f"[B {backend} {size} N={N}] sustained={best}", flush=True)
             # Part C: adversarial hog, fixed rate
             if "C" in args.parts:
-                hog = start_hog(log)
+                hog = start_hog(log, dev)
                 time.sleep(4)
                 per_ms = FIXED_PERIOD_MS[size]
                 for N in [1, 2]:
                     r = run_set(backend, size, ns, nc, N, per_ms / 1e3, args.frames,
                                 args.warmup, dylib, binary, env,
-                                f"C_{backend}_{size}_N{N}", log, sample_gpu=True)
+                                f"C_{backend}_{size}_N{N}", log, sample_gpu=True,
+                                gpu_device=dev)
                     out["C"].setdefault(size, {}).setdefault(backend, {})[str(N)] = \
                         {"summary": summarize(r["per_pipe"]), "all_pass": r["all_pass"],
                          "gpu": r["gpu"]}

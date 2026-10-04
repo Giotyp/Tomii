@@ -15,15 +15,29 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 RADAR = ROOT / "examples" / "radar-pipeline"
-CONDA = Path.home() / "miniconda3" / "envs" / "radar" / "lib"
+# Conda env lib dir (libfftw3f + fftw3f.pc). Override with TOMII_RADAR_CONDA_LIB.
+CONDA = Path(os.environ.get(
+    "TOMII_RADAR_CONDA_LIB",
+    str(Path.home() / "miniconda3" / "envs" / "radar" / "lib")))
 
-# key -> (scene subdir, n_chirps, descending period grid [ms])
+# key -> (scene subdir, n_chirps, descending period grid [ms]). Grids are tuned to
+# this box's sustained-rate boundaries; override per-CPI with --grid SIZE:p1,p2,...
 GRIDS = {
     "1024x128": ("cpi_1024x128", 128, [7.0, 6.5, 6.0, 5.6, 5.2, 4.8]),
     "2048x256": ("cpi_2048x256", 256, [13, 12, 11, 10, 9, 8, 7, 6.5, 6.0]),
     "4096x512": ("cpi_4096x512", 512, [26, 24, 22, 20, 18, 16]),
 }
 BACKENDS = ["cpu", "gpu", "hybrid"]
+
+
+def apply_grid_overrides(overrides):
+    """overrides: list of 'SIZE:p1,p2,...' strings → mutate GRIDS period lists."""
+    for ov in overrides or []:
+        size, _, csv = ov.partition(":")
+        if size not in GRIDS or not csv:
+            raise SystemExit(f"--grid: unknown size or empty list in {ov!r}")
+        sub, nc, _ = GRIDS[size]
+        GRIDS[size] = (sub, nc, [float(x) for x in csv.split(",")])
 
 
 def env_for(be, dev):
@@ -70,7 +84,11 @@ def main():
     ap.add_argument("--repeat", type=int, default=3)
     ap.add_argument("--frames", type=int, default=200)
     ap.add_argument("--warmup", type=int, default=30)
+    ap.add_argument("--grid", action="append", metavar="SIZE:p1,p2,...",
+                    help="override a CPI's period grid (ms), repeatable; "
+                         "e.g. --grid 2048x256:14,12,10")
     args = ap.parse_args()
+    apply_grid_overrides(args.grid)
     rdir = ROOT / "bench/radar-bench/results/gpu-crossover/robust"
     rdir.mkdir(parents=True, exist_ok=True)
     log = open(rdir / "robust.log", "w")

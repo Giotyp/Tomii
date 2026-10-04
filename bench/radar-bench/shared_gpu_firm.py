@@ -20,27 +20,37 @@ MPS_PIPE = "/tmp/tomii_mps_pipe"
 MPS_LOG = "/tmp/tomii_mps_log"
 
 # 3/3 sweep grids (descending per-pipeline period ms), wide enough to bracket both
-# backends' boundaries at each (size, N).
+# backends' boundaries at each (size, N). Box-tuned; override with --grid SIZE:N:csv.
 GRIDS = {
     "2048x256": {1: [8, 7, 6.5, 6], 2: [18, 16, 14, 12, 10], 4: [34, 30, 26, 22, 20]},
     "4096x512": {1: [26, 24, 22, 20], 2: [56, 52, 48, 44], 4: [116, 108, 100, 92, 84]},
 }
 
 
+def apply_grid(overrides):
+    """overrides: 'SIZE:N:p1,p2,...' strings → mutate GRIDS[SIZE][N]."""
+    for ov in overrides or []:
+        parts = ov.split(":")
+        if len(parts) != 3 or parts[0] not in GRIDS:
+            raise SystemExit(f"--grid: expected SIZE:N:p1,p2,... got {ov!r}")
+        GRIDS[parts[0]][int(parts[1])] = [float(x) for x in parts[2].split(",")]
+
+
 def mps_env(base, on):
     if not on:
         return base
-    # The daemon was started with CUDA_VISIBLE_DEVICES=1, so it manages GPU 1 and
-    # exposes it to clients as device index 0. Clients must therefore select 0.
+    # The daemon is started scoped to a single physical device (CUDA_VISIBLE_DEVICES
+    # = that device in start_mps), so it exposes exactly one GPU to clients as device
+    # index 0. Clients therefore always select 0 regardless of the physical index.
     e = {**base, "CUDA_VISIBLE_DEVICES": "0",
          "CUDA_MPS_PIPE_DIRECTORY": MPS_PIPE, "CUDA_MPS_LOG_DIRECTORY": MPS_LOG}
     return e
 
 
-def start_mps(log):
+def start_mps(log, dev=1):
     os.makedirs(MPS_PIPE, exist_ok=True)
     os.makedirs(MPS_LOG, exist_ok=True)
-    e = {**os.environ, "CUDA_VISIBLE_DEVICES": "1",
+    e = {**os.environ, "CUDA_VISIBLE_DEVICES": str(dev),
          "CUDA_MPS_PIPE_DIRECTORY": MPS_PIPE, "CUDA_MPS_LOG_DIRECTORY": MPS_LOG}
     subprocess.run(["nvidia-cuda-mps-control", "-d"], env=e,
                    stdout=log, stderr=subprocess.STDOUT)
@@ -61,14 +71,15 @@ def stop_mps(log):
     log.write("[mps] daemon stopped\n"); log.flush()
 
 
-def sweep_3of3(backend, size, N, env, dylib, binary, frames, warmup, mlab, log):
+def sweep_3of3(backend, size, N, env, dylib, binary, frames, warmup, mlab, log, dev=1):
     ns, nc = sg.SIZES[size][1], sg.SIZES[size][2]
     best = None
     for pm in GRIDS[size][N]:            # descending: getting harder
         ok3 = True
         for rep in range(3):
             r = sg.run_set(backend, size, ns, nc, N, pm / 1e3, frames, warmup,
-                           dylib, binary, env, f"FB_{mlab}_{backend}_{size}_N{N}_{pm}_r{rep}", log)
+                           dylib, binary, env, f"FB_{mlab}_{backend}_{size}_N{N}_{pm}_r{rep}",
+                           log, gpu_device=dev)
             if not r["all_pass"]:
                 ok3 = False
                 break
@@ -80,15 +91,16 @@ def sweep_3of3(backend, size, N, env, dylib, binary, frames, warmup, mlab, log):
     return best
 
 
-def hog_5rep(backend, size, N, env, dylib, binary, frames, warmup, log):
+def hog_5rep(backend, size, N, env, dylib, binary, frames, warmup, log, dev=1):
     ns, nc = sg.SIZES[size][1], sg.SIZES[size][2]
     per = sg.FIXED_PERIOD_MS[size] / 1e3
-    hog = sg.start_hog(log)
+    hog = sg.start_hog(log, dev)
     time.sleep(4)
     reps = []
     for rep in range(5):
         r = sg.run_set(backend, size, ns, nc, N, per, frames, warmup, dylib, binary,
-                       env, f"FC_{backend}_{size}_N{N}_r{rep}", log, sample_gpu=(rep == 0))
+                       env, f"FC_{backend}_{size}_N{N}_r{rep}", log, sample_gpu=(rep == 0),
+                       gpu_device=dev)
         s = sg.summarize(r["per_pipe"])
         reps.append({"all_pass": r["all_pass"], "min_frames": s.get("min_frames", 0),
                      "p50_ms": s.get("p50_ms"), "p99_ms": s.get("p99_ms"),
@@ -115,27 +127,32 @@ def main():
     ap.add_argument("--warmup", type=int, default=30)
     ap.add_argument("--parts", nargs="+", default=["B", "C"])
     ap.add_argument("--mps", nargs="+", default=["off", "on"])
+    ap.add_argument("--gpu-device", type=int, default=1)
+    ap.add_argument("--grid", action="append", metavar="SIZE:N:p1,p2,...",
+                    help="override a (size,N) 3/3 sweep grid [ms], repeatable")
     args = ap.parse_args()
+    apply_grid(args.grid)
+    dev = args.gpu_device
     RES.mkdir(parents=True, exist_ok=True)
     log = open(RES / "firm.log", "a")
     op = RES / "firm_results.json"
     out = json.loads(op.read_text()) if op.exists() else {"B": {}, "C": {}}
 
     for backend in args.backends:
-        dylib, binary = sg.build_backend(backend, log)
-        base = sg.base_env(backend)
+        dylib, binary = sg.build_backend(backend, log, dev)
+        base = sg.base_env(backend, dev)
         # Part B: with/without MPS
         if "B" in args.parts:
             for m in args.mps:
                 on = (m == "on")
                 if on:
-                    start_mps(log)
+                    start_mps(log, dev)
                 env = mps_env(base, on)
                 try:
                     for size in args.sizes:
                         for N in args.ns:
                             b = sweep_3of3(backend, size, N, env, dylib, binary,
-                                           args.frames, args.warmup, m, log)
+                                           args.frames, args.warmup, m, log, dev)
                             out["B"].setdefault(m, {}).setdefault(size, {}) \
                                .setdefault(backend, {})[str(N)] = b
                             op.write_text(json.dumps(out, indent=2))
@@ -149,7 +166,7 @@ def main():
             for size in args.sizes:
                 for N in [1, 2]:
                     c = hog_5rep(backend, size, N, env, dylib, binary,
-                                 args.frames, args.warmup, log)
+                                 args.frames, args.warmup, log, dev)
                     out["C"].setdefault(size, {}).setdefault(backend, {})[str(N)] = c
                     op.write_text(json.dumps(out, indent=2))
                     print(f"[C hog {backend} {size} N={N}] pass={c['n_pass']}/5 "

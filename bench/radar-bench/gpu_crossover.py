@@ -36,7 +36,10 @@ ROOT = HERE.parents[1]
 RADAR = ROOT / "examples" / "radar-pipeline"
 RESULTS = HERE / "results" / "gpu-crossover"
 
-CONDA_RADAR = Path.home() / "miniconda3" / "envs" / "radar" / "lib"
+# Conda env lib dir holding libfftw3f + fftw3f.pc. Override with TOMII_RADAR_CONDA_LIB.
+CONDA_RADAR = Path(os.environ.get(
+    "TOMII_RADAR_CONDA_LIB",
+    str(Path.home() / "miniconda3" / "envs" / "radar" / "lib")))
 
 # CPI sizes. chirp_interval defaults to n_samples/fs (fs=20.48 MHz): 50/100/200 us,
 # giving physical CPIs of 6.4 / 25.6 / 102.4 ms. Targets are shared across sizes:
