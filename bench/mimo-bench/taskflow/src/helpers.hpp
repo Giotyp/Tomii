@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <cmath>
 #include <complex>
 #include <cstdint>
 #include <cstring>
@@ -195,33 +196,44 @@ struct Config {
     }
 
     // -----------------------------------------------------------------------
-    // Generate pilots_sgn (Zadoff-Chu conjugate sign sequence)
-    // Mirrors comms_lib get_sequence + DoubleToCFloat + seq_cyclic_shift + pilots_sgn
+    // Generate pilots_sgn — exact port of the Tomii plugin's Config::Gen_pilots
+    // (comms_lib.rs get_sequence [LTE Zadoff-Chu, u=1, v=0, largest table prime
+    // below N] -> DoubleToCFloat -> seq_cyclic_shift(alpha = (float)(PI/4),
+    // per-subcarrier phase i*alpha) -> pilots_sgn = p / |p|^2, all with the same
+    // f64/f32 precision steps). The earlier simplified generator here produced a
+    // different pilot sequence, so the C++ demod output did not match Tomii's.
     // -----------------------------------------------------------------------
     void gen_pilots() {
-        // Zadoff-Chu root-1 sequence of length N = ofdm_data_num
-        // zc[k] = exp(-j * pi * k * (k+1) / N)
         const double PI = 3.14159265358979323846;
-        size_t N = ofdm_data_num;
-        std::vector<std::complex<double>> zc(N);
-        for (size_t k = 0; k < N; ++k) {
-            double phase = -PI * k * (k + 1) / N;
-            zc[k] = std::complex<double>(std::cos(phase), std::sin(phase));
+        const size_t N = ofdm_data_num;
+        auto is_prime = [](size_t n) {
+            if (n < 2) return false;
+            for (size_t k = 2; k * k <= n; ++k) if (n % k == 0) return false;
+            return true;
+        };
+        std::vector<size_t> primes;  // == kPrimeArray (309 consecutive primes, 2..2039)
+        for (size_t n = 2; primes.size() < 309; ++n) if (is_prime(n)) primes.push_back(n);
+        double m = double(primes[308]);
+        for (size_t j = 0; j < 308; ++j) {
+            if (primes[j] < N && primes[j + 1] > N) { m = double(primes[j]); break; }
         }
-        // Cyclic shift by pi/4
-        double shift = PI / 4.0;
+        const int u = 1, v = 0;
+        double qh = m * double(u + 1) / 31.0;
+        double q = std::floor(qh + 0.5) + double(v) * std::pow(-1.0, 2.0 * std::floor(qh));
+        const float alpha = static_cast<float>(PI / 4.0);
         pilots_sgn.resize(N);
         for (size_t i = 0; i < N; ++i) {
-            // common_pilot[i] = zc[i] * exp(j*shift)
-            std::complex<double> cp = zc[i] * std::complex<double>(std::cos(shift), std::sin(shift));
-            float re = static_cast<float>(cp.real());
-            float im = static_cast<float>(cp.imag());
-            float norm_sq = re * re + im * im;
-            if (norm_sq > 0.0f) {
-                pilots_sgn[i] = std::complex<float>(re / norm_sq, im / norm_sq);
-            } else {
-                pilots_sgn[i] = std::complex<float>(0.0f, 0.0f);
-            }
+            double ml = std::fmod(double(i), m);
+            double re_d = std::cos(-PI * q * ml * (ml + 1.0) / m);
+            double im_d = std::sin(-PI * q * ml * (ml + 1.0) / m);
+            float zr = static_cast<float>(re_d), zi = static_cast<float>(im_d);
+            float ang = static_cast<float>(i) * alpha;
+            // num_complex exp(0 + j*ang) = e^0 * (cos, sin)
+            float sr = std::exp(0.0f) * std::cos(ang), si = std::exp(0.0f) * std::sin(ang);
+            float pr = zr * sr - zi * si;
+            float pi_ = zr * si + zi * sr;
+            float d = pr * pr + pi_ * pi_;
+            pilots_sgn[i] = std::complex<float>(pr / d, pi_ / d);
         }
     }
 };

@@ -93,7 +93,7 @@ pub fn demul_op_cm(
     demod_buffers: &CmTypes,
     ul_beam_matrices: &CmTypes,
     frame_id: usize,
-    symbol_id: usize,
+    _symbol_id_from_graph: usize,
     node_index: usize,
 ) -> CmTypes {
     let config = unsafe { &*raw_mut::<Config>(config) };
@@ -106,6 +106,20 @@ pub fn demul_op_cm(
     // raw `cell_ptr`, never forming an aliased `&mut DemodBuffer`.
     let demod_buffers = unsafe { &*raw_mut::<DemodBuffer>(demod_buffers) };
 
+    // Derive the UL symbol from the instance index (fix, 2026-09-25).
+    // The graph passes `ul_symbol` (a var factored by n_ul_symbols) to demul
+    // (factor = n_ul_symbols * demul_events, group_size = demul_events). The
+    // runtime resolves a factored var for instance i as var[i % len], so
+    // instance i received symbol (i % n_ul_symbols), while its FFT barrier group
+    // (fft.wait group_by antennas) is symbol (i / demul_events). Because
+    // gcd(13, demul_events) = 1 for every config used here, each (symbol, block)
+    // pair was still processed exactly once, but a demul task could read a
+    // symbol whose FFTs it had not waited for. This was masked because the
+    // sender replays identical IQ every frame (the stale FrameWnd-old row holds
+    // the same values); only the first FrameWnd frames could differ. Instance i
+    // now processes symbol i / demul_events, the symbol its barrier group waits
+    // for (the same mapping the C++ baselines use).
+    let symbol_id = framestats.GetUlSymbol(node_index / config.demul_events_per_symbol());
     crate::mimo_count(3, frame_id);
     let frame_slot = frame_id % FrameWnd;
     let base_sc_id = demul_base_scs[node_index % demul_base_scs.len()];
