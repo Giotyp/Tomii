@@ -3,7 +3,7 @@ use crate::bindings::mkl_bindings::Fft;
 use crate::buffer_lib::CsiBuffer;
 use crate::common::config::Config;
 use crate::common::framestats::FrameStats;
-use crate::common::symbols::{FrameWnd, SCsPerCacheline, TransposeBlockSize};
+use crate::common::symbols::{frame_wnd, SCsPerCacheline, TransposeBlockSize};
 use crate::packet_lib::*;
 use tomii_macro::tomii_export;
 use tomii_types::CmTypes;
@@ -44,12 +44,15 @@ pub fn csi_op_cm(
     let packet = unsafe { &*raw_mut::<Packet>(packet) };
     let config = unsafe { &*raw_mut::<Config>(config) };
     let framestats = unsafe { &*raw_mut::<FrameStats>(framestats) };
-    let fft_struct = unsafe { &mut *raw_mut::<Fft>(fft_struct) };
+    // Shared `&`: one Fft per instance index is shared by every slot, so its
+    // scratch must not be used; the FFT runs into per-thread scratch instead.
+    let fft_struct = unsafe { &*raw_mut::<Fft>(fft_struct) };
     let csi_buffer = unsafe { &*raw_mut::<CsiBuffer>(csi_buffer) };
 
     let frame_id = packet.frame_id as usize;
+    crate::e1probe::on_task_start(frame_id);
     crate::mimo_count(0, frame_id);
-    let frame_slot = frame_id % FrameWnd;
+    let frame_slot = frame_id % frame_wnd();
 
     let ant_id = packet.ant_id as usize;
     let symbol_id = packet.symbol_id as usize;
@@ -58,29 +61,33 @@ pub fn csi_op_cm(
     let sample_offset = config.ofdm_rx_zero_prefix_bs();
 
     let packet_ptr = unsafe { packet.data.as_ptr().add(2 * sample_offset) as *const i16 };
-    fft_struct.convert_short_to_float(packet_ptr);
-    fft_struct.computefft();
-    fft_struct.inout_shift(config.ofdm_ca_num());
-
     let pilot_symbol_id = framestats.GetPilotSymbolIdx(symbol_id);
 
-    // Disjoint per-antenna write into this pilot's cell via raw ptr (shared &self).
-    let csi_cell_ptr = csi_buffer.cell_ptr(frame_slot, pilot_symbol_id) as *mut libc::c_void;
+    crate::bindings::mkl_bindings::with_fft_scratch(
+        fft_struct,
+        packet_ptr,
+        config.ofdm_ca_num(),
+        |fft_out| {
+            // Disjoint per-antenna write into this pilot's cell via raw ptr (shared &self).
+            let csi_cell_ptr =
+                csi_buffer.cell_ptr(frame_slot, pilot_symbol_id) as *mut libc::c_void;
 
-    unsafe {
-        PartialTranspose(
-            csi_cell_ptr,
-            ant_id,
-            config.bs_ant_num(),
-            symbol_type,
-            config.ofdm_data_num(),
-            config.ofdm_data_start(),
-            fft_struct.fft_inout_align.get().as_ptr() as *const libc::c_void,
-            config.pilots_sgn().as_ptr() as *const libc::c_void,
-            TransposeBlockSize,
-            SCsPerCacheline,
-        );
-    }
+            unsafe {
+                PartialTranspose(
+                    csi_cell_ptr,
+                    ant_id,
+                    config.bs_ant_num(),
+                    symbol_type,
+                    config.ofdm_data_num(),
+                    config.ofdm_data_start(),
+                    fft_out as *const libc::c_void,
+                    config.pilots_sgn().as_ptr() as *const libc::c_void,
+                    TransposeBlockSize,
+                    SCsPerCacheline,
+                );
+            }
+        },
+    );
 
     // Expand partial CSI from freq-orth pilot to full CSI per UE
     if config.freq_orth_pilot() && pilot_symbol_id == framestats.NumPilotSyms() - 1 {
@@ -106,5 +113,6 @@ pub fn csi_op_cm(
         }
     }
 
+    crate::e1probe::on_fftcsi(frame_id, None);
     CmTypes::Usize(frame_id)
 }
