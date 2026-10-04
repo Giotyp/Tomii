@@ -111,7 +111,10 @@ pub fn beam_op_cm(
     let ul_beam_matrices_ref = unsafe { &*raw_mut::<UlBeamMatrix>(ul_beam_matrices) };
 
     crate::mimo_count(2, frame_id);
-    let frame_slot = frame_id % FrameWnd;
+    crate::e1probe::on_beam_start(frame_id, || {
+        config_ref.bs_ant_num() * config_ref.frame_schedule().matches('P').count()
+    });
+    let frame_slot = frame_id % frame_wnd();
     let beam_block = config_ref.beam_block_size();
     let last_sc_id = base_sc_id + min(beam_block, config_ref.ofdm_data_num() - base_sc_id);
 
@@ -181,5 +184,6 @@ pub fn beam_op_cm(
         }
     });
 
+    crate::e1probe::on_beam_end(frame_id);
     CmTypes::Usize(frame_id)
 }

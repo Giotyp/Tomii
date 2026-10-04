@@ -24,6 +24,7 @@ pub mod beam_lib;
 pub mod buffer_lib;
 pub mod csi_lib;
 pub mod demul_lib;
+pub mod e1probe;
 pub mod fft_lib;
 pub mod modulation;
 pub mod packet_lib;
@@ -40,7 +41,9 @@ use tomii_types::CmTypes;
 #[no_mangle]
 pub fn process_packet(bytes_cm: &CmTypes) -> CmTypes {
     if let CmTypes::Bytes(arc) = bytes_cm {
-        CmTypes::from_any(Packet::from_bytes_ref(arc.as_slice()))
+        let pkt = Packet::from_bytes_ref(arc.as_slice());
+        e1probe::on_packet(pkt.frame_id as usize);
+        CmTypes::from_any(pkt)
     } else {
         panic!(
             "process_packet: expected CmTypes::Bytes, got {:?}",
@@ -78,7 +81,6 @@ pub fn get_packet_slot(packet: &CmTypes, config: &CmTypes) -> usize {
         .expect("Failed to access Packet struct or wrong type")
 }
 
-
 /// TOMII_MIMO_CHECK=1: per-frame stage execution counters (radar-style).
 /// Prints "MIMO_CHECK frame N: csi=..fft=..beam=..demul=.." once frame N+3 starts.
 pub fn mimo_count(stage: usize, frame_id: usize) {
@@ -91,10 +93,16 @@ pub fn mimo_count(stage: usize, frame_id: usize) {
     let mut g = M.lock().unwrap();
     let m = g.get_or_insert_with(Default::default);
     m.entry(frame_id).or_insert([0; 4])[stage] += 1;
-    let done: Vec<usize> = m.range(..frame_id.saturating_sub(3)).map(|(k, _)| *k).collect();
+    let done: Vec<usize> = m
+        .range(..frame_id.saturating_sub(3))
+        .map(|(k, _)| *k)
+        .collect();
     for k in done {
         let c = m.remove(&k).unwrap();
-        eprintln!("MIMO_CHECK frame {k}: csi={} fft={} beam={} demul={}", c[0], c[1], c[2], c[3]);
+        eprintln!(
+            "MIMO_CHECK frame {k}: csi={} fft={} beam={} demul={}",
+            c[0], c[1], c[2], c[3]
+        );
     }
 }
 
@@ -104,6 +112,14 @@ pub fn create_config(config_file: String) -> Config {
     config.Gen_pilots();
     config.UpdateUlMCS();
     config.ScheduleInit();
+    if let Ok(p) = std::env::var("E1_DUMP_PILOTS") {
+        let v = config.pilots_sgn();
+        let bytes: Vec<u8> = v
+            .iter()
+            .flat_map(|c| [c.re.to_le_bytes(), c.im.to_le_bytes()].concat())
+            .collect();
+        let _ = std::fs::write(p, bytes);
+    }
     config
 }
 

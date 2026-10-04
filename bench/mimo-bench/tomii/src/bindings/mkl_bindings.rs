@@ -199,6 +199,47 @@ impl Fft {
         }
     }
 
+    /// convert -> forward FFT -> fftshift, exactly as convert_short_to_float +
+    /// computefft + inout_shift, but into CALLER-provided scratch (`inout`,
+    /// `shift`, each >= 2 * ofdm_ca_num elements, 64-B aligned) instead of the
+    /// struct's own buffers. The committed DFTI descriptor is only read (MKL
+    /// DFTI compute on one committed descriptor is thread-safe), so `&self`
+    /// may be shared by concurrent tasks. Needed because a factored var such as
+    /// `fft_struct` is ONE object per node index shared by every slot: two
+    /// frames in flight could run the same fft instance concurrently and race
+    /// on the struct's scratch.
+    pub fn run_into(
+        &self,
+        packet_ptr: *const i16,
+        inout: &mut [Complex<f32>],
+        shift: &mut [Complex<f32>],
+        ofdm_ca_num: usize,
+    ) {
+        unsafe {
+            SimdConvertShortToFloat(
+                packet_ptr as *const libc::c_void,
+                inout.as_mut_ptr() as *mut libc::c_void,
+                self.nelems,
+            );
+            DftiComputeForward(self.desc, inout.as_mut_ptr() as *mut libc::c_void);
+            memcpy(
+                shift.as_mut_ptr() as *mut std::ffi::c_void,
+                inout.as_ptr() as *const std::ffi::c_void,
+                ofdm_ca_num * std::mem::size_of::<i32>(),
+            );
+            memcpy(
+                inout.as_mut_ptr() as *mut std::ffi::c_void,
+                inout.as_ptr().add(ofdm_ca_num / 2) as *const std::ffi::c_void,
+                ofdm_ca_num * std::mem::size_of::<i32>(),
+            );
+            memcpy(
+                inout.as_mut_ptr().add(ofdm_ca_num / 2) as *mut std::ffi::c_void,
+                shift.as_ptr() as *const std::ffi::c_void,
+                ofdm_ca_num * std::mem::size_of::<i32>(),
+            );
+        }
+    }
+
     pub fn convert_short_to_float(&mut self, packet_ptr: *const i16) {
         let fft_ptr = self.fft_inout_align.get_mut().as_mut_ptr() as *mut f32;
 
@@ -247,4 +288,36 @@ impl Fft {
             );
         }
     }
+}
+
+thread_local! {
+    /// Per-thread FFT scratch (inout, shift), see `Fft::run_into`.
+    pub static TL_FFT_SCRATCH: std::cell::RefCell<(crate::common::structures::AlignedVec<num_complex::Complex<f32>>, crate::common::structures::AlignedVec<num_complex::Complex<f32>>, usize)> =
+        std::cell::RefCell::new((
+            crate::common::structures::AlignedVec::new(0, 64),
+            crate::common::structures::AlignedVec::new(0, 64),
+            0,
+        ));
+}
+
+/// Run the FFT front half into this thread's scratch and hand the result to `f`.
+pub fn with_fft_scratch<R>(
+    fft: &Fft,
+    packet_ptr: *const i16,
+    ofdm_ca_num: usize,
+    f: impl FnOnce(*const Complex<f32>) -> R,
+) -> R {
+    TL_FFT_SCRATCH.with(|tl| {
+        let mut g = tl.borrow_mut();
+        if g.2 != ofdm_ca_num {
+            *g = (
+                crate::common::structures::AlignedVec::new(2 * ofdm_ca_num, 64),
+                crate::common::structures::AlignedVec::new(2 * ofdm_ca_num, 64),
+                ofdm_ca_num,
+            );
+        }
+        let (a, b, _) = &mut *g;
+        fft.run_into(packet_ptr, a.get_mut(), b.get_mut(), ofdm_ca_num);
+        f(a.get().as_ptr())
+    })
 }

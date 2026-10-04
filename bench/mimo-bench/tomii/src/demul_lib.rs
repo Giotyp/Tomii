@@ -9,7 +9,7 @@ use crate::common::config::Config;
 use crate::common::framestats::FrameStats;
 use crate::common::structures::AlignedVec;
 use crate::common::symbols::{
-    Direction, FrameWnd, SCsPerCacheline, TransposeBlockSize, UplinkHardDemod,
+    frame_wnd, Direction, SCsPerCacheline, TransposeBlockSize, UplinkHardDemod,
 };
 use tomii_macro::tomii_export;
 use tomii_types::CmTypes;
@@ -106,22 +106,25 @@ pub fn demul_op_cm(
     // raw `cell_ptr`, never forming an aliased `&mut DemodBuffer`.
     let demod_buffers = unsafe { &*raw_mut::<DemodBuffer>(demod_buffers) };
 
-    // Derive the UL symbol from the instance index (fix, 2026-09-25).
-    // The graph passes `ul_symbol` (a var factored by n_ul_symbols) to demul
-    // (factor = n_ul_symbols * demul_events, group_size = demul_events). The
-    // runtime resolves a factored var for instance i as var[i % len], so
-    // instance i received symbol (i % n_ul_symbols), while its FFT barrier group
-    // (fft.wait group_by antennas) is symbol (i / demul_events). Because
-    // gcd(13, demul_events) = 1 for every config used here, each (symbol, block)
-    // pair was still processed exactly once, but a demul task could read a
-    // symbol whose FFTs it had not waited for. This was masked because the
-    // sender replays identical IQ every frame (the stale FrameWnd-old row holds
-    // the same values); only the first FrameWnd frames could differ. Instance i
-    // now processes symbol i / demul_events, the symbol its barrier group waits
-    // for (the same mapping the C++ baselines use).
+    // Derive the UL symbol from the instance index: instance i waits (fft
+    // group_by antennas) for symbol i / demul_events, so that is the symbol it
+    // must read. The graph's `ul_symbol` var resolves to var[i % n_ul_symbols]
+    // (factored-var semantics), which is NOT the waited-for symbol -- see the
+    // commit "demul reads the UL symbol its FFT barrier group waits for".
+    #[cfg(not(feature = "legacy-demul-symbol"))]
     let symbol_id = framestats.GetUlSymbol(node_index / config.demul_events_per_symbol());
+    // Pre-fix behaviour, kept only to measure the fix's timing impact (E1
+    // RESULTS.md "bug-fix impact"); never enabled in a campaign build.
+    #[cfg(feature = "legacy-demul-symbol")]
+    let symbol_id = _symbol_id_from_graph;
     crate::mimo_count(3, frame_id);
-    let frame_slot = frame_id % FrameWnd;
+    crate::e1probe::on_demul_start(
+        frame_id,
+        framestats.GetUlSymbolIdx(symbol_id),
+        config.bs_ant_num(),
+        config.beam_events_per_symbol(),
+    );
+    let frame_slot = frame_id % frame_wnd();
     let base_sc_id = demul_base_scs[node_index % demul_base_scs.len()];
 
     // Create thread-local working buffers to avoid sharing across concurrent tasks
@@ -226,6 +229,18 @@ pub fn demul_op_cm(
                 demod_bufs.len(),
             );
         }
+    }
+
+    {
+        let mod_order_bits = config.ModOrderBits(Direction::Uplink);
+        crate::e1probe::on_demul(
+            frame_id,
+            config.demul_events_per_symbol() * framestats.NumUlSyms(),
+            framestats.NumUlDataSyms(config),
+            config.num_spatial_streams(),
+            mod_order_bits * config.ofdm_data_num(),
+            |s, ss| demod_buffers.cell_ptr(frame_slot, s, ss) as *const i8,
+        );
     }
 
     // demul's $res value is unused (the dump node only barriers on demul

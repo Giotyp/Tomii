@@ -444,7 +444,7 @@ impl Config {
         symbol_id: usize,
         framestats: &FrameStats,
     ) -> usize {
-        let frame_slot = frame_id % symbols::FrameWnd;
+        let frame_slot = frame_id % symbols::frame_wnd();
         let symbol_offset =
             (frame_slot * framestats.NumUlSyms()) + framestats.GetUlSymbolIdx(symbol_id);
         symbol_offset
@@ -456,7 +456,7 @@ impl Config {
         symbol_idx_ul: usize,
         framestats: &FrameStats,
     ) -> usize {
-        (frame_id % symbols::FrameWnd) * framestats.NumUlSyms() + symbol_idx_ul
+        (frame_id % symbols::frame_wnd()) * framestats.NumUlSyms() + symbol_idx_ul
     }
 
     pub fn GetTotalDataSymbolIdxUl(
@@ -465,7 +465,7 @@ impl Config {
         data_symbol_idx_ul: usize,
         framestats: &FrameStats,
     ) -> usize {
-        (frame_id % symbols::FrameWnd) * (framestats.NumUlSyms() - self.client_ul_pilot_symbols)
+        (frame_id % symbols::frame_wnd()) * (framestats.NumUlSyms() - self.client_ul_pilot_symbols)
             + data_symbol_idx_ul
     }
 

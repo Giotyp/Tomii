@@ -11,7 +11,7 @@ pub struct FftBuffer {
 
 impl FftBuffer {
     pub fn new(config: &Config, framestats: &FrameStats) -> Self {
-        let symbols_ul = framestats.NumUlSyms() * symbols::FrameWnd;
+        let symbols_ul = framestats.NumUlSyms() * symbols::frame_wnd();
         let buffer = Table::new(symbols_ul, config.bs_ant_num() * config.ofdm_data_num());
         FftBuffer { buffer }
     }
@@ -44,7 +44,7 @@ pub struct CsiBuffer {
 impl CsiBuffer {
     pub fn new(config: &Config) -> Self {
         let buffer = Grid::new(
-            symbols::FrameWnd,
+            symbols::frame_wnd(),
             config.ue_ant_num(),
             config.bs_ant_num() * config.ofdm_data_num(),
         );
@@ -79,7 +79,7 @@ pub struct UlBeamMatrix {
 impl UlBeamMatrix {
     pub fn new(config: &Config) -> Self {
         let buffer = Grid::new(
-            symbols::FrameWnd,
+            symbols::frame_wnd(),
             config.ofdm_data_num(),
             config.bs_ant_num() * config.ue_ant_num(),
         );
@@ -108,7 +108,7 @@ pub struct DemodBuffer {
 impl DemodBuffer {
     pub fn new(config: &Config, framestats: &FrameStats) -> Self {
         let demod_buffer = Cube::new(
-            symbols::FrameWnd,
+            symbols::frame_wnd(),
             framestats.NumUlDataSyms(config),
             config.num_spatial_streams(),
             MaxModType * config.ofdm_data_num(),
@@ -143,7 +143,7 @@ impl DemodBuffer {
     /// frame carries identical content for identical input, so this is
     /// byte-stable across runs (unlike hashing the whole multi-frame buffer).
     pub fn frame_bytes(&self, frame_id: usize) -> Vec<u8> {
-        let frame_slot = frame_id % symbols::FrameWnd;
+        let frame_slot = frame_id % symbols::frame_wnd();
         self.buffer
             .d1_plane(frame_slot)
             .into_iter()
