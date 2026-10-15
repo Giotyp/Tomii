@@ -178,19 +178,15 @@ the `.so` swap buys under contention:
 
 ## Multi-frame pipeline vs Taskflow (reproducible)
 
-Tomii does not win this benchmark. A linear pipeline with ~16 µs per-task
-compute, swept over S concurrent frames. Source: `bench/pipeline-bench/`.
+Tomii does not win this benchmark; the point is that the per-frame gap
+*closes* as slots pipeline. A linear 4-stage pipeline with a fixed per-task
+compute kernel, swept over S concurrent frames. Source: `bench/pipeline-bench/`.
 
-| Concurrent frames | Tomii vs Taskflow |
-|---|---|
-| S=1 | Tomii 2.45× slower |
-| S=16 | Tomii 1.33× slower |
-| S=64 | Tomii ~1.3× slower |
-
-The claim is that the gap *closes* — multi-slot amortization is measurable —
-not that Tomii wins. At S=1 Tomii pays a fixed ~5 ms per frame of runtime
-overhead; at S≥16 the resolution-thread cost spreads across lanes and
-scheduling overhead stays below 15% of compute.
+At S=1 Tomii pays a fixed per-frame runtime overhead and runs several-fold
+slower than Taskflow; by S≥16 multi-slot amortization spreads the
+resolution-thread cost across lanes and the gap narrows to a small constant
+factor. *The exact per-task compute figure and the S=1/S=16 ratios are being
+re-measured on the frozen commit and will be restored here.*
 
 **Memory growth**, same benchmark: Tomii adds +83 kB per slot against
 Taskflow's +131 kB — a 1.6× lower growth rate (`/usr/bin/time -v`, W=4,
