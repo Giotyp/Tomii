@@ -24,7 +24,7 @@ Tomii occupies a point between two families: general task-parallel frameworks
 
 **Taskflow and TBB flow graph** are the right choice for single-frame
 micro-task DAGs: their pre-compiled graphs have lower per-invocation cost, and
-on a fine-grained wavefront Tomii is ~2.4× slower
+on a fine-grained wavefront Tomii is ~2.4× slower than Taskflow
 ([benchmarks](/docs/overview/benchmarks)). What they lack is Tomii's frame
 model — both reconstruct or re-submit the graph per invocation, while Tomii
 replays the same compiled graph across 64 slots with generational reset — and
@@ -42,9 +42,10 @@ than single-machine, millisecond-latency streaming with pinned cores.
 block library, a mature ecosystem, and hardware drivers Tomii does not have.
 If you need those, use GNU Radio. What it lacks is a latency-predictable
 frame model: on an FMCW radar workload with identical DSP kernels, Tomii
-completes a frame ~0.6 ms after the last packet arrives against ~3.8 ms for
-GNU Radio 4.0 and ~7.5 ms for 3.10, with a p50→p99.9 spread of ~150 µs
-against several milliseconds
+matches GNU Radio 4.0 end-to-end (~1.04×) while cutting the post-chirp tail
+~1.85× at p50 (310 µs vs 573 µs) and running on 7.4× fewer cores (2.56 vs
+18.9). GR4 wins at small CPIs; the trade is tail latency and core budget, not
+a blanket speedup
 ([benchmarks](/docs/overview/benchmarks), `bench/radar-bench/`).
 
 No framework in this family offers a single declarative DAG that mixes Rust,
@@ -57,15 +58,16 @@ baseband where graph, kernels, and runtime control are fused into one
 optimized codebase. That fusion is exactly what makes it fast — and exactly
 what Tomii gives up on purpose.
 
-Measured in our evaluation on the same uplink pipeline, Agora processes
-frames in 0.50–2.90 ms across antenna configurations; Tomii runs 3.24–8.37 ms
-(agent-optimized) — a bounded 3–4× latency factor on compute-intensive
-configurations. The [benchmarks](/docs/overview/benchmarks) page has the full
-table. The gap has three named sources — dynamic library loading, type-erased
-dispatch, generic dependency tracking — all bounded costs that do not scale
-with problem size.
+Measured in our evaluation on the same uplink pipeline with the same kernels
+(LDPC decode reinstated for an apples-to-apples comparison against Agora's
+published Table 3), the **kernels run at parity** — Tomii's decode is 0.88×
+Agora's per-task cost, with byte-identical output. The remaining end-to-end
+gap is dominated by a *tunable* graph barrier (a one-line edit recovers ~94%
+of the post-arrival term) and by ingest (UDP vs Agora's DPDK — a wall the best
+hand-written Taskflow/oneTBB baselines hit too), not by the decoupled design.
+The [benchmarks](/docs/overview/benchmarks) page has the decomposition.
 
-What the 3–4× buys is the reconfiguration surface:
+What the decoupling buys is the reconfiguration surface:
 
 | Change | Tomii | Agora |
 |---|---|---|
@@ -74,10 +76,14 @@ What the 3–4× buys is the reconfiguration surface:
 | Swap a kernel | Rebuild one plugin | Rebuild the application |
 | Automated tuning | Knob catalog, verifier-gated | Not exposed |
 
-The same evaluation measured application code size on a matched workload:
-210 lines for a Taskflow C++ implementation against 133 for Tomii, with CPU
-affinity, timing, and CSV output built into the runtime instead of
-re-implemented per application.
+The same evaluation measured cost-of-change rather than raw line counts. A
+scheduling-policy change is a CLI flag (0 s) against a whole-binary rebuild in
+the hand-built baselines; a kernel swap rebuilds one plugin (~1.06 s) and
+leaves the runtime binary byte-identical; and *inserting a new stage* — which
+forces a ~21.3 s runtime rebuild under static registration — drops to a
+plugin-only rebuild with dynamic kernel registration. Reaching Tomii's
+per-packet parity with Taskflow/oneTBB in the first place took a ~649-line
+hand-written streaming layer that Tomii provides from a graph and kernels.
 
 If you are deploying production baseband at the latency limit, use Agora. If
 you are iterating on pipeline structure, kernels, or scheduling (the
