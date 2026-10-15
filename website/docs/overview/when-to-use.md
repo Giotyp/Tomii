@@ -14,9 +14,12 @@ outside the envelope, one of the frameworks in the
 **Streaming MIMO pipelines.** Large per-task work (≥ 10 µs), tens to hundreds
 of nodes, 1–64 concurrent slots, long-running processes. Network packet
 ingress, FFT/CSI/beamforming stages, and barriers on the critical path. The
-scheduling abstraction and slot lifecycle amortize well here; on a real 4×4
-MIMO uplink Tomii measures 1.26–1.39× faster than a Taskflow port running
-identical kernel binaries (`bench/mimo-bench/`).
+scheduling abstraction and slot lifecycle amortize well here; on a real MIMO
+uplink Tomii matches the best hand-written per-packet baselines (within
+~0.2–2.1% of Taskflow `tf-async` / oneTBB `flow_graph` on identical kernel
+binaries) and beats the natural collect-then-submit formulation by 11–49% —
+with the ~649-line streaming layer those baselines need provided by the
+runtime (`bench/mimo-bench/`).
 
 **Multi-slot fan-out.** The same graph topology applied to many independent
 frames concurrently. Slot parallelism hides resolution-thread latency, and
@@ -39,7 +42,7 @@ loop is "an optimizer edits the pipeline and measures", Tomii ships that loop
 **Sub-microsecond micro-tasks.** Per-task work below ~1 µs is dominated by
 dispatch and resolution overhead. Static-graph executors (Taskflow, TBB flow
 graph) have lower per-invocation cost; on a fine-grained anti-diagonal
-wavefront Tomii measures ~2.4× slower than both (`bench/anti-diag-bench/`).
+wavefront Tomii measures ~2.4× slower than Taskflow (`bench/anti-diag-bench/`).
 As a practical rule, keep per-task compute at or above ~16 µs — below that,
 scheduling overhead exceeds 15% of compute even at high slot counts.
 
