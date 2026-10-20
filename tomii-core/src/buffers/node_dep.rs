@@ -352,6 +352,23 @@ impl NodeDependencyEntry {
             self.instances_sent[instance_idx].store(gen_pack(slot_gen, 0), Ordering::Release);
         }
     }
+
+    /// Eagerly reinitialise every generational counter in this entry to `new_gen`.
+    ///
+    /// Only needed at the once-per-2^32 low-32-bit wrap of the slot generation
+    /// counter (see `runtime::generation::bump_slot_generation`): an entry that
+    /// goes untouched for a full 2^32-generation span keeps a stale tag that would
+    /// otherwise false-match when the generation wraps back to that value. The
+    /// per-frame hot path remains 100% lazy; this is only ever called at the wrap
+    /// boundary, inside the same exclusive slot-reset window as the generation bump.
+    pub fn reset_epoch(&self, new_gen: u32) {
+        for slot in &self.remaining_deps {
+            slot.store(gen_pack(new_gen, self.deps_per_group), Ordering::SeqCst);
+        }
+        for slot in &self.instances_sent {
+            slot.store(gen_pack(new_gen, 0), Ordering::SeqCst);
+        }
+    }
 }
 
 /// Per-node dependency map using 2D slot×node indexing
@@ -502,6 +519,18 @@ impl NodeDepMap {
             self.slots[slot][node_id].reset_sent_flag(slot_gen, instance_idx);
         }
     }
+
+    /// Eagerly reinitialise every `NodeDependencyEntry` in `slot` to `new_gen`.
+    ///
+    /// Only called at the once-per-2^32 generation wrap (see
+    /// `runtime::generation::bump_slot_generation`) — the per-frame path stays lazy.
+    pub fn reset_slot_epoch(&self, slot: usize, new_gen: u32) {
+        if let Some(entries) = self.slots.get(slot) {
+            for entry in entries {
+                entry.reset_epoch(new_gen);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -635,6 +664,43 @@ mod tests {
         // "Reset" via generation bump: use gen=1 — should behave like new
         let ready = entry.decrease_and_get_ready(1, None, 1);
         assert!(ready.is_empty());
+    }
+
+    #[test]
+    fn test_reset_epoch_reinitialises_all_counters() {
+        // factor=4, total_deps=8 (2 per instance), no groups: deps_per_group == 8.
+        let entry = NodeDependencyEntry::new(4, 8, false, None, false);
+
+        // Drive remaining_deps to a non-init value at gen=5.
+        let _ = entry.decrease_and_get_ready(5, None, 3);
+        // Mark an instances_sent slot as sent at gen=5.
+        entry.reset_sent_flag(5, 0);
+        // Simulate "sent" by writing directly through the same gen/val encoding
+        // reset_sent_flag uses (val=0 means "not sent"); use increment/decrease
+        // paths already exercised above as the non-init baseline — just confirm
+        // the pre-epoch state is not already at the fresh-epoch values we assert
+        // below, so the test is meaningful.
+        let (stored_gen, stored_val) = {
+            let packed = entry.remaining_deps[0].load(Ordering::SeqCst);
+            (gen_unpack_gen(packed), gen_unpack_val(packed))
+        };
+        assert_eq!(stored_gen, 5);
+        assert_eq!(stored_val, 5); // 8 - 3
+        assert_ne!((stored_gen, stored_val), (7, entry.deps_per_group));
+
+        // Wrap the epoch forward to gen=7.
+        entry.reset_epoch(7);
+
+        for slot in &entry.remaining_deps {
+            let packed = slot.load(Ordering::SeqCst);
+            assert_eq!(gen_unpack_gen(packed), 7);
+            assert_eq!(gen_unpack_val(packed), entry.deps_per_group);
+        }
+        for slot in &entry.instances_sent {
+            let packed = slot.load(Ordering::SeqCst);
+            assert_eq!(gen_unpack_gen(packed), 7);
+            assert_eq!(gen_unpack_val(packed), 0);
+        }
     }
 
     #[test]
@@ -840,5 +906,40 @@ mod tests {
         let map = NodeDepMap::new(&nodes, 2, &dep_counts);
         assert_eq!(map.slots.len(), 2); // 2 slots
         assert_eq!(map.slots[0].len(), 2); // 2 nodes
+    }
+
+    #[test]
+    fn test_node_dep_map_reset_slot_epoch_only_touches_target_slot() {
+        let nodes = vec![Node {
+            name: "node0".to_string(),
+            args: vec![],
+            id: 0,
+            loop_args: None,
+            factor: 2,
+            group_size: None,
+            func_name: String::new(),
+            loop_: None,
+            condition: None,
+            use_workers: None,
+            priority: crate::graph_struct::NodePriority::Normal,
+        }];
+        let dep_counts = vec![4];
+        let map = NodeDepMap::new(&nodes, 2, &dep_counts);
+
+        // Drive slot 0's entry away from its init value, at gen=9.
+        let _ = map.decrease_and_get_ready_into(0, 0, 9, None, 3, None, &mut Vec::new());
+        // Leave slot 1 untouched (still at gen=0, init value).
+
+        map.reset_slot_epoch(0, 11);
+
+        // Slot 0 must now read the fresh init value at the new generation.
+        let packed0 = map.slots[0][0].remaining_deps[0].load(Ordering::SeqCst);
+        assert_eq!(gen_unpack_gen(packed0), 11);
+        assert_eq!(gen_unpack_val(packed0), map.slots[0][0].deps_per_group);
+
+        // Slot 1 (not swept) is untouched.
+        let packed1 = map.slots[1][0].remaining_deps[0].load(Ordering::SeqCst);
+        assert_eq!(gen_unpack_gen(packed1), 0);
+        assert_eq!(gen_unpack_val(packed1), map.slots[1][0].deps_per_group);
     }
 }

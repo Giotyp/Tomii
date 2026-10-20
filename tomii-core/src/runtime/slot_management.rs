@@ -190,7 +190,7 @@ pub(super) fn assign_frame_to_available_slot(
         // Done here (new-frame start, Inactive → Active) rather than in the slot
         // completion path so that old-frame in-flight tasks retain the old generation
         // and cannot spuriously spawn or corrupt the new frame's dependency counters.
-        shared.slot_data.generation[last_slot_assigned].fetch_add(1, Ordering::SeqCst);
+        bump_slot_generation(shared, last_slot_assigned);
 
         // Start timing for the slot immediately upon assignment
         shared
@@ -242,7 +242,7 @@ pub(super) fn assign_frame_to_available_slot(
                 drop(running_frames); // Release lock before returning
 
                 // Bump generation for the new frame (see the last_assigned branch).
-                shared.slot_data.generation[slot_id].fetch_add(1, Ordering::SeqCst);
+                bump_slot_generation(shared, slot_id);
                 shared
                     .telemetry
                     .with_timing(|tb| tb.start_slot_processing(slot_id));
@@ -369,7 +369,7 @@ pub(super) fn release_and_activate_next(
     // NodeDependencyEntry, instances_sent, and cond_instances_to_spawn entries.
     // Done here (Buffering → Active) so old-frame tasks still in the batch
     // queue use the old generation and cannot corrupt the new frame's counters.
-    shared.slot_data.generation[slot_id].fetch_add(1, Ordering::SeqCst);
+    bump_slot_generation(shared, slot_id);
 
     shared
         .telemetry
@@ -413,4 +413,271 @@ pub(super) fn initial_nodes(graph: &Graph, slots: Vec<usize>, workers: usize) ->
         }
     }
     node_infos
+}
+
+// ---------------------------------------------------------------------------
+// Centralised slot-generation bump helper
+// ---------------------------------------------------------------------------
+//
+// The per-slot generation counter (`shared.slot_data.generation`) packs into the
+// upper 32 bits of every generational `AtomicU64` counter (see
+// `crate::buffers::{gen_pack, gen_unpack_gen, gen_unpack_val}`), while the counter
+// itself is a full `u64`. Reads of the packed tag truncate the generation to its
+// low 32 bits, so the effective generation space is 2^32: a per-slot entry that
+// goes untouched for a full 2^32-generation span (reachable for conditional/sparse
+// graphs over a long-running process) keeps a stale tag that would false-match
+// once the low 32 bits wrap back to that value.
+//
+// `bump_slot_generation` is the single bump site all slot-reset/activation call
+// sites route through. It performs the ordinary `fetch_add` on every call and,
+// only on the rare low-32-bit wrap, eagerly sweeps every generational entry for
+// that slot so none can carry a stale tag into the new epoch. The common
+// per-frame path is untouched — it stays 100% lazy.
+
+/// Bump `shared.slot_data.generation[slot]` by one.
+///
+/// This must be called from the same exclusive slot-reset/activation window as
+/// the rest of slot reinitialisation (before any other thread can observe the
+/// new frame), exactly as the raw `fetch_add` it replaces.
+///
+/// On the once-per-2^32 wrap of the low 32 bits, this eagerly reinitialises every
+/// generational dependency entry for `slot` to the new (wrapped) generation so
+/// that no entry can carry a stale tag from the previous 2^32 epoch forward.
+pub(crate) fn bump_slot_generation(shared: &SharedData, slot: usize) {
+    let prev = shared.slot_data.generation[slot].fetch_add(1, Ordering::SeqCst);
+    if prev as u32 == u32::MAX {
+        // Low 32 bits just wrapped: the new low-32 generation is 0.
+        let new_gen = prev.wrapping_add(1) as u32;
+        sweep_slot_generational_entries(shared, slot, new_gen);
+    }
+}
+
+/// Eagerly reinitialise every generational per-slot entry to `new_gen`.
+///
+/// Covers all three gen-tagged per-slot structures: `NodeDepMap` (via
+/// `DependencyCounter::reset_slot_epoch`), `cond_instances_to_spawn`, and
+/// `fanout_bulk_arrived`. Only reachable from [`bump_slot_generation`] at the
+/// 2^32 wrap boundary.
+fn sweep_slot_generational_entries(shared: &SharedData, slot: usize, new_gen: u32) {
+    shared.exec.resolution_state.reset_slot_epoch(slot, new_gen);
+
+    // `cond_instances_to_spawn[slot]` and `fanout_bulk_arrived[slot]` are aligned
+    // 1:1 with `node_cache` (one entry per node, same order; see
+    // `runtime::init::build_slot_counters`). Iterate by the shorter of the two to
+    // stay in-bounds even if that invariant is ever violated.
+    let cond_slot = &shared.slot_data.cond_instances_to_spawn[slot];
+    let fanout_slot = &shared.slot_data.fanout_bulk_arrived[slot];
+    let node_cache = &shared.graph_cache.node_cache;
+    let n = node_cache.len().min(cond_slot.len()).min(fanout_slot.len());
+
+    for (node_id, nc) in node_cache.iter().enumerate().take(n) {
+        let cond_init = if nc.is_condition { nc.factor as u32 } else { 0 };
+        cond_slot[node_id].store(
+            crate::buffers::gen_pack(new_gen, cond_init),
+            Ordering::SeqCst,
+        );
+        fanout_slot[node_id].store(crate::buffers::gen_pack(new_gen, 0), Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+    use crate::graph_gen::from_json_str;
+    use crate::runtime::{RuntimeConfig, TomiiRt, TomiiRtBuilder};
+    use crate::scheduler::{create_scheduler, SchedulerConfig, SchedulerType};
+
+    /// a1, a2 (roots, factor 1) -> b (factor 1), b has two non-barrier `$res`
+    /// deps so `dependency_count_vec()` gives b a `deps_per_group` of 2 — enough
+    /// to distinguish "freshly initialised" (2 remaining) from "one decrement
+    /// already applied" (1 remaining) in the assertions below.
+    const TWO_PRED_GRAPH: &str = r#"
+    {
+        "nodes": [
+            { "name": "a1", "function": "noop", "args": [] },
+            { "name": "a2", "function": "noop", "args": [] },
+            {
+                "name": "b",
+                "function": "noop",
+                "args": [
+                    { "type": "$res", "predecessor": { "name": "a1", "indexes": "0" } },
+                    { "type": "$res", "predecessor": { "name": "a2", "indexes": "0" } }
+                ]
+            }
+        ]
+    }
+    "#;
+
+    /// Node id of `b` in [`TWO_PRED_GRAPH`] (ids are assigned in declaration order).
+    const B_NODE_ID: usize = 2;
+
+    /// Build a single-slot runtime for [`TWO_PRED_GRAPH`] without running it —
+    /// tests poke `shared` state directly rather than driving execution.
+    fn build_test_rt() -> TomiiRt {
+        let spec = from_json_str(TWO_PRED_GRAPH, 2).expect("JSON parse failed");
+        let scheduler = create_scheduler(SchedulerConfig {
+            scheduler_type: SchedulerType::WorkStealing,
+            core_offset: 0,
+            num_workers: 2,
+            record: false,
+            external_recorder: None,
+            base_instant: std::time::Instant::now(),
+            system_threads: 1,
+            receiver_threads: 0,
+            target_batch_size: 1,
+            batch_timeout_us: 10,
+            worker_affinity: None,
+            worker_hook: None,
+        });
+        let compiled = spec.compile(&scheduler);
+        let config = RuntimeConfig {
+            slots: 1,
+            max_frames: 1,
+            max_runtime: Some(5),
+            system_threads: 1,
+            workers: 2,
+            ..RuntimeConfig::default()
+        };
+        TomiiRtBuilder::with_config(compiled, scheduler, config)
+            .build()
+            .expect("build failed")
+    }
+
+    #[test]
+    fn test_bump_slot_generation_wrap_sweeps_stale_entries() {
+        let rt = build_test_rt();
+        let shared = &rt.shared;
+        let slot = 0;
+
+        // Simulate an entry last touched one decrement ago, tagged with the
+        // (low-32) generation the upcoming wrap will produce (0) — exactly the
+        // collision the bug describes. Without the eager sweep this stale tag
+        // would false-match the new epoch and the node would need only 1 more
+        // decrement instead of a fresh 2.
+        let mut ready = Vec::new();
+        shared
+            .exec
+            .resolution_state
+            .decrease_and_get_ready_into(slot, B_NODE_ID, 0, None, 1, None, &mut ready);
+        assert!(ready.is_empty(), "1 of 2 deps consumed, not ready yet");
+
+        // Poison cond_instances_to_spawn / fanout_bulk_arrived with a stale tag
+        // at the same colliding generation (0) and an unmistakably non-init value.
+        shared.slot_data.cond_instances_to_spawn[slot][B_NODE_ID]
+            .store(crate::buffers::gen_pack(0, 999), Ordering::SeqCst);
+        shared.slot_data.fanout_bulk_arrived[slot][B_NODE_ID]
+            .store(crate::buffers::gen_pack(0, 888), Ordering::SeqCst);
+
+        // Force the counter to the wrap boundary: the next fetch_add's `prev as
+        // u32` is `u32::MAX`, so the post-increment low 32 bits become 0 —
+        // colliding with the stale tags above.
+        shared.slot_data.generation[slot].store(u64::from(u32::MAX), Ordering::SeqCst);
+
+        bump_slot_generation(shared, slot);
+
+        // cond_instances_to_spawn / fanout_bulk_arrived were eagerly reinitialised
+        // to the fresh init value at the new generation, not left at the poisoned
+        // stale value.
+        let cond_packed =
+            shared.slot_data.cond_instances_to_spawn[slot][B_NODE_ID].load(Ordering::SeqCst);
+        assert_eq!(crate::buffers::gen_unpack_gen(cond_packed), 0);
+        assert_eq!(crate::buffers::gen_unpack_val(cond_packed), 0); // b is not a condition node
+        let fanout_packed =
+            shared.slot_data.fanout_bulk_arrived[slot][B_NODE_ID].load(Ordering::SeqCst);
+        assert_eq!(crate::buffers::gen_unpack_gen(fanout_packed), 0);
+        assert_eq!(crate::buffers::gen_unpack_val(fanout_packed), 0);
+
+        // resolution_state: the pre-wrap decrement (1 of 2 deps) must NOT carry
+        // forward into the new epoch. A decrement at the new generation must
+        // require the FULL 2 deps again, proving the sweep eagerly reinitialised
+        // NodeDepMap rather than the stale tag lazily (and wrongly) matching.
+        let mut ready2 = Vec::new();
+        shared.exec.resolution_state.decrease_and_get_ready_into(
+            slot,
+            B_NODE_ID,
+            0,
+            None,
+            1,
+            None,
+            &mut ready2,
+        );
+        assert!(
+            ready2.is_empty(),
+            "sweep must reset remaining_deps to the full count at the new generation"
+        );
+        let mut ready3 = Vec::new();
+        shared.exec.resolution_state.decrease_and_get_ready_into(
+            slot,
+            B_NODE_ID,
+            0,
+            None,
+            1,
+            None,
+            &mut ready3,
+        );
+        assert_eq!(
+            ready3,
+            vec![0],
+            "second decrement at the new gen completes the freshly-reset count"
+        );
+    }
+
+    #[test]
+    fn test_bump_slot_generation_non_wrap_does_not_sweep() {
+        let rt = build_test_rt();
+        let shared = &rt.shared;
+        let slot = 0;
+
+        // Non-wrap starting point: low 32 bits != u32::MAX.
+        shared.slot_data.generation[slot].store(5, Ordering::SeqCst);
+
+        // Poison the swept-on-wrap structures with sentinel values that would
+        // only change if a sweep (incorrectly) ran on this non-wrap bump.
+        shared.slot_data.cond_instances_to_spawn[slot][B_NODE_ID]
+            .store(crate::buffers::gen_pack(123, 456), Ordering::SeqCst);
+        shared.slot_data.fanout_bulk_arrived[slot][B_NODE_ID]
+            .store(crate::buffers::gen_pack(123, 456), Ordering::SeqCst);
+
+        // Pre-set resolution_state away from its init value at an arbitrary gen
+        // tag (123): 1 of 2 deps consumed.
+        let mut ready = Vec::new();
+        shared
+            .exec
+            .resolution_state
+            .decrease_and_get_ready_into(slot, B_NODE_ID, 123, None, 1, None, &mut ready);
+        assert!(ready.is_empty());
+
+        bump_slot_generation(shared, slot); // 5 -> 6, non-wrap
+
+        assert_eq!(shared.slot_data.generation[slot].load(Ordering::SeqCst), 6);
+        assert_eq!(
+            shared.slot_data.cond_instances_to_spawn[slot][B_NODE_ID].load(Ordering::SeqCst),
+            crate::buffers::gen_pack(123, 456),
+            "non-wrap bump must not touch cond_instances_to_spawn"
+        );
+        assert_eq!(
+            shared.slot_data.fanout_bulk_arrived[slot][B_NODE_ID].load(Ordering::SeqCst),
+            crate::buffers::gen_pack(123, 456),
+            "non-wrap bump must not touch fanout_bulk_arrived"
+        );
+
+        // resolution_state: the pending 1-of-2 decrement from before the bump
+        // must still need only 1 more decrement (not a fresh 2) — proving the
+        // non-wrap bump did not sweep NodeDepMap either.
+        let mut ready2 = Vec::new();
+        shared.exec.resolution_state.decrease_and_get_ready_into(
+            slot,
+            B_NODE_ID,
+            123,
+            None,
+            1,
+            None,
+            &mut ready2,
+        );
+        assert_eq!(
+            ready2,
+            vec![0],
+            "non-wrap bump must leave the in-flight decrement count untouched"
+        );
+    }
 }
