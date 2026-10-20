@@ -66,6 +66,14 @@ pub trait DependencyCounter: Send + Sync {
 
     /// Human-readable diagnostic string (used in `tracing::debug!` at startup).
     fn debug_info(&self) -> String;
+
+    /// Eagerly reinitialise every generational dependency entry for `slot` to
+    /// `new_gen`.
+    ///
+    /// Only called at the once-per-2^32 low-32-bit wrap of the slot generation
+    /// counter (see `runtime::generation::bump_slot_generation`), never on the
+    /// common per-frame path, which stays fully lazy.
+    fn reset_slot_epoch(&self, slot: usize, new_gen: u32);
 }
 
 /// Multi-threaded dependency counter — uses atomics for lock-free operation.
@@ -156,6 +164,11 @@ impl DependencyCounter for MultiThreadedCounter {
 
     fn debug_info(&self) -> String {
         format!("{:?}", self)
+    }
+
+    #[inline]
+    fn reset_slot_epoch(&self, slot: usize, new_gen: u32) {
+        self.node_dep_map.reset_slot_epoch(slot, new_gen);
     }
 }
 

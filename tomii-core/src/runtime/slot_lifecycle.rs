@@ -13,7 +13,7 @@
 //! "what happens when a slot completes" separate from "how slots are allocated and released".
 
 use super::shared_data::{ExecCtx, SharedData, SlotData, SlotState};
-use super::slot_management::{initial_nodes, process_slot_completion};
+use super::slot_management::{bump_slot_generation, initial_nodes, process_slot_completion};
 use crate::debug::print_debug;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -257,7 +257,7 @@ fn detect_and_claim_slot_completion(slot_data: &SlotData, exec: &ExecCtx, slot: 
 fn reset_slot_state(shared: &SharedData, slot: usize) {
     // Bump generation BEFORE counter resets — closes the window where stale tasks
     // (gen=G) could pass the batch_queue gen filter while counters are already reset.
-    shared.slot_data.generation[slot].fetch_add(1, Ordering::SeqCst);
+    bump_slot_generation(shared, slot);
 
     shared.slot_data.packet_complete[slot].store(false, Ordering::SeqCst);
     shared.slot_data.packet_counters[slot].store(0, Ordering::SeqCst);
