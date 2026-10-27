@@ -237,7 +237,25 @@ struct Args {
     resolution_strategy: String,
 }
 
+/// Keep freed heap memory resident: no trimming back to the OS and no per-allocation
+/// mmap/munmap for buffers up to 32 MiB. Otherwise glibc's churn of short-lived
+/// per-frame buffers costs millions of minor page faults per second during warm-up
+/// (contending on mmap_lock across all workers). `TOMII_NO_MALLOC_TUNE=1` opts out.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn tune_malloc() {
+    if std::env::var("TOMII_NO_MALLOC_TUNE").is_ok_and(|v| v == "1") {
+        return;
+    }
+    unsafe {
+        libc::mallopt(libc::M_TRIM_THRESHOLD, i32::MAX);
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 32 * 1024 * 1024);
+        libc::mallopt(libc::M_TOP_PAD, 64 * 1024 * 1024);
+    }
+}
+
 fn main() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    tune_malloc();
     let args = Args::parse();
 
     // Initialize tracing subscriber. RUST_LOG overrides the --debug flag.
