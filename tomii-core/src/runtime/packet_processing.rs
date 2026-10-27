@@ -173,10 +173,13 @@ pub(super) fn poll_and_process_network_packets(
 /// run's `len` per-packet entries with a single `(NodeInfo{bulk_count=len}, None)`
 /// entry, collapsing the per-packet successor walk + dep-counter RMWs to one.
 ///
-/// GUARD (strict + per-packet fallback): skip coalescing entirely if node-0 has
-/// ANY conditional successor edge — the per-index condition machinery
-/// (`dispatch_condition_successor`) is not bulk-aware. Runs of length 1 are also
-/// left exactly as-is. Completion counting is unaffected: `packet_counters` is
+/// GUARD (strict + per-packet fallback): skip coalescing entirely if node-0 feeds
+/// any conditional OR one-to-one successor (see the guard below). A one-to-one
+/// `$res` successor reads its predecessor via the triggering `pred_index`, which a
+/// bulk entry can only carry once for the whole run — so coalescing those is
+/// correctness-breaking (MIMO's ingest is one-to-one and falls back here).
+/// Non-one-to-one edges read via `node_index` and are bulk-safe. Runs of length 1
+/// are left exactly as-is. Completion counting is unaffected: `packet_counters` is
 /// bumped per packet in `assign_packet_to_slot`, and `pending_tasks` balances
 /// regardless of granularity (one `fetch_sub(len)` == `len` individual subs).
 #[inline]
@@ -185,14 +188,24 @@ fn coalesce_network_batch(shared: &Arc<SharedData>, batch: &mut Vec<(NodeInfo, O
     if batch.len() < 2 {
         return;
     }
-    // Guard: the condition path is not bulk-aware — fall back to exact per-packet
-    // behaviour if node-0 feeds any conditional successor.
+    // Guard (strict): fall back to exact per-packet admission if node-0 feeds any
+    //   (a) conditional successor — the per-index condition machinery
+    //       (dispatch_condition_successor) is not bulk-aware; or
+    //   (b) ONE-TO-ONE successor — a 1:1 `$res` edge whose successor reads its
+    //       predecessor via the triggering `pred_index` (fetch_res_results case 2).
+    //       A coalesced bulk entry carries a single chunk-start `pred_index` for the
+    //       whole run, so every covered successor would read the run's FIRST cell
+    //       instead of its own — wrong, grouping-dependent values. (MIMO's
+    //       network->fft and network->csi are both one-to-one, so MIMO correctly
+    //       falls back here; non-one-to-one ingest edges read via node_index and
+    //       are bulk-safe.)
+    // Checked before the sort so an unsafe graph pays zero overhead.
     if shared
         .graph_cache
         .successor_arena
         .edges_for(0)
         .iter()
-        .any(|e| e.has_condition)
+        .any(|e| e.has_condition || e.is_one_to_one())
     {
         return;
     }

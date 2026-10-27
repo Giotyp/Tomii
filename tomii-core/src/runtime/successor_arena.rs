@@ -121,6 +121,18 @@ impl SuccEdge {
         }
     }
 
+    /// True when this edge maps 1:1 onto a specific successor instance, i.e. the
+    /// successor reads its predecessor's result via the *triggering* `pred_index`
+    /// (`fetch_res_results` case 2), not via its own `node_index`. Such an edge is
+    /// NOT safe to coalesce into a bulk entry that carries a single chunk-start
+    /// `pred_index` for the whole run — each covered cell feeds a distinct
+    /// successor that must read that cell. Used by DR3's `coalesce_network_batch`
+    /// to fall back to per-packet admission for one-to-one network successors.
+    #[inline]
+    pub fn is_one_to_one(&self) -> bool {
+        self.has_one_to_one
+    }
+
     /// The specific successor instance fired by predecessor instance `pred_index`
     /// for 1:1 non-barrier equal-factor `$res` edges.
     ///
