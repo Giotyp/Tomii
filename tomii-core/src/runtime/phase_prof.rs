@@ -30,9 +30,26 @@ pub(crate) const DISPATCH: usize = 19; // dispatch_nodes (scheduler submission; 
 const N: usize = 20;
 
 const NAMES: [&str; N] = [
-    "loop", "idle", "poll", "drain", "reinject", "telem", "decode", "idfn", "window", "park",
-    "admit", "slotassign", "initdisp", "indexfn", "coalesce", "netdrive", "bq", "bqdrive",
-    "checkslots", "dispatch",
+    "loop",
+    "idle",
+    "poll",
+    "drain",
+    "reinject",
+    "telem",
+    "decode",
+    "idfn",
+    "window",
+    "park",
+    "admit",
+    "slotassign",
+    "initdisp",
+    "indexfn",
+    "coalesce",
+    "netdrive",
+    "bq",
+    "bqdrive",
+    "checkslots",
+    "dispatch",
 ];
 
 struct Prof {
@@ -130,7 +147,11 @@ pub(crate) fn dump(thread_id: usize) {
         );
         for i in 0..N {
             let ns = p.cyc[i] as f64 * ns_per_cyc;
-            let per = if p.cnt[i] > 0 { ns / p.cnt[i] as f64 } else { 0.0 };
+            let per = if p.cnt[i] > 0 {
+                ns / p.cnt[i] as f64
+            } else {
+                0.0
+            };
             line.push_str(&format!(
                 " {}={:.1}ms/{}/{:.0}ns",
                 NAMES[i],
@@ -218,14 +239,21 @@ thread_local! {
 fn trace() -> Option<&'static Trace> {
     TRACE
         .get_or_init(|| {
-            let path = std::env::var("TOMII_TRACE").ok().filter(|s| !s.is_empty())?;
+            let path = std::env::var("TOMII_TRACE")
+                .ok()
+                .filter(|s| !s.is_empty())?;
             let cap: usize = std::env::var("TOMII_TRACE_CAP")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3_000_000);
             // collect() writes every word, so all pages are faulted here, not on the hot path.
             let buf: Vec<AtomicU64> = (0..cap * EW).map(|_| AtomicU64::new(0)).collect();
-            Some(Trace { buf, cur: AtomicUsize::new(0), cap, path })
+            Some(Trace {
+                buf,
+                cur: AtomicUsize::new(0),
+                cap,
+                path,
+            })
         })
         .as_ref()
 }
@@ -242,7 +270,10 @@ pub(crate) fn trace_on() -> bool {
 
 #[inline]
 pub(crate) fn mono_ns() -> u64 {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
@@ -264,7 +295,15 @@ fn push(words: [u64; EW]) {
 }
 
 #[inline]
-pub(crate) fn trace_task(node: usize, bulk: usize, frame: usize, index: usize, spawn: u64, start: u64, end: u64) {
+pub(crate) fn trace_task(
+    node: usize,
+    bulk: usize,
+    frame: usize,
+    index: usize,
+    spawn: u64,
+    start: u64,
+    end: u64,
+) {
     let (w, s) = WORKER.with(|c| c.get());
     push([
         1 | (w << 8) | (s << 24) | ((node as u64 & 0xFF) << 32) | ((bulk as u64 & 0xFFFF) << 40),

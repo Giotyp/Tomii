@@ -227,7 +227,11 @@ pub(super) fn dispatch_nodes(
         args_buf.resize(n, None);
         send_to_scheduler(shared, sctx, nodes_to_schedule, &args_buf, None);
     });
-    super::phase_prof::add_n(super::phase_prof::DISPATCH, t, nodes_to_schedule.len() as u64);
+    super::phase_prof::add_n(
+        super::phase_prof::DISPATCH,
+        t,
+        nodes_to_schedule.len() as u64,
+    );
 
     sctx.telemetry
         .record_timing(start_time, thread_slot, "Preparation", usize::MAX);

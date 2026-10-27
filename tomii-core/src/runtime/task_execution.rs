@@ -258,7 +258,10 @@ pub(super) fn execute_task(
     let trace_t0 = if super::phase_prof::trace_on() {
         let base_now = shared.telemetry.base_instant.elapsed().as_nanos();
         let m = super::phase_prof::mono_ns();
-        (m, m.saturating_sub(base_now.saturating_sub(spawn_ns) as u64))
+        (
+            m,
+            m.saturating_sub(base_now.saturating_sub(spawn_ns) as u64),
+        )
     } else {
         (0, 0)
     };

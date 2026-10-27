@@ -34,6 +34,7 @@ fn spawn_receiver_thread(
     socket_range: std::ops::Range<usize>,
     core_id: usize,
     return_rxs: Vec<flume::Receiver<Vec<u8>>>,
+    decode: Option<tomii_types::CmPtr>,
 ) -> Result<JoinHandle<()>, crate::RuntimeError> {
     thread::Builder::new()
         .name(thread_name)
@@ -49,6 +50,7 @@ fn spawn_receiver_thread(
                 socket_range,
                 core_id,
                 return_rxs,
+                decode,
             );
         })
         .map_err(crate::RuntimeError::SpawnFailed)
@@ -71,6 +73,14 @@ impl TomiiRt {
 
         let num_sockets = network_config.num_sockets;
         let buffer_depth = network_config.buffer_depth;
+        // RX-side decode (TOMII_RX_DECODE=1): receiver threads run extract_packet so the
+        // resolution thread only admits. Requires a thread-safe extract function.
+        let rx_decode = if std::env::var("TOMII_RX_DECODE").is_ok_and(|v| v == "1") {
+            network_config.extract_packet_func
+        } else {
+            None
+        };
+        tracing::info!(rx_decode = rx_decode.is_some(), "receiver decode placement");
 
         tracing::info!(
             num_sockets,
@@ -132,6 +142,7 @@ impl TomiiRt {
                     socket_id..socket_id + 1,
                     core_id,
                     vec![return_rx],
+                    rx_decode,
                 )?;
                 handles.push(handle);
                 tracing::debug!(socket_id, core_id, "receiver thread spawned");
@@ -169,6 +180,7 @@ impl TomiiRt {
                     socket_range,
                     core_id,
                     return_rxs,
+                    rx_decode,
                 )?;
                 handles.push(handle);
                 tracing::debug!(

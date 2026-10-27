@@ -32,6 +32,9 @@ pub struct PacketMessage {
     pub timestamp: Instant,
     /// Receiver core ID (for recording)
     pub receiver_core_id: usize,
+    /// Set when the receiver thread already ran `extract_packet` (RX-side decode);
+    /// `packet_bytes` is then empty and the resolution thread skips decoding.
+    pub decoded: Option<tomii_types::CmTypes>,
 }
 
 /// Network socket types supported by Τομί
@@ -146,6 +149,7 @@ pub fn multi_socket_receiver_loop(
     socket_range: std::ops::Range<usize>,
     core_id: usize,
     return_rxs: Vec<flume::Receiver<Vec<u8>>>,
+    decode: Option<tomii_types::CmPtr>,
 ) {
     // Pin this receiver to its dedicated physical core (`core_id` =
     // receiver_core_offset + thread_id, the core the allocator reserved).
@@ -241,11 +245,28 @@ pub fn multi_socket_receiver_loop(
                         last_packet_timestamp = packet_timestamp;
                     }
 
+                    // RX-side decode: run extract_packet here (in parallel across
+                    // receiver threads) and recycle the raw buffer locally.
+                    let (packet_bytes, decoded) = match decode {
+                        Some(dec) => {
+                            let raw = tomii_types::CmTypes::from_bytes(packet_bytes);
+                            let out = dec(std::slice::from_ref(&raw));
+                            if let tomii_types::CmTypes::Bytes(arc) = raw {
+                                if let Ok(buf) = Arc::try_unwrap(arc) {
+                                    local_pools[local_idx].push(buf);
+                                }
+                            }
+                            (Vec::new(), Some(out))
+                        }
+                        None => (packet_bytes, None),
+                    };
+
                     let msg = PacketMessage {
                         packet_bytes,
                         socket_id,
                         timestamp: packet_timestamp,
                         receiver_core_id: core_id,
+                        decoded,
                     };
 
                     if tx.try_send(msg).is_err() {

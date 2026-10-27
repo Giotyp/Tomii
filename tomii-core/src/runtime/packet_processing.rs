@@ -73,6 +73,17 @@ pub(super) fn poll_and_process_network_packets(
             frame_packets,
         );
         super::phase_prof::add(super::phase_prof::REINJECT, t);
+        if dispatch_chunk() > 0 {
+            flush_active_batch(
+                shared,
+                &mut active_packet_batch,
+                cond_indexes,
+                frame_slot_activity,
+                thread_core,
+                thread_id,
+                thread_slot,
+            );
+        }
     }
 
     for packet_msg in packet_buf.drain(..) {
@@ -119,7 +130,12 @@ pub(super) fn poll_and_process_network_packets(
             + shared.config.slots;
         super::phase_prof::add(super::phase_prof::WINDOW, t);
         if new_frame >= window_end {
-            super::phase_prof::trace_admit(1, new_frame, (window_end - shared.config.slots) as u64, 0);
+            super::phase_prof::trace_admit(
+                1,
+                new_frame,
+                (window_end - shared.config.slots) as u64,
+                0,
+            );
             let t = super::phase_prof::now();
             park_pending_packet(
                 shared,
@@ -149,33 +165,67 @@ pub(super) fn poll_and_process_network_packets(
             frame_packets,
         );
         super::phase_prof::add(super::phase_prof::ADMIT, t);
+        let chunk = dispatch_chunk();
+        if chunk > 0 && active_packet_batch.len() >= chunk {
+            flush_active_batch(
+                shared,
+                &mut active_packet_batch,
+                cond_indexes,
+                frame_slot_activity,
+                thread_core,
+                thread_id,
+                thread_slot,
+            );
+        }
     }
 
-    if !active_packet_batch.is_empty() {
+    flush_active_batch(
+        shared,
+        &mut active_packet_batch,
+        cond_indexes,
+        frame_slot_activity,
+        thread_core,
+        thread_id,
+        thread_slot,
+    );
+}
+
+/// Coalesce and resolve the admitted network batch (stores results, dispatches successors).
+#[allow(clippy::too_many_arguments)]
+fn flush_active_batch(
+    shared: &Arc<SharedData>,
+    batch: &mut Vec<(NodeInfo, Option<CmTypes>)>,
+    cond_indexes: &[Vec<usize>],
+    frame_slot_activity: &mut HashMap<usize, bool>,
+    thread_core: usize,
+    thread_id: usize,
+    thread_slot: usize,
+) {
+    if !batch.is_empty() {
         // DR3: coalesce contiguous same-slot network cells into bulk entries so the
         // resolution thread walks node-0's successors once per run instead of once
         // per packet (the ~2000-entry/frame dispatch wall), then drives the batch.
         let t = super::phase_prof::now();
-        coalesce_network_batch(shared, &mut active_packet_batch);
+        coalesce_network_batch(shared, batch);
         super::phase_prof::add(super::phase_prof::COALESCE, t);
 
         let start_ns_batch = shared.telemetry.base_instant.elapsed().as_nanos();
         let start_proc = shared.telemetry.measure_start();
         let t = super::phase_prof::now();
-        let n = active_packet_batch.len() as u64;
+        let n = batch.len() as u64;
         if super::phase_prof::trace_on() {
             // sub 8: network batch about to resolve: frame of first & last entry, a=entries, b=distinct slots bitmap
             let mut bits = 0u64;
-            for (ni, _) in active_packet_batch.iter() {
+            for (ni, _) in batch.iter() {
                 bits |= 1u64 << ni.slot;
             }
-            let f0 = shared.slot_data.frame_id[active_packet_batch[0].0.slot].load(Ordering::Relaxed);
+            let f0 = shared.slot_data.frame_id[batch[0].0.slot].load(Ordering::Relaxed);
             super::phase_prof::trace_admit(8, f0, n, bits);
         }
         // Route through the pluggable resolution strategy (the batch-protocol seam).
         let _ = shared.exec.resolution_strategy.drive_batch(
             shared,
-            &mut active_packet_batch,
+            batch,
             thread_core,
             thread_id,
             thread_slot,
@@ -188,6 +238,19 @@ pub(super) fn poll_and_process_network_packets(
             .telemetry
             .record_timing(start_proc, thread_slot, "Batch Resolution", usize::MAX);
     }
+}
+
+/// Admitted packets per dispatch flush (TOMII_DISPATCH_CHUNK); 0 = flush once per poll.
+/// The drain itself stays unbounded (bounding it overflows the ingest channel); chunked
+/// flushing keeps tasks reaching the workers while a large backlog is being admitted.
+fn dispatch_chunk() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("TOMII_DISPATCH_CHUNK")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    })
 }
 
 /// DR3: coalesce the network drain batch (node-0 cells) into bulk entries.
@@ -545,6 +608,9 @@ fn decode_packet(
     packet_process_func: tomii_types::CmPtr,
     thread_slot: usize,
 ) -> CmTypes {
+    if let Some(cm) = packet_msg.decoded {
+        return cm; // already decoded on the receiver thread
+    }
     let socket_id = packet_msg.socket_id;
     // Bytes variant avoids Arc/RwLock/Box overhead.
     // Keep received_bytes_cm alive (not moved) so we can reclaim its Vec<u8> below.
