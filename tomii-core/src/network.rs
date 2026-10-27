@@ -147,12 +147,20 @@ pub fn multi_socket_receiver_loop(
     core_id: usize,
     return_rxs: Vec<flume::Receiver<Vec<u8>>>,
 ) {
-    // Pin to core
-    if let Some(core_ids) = core_affinity::get_core_ids() {
-        if core_id < core_ids.len() {
-            core_affinity::set_for_current(core_ids[core_id]);
-        }
-    }
+    // Pin this receiver to its dedicated physical core (`core_id` =
+    // receiver_core_offset + thread_id, the core the allocator reserved).
+    //
+    // Do NOT derive the target from `core_affinity::get_core_ids()`:
+    // get_core_ids() returns the CURRENT thread's affinity set, and receiver
+    // threads are spawned from the main thread which is pinned to core 0 — so
+    // inside a receiver thread get_core_ids() returns only `[core 0]`, the
+    // `core_id < len` guard then fails, the pin is skipped, and all receivers
+    // inherit main's core 0 (starving epoll busy-poll ingest). Workers avoid
+    // this because they pin from the scheduler's allocation, not a per-thread
+    // get_core_ids(). Pinning directly to the physical core via `CoreId { id }`
+    // works regardless of the inherited mask: sched_setaffinity to a core in
+    // the process cpuset is permitted (workers already run on 6..31).
+    core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
 
     let read_timeout = Duration::from_micros(1);
 
