@@ -47,6 +47,12 @@ pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> 
             .count()
     };
 
+    super::phase_prof::trace_admit(
+        6,
+        shared.slot_data.frame_id[slot].load(Ordering::Relaxed),
+        slot as u64,
+        0,
+    );
     // Increment global completion counter
     let completed_frames = shared
         .telemetry

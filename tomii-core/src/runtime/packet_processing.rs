@@ -49,7 +49,9 @@ pub(super) fn poll_and_process_network_packets(
 
     // Drain all available packets into reusable buffer (no Vec alloc per call).
     packet_buf.clear();
+    let t = super::phase_prof::now();
     packet_buf.extend(shared.net.packet_receiver.drain());
+    super::phase_prof::add_n(super::phase_prof::DRAIN, t, packet_buf.len() as u64);
     let packet_rcv_instant = Instant::now();
 
     let mut active_packet_batch: Vec<(NodeInfo, Option<CmTypes>)> =
@@ -59,6 +61,7 @@ pub(super) fn poll_and_process_network_packets(
     // Done before the fresh drain so older (parked) packets are processed first.
     // Relaxed is only an emptiness hint — a stale read delays this by one poll.
     if shared.net.pending_count.load(Ordering::Relaxed) > 0 {
+        let t = super::phase_prof::now();
         reinject_pending_frames(
             shared,
             idx_func_ptr,
@@ -69,23 +72,30 @@ pub(super) fn poll_and_process_network_packets(
             thread_slot,
             frame_packets,
         );
+        super::phase_prof::add(super::phase_prof::REINJECT, t);
     }
 
     for packet_msg in packet_buf.drain(..) {
         let receiver_core_id = packet_msg.receiver_core_id;
         let packet_timestamp = packet_msg.timestamp;
+        let t = super::phase_prof::now();
         shared.telemetry.with_timing(|tb| {
             let dur = packet_rcv_instant.duration_since(packet_timestamp);
             tb.add_task_time(thread_slot, "Packet Received", usize::MAX, dur);
         });
+        super::phase_prof::add(super::phase_prof::TELEM, t);
 
+        let t = super::phase_prof::now();
         let packet_cm = decode_packet(shared, packet_msg, packet_process_func, thread_slot);
+        super::phase_prof::add(super::phase_prof::DECODE, t);
 
+        let t = super::phase_prof::now();
         let start_id = shared.telemetry.measure_start();
         let new_frame_opt = process_id_function(shared, &packet_cm);
         shared
             .telemetry
             .record_timing(start_id, thread_slot, "ID Function", usize::MAX);
+        super::phase_prof::add(super::phase_prof::IDFN, t);
 
         let Some(new_frame) = new_frame_opt else {
             print_debug(|| {
@@ -101,12 +111,16 @@ pub(super) fn poll_and_process_network_packets(
         // assigned a slot yet.  Park it for re-injection once the window advances —
         // dropping its head packets here would leave the frame permanently
         // incomplete and wedge the slot it is later assigned to.
+        let t = super::phase_prof::now();
         let window_end = shared
             .telemetry
             .frame_complete_counter
             .load(Ordering::SeqCst)
             + shared.config.slots;
+        super::phase_prof::add(super::phase_prof::WINDOW, t);
         if new_frame >= window_end {
+            super::phase_prof::trace_admit(1, new_frame, (window_end - shared.config.slots) as u64, 0);
+            let t = super::phase_prof::now();
             park_pending_packet(
                 shared,
                 new_frame,
@@ -115,9 +129,11 @@ pub(super) fn poll_and_process_network_packets(
                 receiver_core_id,
                 frame_packets,
             );
+            super::phase_prof::add(super::phase_prof::PARK, t);
             continue;
         }
 
+        let t = super::phase_prof::now();
         admit_packet(
             shared,
             new_frame,
@@ -132,16 +148,30 @@ pub(super) fn poll_and_process_network_packets(
             thread_slot,
             frame_packets,
         );
+        super::phase_prof::add(super::phase_prof::ADMIT, t);
     }
 
     if !active_packet_batch.is_empty() {
         // DR3: coalesce contiguous same-slot network cells into bulk entries so the
         // resolution thread walks node-0's successors once per run instead of once
         // per packet (the ~2000-entry/frame dispatch wall), then drives the batch.
+        let t = super::phase_prof::now();
         coalesce_network_batch(shared, &mut active_packet_batch);
+        super::phase_prof::add(super::phase_prof::COALESCE, t);
 
         let start_ns_batch = shared.telemetry.base_instant.elapsed().as_nanos();
         let start_proc = shared.telemetry.measure_start();
+        let t = super::phase_prof::now();
+        let n = active_packet_batch.len() as u64;
+        if super::phase_prof::trace_on() {
+            // sub 8: network batch about to resolve: frame of first & last entry, a=entries, b=distinct slots bitmap
+            let mut bits = 0u64;
+            for (ni, _) in active_packet_batch.iter() {
+                bits |= 1u64 << ni.slot;
+            }
+            let f0 = shared.slot_data.frame_id[active_packet_batch[0].0.slot].load(Ordering::Relaxed);
+            super::phase_prof::trace_admit(8, f0, n, bits);
+        }
         // Route through the pluggable resolution strategy (the batch-protocol seam).
         let _ = shared.exec.resolution_strategy.drive_batch(
             shared,
@@ -153,6 +183,7 @@ pub(super) fn poll_and_process_network_packets(
             frame_slot_activity,
             start_ns_batch,
         );
+        super::phase_prof::add_n(super::phase_prof::NETDRIVE, t, n);
         shared
             .telemetry
             .record_timing(start_proc, thread_slot, "Batch Resolution", usize::MAX);
@@ -295,6 +326,7 @@ fn admit_packet(
             // between the completion counter advancing and the finished slot
             // being released.  Park and retry on a later poll; dropping here
             // permanently lost frames that were milliseconds from a free slot.
+            super::phase_prof::trace_admit(2, new_frame, 0, 0);
             park_pending_packet(
                 shared,
                 new_frame,
@@ -341,6 +373,7 @@ fn admit_packet(
             drop(slot_states);
             active_packet_batch.push((node_info.clone(), Some(packet_cm)));
         } else {
+            super::phase_prof::trace_admit(5, new_frame, slot as u64, 0);
             let mut slot_buffers = shared.slot_data.buffers.write();
             slot_buffers[slot].push((node_info.clone(), Some(packet_cm)));
             drop(slot_buffers);
@@ -457,6 +490,7 @@ fn reinject_pending_frames(
             .collect()
     };
     for (frame, packets) in ready {
+        super::phase_prof::trace_admit(3, frame, packets.len() as u64, 0);
         print_debug(|| {
             format!(
                 "Thread {:?} -- Re-injecting {} parked packets for frame {}",
@@ -493,6 +527,7 @@ pub(super) fn mark_frame_dropped(shared: &Arc<SharedData>, frame: usize, reason:
     }
     let already_marked = shared.net.frame_dropped[frame].swap(true, Ordering::AcqRel);
     if !already_marked {
+        super::phase_prof::trace_admit(7, frame, 0, 0);
         shared
             .telemetry
             .frame_complete_counter
@@ -561,15 +596,19 @@ fn assign_packet_to_slot(
     }
 
     let start_sa = shared.telemetry.measure_start();
+    let t = super::phase_prof::now();
     let (assigned_slot, newly_activated) = match assign_frame_to_available_slot(shared, new_frame) {
         Some(v) => v,
         None => return SlotAssignment::NoSlotYet,
     };
+    super::phase_prof::add(super::phase_prof::SLOTASSIGN, t);
     shared
         .telemetry
         .record_timing(start_sa, thread_slot, "Slot Assignment", usize::MAX);
 
+    let t = super::phase_prof::now();
     if newly_activated {
+        super::phase_prof::trace_admit(4, new_frame, assigned_slot as u64, 0);
         *slots_dirty = true;
         // Spawn initial nodes immediately so workers start while remaining packets arrive.
         let init_nodes = initial_nodes(&shared.graph, vec![assigned_slot], shared.config.workers);
@@ -587,6 +626,11 @@ fn assign_packet_to_slot(
         }
     }
 
+    if newly_activated {
+        super::phase_prof::add(super::phase_prof::INITDISP, t);
+    }
+
+    let t = super::phase_prof::now();
     let packet_index = if let Some((idx_fn, idx_args)) = idx_func_ptr {
         let additional_args = super::arg_resolution::parse_args(
             shared,
@@ -624,6 +668,7 @@ fn assign_packet_to_slot(
         );
         shared.slot_data.packet_counters[assigned_slot].fetch_add(1, Ordering::SeqCst)
     };
+    super::phase_prof::add(super::phase_prof::INDEXFN, t);
 
     SlotAssignment::Assigned(NodeInfo::new(0, assigned_slot, packet_index, 0))
 }

@@ -103,6 +103,11 @@ pub(super) fn worker_loop(
     // Set thread-local state
     crate::scheduler::set_current_worker_id(core_id.id);
     crate::scheduler::set_current_worker_index(worker_id);
+    crate::runtime::phase_prof::set_worker(worker_id, group_id);
+    let tracing_on = crate::runtime::phase_prof::trace_on();
+    let total_load = |sh: &SharedWorkerState| -> usize {
+        sh.group_channels.iter().map(|c| c.load()).sum::<usize>() + sh.global_channels.load()
+    };
 
     WORKER_STATE.with(|s| {
         s.set(WorkerState {
@@ -200,6 +205,11 @@ pub(super) fn worker_loop(
         // crossbeam select! handles efficient OS-level park/wake.
         // When a task arrives on any monitored channel, the blocked worker
         // wakes immediately (futex-based, ~1-5us latency).
+        let (blk_t0, blk_l0) = if tracing_on {
+            (crate::runtime::phase_prof::mono_ns(), total_load(&shared))
+        } else {
+            (0, 0)
+        };
         let task = if allow_global_steal {
             let gbl_high = &shared.global_channels.high_rx;
             let gbl_norm = &shared.global_channels.normal_rx;
@@ -222,6 +232,16 @@ pub(super) fn worker_loop(
             }
         };
 
+        // Skip pure-idle timeouts (no task, empty queues at both ends) to bound trace size.
+        if tracing_on && (task.is_some() || blk_l0 > 0 || total_load(&shared) > 0) {
+            crate::runtime::phase_prof::trace_block(
+                task.is_some(),
+                blk_l0,
+                total_load(&shared),
+                blk_t0,
+                crate::runtime::phase_prof::mono_ns(),
+            );
+        }
         if let Some(task) = task {
             run_job(task);
         }

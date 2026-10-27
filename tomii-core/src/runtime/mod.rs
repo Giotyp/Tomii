@@ -26,6 +26,7 @@ mod node_cache;
 mod ordering;
 #[cfg(feature = "network")]
 mod packet_processing;
+pub(crate) mod phase_prof;
 mod reporting;
 mod resolution_loop;
 /// Pluggable resolution-strategy trait and the default `MultiSlotBatchStrategy`.
