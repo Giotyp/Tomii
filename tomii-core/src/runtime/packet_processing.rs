@@ -135,6 +135,11 @@ pub(super) fn poll_and_process_network_packets(
     }
 
     if !active_packet_batch.is_empty() {
+        // DR3: coalesce contiguous same-slot network cells into bulk entries so the
+        // resolution thread walks node-0's successors once per run instead of once
+        // per packet (the ~2000-entry/frame dispatch wall), then drives the batch.
+        coalesce_network_batch(shared, &mut active_packet_batch);
+
         let start_ns_batch = shared.telemetry.base_instant.elapsed().as_nanos();
         let start_proc = shared.telemetry.measure_start();
         // Route through the pluggable resolution strategy (the batch-protocol seam).
@@ -152,6 +157,95 @@ pub(super) fn poll_and_process_network_packets(
             .telemetry
             .record_timing(start_proc, thread_slot, "Batch Resolution", usize::MAX);
     }
+}
+
+/// DR3: coalesce the network drain batch (node-0 cells) into bulk entries.
+///
+/// Each packet is a resolution-thread batch entry that stores node-0's result at
+/// its cell, decrements `pending_tasks`, and walks node-0's successor edges —
+/// ~2000/frame at 64x16, serial on the resolution thread (the dispatch/queueing
+/// wall). Where node-0's successors carry no condition, a contiguous run of
+/// same-slot cells is equivalent to ONE bulk completion over `[start, start+len)`:
+/// `decrement_and_collect_ready` already intersects a bulk range with each edge's
+/// index filter (findings #21 defect B) and fanout-bulk accumulates `ready.len()`
+/// — identical to the proven worker bulk-compute path. So we store each cell's
+/// distinct result up front (irreducible — one result per cell) and replace the
+/// run's `len` per-packet entries with a single `(NodeInfo{bulk_count=len}, None)`
+/// entry, collapsing the per-packet successor walk + dep-counter RMWs to one.
+///
+/// GUARD (strict + per-packet fallback): skip coalescing entirely if node-0 has
+/// ANY conditional successor edge — the per-index condition machinery
+/// (`dispatch_condition_successor`) is not bulk-aware. Runs of length 1 are also
+/// left exactly as-is. Completion counting is unaffected: `packet_counters` is
+/// bumped per packet in `assign_packet_to_slot`, and `pending_tasks` balances
+/// regardless of granularity (one `fetch_sub(len)` == `len` individual subs).
+#[inline]
+fn coalesce_network_batch(shared: &Arc<SharedData>, batch: &mut Vec<(NodeInfo, Option<CmTypes>)>) {
+    // Network ingest node is id 0 by convention (admit_packet builds NodeInfo::new(0, ..)).
+    if batch.len() < 2 {
+        return;
+    }
+    // Guard: the condition path is not bulk-aware — fall back to exact per-packet
+    // behaviour if node-0 feeds any conditional successor.
+    if shared
+        .graph_cache
+        .successor_arena
+        .edges_for(0)
+        .iter()
+        .any(|e| e.has_condition)
+    {
+        return;
+    }
+
+    // Group by (slot, contiguous index). Order within a cell is irrelevant — one
+    // cell is one packet, and per-frame output is order-independent (parity-proven).
+    batch.sort_by(|a, b| (a.0.slot, a.0.index).cmp(&(b.0.slot, b.0.index)));
+
+    let rctx = shared.resolve_ctx();
+    let old = std::mem::take(batch);
+    let mut out: Vec<(NodeInfo, Option<CmTypes>)> = Vec::with_capacity(old.len());
+    let mut iter = old.into_iter().peekable();
+
+    while let Some((ni, payload)) = iter.next() {
+        // Only network cells coalesce; anything else passes through unchanged.
+        if ni.id != 0 {
+            out.push((ni, payload));
+            continue;
+        }
+        let slot = ni.slot;
+        let start_index = ni.index;
+        let mut run: Vec<(NodeInfo, Option<CmTypes>)> = vec![(ni, payload)];
+        let mut last_index = start_index;
+        while let Some((peek_ni, _)) = iter.peek() {
+            if peek_ni.id == 0 && peek_ni.slot == slot && peek_ni.index == last_index + 1 {
+                let e = iter.next().unwrap();
+                last_index = e.0.index;
+                run.push(e);
+            } else {
+                break;
+            }
+        }
+
+        if run.len() == 1 {
+            // Single cell: leave as-is (Some(payload) → Phase 1 stores it as today).
+            out.push(run.pop().unwrap());
+        } else {
+            // Bulk run: store each cell's distinct result now (Phase 1 lifted ahead
+            // of drive_batch — strictly safer, all node-0 results land before any
+            // successor runs), then emit one bulk entry with None payload.
+            let run_len = run.len();
+            for (cell_ni, cell_payload) in run {
+                if let Some(p) = cell_payload {
+                    rctx.exec.node_results.set(&cell_ni, p);
+                }
+            }
+            let mut bulk = NodeInfo::new(0, slot, start_index, 0);
+            bulk.bulk_count = run_len;
+            out.push((bulk, None));
+        }
+    }
+
+    *batch = out;
 }
 
 /// Admits one decoded, in-window packet: assigns it to a slot, routes it into the
