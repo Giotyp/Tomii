@@ -36,4 +36,13 @@ fn main() {
     // Add RPATH to the build output
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir);
     println!("cargo:rustc-link-arg=-Wl,-z,notext");
+
+    // Resolve the Fortran BLAS/LAPACK symbols Armadillo calls inside libbeamfuncs /
+    // libdemod (cgemm_, cpotrf_, ...) to MKL, as Agora's binary does. The static
+    // mkl_intel_lp64 above only serves this crate's own calls and is not exported, so
+    // without a dynamic NEEDED entry those symbols fall through to OpenBLAS/netlib
+    // (~3x slower Precoder, worse under concurrency). --no-as-needed keeps the entry.
+    println!("cargo:rustc-link-arg=-Wl,--no-as-needed");
+    println!("cargo:rustc-link-arg=-l:libmkl_intel_lp64.so.2");
+    println!("cargo:rustc-link-arg=-Wl,--as-needed");
 }
