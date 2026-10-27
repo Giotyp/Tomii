@@ -442,6 +442,17 @@ impl TomiiRtBuilder {
             net: NetworkInfra {
                 frame_packets: AtomicUsize::new(0),
                 receive_finished: Arc::new(AtomicBool::new(false)),
+                ingest_shards: {
+                    let n = if std::env::var("TOMII_INGEST_SHARDS").is_ok_and(|v| v == "1")
+                        && system_threads > 1
+                    {
+                        system_threads
+                    } else {
+                        0
+                    };
+                    let cap = packet_sender.capacity().unwrap_or(65536);
+                    (0..n).map(|_| flume::bounded(cap)).collect()
+                },
                 packet_sender,
                 packet_receiver,
                 receiver_sockets,

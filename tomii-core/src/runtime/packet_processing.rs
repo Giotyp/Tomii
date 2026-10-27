@@ -50,7 +50,13 @@ pub(super) fn poll_and_process_network_packets(
     // Drain all available packets into reusable buffer (no Vec alloc per call).
     packet_buf.clear();
     let t = super::phase_prof::now();
-    packet_buf.extend(shared.net.packet_receiver.drain());
+    let shards = &shared.net.ingest_shards;
+    let rx = if shards.is_empty() {
+        &shared.net.packet_receiver
+    } else {
+        &shards[thread_id % shards.len()].1
+    };
+    packet_buf.extend(rx.drain());
     super::phase_prof::add_n(super::phase_prof::DRAIN, t, packet_buf.len() as u64);
     let packet_rcv_instant = Instant::now();
 

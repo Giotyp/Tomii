@@ -232,6 +232,10 @@ pub struct NetworkInfra {
     /// Flume MPSC channel from network receivers to resolution threads.
     pub packet_sender: Sender<PacketMessage>,
     pub packet_receiver: Receiver<PacketMessage>,
+    /// Sharded ingest (TOMII_INGEST_SHARDS=1, system_threads > 1): one channel per
+    /// resolution thread; receiver thread i feeds shard i % n, resolution thread t
+    /// drains shard t. Empty = the single shared channel above.
+    pub ingest_shards: Vec<(Sender<PacketMessage>, Receiver<PacketMessage>)>,
     pub receiver_sockets: Arc<Vec<NetworkSocket>>,
     pub packet_drop_counters: Arc<Vec<AtomicUsize>>,
     /// Per-socket buffer return channels: resolution thread → receiver thread.

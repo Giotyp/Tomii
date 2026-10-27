@@ -116,7 +116,15 @@ impl TomiiRt {
             .packet_length;
         let recv_pool_size = self.shared.config.recv_pool_size;
         let shutdown = Arc::clone(&self.shared.shutdown_flag);
-        let tx = self.shared.net.packet_sender.clone();
+        let shards = &self.shared.net.ingest_shards;
+        let shard_tx = |i: usize| {
+            if shards.is_empty() {
+                self.shared.net.packet_sender.clone()
+            } else {
+                shards[i % shards.len()].0.clone()
+            }
+        };
+        tracing::info!(ingest_shards = shards.len(), "ingest channel layout");
         let sockets = Arc::clone(&self.shared.net.receiver_sockets);
         let drop_counters = Arc::clone(&self.shared.net.packet_drop_counters);
 
@@ -135,7 +143,7 @@ impl TomiiRt {
                     packet_length,
                     recv_pool_size,
                     Arc::clone(&shutdown),
-                    tx.clone(),
+                    shard_tx(socket_id),
                     Arc::clone(&sockets),
                     Arc::clone(&drop_counters),
                     socket_id,
@@ -173,7 +181,7 @@ impl TomiiRt {
                     packet_length,
                     recv_pool_size,
                     Arc::clone(&shutdown),
-                    tx.clone(),
+                    shard_tx(thread_id),
                     Arc::clone(&sockets),
                     Arc::clone(&drop_counters),
                     thread_id,
