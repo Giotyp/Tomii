@@ -63,6 +63,7 @@ pub use dump::StateDumper;
 pub use resolution_strategy::{BatchOutcome, MultiSlotBatchStrategy, ResolutionStrategy};
 pub use shared_data::SchedCtx;
 pub(crate) use shared_data::SharedData;
+pub(crate) use shared_data::FRAME_SLOT_EMPTY;
 pub use shared_data::{BatchConfig, RuntimeConfig, SpinWaitConfig};
 pub(crate) use shared_data::{
     BatchQueueRx, BatchQueueTx, ExecCtx, GraphCache, SlotData, SlotState, Telemetry,
@@ -426,6 +427,12 @@ impl TomiiRtBuilder {
                 fanout_bulk_arrived: Arc::new(fanout_bulk_arrived),
                 states: Arc::new(RwLock::new(vec![SlotState::Inactive; slots])),
                 running_frames: Arc::new(RwLock::new(Vec::new())),
+                frame_slot_map: {
+                    // Power-of-two length >= 2*slots so the index mask is a bit-and
+                    // and no two simultaneously-live frames alias the same cell.
+                    let len = (2 * slots).next_power_of_two();
+                    Arc::new((0..len).map(|_| AtomicU64::new(FRAME_SLOT_EMPTY)).collect())
+                },
                 buffers: slot_buffers,
                 last_assigned: Arc::new(AtomicUsize::new(0)),
             },

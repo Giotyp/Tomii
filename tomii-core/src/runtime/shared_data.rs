@@ -161,6 +161,12 @@ impl Default for RuntimeConfig {
     }
 }
 
+/// Sentinel for an empty `SlotData::frame_slot_map` cell.
+///
+/// `gen_pack(frame_low, slot)` can never collide with this for a live entry:
+/// that would require `slot == u32::MAX`, but `slot < config.slots <= 64`.
+pub(crate) const FRAME_SLOT_EMPTY: u64 = u64::MAX;
+
 /// All per-slot atomics and lock-protected slot state.
 pub struct SlotData {
     /// Slot generation counters — incremented on slot completion for lazy reinit.
@@ -186,6 +192,21 @@ pub struct SlotData {
     pub fanout_bulk_arrived: Arc<Vec<Vec<AtomicU64>>>,
     pub states: Arc<RwLock<Vec<SlotState>>>,
     pub running_frames: Arc<RwLock<Vec<(usize, usize)>>>,
+    /// Lock-free cache of the `running_frames` map, serving the already-assigned
+    /// fast path in `assign_frame_to_available_slot` (the overwhelmingly common
+    /// case: every packet after a frame's first). Indexed `frame & (len - 1)`
+    /// where `len` is a power of two `>= 2 * slots`; each cell is
+    /// `gen_pack(frame_low_u32, slot_u32)`, or [`FRAME_SLOT_EMPTY`] when vacant.
+    ///
+    /// Published and cleared **only** under `running_frames.write()`, so it stays
+    /// consistent with `running_frames` under that lock. Lock-free readers
+    /// re-validate the packed frame tag (cheap protection against `frame`/`frame +
+    /// len` index aliasing) and fall through to the write-locked slow path on any
+    /// miss — where the authoritative `running_frames` re-scan preserves
+    /// first-packet-wins activation. `len >= 2 * slots` guarantees no two
+    /// simultaneously-live frames (at most `slots` of them, bounded by the
+    /// admission window) ever share a cell.
+    pub frame_slot_map: Arc<Vec<AtomicU64>>,
     /// Per-slot buffering: holds ready nodes with packet data waiting for slot activation.
     #[allow(clippy::type_complexity)]
     pub buffers: Arc<RwLock<Vec<Vec<(NodeInfo, Option<CmTypes>)>>>>,
