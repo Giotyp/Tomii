@@ -4,6 +4,7 @@ use super::network_init::process_id_function;
 use super::reporting::should_record_slot;
 use super::shared_data::{PendingPacket, SharedData};
 use super::slot_management::{assign_frame_to_available_slot, initial_nodes};
+use super::thread_locals::INDEX_ARGS_BUF;
 use crate::async_recorder::submit_record;
 use crate::buffers::NodeInfo;
 use crate::debug::print_debug;
@@ -488,10 +489,19 @@ fn assign_packet_to_slot(
             0, // pred_index
             None,
         );
-        let mut full_args = Vec::with_capacity(1 + additional_args.len());
-        full_args.push(packet_cm.clone());
-        full_args.extend(additional_args);
-        let idx_result = idx_fn(&full_args);
+        // Reuse a thread-local buffer for the call args instead of a fresh
+        // per-packet `Vec`. The single `packet_cm.clone()` stays: the packet
+        // value is routed to the active batch after this call, so it cannot be
+        // moved out of the borrow here.
+        let idx_result = INDEX_ARGS_BUF.with(|buf| {
+            let mut full_args = buf.borrow_mut();
+            full_args.clear();
+            full_args.push(packet_cm.clone());
+            full_args.extend(additional_args);
+            let r = idx_fn(full_args.as_slice());
+            full_args.clear(); // drop the args now; keep only the capacity
+            r
+        });
         shared.slot_data.packet_counters[assigned_slot].fetch_add(1, Ordering::SeqCst);
         shared.slot_data.last_packet_ns[assigned_slot].store(
             shared.telemetry.base_instant.elapsed().as_nanos() as u64,

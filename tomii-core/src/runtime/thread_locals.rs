@@ -116,4 +116,15 @@ thread_local! {
     /// Lifecycle: truncated to the required length at the start of each call.
     pub(super) static PREP_ARGS_BUF: RefCell<Vec<Option<Vec<CmTypes>>>> =
         RefCell::new(Vec::with_capacity(64));
+
+    /// Reusable arg buffer for the index-function call in `assign_packet_to_slot`
+    /// — eliminates the per-packet `Vec::with_capacity` allocation on the
+    /// admission hot path (one call per admitted packet, ~2000/frame at 64x16).
+    ///
+    /// Written and read by: resolution threads inside `assign_packet_to_slot`.
+    /// Lifecycle: cleared at the start of each index-path invocation; the
+    /// contents (the packet value plus parsed index args) are dropped before the
+    /// next call reuses the capacity.
+    pub(super) static INDEX_ARGS_BUF: RefCell<Vec<CmTypes>> =
+        RefCell::new(Vec::with_capacity(8));
 }
