@@ -313,7 +313,7 @@ fn coalesce_network_batch(shared: &Arc<SharedData>, batch: &mut Vec<(NodeInfo, O
 
     // Group by (slot, contiguous index). Order within a cell is irrelevant — one
     // cell is one packet, and per-frame output is order-independent (parity-proven).
-    batch.sort_by(|a, b| (a.0.slot, a.0.index).cmp(&(b.0.slot, b.0.index)));
+    batch.sort_by_key(|a| (a.0.slot, a.0.index));
 
     let rctx = shared.resolve_ctx();
     let old = std::mem::take(batch);
