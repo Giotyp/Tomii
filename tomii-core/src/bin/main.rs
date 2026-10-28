@@ -253,7 +253,39 @@ fn tune_malloc() {
     }
 }
 
+/// `TOMII_MEMBIND=<node>`: bind all memory of this process to one NUMA node. Besides
+/// locality, a bind policy opts the process out of automatic NUMA balancing, whose
+/// periodic unmap/hint-fault/migrate cycle stalls hot pages for ~ms at a time.
+#[cfg(target_os = "linux")]
+fn apply_membind() {
+    let Ok(v) = std::env::var("TOMII_MEMBIND") else {
+        return;
+    };
+    let Ok(node) = v.parse::<u32>() else {
+        eprintln!("TOMII_MEMBIND={v}: expected a NUMA node number");
+        return;
+    };
+    const MPOL_BIND: libc::c_long = 2;
+    let mask: u64 = 1u64 << node;
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_set_mempolicy,
+            MPOL_BIND,
+            &mask as *const u64,
+            (node as libc::c_ulong) + 2,
+        )
+    };
+    if rc != 0 {
+        eprintln!(
+            "set_mempolicy(MPOL_BIND, node {node}) failed: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    apply_membind();
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     tune_malloc();
     let args = Args::parse();
