@@ -30,10 +30,33 @@ fn main() {
     // Link with fftfuncs library
     println!("cargo:rustc-link-lib=dylib=fftfuncs");
 
+    // Link with the WLAN scrambler (descramble after decode), in lib/
+    println!("cargo:rustc-link-lib=dylib=scrambler");
+
+    // Link the FlexRAN 5GNR LDPC decoder (AVX-512 build) + its common lib.
+    // Prebuilt install (no FlexRAN build needed); static archives.
+    let flexran_install = "/opt/FlexRAN-FEC-SDK-19-04/sdk/build-avx512-icc/install";
+    println!(
+        "cargo:rustc-link-search=native={}/lib_ldpc_decoder_5gnr",
+        flexran_install
+    );
+    println!("cargo:rustc-link-lib=static=ldpc_decoder_5gnr");
+    println!("cargo:rustc-link-search=native={}/lib_common", flexran_install);
+    println!("cargo:rustc-link-lib=static=common");
+
     println!("cargo:rustc-link-lib=dylib=stdc++");
     println!("cargo:rustc-link-search=native={}", lib_dir);
 
     // Add RPATH to the build output
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir);
     println!("cargo:rustc-link-arg=-Wl,-z,notext");
+
+    // Resolve the Fortran BLAS/LAPACK symbols Armadillo calls inside libbeamfuncs /
+    // libdemod (cgemm_, cpotrf_, ...) to MKL, as Agora's binary does. The static
+    // mkl_intel_lp64 above only serves this crate's own calls and is not exported, so
+    // without a dynamic NEEDED entry those symbols fall through to OpenBLAS/netlib
+    // (~3x slower Precoder, worse under concurrency). --no-as-needed keeps the entry.
+    println!("cargo:rustc-link-arg=-Wl,--no-as-needed");
+    println!("cargo:rustc-link-arg=-l:libmkl_intel_lp64.so.2");
+    println!("cargo:rustc-link-arg=-Wl,--as-needed");
 }

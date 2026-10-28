@@ -216,12 +216,17 @@ impl Fft {
         ofdm_ca_num: usize,
     ) {
         unsafe {
+            let t = crate::kprof::t();
             SimdConvertShortToFloat(
                 packet_ptr as *const libc::c_void,
                 inout.as_mut_ptr() as *mut libc::c_void,
                 self.nelems,
             );
+            crate::kprof::add(crate::kprof::FFT_CONV, t);
+            let t = crate::kprof::t();
             DftiComputeForward(self.desc, inout.as_mut_ptr() as *mut libc::c_void);
+            crate::kprof::add(crate::kprof::FFT_DFTI, t);
+            let t = crate::kprof::t();
             memcpy(
                 shift.as_mut_ptr() as *mut std::ffi::c_void,
                 inout.as_ptr() as *const std::ffi::c_void,
@@ -237,6 +242,7 @@ impl Fft {
                 shift.as_ptr() as *const std::ffi::c_void,
                 ofdm_ca_num * std::mem::size_of::<i32>(),
             );
+            crate::kprof::add(crate::kprof::FFT_SHIFT, t);
         }
     }
 
@@ -300,8 +306,33 @@ thread_local! {
         ));
 }
 
+thread_local! {
+    /// One committed DFTI descriptor per worker thread (as Agora keeps one per
+    /// worker): reusing it keeps its twiddle tables cache-hot, whereas rotating
+    /// through one descriptor per graph instance (~900) costs ~0.9 us/FFT in-situ.
+    static TL_FFT: std::cell::RefCell<Option<(usize, Fft)>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Run the FFT front half into this thread's scratch and hand the result to `f`.
+/// `_fft` (the per-instance descriptor) is kept for API compatibility; the
+/// computation uses an identically configured per-thread descriptor.
 pub fn with_fft_scratch<R>(
+    _fft: &Fft,
+    packet_ptr: *const i16,
+    ofdm_ca_num: usize,
+    f: impl FnOnce(*const Complex<f32>) -> R,
+) -> R {
+    TL_FFT.with(|tf| {
+        let mut tf = tf.borrow_mut();
+        if tf.as_ref().map(|(n, _)| *n) != Some(ofdm_ca_num) {
+            *tf = Some((ofdm_ca_num, Fft::new(ofdm_ca_num)));
+        }
+        let fft = &tf.as_ref().unwrap().1;
+        with_fft_scratch_on(fft, packet_ptr, ofdm_ca_num, f)
+    })
+}
+
+fn with_fft_scratch_on<R>(
     fft: &Fft,
     packet_ptr: *const i16,
     ofdm_ca_num: usize,

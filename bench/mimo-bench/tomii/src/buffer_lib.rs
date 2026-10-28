@@ -1,7 +1,8 @@
 use crate::common::config::Config;
 use crate::common::framestats::FrameStats;
 use crate::common::structures::{Cube, Grid, Table};
-use crate::common::symbols::{self, MaxModType};
+use crate::common::symbols::{self, Direction, MaxModType};
+use crate::common::utils::roundup;
 use num_complex::Complex;
 use tomii_types::Sliceable;
 
@@ -142,6 +143,56 @@ impl DemodBuffer {
     /// extract only the slot belonging to the dumped frame. Every fully-received
     /// frame carries identical content for identical input, so this is
     /// byte-stable across runs (unlike hashing the whole multi-frame buffer).
+    pub fn frame_bytes(&self, frame_id: usize) -> Vec<u8> {
+        let frame_slot = frame_id % symbols::frame_wnd();
+        self.buffer
+            .d1_plane(frame_slot)
+            .into_iter()
+            .map(|b| b as u8)
+            .collect()
+    }
+}
+
+/// LDPC decoder output: compacted message bytes per (frame_slot, UL data
+/// symbol, UE), holding `num_blocks_in_symbol * roundup(NumBytesPerCb, 64)`
+/// bytes (one slot per code block). Dimensioned over `frame_wnd()` like the
+/// other MIMO buffers, so several in-flight frames coexist.
+pub struct DecodedBuffer {
+    buffer: Cube<i8>,
+}
+
+impl DecodedBuffer {
+    pub fn new(config: &Config, framestats: &FrameStats) -> Self {
+        let num_blocks_in_symbol = config.LdpcConfig(Direction::Uplink).GetNumBlocksInSymbol();
+        let buffer = Cube::new(
+            symbols::frame_wnd(),
+            framestats.NumUlDataSyms(config),
+            config.ue_ant_num(),
+            num_blocks_in_symbol * roundup(config.NumBytesPerCb(Direction::Uplink), 64),
+        );
+        DecodedBuffer { buffer }
+    }
+
+    pub fn get_mut(&mut self) -> &mut Cube<i8> {
+        &mut self.buffer
+    }
+
+    pub fn get(&self) -> &Cube<i8> {
+        &self.buffer
+    }
+
+    /// Raw `*mut i8` to the (frame_slot, data_symbol, ue) cell from a shared
+    /// `&self`. Concurrent decode tasks write disjoint code-block offsets of
+    /// these cells; the raw pointer avoids the aliased-`&mut` UB (same rationale
+    /// as DemodBuffer::cell_ptr). SAFETY: callers write disjoint regions,
+    /// guaranteed by the node_index → (symbol, stream, cb) bijection.
+    pub fn cell_ptr(&self, frame_slot: usize, data_symbol: usize, ue: usize) -> *mut i8 {
+        self.buffer.cell_ptr(frame_slot, data_symbol, ue)
+    }
+
+    /// Serialise just the frame-window slot for `frame_id` (= frame_id %
+    /// frame_wnd()) — deterministic per-frame bytes for verification, mirroring
+    /// DemodBuffer::frame_bytes.
     pub fn frame_bytes(&self, frame_id: usize) -> Vec<u8> {
         let frame_slot = frame_id % symbols::frame_wnd();
         self.buffer

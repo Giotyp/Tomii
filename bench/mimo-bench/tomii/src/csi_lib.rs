@@ -89,8 +89,14 @@ pub fn csi_op_cm(
         },
     );
 
-    // Expand partial CSI from freq-orth pilot to full CSI per UE
-    if config.freq_orth_pilot() && pilot_symbol_id == framestats.NumPilotSyms() - 1 {
+    // Expand partial CSI from freq-orth pilot to full CSI per UE. Pilot groups wider
+    // than a transpose block (16 UEs / 16-subcarrier groups, as on Agora's conext
+    // branch) need no expansion: beamforming reads each UE's estimate directly at its
+    // pilot subcarrier (beam_lib.rs). Agora's `expand_csi` assumes group == block.
+    if config.freq_orth_pilot()
+        && pilot_symbol_id == framestats.NumPilotSyms() - 1
+        && config.pilot_sc_group_size() == TransposeBlockSize
+    {
         let src_buf = csi_buffer.get().get(frame_slot, 0).as_ptr();
 
         let mut dst_bufs: Vec<*mut libc::c_void> = vec![std::ptr::null_mut(); config.ue_ant_num()];

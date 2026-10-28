@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -104,6 +105,16 @@ def build_mimo_graph(config_path: str = AGORA_CONFIG, dump: bool = False) -> tm.
     total_demul_tasks = app.var(
         "total_demul_tasks", func="total_demul_tasks", args=[config, framestats]
     )
+    total_decode_tasks = app.var(
+        "total_decode_tasks", func="total_decode_tasks", args=[config, framestats]
+    )
+    # Decode tasks per UL symbol (spatial streams × code blocks/symbol). At
+    # 64×16 this is 16×1 = 16, so the 208 decode tasks form 13 per-symbol groups
+    # (one per UL data symbol) — the grouping used to scope decode's demul
+    # barrier (see the decode node below).
+    decode_tasks_per_symbol = app.var(
+        "decode_tasks_per_symbol", func="decode_tasks_per_symbol", args=[config]
+    )
 
     # ------------------------------------------------------------------
     # Buffer initialisations (shared across instances)
@@ -114,6 +125,9 @@ def build_mimo_graph(config_path: str = AGORA_CONFIG, dump: bool = False) -> tm.
     csi_buffer = app.var("csi_buffer", func="create_csi_buffer", args=[config])
     demod_buffers = app.var(
         "demod_buffers", func="create_demod_buffers", args=[config, framestats]
+    )
+    decode_buffers = app.var(
+        "decode_buffers", func="create_decode_buffers", args=[config, framestats]
     )
     ul_beam_matrices = app.var(
         "ul_beam_matrices", func="create_ul_beam_matrices", args=[config]
@@ -221,7 +235,7 @@ def build_mimo_graph(config_path: str = AGORA_CONFIG, dump: bool = False) -> tm.
         func="demul_op",
         factor=total_demul_tasks,
         group_size=demul_events_per_symbol,
-        priority="low",
+        priority=os.environ.get("MIMO_PRIO_DEMUL", "low"),
         args=[
             config,
             framestats,
@@ -240,10 +254,48 @@ def build_mimo_graph(config_path: str = AGORA_CONFIG, dump: bool = False) -> tm.
         ],
     )
 
-    # dump — optional terminal node: serialise this frame's demod slot to
-    # $TOMII_VERIFY_PATH after all demul tasks complete (verify.py only).
-    # fft.out(0) supplies frame_id so the dump extracts a single frame's slot
-    # (deterministic) rather than the whole multi-frame FrameWnd buffer.
+    # decode — LDPC decode (FlexRAN 5GNR); one task per code block (batch 1).
+    # This is the pipeline's terminal compute stage (Agora Table-3 "Decode").
+    #
+    # RQ3/RQ5 graph-only overlap edit (topology change; identical kernel): decode
+    # code block (ul_symbol g, stream s) reads demod_buffers[slot][g][s] — the
+    # whole symbol's LLRs for that stream — produced by ALL demul subcarrier-
+    # groups of symbol g and NO other symbol (GetNumBlocksInSymbol()==1, so one
+    # code block spans a symbol's 1200 subcarriers; see decode_lib.rs /
+    # demul_lib.rs). The finest correct dependency is therefore PER UL SYMBOL:
+    # decode for symbol g needs exactly demul's demul_events_per_symbol tasks for
+    # symbol g. Expressed via group_size on decode (decode_tasks_per_symbol →
+    # 13 groups of 16) + a grouped barrier on demul (group_by=
+    # demul_events_per_symbol → 13 barrier groups of 19), mirroring how demul
+    # already scopes its fft dependence (fft.wait(..., group_by=antennas)). This
+    # lets decode for symbol g start as soon as demul for symbol g is done,
+    # overlapping with demul of later symbols, instead of bursting all 208 decode
+    # tasks after a single full demul→decode barrier. The demul.out(0) $res
+    # likewise resolves per-group (group g reads demul[g·demul_events_per_symbol],
+    # which the grouped barrier already covers), so no cross-group wait is added.
+    decode = app.node(
+        "decode",
+        func="decode_op",
+        factor=total_decode_tasks,
+        group_size=decode_tasks_per_symbol,
+        priority=os.environ.get("MIMO_PRIO_DECODE", "low"),
+        args=[
+            config,
+            framestats,
+            decode_buffers,
+            demod_buffers,
+            demul.out(0),  # frame_id ($res from demul; per-group under group_size)
+            _index,  # node_index
+            demul.wait(
+                0, total_demul_tasks, group_by=demul_events_per_symbol
+            ),  # scoped barrier: per-UL-symbol demul group (not a full barrier)
+        ],
+    )
+
+    # dump — optional terminal nodes: serialise this frame's demod slot to
+    # $TOMII_VERIFY_PATH (demod golden) and decoded slot to
+    # $TOMII_DECODE_VERIFY_PATH (decode golden) after their stage completes
+    # (verify.py / decode determinism check only).
     if dump:
         app.node(
             "dump",
@@ -253,6 +305,16 @@ def build_mimo_graph(config_path: str = AGORA_CONFIG, dump: bool = False) -> tm.
                 demod_buffers,
                 fft.out(0),  # frame_id
                 demul.wait(0, total_demul_tasks),  # barrier: all demul done
+            ],
+        )
+        app.node(
+            "dump_decoded",
+            func="dump_decoded_if_env",
+            factor=1,
+            args=[
+                decode_buffers,
+                demul.out(0),  # frame_id
+                decode.wait(0, total_decode_tasks),  # barrier: all decode done
             ],
         )
 

@@ -133,6 +133,9 @@ pub fn beam_op_cm(
         false => (1, base_sc_id),
     };
 
+    let grouped_pilots =
+        config_ref.freq_orth_pilot() && config_ref.pilot_sc_group_size() != TransposeBlockSize;
+
     TL_CSI_GATHER.with(|tl| {
         let mut csi_gather = tl.borrow_mut();
 
@@ -157,10 +160,18 @@ pub fn beam_op_cm(
                         .as_mut_ptr()
                         .add(config_ref.bs_ant_num() * selected_ue_idx)
                 };
-                let csi_buf = csi_buffer_ref.get().get(frame_slot, ue_idx);
+                // Freq-orthogonal pilots in groups wider than a transpose block: UE
+                // `ue_idx` is estimated only at its own pilot subcarrier
+                // (group start + ue_idx) of the pilot's CSI cell, so read it there
+                // directly instead of from an expanded per-UE copy.
+                let (csi_buf, gather_sc) = if grouped_pilots {
+                    (csi_buffer_ref.get().get(frame_slot, 0), cur_sc_id + ue_idx)
+                } else {
+                    (csi_buffer_ref.get().get(frame_slot, ue_idx), cur_sc_id)
+                };
                 unsafe {
                     PartialTransposeGather(
-                        cur_sc_id,
+                        gather_sc,
                         csi_buf.as_ptr() as *const libc::c_void,
                         csi_gather_ptr as *mut libc::c_void,
                         config_ref.bs_ant_num(),
