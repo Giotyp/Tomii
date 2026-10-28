@@ -90,7 +90,12 @@ pub fn csi_op_cm(
     );
 
     // Expand partial CSI from freq-orth pilot to full CSI per UE
-    if config.freq_orth_pilot() && pilot_symbol_id == framestats.NumPilotSyms() - 1 {
+    if config.freq_orth_pilot()
+        && pilot_symbol_id == framestats.NumPilotSyms() - 1
+        && config.pilot_sc_group_size() != TransposeBlockSize
+    {
+        expand_csi_grouped(config, csi_buffer, frame_slot, ant_id);
+    } else if config.freq_orth_pilot() && pilot_symbol_id == framestats.NumPilotSyms() - 1 {
         let src_buf = csi_buffer.get().get(frame_slot, 0).as_ptr();
 
         let mut dst_bufs: Vec<*mut libc::c_void> = vec![std::ptr::null_mut(); config.ue_ant_num()];
@@ -115,4 +120,42 @@ pub fn csi_op_cm(
 
     crate::e1probe::on_fftcsi(frame_id, None);
     CmTypes::Usize(frame_id)
+}
+
+/// Frequency-orthogonal CSI expansion for pilot groups spanning several transpose
+/// blocks (e.g. 16 UEs / 16-subcarrier groups, as on Agora's conext branch). UE `u`
+/// transmits on subcarrier `group_start + u`; its estimate there is copied to every
+/// subcarrier of the group in UE `u`'s CSI cell. Agora's `expand_csi` assumes the
+/// group equals one transpose block (UEs <= 8). Only this antenna's rows are touched,
+/// so concurrent CSI tasks (one per antenna) stay disjoint.
+fn expand_csi_grouped(config: &Config, csi_buffer: &CsiBuffer, frame_slot: usize, ant_id: usize) {
+    use num_complex::Complex;
+    let t = TransposeBlockSize;
+    let n_ant = config.bs_ant_num();
+    let n_ue = config.ue_ant_num();
+    let g = config.pilot_sc_group_size();
+    let n_sc = config.ofdm_data_num();
+    assert!(
+        g % t == 0 && n_ue <= g && g <= 64 && n_sc % g == 0,
+        "unsupported freq-orth pilot group {g} (transpose {t}, ue {n_ue}, sc {n_sc})"
+    );
+    // Position of (subcarrier, this antenna) in the transposed CSI layout.
+    let idx = |sc: usize| (sc / t) * (t * n_ant) + ant_id * t + (sc % t);
+    // The pilot symbol's cell is also UE 0's cell: read a group's pilots before writing it.
+    let src = csi_buffer.cell_ptr(frame_slot, 0) as *const Complex<f32>;
+    let mut dst = [std::ptr::null_mut::<Complex<f32>>(); 64];
+    for (u, d) in dst.iter_mut().enumerate().take(n_ue) {
+        *d = csi_buffer.cell_ptr(frame_slot, u);
+    }
+    let mut vals = [Complex::new(0.0f32, 0.0); 64];
+    for gs in (0..n_sc).step_by(g) {
+        for (u, v) in vals.iter_mut().enumerate().take(n_ue) {
+            *v = unsafe { *src.add(idx(gs + u)) };
+        }
+        for u in 0..n_ue {
+            for sc in gs..gs + g {
+                unsafe { *dst[u].add(idx(sc)) = vals[u] };
+            }
+        }
+    }
 }

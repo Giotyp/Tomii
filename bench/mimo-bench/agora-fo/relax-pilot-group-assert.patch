@@ -1,0 +1,16 @@
+--- a/src/common/config.cc	2025-11-13 15:28:37.946387030 +0000
++++ b/src/common/config.cc	2026-10-28 03:49:18.543079533 +0000
+@@ -362,9 +362,10 @@
+   pilot_sc_group_size_ =
+       tdd_conf.value("pilot_sc_group_size", kTransposeBlockSize);
+   if (freq_orthogonal_pilot_) {
+-    RtAssert(pilot_sc_group_size_ == kTransposeBlockSize,
+-             "In this version, pilot_sc_group_size must be equal to Transpose "
+-             "Block Size " +
++    // Relaxed (as on the conext branch used for the Agora paper): any multiple
++    // of the transpose block, so 16 UEs can use 16-subcarrier pilot groups.
++    RtAssert(pilot_sc_group_size_ % kTransposeBlockSize == 0,
++             "pilot_sc_group_size must be a multiple of Transpose Block Size " +
+                  std::to_string(kTransposeBlockSize));
+     RtAssert(ofdm_data_num_ % pilot_sc_group_size_ == 0,
+              "ofdm_data_num must be evenly divided by pilot_sc_group_size " +
