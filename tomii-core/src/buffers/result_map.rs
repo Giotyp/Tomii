@@ -248,21 +248,66 @@ impl LockFreeResultMap {
         let start = slot * self.per_slot_size;
         let end = start + self.per_slot_size;
 
+        // The slot is always cleared here (callers rely on that before releasing it);
+        // with deferred reclaim only the *freeing* of the detached results moves to a
+        // background thread. Freeing a frame's results (e.g. ~900 decoded 8 KB packets
+        // allocated on receiver threads) costs ~1 ms, which otherwise stalls the
+        // resolution thread that completed the frame — and its ingest shard with it.
+        let reclaim_tx = reclaimer_tx();
+        let mut detached: Vec<Box<tomii_types::CmTypes>> = Vec::new();
         for idx in start..end {
             let old_tag = self.inline_tag[idx].swap(0, Ordering::SeqCst);
             if old_tag == TAG_BOXED {
                 // SAFETY: the SeqCst swap gives exclusive ownership of the boxed ptr.
                 let old_ptr = self.buffer[idx].swap(null_mut(), Ordering::SeqCst);
                 if !old_ptr.is_null() {
-                    unsafe {
-                        drop(Box::from_raw(old_ptr));
+                    let b = unsafe { Box::from_raw(old_ptr) };
+                    if reclaim_tx.is_some() {
+                        detached.push(b);
+                    } else {
+                        drop(b);
                     }
                 }
             }
             // Inline primitives (old_tag 1-14): no heap allocation to free.
             // `inline_val` can be left with stale bits; `inline_tag = 0` gates access.
         }
+        if let Some(tx) = reclaim_tx {
+            if !detached.is_empty() {
+                // On a closed channel the Vec comes back and is dropped here.
+                let _ = tx.send(detached);
+            }
+        }
     }
+}
+
+/// `TOMII_DEFER_RECLAIM=1`: a background thread frees detached slot results.
+/// It pins to core `TOMII_RECLAIM_CORE` (default 0, the main thread's core).
+fn reclaimer_tx() -> Option<&'static crossbeam_channel::Sender<Vec<Box<tomii_types::CmTypes>>>> {
+    static TX: std::sync::OnceLock<
+        Option<crossbeam_channel::Sender<Vec<Box<tomii_types::CmTypes>>>>,
+    > = std::sync::OnceLock::new();
+    TX.get_or_init(|| {
+        if !std::env::var("TOMII_DEFER_RECLAIM").is_ok_and(|v| v == "1") {
+            return None;
+        }
+        let core: usize = std::env::var("TOMII_RECLAIM_CORE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let (tx, rx) = crossbeam_channel::unbounded::<Vec<Box<tomii_types::CmTypes>>>();
+        std::thread::Builder::new()
+            .name("reclaimer".into())
+            .spawn(move || {
+                core_affinity::set_for_current(core_affinity::CoreId { id: core });
+                for batch in rx {
+                    drop(batch);
+                }
+            })
+            .ok()?;
+        Some(tx)
+    })
+    .as_ref()
 }
 
 impl Drop for LockFreeResultMap {
