@@ -174,6 +174,17 @@ static W_INST: [AtomicU64; MAXN] = [Z; MAXN];
 static W_EXEC_NS: [AtomicU64; MAXN] = [Z; MAXN];
 static W_WAIT_NS: [AtomicU64; MAXN] = [Z; MAXN];
 static W_WAIT_MAX_NS: [AtomicU64; MAXN] = [Z; MAXN];
+static W_KERNEL_NS: [AtomicU64; MAXN] = [Z; MAXN];
+
+/// Add the kernel-only time (args built -> kernel returned) of the task just executed.
+#[inline]
+pub(crate) fn worker_kernel(node: usize) {
+    if !enabled() || node >= MAXN {
+        return;
+    }
+    let m = MARKS.with(|m| m.get());
+    W_KERNEL_NS[node].fetch_add(m[1].saturating_sub(m[0]), Ordering::Relaxed);
+}
 
 /// Record one executed task: `wait_ns` = spawn→start, `exec_ns` = start→end (incl. successor resolution).
 #[inline]
@@ -202,12 +213,13 @@ pub(crate) fn dump_workers() {
         let e = W_EXEC_NS[n].load(Ordering::Relaxed) as f64;
         let w = W_WAIT_NS[n].load(Ordering::Relaxed) as f64;
         line.push_str(&format!(
-            " node{}: tasks={} inst={} exec_total_ms={:.0} exec_per_task_us={:.1} wait_mean_us={:.1} wait_max_ms={:.1} |",
+            " node{}: tasks={} inst={} exec_total_ms={:.0} exec_per_task_us={:.1} kernel_per_task_us={:.1} wait_mean_us={:.1} wait_max_ms={:.1} |",
             n,
             t,
             i,
             e / 1e6,
             e / t as f64 / 1e3,
+            W_KERNEL_NS[n].load(Ordering::Relaxed) as f64 / t as f64 / 1e3,
             w / t as f64 / 1e3,
             W_WAIT_MAX_NS[n].load(Ordering::Relaxed) as f64 / 1e6
         ));
@@ -409,7 +421,7 @@ fn thread_cpu_ns() -> u64 {
 /// Marks 0/1 record wall time; marks 2/3 the thread CPU time at the same points.
 #[inline]
 pub(crate) fn mark(i: usize) {
-    if trace_on() {
+    if enabled() || trace_on() {
         let t = mono_ns();
         let c = thread_cpu_ns();
         MARKS.with(|m| {

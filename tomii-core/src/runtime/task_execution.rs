@@ -272,6 +272,9 @@ pub(super) fn execute_task(
     };
     if super::phase_prof::enabled() {
         let t1 = shared.telemetry.base_instant.elapsed().as_nanos();
+        if node_info.bulk_count <= 1 {
+            super::phase_prof::worker_kernel(node_info.id as usize);
+        }
         super::phase_prof::worker_task(
             node_info.id as usize,
             node_info.bulk_count.max(1) as u64,
