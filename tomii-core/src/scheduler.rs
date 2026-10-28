@@ -1032,12 +1032,20 @@ pub fn create_scheduler(cfg: SchedulerConfig) -> SchedulerImpl {
                     // No affinity groups — shard workers so no single channel is
                     // contended by every worker at high W (keeps 1 shard for W <= 8).
                     builder = builder
-                        .add_sharded_workers(num_workers, CUSTOM_SHARD_SIZE, 64)
+                        .add_sharded_workers(
+                            num_workers,
+                            CUSTOM_SHARD_SIZE,
+                            worker_spin_iterations(),
+                        )
                         .worker_affinity(worker_affinity);
                 }
             } else {
                 // No affinity config — shard workers (see above).
-                builder = builder.add_sharded_workers(num_workers, CUSTOM_SHARD_SIZE, 64);
+                builder = builder.add_sharded_workers(
+                    num_workers,
+                    CUSTOM_SHARD_SIZE,
+                    worker_spin_iterations(),
+                );
             }
 
             if let Some(rec) = external_recorder {
@@ -1068,4 +1076,14 @@ mod tests {
         m.record_task_complete(1);
         assert_eq!(m.tasks_per_worker[1].load(Ordering::Relaxed), 1);
     }
+}
+
+/// Worker spin iterations before parking (`TOMII_WORKER_SPIN`, default 64). Longer
+/// spinning lets an idle worker pick up the next task without a futex wake, at the
+/// cost of CPU while idle.
+fn worker_spin_iterations() -> usize {
+    std::env::var("TOMII_WORKER_SPIN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(64)
 }
