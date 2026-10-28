@@ -134,6 +134,20 @@ pub struct RuntimeConfig {
     /// When true, disable the 1:1 fanout-bulk dispatch path (Upgrade 5).
     /// Produces bit-identical output to the per-cell path; used for verification.
     pub no_fanout_bulk: bool,
+    /// Network graphs: receiver threads run the graph's packet-extract function, so
+    /// resolution threads only admit. The extract function must be thread-safe.
+    pub rx_decode: bool,
+    /// Network graphs with `system_threads > 1`: one ingest channel per resolution
+    /// thread (receiver `i` feeds channel `i % n`) instead of one shared channel.
+    pub ingest_shards: bool,
+    /// Resolve and dispatch admitted packets every N packets within one poll, so a
+    /// large backlog does not delay all of its tasks until the poll ends (0 = once
+    /// per poll).
+    pub dispatch_chunk: usize,
+    /// Free completed-slot results on a background thread pinned to this core. The
+    /// slot is still cleared before release; only the freeing moves off the
+    /// resolution thread. `None` frees inline.
+    pub reclaim_core: Option<usize>,
 }
 
 impl Default for RuntimeConfig {
@@ -157,6 +171,10 @@ impl Default for RuntimeConfig {
             spin_wait: SpinWaitConfig::default(),
             batch: BatchConfig::default(),
             no_fanout_bulk: false,
+            rx_decode: false,
+            ingest_shards: false,
+            dispatch_chunk: 0,
+            reclaim_core: None,
         }
     }
 }

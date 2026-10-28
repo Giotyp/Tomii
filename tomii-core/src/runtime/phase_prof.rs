@@ -145,7 +145,7 @@ pub(crate) fn dump(thread_id: usize) {
             wall_ns / 1e6,
             1.0 / ns_per_cyc
         );
-        for i in 0..N {
+        for (i, name) in NAMES.iter().enumerate() {
             let ns = p.cyc[i] as f64 * ns_per_cyc;
             let per = if p.cnt[i] > 0 {
                 ns / p.cnt[i] as f64
@@ -154,7 +154,7 @@ pub(crate) fn dump(thread_id: usize) {
             };
             line.push_str(&format!(
                 " {}={:.1}ms/{}/{:.0}ns",
-                NAMES[i],
+                name,
                 ns / 1e6,
                 p.cnt[i],
                 per

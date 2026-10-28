@@ -387,10 +387,16 @@ impl TomiiRtBuilder {
         // --- Assemble SharedData ---
         // Allocate one extra slot beyond the frame slots to cover post-node writes, which
         // use slot index `slots + system_threads` (see scheduling.rs `frame_use`).
-        let node_results = Arc::new(crate::buffers::LockFreeResultMap::new(
+        let mut node_results_map = crate::buffers::LockFreeResultMap::new(
             &graph.nodes,
             slots + self.config.system_threads + 1,
-        ));
+        );
+        if let Some(core) = self.config.reclaim_core {
+            node_results_map = node_results_map.with_deferred_reclaim(core);
+        }
+        let node_results = Arc::new(node_results_map);
+        #[cfg(feature = "network")]
+        let ingest_shards_enabled = self.config.ingest_shards;
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
         #[cfg(feature = "network")]
@@ -443,9 +449,7 @@ impl TomiiRtBuilder {
                 frame_packets: AtomicUsize::new(0),
                 receive_finished: Arc::new(AtomicBool::new(false)),
                 ingest_shards: {
-                    let n = if std::env::var("TOMII_INGEST_SHARDS").is_ok_and(|v| v == "1")
-                        && system_threads > 1
-                    {
+                    let n = if ingest_shards_enabled && system_threads > 1 {
                         system_threads
                     } else {
                         0

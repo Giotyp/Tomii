@@ -27,6 +27,8 @@ _INT_FLAGS: Dict[str, str] = {
     "exclude_frames": "--exclude-frames",
     "frame_timeout_ms": "--frame-timeout-ms",
     "record_frame": "--record-frame",
+    "dispatch_chunk": "--dispatch-chunk",
+    "reclaim_core": "--reclaim-core",
 }
 
 _BOOL_FLAGS: Dict[str, str] = {
@@ -40,6 +42,9 @@ _BOOL_FLAGS: Dict[str, str] = {
     "coalesce_barriers": "--coalesce-barriers",
     "inline_continuation": "--inline-continuation",
     "no_fanout_bulk": "--no-fanout-bulk",
+    "rx_decode": "--rx-decode",
+    "ingest_shards": "--ingest-shards",
+    "no_malloc_tune": "--no-malloc-tune",
 }
 
 _STR_FLAGS: Dict[str, str] = {
@@ -47,6 +52,7 @@ _STR_FLAGS: Dict[str, str] = {
     "timing": "--timing",
     "report": "--report",
     "dump_state": "--dump-state",
+    "membind": "--membind",
 }
 
 _KNOB_DESCRIPTIONS: Dict[str, str] = {
@@ -62,6 +68,8 @@ _KNOB_DESCRIPTIONS: Dict[str, str] = {
     "batching_limit": "Max outstanding batches before back-pressure",
     "exclude_frames": "Skip first N frames from timing output",
     "record_frame": "Record timing for this specific frame index only",
+    "dispatch_chunk": "Dispatch admitted packets every N packets within a poll (0 = once per poll)",
+    "reclaim_core": "Free completed-frame results on a background thread pinned to this core",
     # Bool flags
     "fifo": "Use FIFO task scheduling instead of default (depth-first)",
     "custom": "Enable custom scheduling strategy",
@@ -72,12 +80,16 @@ _KNOB_DESCRIPTIONS: Dict[str, str] = {
     "slot_priority": "Prioritize tasks from the earliest active slot",
     "coalesce_barriers": "Batch barrier fan-outs into bulk tasks (reduces overhead for fine-grained graphs)",
     "inline_continuation": "Run single-successor tasks inline (reduces scheduling overhead)",
+    "rx_decode": "Network graphs: run the packet-extract function on receiver threads",
+    "ingest_shards": "Network graphs: one ingest channel per resolution thread",
+    "no_malloc_tune": "Keep glibc malloc defaults (trimming / mmap of large buffers)",
     # Str flags
     "output": "Path for raw timing output file",
     "dump_state": "Path for a runtime state snapshot (JSON) written at shutdown; "
     "SIGUSR1 writes numbered live snapshots (wedged-run debugging)",
     "timing": "Path for per-node timing CSV",
     "report": "Path for JSON summary report (avg/p99 latency, bottleneck hints)",
+    "membind": "Bind memory to these NUMA nodes, e.g. '0' or '0,1' (also disables NUMA balancing for the process)",
 }
 
 # Role of each knob in a tuning context:
@@ -107,6 +119,12 @@ _KNOB_ROLES: Dict[str, str] = {
     "coalesce_barriers": "perf",
     "inline_continuation": "perf",
     "no_fanout_bulk": "perf",
+    "rx_decode": "perf",
+    "ingest_shards": "perf",
+    "dispatch_chunk": "perf",
+    "reclaim_core": "env",
+    "membind": "env",
+    "no_malloc_tune": "env",
     "output": "io",
     "timing": "io",
     "report": "io",

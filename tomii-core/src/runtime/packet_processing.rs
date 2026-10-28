@@ -79,7 +79,7 @@ pub(super) fn poll_and_process_network_packets(
             frame_packets,
         );
         super::phase_prof::add(super::phase_prof::REINJECT, t);
-        if dispatch_chunk() > 0 {
+        if shared.config.dispatch_chunk > 0 {
             flush_active_batch(
                 shared,
                 &mut active_packet_batch,
@@ -185,7 +185,7 @@ pub(super) fn poll_and_process_network_packets(
             frame_packets,
         );
         super::phase_prof::add(super::phase_prof::ADMIT, t);
-        let chunk = dispatch_chunk();
+        let chunk = shared.config.dispatch_chunk;
         if chunk > 0 && active_packet_batch.len() >= chunk {
             flush_active_batch(
                 shared,
@@ -258,19 +258,6 @@ fn flush_active_batch(
             .telemetry
             .record_timing(start_proc, thread_slot, "Batch Resolution", usize::MAX);
     }
-}
-
-/// Admitted packets per dispatch flush (TOMII_DISPATCH_CHUNK); 0 = flush once per poll.
-/// The drain itself stays unbounded (bounding it overflows the ingest channel); chunked
-/// flushing keeps tasks reaching the workers while a large backlog is being admitted.
-fn dispatch_chunk() -> usize {
-    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *V.get_or_init(|| {
-        std::env::var("TOMII_DISPATCH_CHUNK")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0)
-    })
 }
 
 /// DR3: coalesce the network drain batch (node-0 cells) into bulk entries.

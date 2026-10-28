@@ -1056,6 +1056,16 @@ pub fn create_scheduler(cfg: SchedulerConfig) -> SchedulerImpl {
     }
 }
 
+/// Worker spin iterations before parking (`TOMII_WORKER_SPIN`, default 64). Longer
+/// spinning lets an idle worker pick up the next task without a futex wake, at the
+/// cost of CPU while idle.
+fn worker_spin_iterations() -> usize {
+    std::env::var("TOMII_WORKER_SPIN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1076,14 +1086,4 @@ mod tests {
         m.record_task_complete(1);
         assert_eq!(m.tasks_per_worker[1].load(Ordering::Relaxed), 1);
     }
-}
-
-/// Worker spin iterations before parking (`TOMII_WORKER_SPIN`, default 64). Longer
-/// spinning lets an idle worker pick up the next task without a futex wake, at the
-/// cost of CPU while idle.
-fn worker_spin_iterations() -> usize {
-    std::env::var("TOMII_WORKER_SPIN")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(64)
 }

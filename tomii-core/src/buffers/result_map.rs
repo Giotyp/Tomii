@@ -84,6 +84,11 @@ pub struct LockFreeResultMap {
     node_factors: Vec<usize>,
     nodes_len: usize,
     slots: usize,
+    /// Set by [`LockFreeResultMap::with_deferred_reclaim`]: detached slot results are
+    /// sent here and dropped on a background thread instead of inline.
+    // Boxes on purpose: the reclaimer frees the result boxes themselves.
+    #[allow(clippy::vec_box)]
+    reclaim: Option<crossbeam_channel::Sender<Vec<Box<tomii_types::CmTypes>>>>,
 }
 
 impl LockFreeResultMap {
@@ -119,7 +124,29 @@ impl LockFreeResultMap {
             node_factors,
             nodes_len,
             slots,
+            reclaim: None,
         }
+    }
+
+    /// Free completed-slot results on a background thread pinned to `core`.
+    /// [`reinit_slot`](Self::reinit_slot) still clears the slot synchronously; only
+    /// dropping the detached results moves off the caller (a completed frame can hold
+    /// ~1 ms of frees, e.g. hundreds of decoded packets allocated on other threads).
+    pub fn with_deferred_reclaim(mut self, core: usize) -> Self {
+        let (tx, rx) = crossbeam_channel::unbounded::<Vec<Box<tomii_types::CmTypes>>>();
+        let spawned = std::thread::Builder::new()
+            .name("reclaimer".into())
+            .spawn(move || {
+                core_affinity::set_for_current(core_affinity::CoreId { id: core });
+                for batch in rx {
+                    drop(batch);
+                }
+            });
+        match spawned {
+            Ok(_) => self.reclaim = Some(tx),
+            Err(e) => tracing::warn!(error = %e, "reclaimer thread spawn failed; freeing inline"),
+        }
+        self
     }
 
     #[inline]
@@ -253,7 +280,7 @@ impl LockFreeResultMap {
         // background thread. Freeing a frame's results (e.g. ~900 decoded 8 KB packets
         // allocated on receiver threads) costs ~1 ms, which otherwise stalls the
         // resolution thread that completed the frame — and its ingest shard with it.
-        let reclaim_tx = reclaimer_tx();
+        let reclaim_tx = self.reclaim.as_ref();
         let mut detached: Vec<Box<tomii_types::CmTypes>> = Vec::new();
         for idx in start..end {
             let old_tag = self.inline_tag[idx].swap(0, Ordering::SeqCst);
@@ -279,35 +306,6 @@ impl LockFreeResultMap {
             }
         }
     }
-}
-
-/// `TOMII_DEFER_RECLAIM=1`: a background thread frees detached slot results.
-/// It pins to core `TOMII_RECLAIM_CORE` (default 0, the main thread's core).
-fn reclaimer_tx() -> Option<&'static crossbeam_channel::Sender<Vec<Box<tomii_types::CmTypes>>>> {
-    static TX: std::sync::OnceLock<
-        Option<crossbeam_channel::Sender<Vec<Box<tomii_types::CmTypes>>>>,
-    > = std::sync::OnceLock::new();
-    TX.get_or_init(|| {
-        if !std::env::var("TOMII_DEFER_RECLAIM").is_ok_and(|v| v == "1") {
-            return None;
-        }
-        let core: usize = std::env::var("TOMII_RECLAIM_CORE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        let (tx, rx) = crossbeam_channel::unbounded::<Vec<Box<tomii_types::CmTypes>>>();
-        std::thread::Builder::new()
-            .name("reclaimer".into())
-            .spawn(move || {
-                core_affinity::set_for_current(core_affinity::CoreId { id: core });
-                for batch in rx {
-                    drop(batch);
-                }
-            })
-            .ok()?;
-        Some(tx)
-    })
-    .as_ref()
 }
 
 impl Drop for LockFreeResultMap {

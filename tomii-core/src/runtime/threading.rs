@@ -73,9 +73,9 @@ impl TomiiRt {
 
         let num_sockets = network_config.num_sockets;
         let buffer_depth = network_config.buffer_depth;
-        // RX-side decode (TOMII_RX_DECODE=1): receiver threads run extract_packet so the
-        // resolution thread only admits. Requires a thread-safe extract function.
-        let rx_decode = if std::env::var("TOMII_RX_DECODE").is_ok_and(|v| v == "1") {
+        // Receiver-side decode: receiver threads run extract_packet so the resolution
+        // thread only admits. Requires a thread-safe extract function.
+        let rx_decode = if self.shared.config.rx_decode {
             network_config.extract_packet_func
         } else {
             None

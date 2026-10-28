@@ -23,6 +23,14 @@ class RunConfig:
     batching_limit: int = 10
     coalesce_barriers: bool = False
     inline_continuation: bool = False
+    # ── Network ingest ───────────────────────────────────────────────────────
+    rx_decode: bool = False
+    ingest_shards: bool = False
+    dispatch_chunk: int = 0
+    reclaim_core: Optional[int] = None
+    # ── Host / memory ────────────────────────────────────────────────────────
+    membind: Optional[str] = None
+    no_malloc_tune: bool = False
     # ── Timing / output ──────────────────────────────────────────────────────
     timing: Optional[str] = None
     record: bool = False
@@ -95,6 +103,18 @@ class RunConfig:
             args.append("--coalesce-barriers")
         if self.inline_continuation:
             args.append("--inline-continuation")
+        if self.rx_decode:
+            args.append("--rx-decode")
+        if self.ingest_shards:
+            args.append("--ingest-shards")
+        if self.dispatch_chunk:
+            args += ["--dispatch-chunk", str(self.dispatch_chunk)]
+        if self.reclaim_core is not None:
+            args += ["--reclaim-core", str(self.reclaim_core)]
+        if self.membind is not None:
+            args += ["--membind", self.membind]
+        if self.no_malloc_tune:
+            args.append("--no-malloc-tune")
         if self.record:
             args.append("--record")
         if self.use_rdtsc:
