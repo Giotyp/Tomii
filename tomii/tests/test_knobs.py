@@ -227,3 +227,8 @@ def test_suggest_optuna_matches_domains() -> None:
     study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=1))
     study.optimize(objective, n_trials=3)
     assert set(seen) == set(domains)
+
+
+def test_network_only_knobs_hidden_without_network() -> None:
+    names = {k["name"] for k in knob_space(TOY_GRAPH, workload="toy")["knobs"]}
+    assert not names & {"receiver_threads", "rx_decode", "ingest_shards"}

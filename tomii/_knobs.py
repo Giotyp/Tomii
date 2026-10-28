@@ -204,6 +204,10 @@ def _graph_knobs(graph_dict: Dict[str, Any]) -> List[Dict[str, Any]]:
     return knobs
 
 
+#: CLI knobs that only affect graphs with network input; inert (and hidden) otherwise.
+_NETWORK_ONLY_KNOBS = ("receiver_threads", "rx_decode", "ingest_shards")
+
+
 def knob_space(
     graph: Any = None,
     *,
@@ -231,7 +235,7 @@ def knob_space(
     for entry in list_knobs_json()["knobs"]:
         if entry.get("role") != "perf" or "domain" not in entry:
             continue
-        if entry["name"] == "receiver_threads" and not has_network:
+        if not has_network and entry["name"] in _NETWORK_ONLY_KNOBS:
             continue
         knobs.append({**entry, "kind": "cli"})
 
