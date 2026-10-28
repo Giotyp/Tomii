@@ -77,6 +77,7 @@ pub fn fft_op_cm(
             // Disjoint per-antenna write into this symbol's row via raw ptr (shared &self).
             let fft_buffer_ptr = fft_buffer.row_ptr(data_offset) as *mut libc::c_void;
 
+            let t = crate::kprof::t();
             unsafe {
                 PartialTranspose(
                     fft_buffer_ptr,
@@ -91,6 +92,7 @@ pub fn fft_op_cm(
                     SCsPerCacheline,
                 );
             }
+            crate::kprof::add(crate::kprof::FFT_TRANSPOSE, t);
         },
     );
 

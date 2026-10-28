@@ -28,6 +28,7 @@ pub mod csi_lib;
 pub mod decode_lib;
 pub mod demul_lib;
 pub mod e1probe;
+pub mod kprof;
 pub mod fft_lib;
 pub mod modulation;
 pub mod packet_lib;

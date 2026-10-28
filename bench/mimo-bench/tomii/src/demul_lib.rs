@@ -16,6 +16,43 @@ use tomii_types::CmTypes;
 
 const SIMDGather: bool = true;
 
+const CBLAS_COL_MAJOR: i32 = 102;
+const CBLAS_NO_TRANS: i32 = 111;
+extern "C" {
+    // MKL CBLAS (LP64), resolved from libmkl_intel_lp64.
+    #[allow(clippy::too_many_arguments)]
+    fn cblas_cgemm(
+        layout: i32,
+        transa: i32,
+        transb: i32,
+        m: i32,
+        n: i32,
+        k: i32,
+        alpha: *const libc::c_void,
+        a: *const libc::c_void,
+        lda: i32,
+        b: *const libc::c_void,
+        ldb: i32,
+        beta: *const libc::c_void,
+        c: *mut libc::c_void,
+        ldc: i32,
+    );
+    fn cblas_cgemv(
+        layout: i32,
+        trans: i32,
+        m: i32,
+        n: i32,
+        alpha: *const libc::c_void,
+        a: *const libc::c_void,
+        lda: i32,
+        x: *const libc::c_void,
+        incx: i32,
+        beta: *const libc::c_void,
+        y: *mut libc::c_void,
+        incy: i32,
+    );
+}
+
 // Obtain a *mut T from either CmTypes::Any or CmTypes::AnyHeld (zero-lock bulk
 // path). Mirrors beam_lib::raw_mut.
 unsafe fn raw_mut<T: std::any::Any + Send + Sync + 'static>(cm: &CmTypes) -> *mut T {
@@ -128,12 +165,15 @@ pub fn demul_op_cm(
     let base_sc_id = demul_base_scs[node_index % demul_base_scs.len()];
 
     // Create thread-local working buffers to avoid sharing across concurrent tasks
-    let mut data_gather = AlignedVec::<Complex32>::new(SCsPerCacheline * config.bs_ant_num(), 64);
-    let mut equaled_buf_temp =
-        AlignedVec::<Complex32>::new(demul_struct.demul_block * config.num_spatial_streams(), 64);
-    let mut equaled_buf_temp_trans =
-        AlignedVec::<Complex32>::new(demul_struct.demul_block * config.num_spatial_streams(), 64);
+    // Reused per worker thread (allocated once per size); every element a task reads
+    // is written by that task first, so reuse cannot leak data between tasks.
+    let t_alloc = crate::kprof::t();
+    let gather_len = SCsPerCacheline * config.bs_ant_num();
+    let eq_len = demul_struct.demul_block * config.num_spatial_streams();
+    let (mut data_gather, mut equaled_buf_temp, mut equaled_buf_temp_trans) =
+        take_scratch(gather_len, eq_len);
 
+    crate::kprof::add(crate::kprof::DEMUL_ALLOC, t_alloc);
     let symbol_idx_ul = framestats.GetUlSymbolIdx(symbol_id);
     let total_symbol_idx_ul = config.GetTotalSymbolIdxUl(frame_id, symbol_idx_ul, framestats);
 
@@ -154,6 +194,7 @@ pub fn demul_op_cm(
         let data_buf_ptr =
             fft_buffer.get().get(total_symbol_idx_ul).as_ptr() as *const libc::c_void;
 
+        let t = crate::kprof::t();
         unsafe {
             DemulGather(
                 TransposeBlockSize,
@@ -167,37 +208,86 @@ pub fn demul_op_cm(
                 partial_transpose_block_base,
             );
         }
+        crate::kprof::add(crate::kprof::DEMUL_GATHER, t);
 
+        let t = crate::kprof::t();
+        // Freq-orthogonal pilots: every subcarrier of a pilot group shares one ZF
+        // matrix, so when this gathered chunk lies in a single group, equalize it as
+        // one GEMM (n_ss x n_ant) * (n_ant x chunk). The gather buffer is already
+        // column-major per subcarrier and the output layout is per-subcarrier n_ss.
+        let chunk_beam_sc = config.GetBeamScId(base_sc_id + i);
+        if config.GetBeamScId(base_sc_id + i + SCsPerCacheline - 1) == chunk_beam_sc {
+            let one = Complex32::new(1.0, 0.0);
+            let zero = Complex32::new(0.0, 0.0);
+            let ul_buf_ptr = ul_beam_matrices
+                .get()
+                .get(frame_slot, chunk_beam_sc)
+                .as_ptr();
+            let eq_ptr =
+                equaled_buf_temp.get_mut()[i * config.num_spatial_streams()..].as_mut_ptr();
+            unsafe {
+                cblas_cgemm(
+                    CBLAS_COL_MAJOR,
+                    CBLAS_NO_TRANS,
+                    CBLAS_NO_TRANS,
+                    config.num_spatial_streams() as i32,
+                    SCsPerCacheline as i32,
+                    config.bs_ant_num() as i32,
+                    &one as *const Complex32 as *const libc::c_void,
+                    ul_buf_ptr as *const libc::c_void,
+                    config.num_spatial_streams() as i32,
+                    data_gather.get().as_ptr() as *const libc::c_void,
+                    config.bs_ant_num() as i32,
+                    &zero as *const Complex32 as *const libc::c_void,
+                    eq_ptr as *mut libc::c_void,
+                    config.num_spatial_streams() as i32,
+                );
+            }
+            crate::kprof::add(crate::kprof::DEMUL_EQ, t);
+            continue;
+        }
         for j in 0..SCsPerCacheline {
             let cur_sc_id = base_sc_id + i + j;
 
+            // Read-only inputs: pass pointers straight to the kernel (no per-subcarrier
+            // heap copies of the gathered vector or the 16x64 beam matrix).
             let offset = j * config.bs_ant_num();
-            let data_vec: Vec<Complex32> =
-                data_gather.get()[offset..(offset + config.bs_ant_num())].to_vec();
+            let data_ptr = data_gather.get()[offset..(offset + config.bs_ant_num())].as_ptr();
 
-            let ul_beam_vec = ul_beam_matrices
+            let ul_buf_ptr = ul_beam_matrices
                 .get()
                 .get(frame_slot, config.GetBeamScId(cur_sc_id))
-                .to_vec();
-
-            let ul_buf_ptr = ul_beam_vec.as_ptr() as *const libc::c_void;
+                .as_ptr() as *const libc::c_void;
 
             let equal_offset = (cur_sc_id - base_sc_id) * config.num_spatial_streams();
             let eq_slice = &mut equaled_buf_temp.get_mut()[equal_offset..];
 
+            // equalized = ul_beam (n_ss x n_ant, column-major) * data (n_ant), via MKL
+            // directly as Agora does (Agora: cblas_cgemm) rather than through Armadillo.
+            let one = Complex32::new(1.0, 0.0);
+            let zero = Complex32::new(0.0, 0.0);
             unsafe {
-                Equalization(
-                    eq_slice.as_mut_ptr() as *mut libc::c_void,
-                    data_vec.as_ptr() as *const libc::c_void,
-                    config.num_spatial_streams(),
+                cblas_cgemv(
+                    CBLAS_COL_MAJOR,
+                    CBLAS_NO_TRANS,
+                    config.num_spatial_streams() as i32,
+                    config.bs_ant_num() as i32,
+                    &one as *const Complex32 as *const libc::c_void,
                     ul_buf_ptr,
-                    config.bs_ant_num(),
+                    config.num_spatial_streams() as i32,
+                    data_ptr as *const libc::c_void,
+                    1,
+                    &zero as *const Complex32 as *const libc::c_void,
+                    eq_slice.as_mut_ptr() as *mut libc::c_void,
+                    1,
                 );
             }
         }
+        crate::kprof::add(crate::kprof::DEMUL_EQ, t);
     }
 
     // Demodulation
+    let t_demod = crate::kprof::t();
     if symbol_idx_ul >= config.client_ul_pilot_symbols() {
         unsafe {
             let mut demod_bufs: Vec<*mut libc::c_void> =
@@ -231,6 +321,8 @@ pub fn demul_op_cm(
         }
     }
 
+    crate::kprof::add(crate::kprof::DEMUL_DEMOD, t_demod);
+    put_scratch(data_gather, equaled_buf_temp, equaled_buf_temp_trans);
     {
         let mod_order_bits = config.ModOrderBits(Direction::Uplink);
         crate::e1probe::on_demul(
@@ -246,4 +338,31 @@ pub fn demul_op_cm(
     // demul's $res value is unused (the dump node only barriers on demul
     // completion); return frame_id like beam_op_cm.
     CmTypes::Usize(frame_id)
+}
+
+type DemulScratch = (
+    AlignedVec<Complex32>,
+    AlignedVec<Complex32>,
+    AlignedVec<Complex32>,
+);
+
+thread_local! {
+    static DEMUL_SCRATCH: std::cell::RefCell<Option<(usize, usize, DemulScratch)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn take_scratch(gather_len: usize, eq_len: usize) -> DemulScratch {
+    DEMUL_SCRATCH.with(|c| match c.borrow_mut().take() {
+        Some((g, e, bufs)) if g == gather_len && e == eq_len => bufs,
+        _ => (
+            AlignedVec::new(gather_len, 64),
+            AlignedVec::new(eq_len, 64),
+            AlignedVec::new(eq_len, 64),
+        ),
+    })
+}
+
+fn put_scratch(a: AlignedVec<Complex32>, b: AlignedVec<Complex32>, c: AlignedVec<Complex32>) {
+    let (g, e) = (a.get().len(), b.get().len());
+    DEMUL_SCRATCH.with(|s| *s.borrow_mut() = Some((g, e, (a, b, c))));
 }
