@@ -30,6 +30,20 @@ fn main() {
     // Link with fftfuncs library
     println!("cargo:rustc-link-lib=dylib=fftfuncs");
 
+    // Link with the WLAN scrambler (descramble after decode), in lib/
+    println!("cargo:rustc-link-lib=dylib=scrambler");
+
+    // Link the FlexRAN 5GNR LDPC decoder (AVX-512 build) + its common lib.
+    // Prebuilt install (no FlexRAN build needed); static archives.
+    let flexran_install = "/opt/FlexRAN-FEC-SDK-19-04/sdk/build-avx512-icc/install";
+    println!(
+        "cargo:rustc-link-search=native={}/lib_ldpc_decoder_5gnr",
+        flexran_install
+    );
+    println!("cargo:rustc-link-lib=static=ldpc_decoder_5gnr");
+    println!("cargo:rustc-link-search=native={}/lib_common", flexran_install);
+    println!("cargo:rustc-link-lib=static=common");
+
     println!("cargo:rustc-link-lib=dylib=stdc++");
     println!("cargo:rustc-link-search=native={}", lib_dir);
 

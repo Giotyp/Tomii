@@ -101,6 +101,7 @@ def _run_pass(
 ) -> Path:
     timing_file = output_dir / f"verify_pass{pass_id}.txt"
     demod_file = output_dir / f"verify_pass{pass_id}_demul.bin"
+    decode_file = output_dir / f"verify_pass{pass_id}_decode.bin"
 
     cmd = build_command(
         binary,
@@ -134,6 +135,12 @@ def _run_pass(
     bench_env = {
         **os.environ,
         "TOMII_VERIFY_PATH": str(demod_file),
+        # Also dump the LDPC-decoded output (dump_decoded node). Including it in
+        # the compared hash makes this a byte-exact determinism check of the
+        # decode stage too — across passes and, when run at different --workers,
+        # across worker counts.
+        "TOMII_DECODE_VERIFY_PATH": str(decode_file),
+        "E1_DECODE_TASKS": "1",
         "MKL_NUM_THREADS": "1",
         "OMP_NUM_THREADS": "1",
         "OPENBLAS_NUM_THREADS": "1",
@@ -181,7 +188,13 @@ def _run_pass(
             f"meaningless"
         )
 
-    return demod_file
+    # Combine demod + decoded output so the compared hash covers both stages.
+    combined = output_dir / f"verify_pass{pass_id}_combined.bin"
+    with open(combined, "wb") as out:
+        out.write(demod_file.read_bytes())
+        if decode_file.exists():
+            out.write(decode_file.read_bytes())
+    return combined
 
 
 def _parse_frames_processed(timing_file: Path) -> int:

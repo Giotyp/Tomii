@@ -18,11 +18,14 @@ pub mod bindings {
     pub mod demod_bindings;
     pub mod fftfuncs_bindings;
     pub mod mkl_bindings;
+    pub mod phy_ldpc_decoder_5gnr_bindings;
+    pub mod scrambler_bindings;
 }
 
 pub mod beam_lib;
 pub mod buffer_lib;
 pub mod csi_lib;
+pub mod decode_lib;
 pub mod demul_lib;
 pub mod e1probe;
 pub mod fft_lib;

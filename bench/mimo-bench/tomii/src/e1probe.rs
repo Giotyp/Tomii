@@ -26,6 +26,7 @@ struct Rec {
     rx: AtomicU32,
     overlap: AtomicU32,
     demul: AtomicU32,
+    decode: AtomicU32,
     verify: AtomicU32,
     csi: AtomicU32,
     beam: AtomicU32,
@@ -45,6 +46,9 @@ pub struct Probe {
     dump_golden: Option<String>,
     golden_frame: usize,
     n_expected: usize,
+    // Decode tasks per frame when the decode stage is wired (E1_DECODE_TASKS);
+    // 0 means the pipeline ends at demul (completion stamped there, legacy path).
+    n_decode: usize,
     done_count: AtomicUsize,
     verify_fail: AtomicUsize,
     last_activity: AtomicU64,
@@ -90,6 +94,7 @@ fn init() -> Option<Probe> {
             .filter(|s| !s.is_empty()),
         golden_frame: env_usize("E1_GOLDEN_FRAME").unwrap_or(10),
         n_expected: env_usize("E1_NFRAMES").unwrap_or(usize::MAX),
+        n_decode: env_usize("E1_DECODE_TASKS").unwrap_or(0),
         done_count: AtomicUsize::new(0),
         verify_fail: AtomicUsize::new(0),
         last_activity: AtomicU64::new(0),
@@ -139,14 +144,14 @@ impl Probe {
             self.verify_fail.load(Ordering::Acquire),
             self.golden.is_some()
         ));
-        s.push_str("frame,first_rx_ns,last_rx_ns,done_ns,rx_pkts,overlap,verify,depviol,winviol,n_fftcsi,n_csi,n_beam,n_demul\n");
+        s.push_str("frame,first_rx_ns,last_rx_ns,done_ns,rx_pkts,overlap,verify,depviol,winviol,n_fftcsi,n_csi,n_beam,n_demul,n_decode\n");
         for (f, r) in self.recs.iter().enumerate() {
             let fr = r.first_rx.load(Ordering::Acquire);
             if fr == 0 {
                 continue;
             }
             s.push_str(&format!(
-                "{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 f,
                 fr,
                 r.last_rx.load(Ordering::Acquire),
@@ -159,7 +164,8 @@ impl Probe {
                 r.exec.load(Ordering::Acquire),
                 r.csi.load(Ordering::Acquire),
                 r.beam.load(Ordering::Acquire),
-                r.demul.load(Ordering::Acquire)
+                r.demul.load(Ordering::Acquire),
+                r.decode.load(Ordering::Acquire)
             ));
         }
         let tmp = format!("{}.tmp", self.out);
@@ -277,8 +283,14 @@ pub fn on_demul<F: Fn(usize, usize) -> *const i8>(
         return;
     }
     let t = now_ns();
-    r.done.store(t, Ordering::Release);
-    p.last_activity.store(t, Ordering::Relaxed);
+    // When the decode stage is wired, the frame is "done" at the last decode
+    // task (on_decode), not here — so end-to-end latency and keep-up include
+    // decode. The demod verify + golden dump below still run at demul (they
+    // check demul's output). Legacy (no decode): stamp completion here.
+    if p.n_decode == 0 {
+        r.done.store(t, Ordering::Release);
+        p.last_activity.store(t, Ordering::Relaxed);
+    }
 
     let canon = |buf: &mut Vec<u8>| {
         for s in 0..n_sym {
@@ -315,5 +327,28 @@ pub fn on_demul<F: Fn(usize, usize) -> *const i8>(
             let _ = std::fs::write(path, &buf);
         }
     }
+    if p.n_decode == 0 {
+        p.done_count.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// Called at the end of every decode task (when the decode stage is wired). The
+/// task that completes the frame's decode work stamps `done` and bumps the
+/// completion count — so end-to-end latency and keep-up are measured through
+/// decode, the pipeline's terminal stage.
+#[inline]
+pub fn on_decode(frame_id: usize, total_decode: usize) {
+    let Some(p) = probe() else { return };
+    if p.n_decode == 0 {
+        return;
+    }
+    let r = &p.recs[frame_id % MAXF];
+    let n = r.decode.fetch_add(1, Ordering::AcqRel) + 1;
+    if n as usize != total_decode {
+        return;
+    }
+    let t = now_ns();
+    r.done.store(t, Ordering::Release);
+    p.last_activity.store(t, Ordering::Relaxed);
     p.done_count.fetch_add(1, Ordering::AcqRel);
 }
