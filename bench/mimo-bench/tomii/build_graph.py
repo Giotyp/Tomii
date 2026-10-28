@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -234,7 +235,7 @@ def build_mimo_graph(config_path: str = AGORA_CONFIG, dump: bool = False) -> tm.
         func="demul_op",
         factor=total_demul_tasks,
         group_size=demul_events_per_symbol,
-        priority="low",
+        priority=os.environ.get("MIMO_PRIO_DEMUL", "low"),
         args=[
             config,
             framestats,
@@ -277,7 +278,7 @@ def build_mimo_graph(config_path: str = AGORA_CONFIG, dump: bool = False) -> tm.
         func="decode_op",
         factor=total_decode_tasks,
         group_size=decode_tasks_per_symbol,
-        priority="low",
+        priority=os.environ.get("MIMO_PRIO_DECODE", "low"),
         args=[
             config,
             framestats,
