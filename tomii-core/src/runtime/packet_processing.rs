@@ -113,6 +113,20 @@ pub(super) fn poll_and_process_network_packets(
             .telemetry
             .record_timing(start_id, thread_slot, "ID Function", usize::MAX);
         super::phase_prof::add(super::phase_prof::IDFN, t);
+        if super::phase_prof::trace_on() {
+            if let Some(f) = new_frame_opt {
+                // sub 10: packet reached admission: a = ns since socket receive,
+                // b = ns it waited in the ingest channel before this drain.
+                super::phase_prof::trace_admit(
+                    10,
+                    f,
+                    packet_timestamp.elapsed().as_nanos() as u64,
+                    packet_rcv_instant
+                        .duration_since(packet_timestamp)
+                        .as_nanos() as u64,
+                );
+            }
+        }
 
         let Some(new_frame) = new_frame_opt else {
             print_debug(|| {

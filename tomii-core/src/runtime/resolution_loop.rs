@@ -160,6 +160,13 @@ pub(super) fn resolution(
             &mut slots_dirty,
         );
         super::phase_prof::add(super::phase_prof::CHECKSLOTS, t);
+        if super::phase_prof::trace_on() {
+            // sub 11: slow check_slots call (slot completion / release work), a = ns.
+            let dt = super::phase_prof::now().wrapping_sub(t) / 2; // TSC @ ~2.0 GHz -> ns
+            if dt > 50_000 {
+                super::phase_prof::trace_admit(11, thread_id, dt, 0);
+            }
+        }
         shared
             .telemetry
             .record_timing(start_proc, thread_slot, "Slot Check", usize::MAX);
