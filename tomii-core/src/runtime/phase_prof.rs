@@ -356,3 +356,86 @@ pub(crate) fn trace_admit(sub: u64, frame: usize, a: u64, b: u64) {
         push([3 | (sub << 8), frame as u64, mono_ns(), a, b]);
     }
 }
+
+// ---- spin_wait_for_result accounting (by predecessor node id) ----
+static SW_CALLS: [AtomicU64; MAXN] = [Z; MAXN];
+static SW_NS: [AtomicU64; MAXN] = [Z; MAXN];
+static SW_MAX_NS: [AtomicU64; MAXN] = [Z; MAXN];
+
+#[inline]
+pub(crate) fn spin_wait_done(pred_node: usize, ns: u64) {
+    if !enabled() || pred_node >= MAXN {
+        return;
+    }
+    SW_CALLS[pred_node].fetch_add(1, Ordering::Relaxed);
+    SW_NS[pred_node].fetch_add(ns, Ordering::Relaxed);
+    SW_MAX_NS[pred_node].fetch_max(ns, Ordering::Relaxed);
+}
+
+pub(crate) fn dump_spin_wait() {
+    if !enabled() {
+        return;
+    }
+    let mut line = String::from("SPINWAIT_PROF");
+    for n in 0..MAXN {
+        let c = SW_CALLS[n].load(Ordering::Relaxed);
+        if c > 0 {
+            line.push_str(&format!(
+                " pred{}: calls={} total_ms={:.1} max_ms={:.2} |",
+                n,
+                c,
+                SW_NS[n].load(Ordering::Relaxed) as f64 / 1e6,
+                SW_MAX_NS[n].load(Ordering::Relaxed) as f64 / 1e6
+            ));
+        }
+    }
+    eprintln!("{line}");
+}
+
+// ---- intra-task marks (trace only): 0 = args built, 1 = kernel returned ----
+thread_local! {
+    static MARKS: Cell<[u64; 4]> = const { Cell::new([0; 4]) };
+}
+
+fn thread_cpu_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+
+/// Marks 0/1 record wall time; marks 2/3 the thread CPU time at the same points.
+#[inline]
+pub(crate) fn mark(i: usize) {
+    if trace_on() {
+        let t = mono_ns();
+        let c = thread_cpu_ns();
+        MARKS.with(|m| {
+            let mut v = m.get();
+            v[i] = t;
+            v[i + 2] = c;
+            m.set(v);
+        });
+    }
+}
+
+/// kind 4 SLOW TASK: w0 = 4 | node<<8 | worker<<16 ; w1 = start ; w2 = args_done ;
+/// w3 = kernel_done ; w4 = end. Emitted only for tasks longer than 200 us.
+#[inline]
+pub(crate) fn trace_slow_task(node: usize, start: u64, end: u64) {
+    if end.saturating_sub(start) < 200_000 {
+        return;
+    }
+    let (w, _) = WORKER.with(|c| c.get());
+    let m = MARKS.with(|m| m.get());
+    let kcpu_us = (m[3].saturating_sub(m[2]) / 1000) & 0xFFFF_FFFF;
+    push([
+        4 | ((node as u64 & 0xFF) << 8) | (w << 16) | (kcpu_us << 32),
+        start,
+        m[0],
+        m[1],
+        end,
+    ]);
+}

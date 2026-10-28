@@ -280,6 +280,13 @@ pub(super) fn execute_task(
         );
     }
     if trace_t0.0 != 0 {
+        if node_info.bulk_count <= 1 {
+            super::phase_prof::trace_slow_task(
+                node_info.id as usize,
+                trace_t0.0,
+                super::phase_prof::mono_ns(),
+            );
+        }
         super::phase_prof::trace_task(
             node_info.id as usize,
             node_info.bulk_count.max(1),
@@ -515,6 +522,7 @@ fn execute_single_task(
                 if stale {
                     return None::<CmTypes>;
                 }
+                super::phase_prof::mark(0);
                 Some(func(buf))
             })
         } else {
@@ -536,6 +544,7 @@ fn execute_single_task(
                     buf.clear();
                     return None::<CmTypes>;
                 }
+                super::phase_prof::mark(0);
                 let r = func(&buf);
                 buf.clear();
                 Some(r)
@@ -555,6 +564,7 @@ fn execute_single_task(
         }
     };
 
+    super::phase_prof::mark(1);
     let node_name = &sctx.cache.node_cache[node_info.id as usize].name;
     sctx.telemetry
         .record_timing(start_time, node_info.slot, node_name, worker_id);

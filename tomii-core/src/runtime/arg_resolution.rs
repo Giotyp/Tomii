@@ -237,8 +237,13 @@ fn spin_wait_for_result(
 ) -> Option<tomii_types::CmTypes> {
     use std::sync::atomic::Ordering;
     let mut spin_count: u32 = 0;
+    let sw_t0 = std::time::Instant::now();
     loop {
         if let Some(result) = shared.exec.node_results.get(node_info) {
+            super::phase_prof::spin_wait_done(
+                node_info.id as usize,
+                sw_t0.elapsed().as_nanos() as u64,
+            );
             return Some(result);
         }
         if shared.shutdown_flag.load(Ordering::Acquire) {

@@ -182,6 +182,7 @@ pub(super) fn resolution(
     super::phase_prof::dump(thread_id);
     if thread_id == 0 {
         super::phase_prof::dump_workers();
+        super::phase_prof::dump_spin_wait();
         super::phase_prof::trace_dump();
     }
 }
