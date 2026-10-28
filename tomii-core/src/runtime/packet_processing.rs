@@ -4,6 +4,7 @@ use super::network_init::process_id_function;
 use super::reporting::should_record_slot;
 use super::shared_data::{PendingPacket, SharedData};
 use super::slot_management::{assign_frame_to_available_slot, initial_nodes};
+use super::thread_locals::INDEX_ARGS_BUF;
 use crate::async_recorder::submit_record;
 use crate::buffers::NodeInfo;
 use crate::debug::print_debug;
@@ -48,7 +49,15 @@ pub(super) fn poll_and_process_network_packets(
 
     // Drain all available packets into reusable buffer (no Vec alloc per call).
     packet_buf.clear();
-    packet_buf.extend(shared.net.packet_receiver.drain());
+    let t = super::phase_prof::now();
+    let shards = &shared.net.ingest_shards;
+    let rx = if shards.is_empty() {
+        &shared.net.packet_receiver
+    } else {
+        &shards[thread_id % shards.len()].1
+    };
+    packet_buf.extend(rx.drain());
+    super::phase_prof::add_n(super::phase_prof::DRAIN, t, packet_buf.len() as u64);
     let packet_rcv_instant = Instant::now();
 
     let mut active_packet_batch: Vec<(NodeInfo, Option<CmTypes>)> =
@@ -58,6 +67,7 @@ pub(super) fn poll_and_process_network_packets(
     // Done before the fresh drain so older (parked) packets are processed first.
     // Relaxed is only an emptiness hint — a stale read delays this by one poll.
     if shared.net.pending_count.load(Ordering::Relaxed) > 0 {
+        let t = super::phase_prof::now();
         reinject_pending_frames(
             shared,
             idx_func_ptr,
@@ -68,23 +78,55 @@ pub(super) fn poll_and_process_network_packets(
             thread_slot,
             frame_packets,
         );
+        super::phase_prof::add(super::phase_prof::REINJECT, t);
+        if shared.config.dispatch_chunk > 0 {
+            flush_active_batch(
+                shared,
+                &mut active_packet_batch,
+                cond_indexes,
+                frame_slot_activity,
+                thread_core,
+                thread_id,
+                thread_slot,
+            );
+        }
     }
 
     for packet_msg in packet_buf.drain(..) {
         let receiver_core_id = packet_msg.receiver_core_id;
         let packet_timestamp = packet_msg.timestamp;
+        let t = super::phase_prof::now();
         shared.telemetry.with_timing(|tb| {
             let dur = packet_rcv_instant.duration_since(packet_timestamp);
             tb.add_task_time(thread_slot, "Packet Received", usize::MAX, dur);
         });
+        super::phase_prof::add(super::phase_prof::TELEM, t);
 
+        let t = super::phase_prof::now();
         let packet_cm = decode_packet(shared, packet_msg, packet_process_func, thread_slot);
+        super::phase_prof::add(super::phase_prof::DECODE, t);
 
+        let t = super::phase_prof::now();
         let start_id = shared.telemetry.measure_start();
         let new_frame_opt = process_id_function(shared, &packet_cm);
         shared
             .telemetry
             .record_timing(start_id, thread_slot, "ID Function", usize::MAX);
+        super::phase_prof::add(super::phase_prof::IDFN, t);
+        if super::phase_prof::trace_on() {
+            if let Some(f) = new_frame_opt {
+                // sub 10: packet reached admission: a = ns since socket receive,
+                // b = ns it waited in the ingest channel before this drain.
+                super::phase_prof::trace_admit(
+                    10,
+                    f,
+                    packet_timestamp.elapsed().as_nanos() as u64,
+                    packet_rcv_instant
+                        .duration_since(packet_timestamp)
+                        .as_nanos() as u64,
+                );
+            }
+        }
 
         let Some(new_frame) = new_frame_opt else {
             print_debug(|| {
@@ -100,12 +142,21 @@ pub(super) fn poll_and_process_network_packets(
         // assigned a slot yet.  Park it for re-injection once the window advances —
         // dropping its head packets here would leave the frame permanently
         // incomplete and wedge the slot it is later assigned to.
+        let t = super::phase_prof::now();
         let window_end = shared
             .telemetry
             .frame_complete_counter
             .load(Ordering::SeqCst)
             + shared.config.slots;
+        super::phase_prof::add(super::phase_prof::WINDOW, t);
         if new_frame >= window_end {
+            super::phase_prof::trace_admit(
+                1,
+                new_frame,
+                (window_end - shared.config.slots) as u64,
+                0,
+            );
+            let t = super::phase_prof::now();
             park_pending_packet(
                 shared,
                 new_frame,
@@ -114,9 +165,11 @@ pub(super) fn poll_and_process_network_packets(
                 receiver_core_id,
                 frame_packets,
             );
+            super::phase_prof::add(super::phase_prof::PARK, t);
             continue;
         }
 
+        let t = super::phase_prof::now();
         admit_packet(
             shared,
             new_frame,
@@ -131,15 +184,68 @@ pub(super) fn poll_and_process_network_packets(
             thread_slot,
             frame_packets,
         );
+        super::phase_prof::add(super::phase_prof::ADMIT, t);
+        let chunk = shared.config.dispatch_chunk;
+        if chunk > 0 && active_packet_batch.len() >= chunk {
+            flush_active_batch(
+                shared,
+                &mut active_packet_batch,
+                cond_indexes,
+                frame_slot_activity,
+                thread_core,
+                thread_id,
+                thread_slot,
+            );
+        }
     }
 
-    if !active_packet_batch.is_empty() {
+    flush_active_batch(
+        shared,
+        &mut active_packet_batch,
+        cond_indexes,
+        frame_slot_activity,
+        thread_core,
+        thread_id,
+        thread_slot,
+    );
+}
+
+/// Coalesce and resolve the admitted network batch (stores results, dispatches successors).
+#[allow(clippy::too_many_arguments)]
+fn flush_active_batch(
+    shared: &Arc<SharedData>,
+    batch: &mut Vec<(NodeInfo, Option<CmTypes>)>,
+    cond_indexes: &[Vec<usize>],
+    frame_slot_activity: &mut HashMap<usize, bool>,
+    thread_core: usize,
+    thread_id: usize,
+    thread_slot: usize,
+) {
+    if !batch.is_empty() {
+        // DR3: coalesce contiguous same-slot network cells into bulk entries so the
+        // resolution thread walks node-0's successors once per run instead of once
+        // per packet (the ~2000-entry/frame dispatch wall), then drives the batch.
+        let t = super::phase_prof::now();
+        coalesce_network_batch(shared, batch);
+        super::phase_prof::add(super::phase_prof::COALESCE, t);
+
         let start_ns_batch = shared.telemetry.base_instant.elapsed().as_nanos();
         let start_proc = shared.telemetry.measure_start();
+        let t = super::phase_prof::now();
+        let n = batch.len() as u64;
+        if super::phase_prof::trace_on() {
+            // sub 8: network batch about to resolve: frame of first & last entry, a=entries, b=distinct slots bitmap
+            let mut bits = 0u64;
+            for (ni, _) in batch.iter() {
+                bits |= 1u64 << ni.slot;
+            }
+            let f0 = shared.slot_data.frame_id[batch[0].0.slot].load(Ordering::Relaxed);
+            super::phase_prof::trace_admit(8, f0, n, bits);
+        }
         // Route through the pluggable resolution strategy (the batch-protocol seam).
         let _ = shared.exec.resolution_strategy.drive_batch(
             shared,
-            &mut active_packet_batch,
+            batch,
             thread_core,
             thread_id,
             thread_slot,
@@ -147,10 +253,113 @@ pub(super) fn poll_and_process_network_packets(
             frame_slot_activity,
             start_ns_batch,
         );
+        super::phase_prof::add_n(super::phase_prof::NETDRIVE, t, n);
         shared
             .telemetry
             .record_timing(start_proc, thread_slot, "Batch Resolution", usize::MAX);
     }
+}
+
+/// DR3: coalesce the network drain batch (node-0 cells) into bulk entries.
+///
+/// Each packet is a resolution-thread batch entry that stores node-0's result at
+/// its cell, decrements `pending_tasks`, and walks node-0's successor edges —
+/// ~2000/frame at 64x16, serial on the resolution thread (the dispatch/queueing
+/// wall). Where node-0's successors carry no condition, a contiguous run of
+/// same-slot cells is equivalent to ONE bulk completion over `[start, start+len)`:
+/// `decrement_and_collect_ready` already intersects a bulk range with each edge's
+/// index filter (findings #21 defect B) and fanout-bulk accumulates `ready.len()`
+/// — identical to the proven worker bulk-compute path. So we store each cell's
+/// distinct result up front (irreducible — one result per cell) and replace the
+/// run's `len` per-packet entries with a single `(NodeInfo{bulk_count=len}, None)`
+/// entry, collapsing the per-packet successor walk + dep-counter RMWs to one.
+///
+/// GUARD (strict + per-packet fallback): skip coalescing entirely if node-0 feeds
+/// any conditional OR one-to-one successor (see the guard below). A one-to-one
+/// `$res` successor reads its predecessor via the triggering `pred_index`, which a
+/// bulk entry can only carry once for the whole run — so coalescing those is
+/// correctness-breaking (MIMO's ingest is one-to-one and falls back here).
+/// Non-one-to-one edges read via `node_index` and are bulk-safe. Runs of length 1
+/// are left exactly as-is. Completion counting is unaffected: `packet_counters` is
+/// bumped per packet in `assign_packet_to_slot`, and `pending_tasks` balances
+/// regardless of granularity (one `fetch_sub(len)` == `len` individual subs).
+#[inline]
+fn coalesce_network_batch(shared: &Arc<SharedData>, batch: &mut Vec<(NodeInfo, Option<CmTypes>)>) {
+    // Network ingest node is id 0 by convention (admit_packet builds NodeInfo::new(0, ..)).
+    if batch.len() < 2 {
+        return;
+    }
+    // Guard (strict): fall back to exact per-packet admission if node-0 feeds any
+    //   (a) conditional successor — the per-index condition machinery
+    //       (dispatch_condition_successor) is not bulk-aware; or
+    //   (b) ONE-TO-ONE successor — a 1:1 `$res` edge whose successor reads its
+    //       predecessor via the triggering `pred_index` (fetch_res_results case 2).
+    //       A coalesced bulk entry carries a single chunk-start `pred_index` for the
+    //       whole run, so every covered successor would read the run's FIRST cell
+    //       instead of its own — wrong, grouping-dependent values. (MIMO's
+    //       network->fft and network->csi are both one-to-one, so MIMO correctly
+    //       falls back here; non-one-to-one ingest edges read via node_index and
+    //       are bulk-safe.)
+    // Checked before the sort so an unsafe graph pays zero overhead.
+    if shared
+        .graph_cache
+        .successor_arena
+        .edges_for(0)
+        .iter()
+        .any(|e| e.has_condition || e.is_one_to_one())
+    {
+        return;
+    }
+
+    // Group by (slot, contiguous index). Order within a cell is irrelevant — one
+    // cell is one packet, and per-frame output is order-independent (parity-proven).
+    batch.sort_by_key(|a| (a.0.slot, a.0.index));
+
+    let rctx = shared.resolve_ctx();
+    let old = std::mem::take(batch);
+    let mut out: Vec<(NodeInfo, Option<CmTypes>)> = Vec::with_capacity(old.len());
+    let mut iter = old.into_iter().peekable();
+
+    while let Some((ni, payload)) = iter.next() {
+        // Only network cells coalesce; anything else passes through unchanged.
+        if ni.id != 0 {
+            out.push((ni, payload));
+            continue;
+        }
+        let slot = ni.slot;
+        let start_index = ni.index;
+        let mut run: Vec<(NodeInfo, Option<CmTypes>)> = vec![(ni, payload)];
+        let mut last_index = start_index;
+        while let Some((peek_ni, _)) = iter.peek() {
+            if peek_ni.id == 0 && peek_ni.slot == slot && peek_ni.index == last_index + 1 {
+                let e = iter.next().unwrap();
+                last_index = e.0.index;
+                run.push(e);
+            } else {
+                break;
+            }
+        }
+
+        if run.len() == 1 {
+            // Single cell: leave as-is (Some(payload) → Phase 1 stores it as today).
+            out.push(run.pop().unwrap());
+        } else {
+            // Bulk run: store each cell's distinct result now (Phase 1 lifted ahead
+            // of drive_batch — strictly safer, all node-0 results land before any
+            // successor runs), then emit one bulk entry with None payload.
+            let run_len = run.len();
+            for (cell_ni, cell_payload) in run {
+                if let Some(p) = cell_payload {
+                    rctx.exec.node_results.set(&cell_ni, p);
+                }
+            }
+            let mut bulk = NodeInfo::new(0, slot, start_index, 0);
+            bulk.bulk_count = run_len;
+            out.push((bulk, None));
+        }
+    }
+
+    *batch = out;
 }
 
 /// Admits one decoded, in-window packet: assigns it to a slot, routes it into the
@@ -187,6 +396,7 @@ fn admit_packet(
             // between the completion counter advancing and the finished slot
             // being released.  Park and retry on a later poll; dropping here
             // permanently lost frames that were milliseconds from a free slot.
+            super::phase_prof::trace_admit(2, new_frame, 0, 0);
             park_pending_packet(
                 shared,
                 new_frame,
@@ -233,6 +443,7 @@ fn admit_packet(
             drop(slot_states);
             active_packet_batch.push((node_info.clone(), Some(packet_cm)));
         } else {
+            super::phase_prof::trace_admit(5, new_frame, slot as u64, 0);
             let mut slot_buffers = shared.slot_data.buffers.write();
             slot_buffers[slot].push((node_info.clone(), Some(packet_cm)));
             drop(slot_buffers);
@@ -349,6 +560,7 @@ fn reinject_pending_frames(
             .collect()
     };
     for (frame, packets) in ready {
+        super::phase_prof::trace_admit(3, frame, packets.len() as u64, 0);
         print_debug(|| {
             format!(
                 "Thread {:?} -- Re-injecting {} parked packets for frame {}",
@@ -385,6 +597,7 @@ pub(super) fn mark_frame_dropped(shared: &Arc<SharedData>, frame: usize, reason:
     }
     let already_marked = shared.net.frame_dropped[frame].swap(true, Ordering::AcqRel);
     if !already_marked {
+        super::phase_prof::trace_admit(7, frame, 0, 0);
         shared
             .telemetry
             .frame_complete_counter
@@ -402,6 +615,9 @@ fn decode_packet(
     packet_process_func: tomii_types::CmPtr,
     thread_slot: usize,
 ) -> CmTypes {
+    if let Some(cm) = packet_msg.decoded {
+        return cm; // already decoded on the receiver thread
+    }
     let socket_id = packet_msg.socket_id;
     // Bytes variant avoids Arc/RwLock/Box overhead.
     // Keep received_bytes_cm alive (not moved) so we can reclaim its Vec<u8> below.
@@ -453,15 +669,19 @@ fn assign_packet_to_slot(
     }
 
     let start_sa = shared.telemetry.measure_start();
+    let t = super::phase_prof::now();
     let (assigned_slot, newly_activated) = match assign_frame_to_available_slot(shared, new_frame) {
         Some(v) => v,
         None => return SlotAssignment::NoSlotYet,
     };
+    super::phase_prof::add(super::phase_prof::SLOTASSIGN, t);
     shared
         .telemetry
         .record_timing(start_sa, thread_slot, "Slot Assignment", usize::MAX);
 
+    let t = super::phase_prof::now();
     if newly_activated {
+        super::phase_prof::trace_admit(4, new_frame, assigned_slot as u64, 0);
         *slots_dirty = true;
         // Spawn initial nodes immediately so workers start while remaining packets arrive.
         let init_nodes = initial_nodes(&shared.graph, vec![assigned_slot], shared.config.workers);
@@ -479,6 +699,11 @@ fn assign_packet_to_slot(
         }
     }
 
+    if newly_activated {
+        super::phase_prof::add(super::phase_prof::INITDISP, t);
+    }
+
+    let t = super::phase_prof::now();
     let packet_index = if let Some((idx_fn, idx_args)) = idx_func_ptr {
         let additional_args = super::arg_resolution::parse_args(
             shared,
@@ -488,10 +713,19 @@ fn assign_packet_to_slot(
             0, // pred_index
             None,
         );
-        let mut full_args = Vec::with_capacity(1 + additional_args.len());
-        full_args.push(packet_cm.clone());
-        full_args.extend(additional_args);
-        let idx_result = idx_fn(&full_args);
+        // Reuse a thread-local buffer for the call args instead of a fresh
+        // per-packet `Vec`. The single `packet_cm.clone()` stays: the packet
+        // value is routed to the active batch after this call, so it cannot be
+        // moved out of the borrow here.
+        let idx_result = INDEX_ARGS_BUF.with(|buf| {
+            let mut full_args = buf.borrow_mut();
+            full_args.clear();
+            full_args.push(packet_cm.clone());
+            full_args.extend(additional_args);
+            let r = idx_fn(full_args.as_slice());
+            full_args.clear(); // drop the args now; keep only the capacity
+            r
+        });
         shared.slot_data.packet_counters[assigned_slot].fetch_add(1, Ordering::SeqCst);
         shared.slot_data.last_packet_ns[assigned_slot].store(
             shared.telemetry.base_instant.elapsed().as_nanos() as u64,
@@ -507,6 +741,7 @@ fn assign_packet_to_slot(
         );
         shared.slot_data.packet_counters[assigned_slot].fetch_add(1, Ordering::SeqCst)
     };
+    super::phase_prof::add(super::phase_prof::INDEXFN, t);
 
     SlotAssignment::Assigned(NodeInfo::new(0, assigned_slot, packet_index, 0))
 }

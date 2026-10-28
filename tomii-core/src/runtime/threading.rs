@@ -34,6 +34,7 @@ fn spawn_receiver_thread(
     socket_range: std::ops::Range<usize>,
     core_id: usize,
     return_rxs: Vec<flume::Receiver<Vec<u8>>>,
+    decode: Option<tomii_types::CmPtr>,
 ) -> Result<JoinHandle<()>, crate::RuntimeError> {
     thread::Builder::new()
         .name(thread_name)
@@ -49,6 +50,7 @@ fn spawn_receiver_thread(
                 socket_range,
                 core_id,
                 return_rxs,
+                decode,
             );
         })
         .map_err(crate::RuntimeError::SpawnFailed)
@@ -71,6 +73,14 @@ impl TomiiRt {
 
         let num_sockets = network_config.num_sockets;
         let buffer_depth = network_config.buffer_depth;
+        // Receiver-side decode: receiver threads run extract_packet so the resolution
+        // thread only admits. Requires a thread-safe extract function.
+        let rx_decode = if self.shared.config.rx_decode {
+            network_config.extract_packet_func
+        } else {
+            None
+        };
+        tracing::info!(rx_decode = rx_decode.is_some(), "receiver decode placement");
 
         tracing::info!(
             num_sockets,
@@ -106,7 +116,15 @@ impl TomiiRt {
             .packet_length;
         let recv_pool_size = self.shared.config.recv_pool_size;
         let shutdown = Arc::clone(&self.shared.shutdown_flag);
-        let tx = self.shared.net.packet_sender.clone();
+        let shards = &self.shared.net.ingest_shards;
+        let shard_tx = |i: usize| {
+            if shards.is_empty() {
+                self.shared.net.packet_sender.clone()
+            } else {
+                shards[i % shards.len()].0.clone()
+            }
+        };
+        tracing::info!(ingest_shards = shards.len(), "ingest channel layout");
         let sockets = Arc::clone(&self.shared.net.receiver_sockets);
         let drop_counters = Arc::clone(&self.shared.net.packet_drop_counters);
 
@@ -125,13 +143,14 @@ impl TomiiRt {
                     packet_length,
                     recv_pool_size,
                     Arc::clone(&shutdown),
-                    tx.clone(),
+                    shard_tx(socket_id),
                     Arc::clone(&sockets),
                     Arc::clone(&drop_counters),
                     socket_id,
                     socket_id..socket_id + 1,
                     core_id,
                     vec![return_rx],
+                    rx_decode,
                 )?;
                 handles.push(handle);
                 tracing::debug!(socket_id, core_id, "receiver thread spawned");
@@ -162,13 +181,14 @@ impl TomiiRt {
                     packet_length,
                     recv_pool_size,
                     Arc::clone(&shutdown),
-                    tx.clone(),
+                    shard_tx(thread_id),
                     Arc::clone(&sockets),
                     Arc::clone(&drop_counters),
                     thread_id,
                     socket_range,
                     core_id,
                     return_rxs,
+                    rx_decode,
                 )?;
                 handles.push(handle);
                 tracing::debug!(

@@ -138,6 +138,40 @@ struct Args {
     no_fanout_bulk: bool,
     #[clap(
         long,
+        help = "Network graphs: run the packet-extract function on the receiver threads instead of the resolution threads. The extract function must be thread-safe."
+    )]
+    rx_decode: bool,
+    #[clap(
+        long,
+        help = "Network graphs with --system-threads > 1: give each resolution thread its own ingest channel (receiver i feeds channel i % n) instead of one shared channel."
+    )]
+    ingest_shards: bool,
+    #[clap(
+        long,
+        value_name = "N",
+        default_value = "0",
+        help = "Resolve and dispatch admitted packets every N packets within one poll (0 = once per poll)."
+    )]
+    dispatch_chunk: usize,
+    #[clap(
+        long,
+        value_name = "CORE",
+        help = "Free completed-slot results on a background thread pinned to CORE instead of on the resolution thread that completed the frame."
+    )]
+    reclaim_core: Option<usize>,
+    #[clap(
+        long,
+        value_name = "NODES",
+        help = "Bind process memory to these NUMA nodes (comma-separated, e.g. 0 or 0,1). A bind policy also opts the process out of automatic NUMA balancing."
+    )]
+    membind: Option<String>,
+    #[clap(
+        long,
+        help = "Do not tune glibc malloc (by default heap trimming and mmap of buffers up to 32 MiB are disabled to avoid page-fault churn)."
+    )]
+    no_malloc_tune: bool,
+    #[clap(
+        long,
         alias = "exclude-streams",
         value_name = "EXCLUDE_FRAMES",
         required = false,
@@ -237,8 +271,65 @@ struct Args {
     resolution_strategy: String,
 }
 
+/// Keep freed heap memory resident: no trimming back to the OS and no per-allocation
+/// mmap/munmap for buffers up to 32 MiB. Otherwise glibc's churn of short-lived
+/// per-frame buffers costs millions of minor page faults per second during warm-up
+/// (contending on mmap_lock across all workers). `--no-malloc-tune` opts out.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn tune_malloc() {
+    unsafe {
+        libc::mallopt(libc::M_TRIM_THRESHOLD, i32::MAX);
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 32 * 1024 * 1024);
+        libc::mallopt(libc::M_TOP_PAD, 64 * 1024 * 1024);
+    }
+}
+
+/// `--membind <node>[,<node>...]`: bind this process's memory to the listed NUMA nodes
+/// (with several, pages come from the node nearest the allocating CPU). Besides
+/// locality, a bind policy opts the process out of automatic NUMA balancing, whose
+/// periodic unmap/hint-fault/migrate cycle stalls hot pages for ~ms at a time.
+#[cfg(target_os = "linux")]
+fn apply_membind(spec: &str) {
+    let mut mask: u64 = 0;
+    for part in spec.split(',') {
+        match part.trim().parse::<u32>() {
+            Ok(n) if n < 64 => mask |= 1u64 << n,
+            _ => {
+                eprintln!("--membind {spec}: expected comma-separated NUMA node numbers");
+                std::process::exit(2);
+            }
+        }
+    }
+    const MPOL_BIND: libc::c_long = 2;
+    let maxnode = (64 - mask.leading_zeros()) as libc::c_ulong + 1;
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_set_mempolicy,
+            MPOL_BIND,
+            &mask as *const u64,
+            maxnode,
+        )
+    };
+    if rc != 0 {
+        eprintln!(
+            "set_mempolicy(MPOL_BIND, {spec}) failed: {}",
+            std::io::Error::last_os_error()
+        );
+        std::process::exit(2);
+    }
+}
+
 fn main() {
     let args = Args::parse();
+    // Process-wide memory policy and allocator tuning, before the runtime allocates.
+    #[cfg(target_os = "linux")]
+    if let Some(ref spec) = args.membind {
+        apply_membind(spec);
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if !args.no_malloc_tune {
+        tune_malloc();
+    }
 
     // Initialize tracing subscriber. RUST_LOG overrides the --debug flag.
     // Disable ANSI colour codes when stdout is redirected to a file so that
@@ -348,6 +439,10 @@ fn main() {
         coalesce_barriers: args.coalesce_barriers,
         inline_continuation: args.inline_continuation,
         no_fanout_bulk: args.no_fanout_bulk,
+        rx_decode: args.rx_decode,
+        ingest_shards: args.ingest_shards,
+        dispatch_chunk: args.dispatch_chunk,
+        reclaim_core: args.reclaim_core,
         single_slot_mode: args.slots == 1,
         record_frame: args.record_frame,
         recv_pool_size: args.recv_pool_size,

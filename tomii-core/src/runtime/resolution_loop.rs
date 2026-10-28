@@ -51,6 +51,7 @@ pub(super) fn resolution(
         }
     }
 
+    super::phase_prof::trace_init();
     perform_initial_preparation(&shared, thread_id, thread_core, thread_slot);
 
     // prefetch cond indexes for efficiency
@@ -78,6 +79,8 @@ pub(super) fn resolution(
 
     // Process completed nodes with dynamic batching from scheduler
     loop {
+        let it0 = super::phase_prof::now();
+        let wm0 = super::phase_prof::work_mark();
         // Check shutdown flag first to exit immediately when signaled
         if shared.shutdown_flag.load(Ordering::Acquire) {
             tracing::debug!(
@@ -95,6 +98,7 @@ pub(super) fn resolution(
 
             if should_poll_packets {
                 if let Some(network_config) = network_config_opt.as_ref() {
+                    let t = super::phase_prof::now();
                     poll_and_process_network_packets(
                         &shared,
                         network_config,
@@ -106,10 +110,12 @@ pub(super) fn resolution(
                         thread_id,
                         thread_slot,
                     );
+                    super::phase_prof::add(super::phase_prof::POLL, t);
                 }
             }
         }
 
+        let t = super::phase_prof::now();
         drain_and_process_batch_queue(
             &shared,
             &mut batch_buf,
@@ -119,6 +125,7 @@ pub(super) fn resolution(
             thread_id,
             thread_slot,
         );
+        super::phase_prof::add(super::phase_prof::BQ, t);
 
         // Check shutdown immediately after blocking call returns
         if shared.shutdown_flag.load(Ordering::Acquire) {
@@ -140,6 +147,7 @@ pub(super) fn resolution(
         }
 
         let start_proc = shared.telemetry.measure_start();
+        let t = super::phase_prof::now();
         // Check slots for completion
         check_slots(
             &shared,
@@ -151,9 +159,21 @@ pub(super) fn resolution(
             &mut cached_slots,
             &mut slots_dirty,
         );
+        super::phase_prof::add(super::phase_prof::CHECKSLOTS, t);
+        if super::phase_prof::trace_on() {
+            // sub 11: slow check_slots call (slot completion / release work), a = ns.
+            let dt = super::phase_prof::now().wrapping_sub(t) / 2; // TSC @ ~2.0 GHz -> ns
+            if dt > 50_000 {
+                super::phase_prof::trace_admit(11, thread_id, dt, 0);
+            }
+        }
         shared
             .telemetry
             .record_timing(start_proc, thread_slot, "Slot Check", usize::MAX);
+        super::phase_prof::add(super::phase_prof::LOOP, it0);
+        if super::phase_prof::work_mark() == wm0 {
+            super::phase_prof::add(super::phase_prof::IDLE, it0);
+        }
 
         // Check for completion of all frames
         let completed_frames = shared
@@ -165,6 +185,12 @@ pub(super) fn resolution(
             tracing::debug!(thread_id, "all frames completed, exiting resolution loop");
             break;
         }
+    }
+    super::phase_prof::dump(thread_id);
+    if thread_id == 0 {
+        super::phase_prof::dump_workers();
+        super::phase_prof::dump_spin_wait();
+        super::phase_prof::trace_dump();
     }
 }
 
@@ -423,6 +449,8 @@ fn drain_and_process_batch_queue(
         );
         // Route through the pluggable resolution strategy (the batch-protocol seam).
         // The default MultiSlotBatchStrategy delegates to process_batch_resolution.
+        let t = super::phase_prof::now();
+        let n = comp_batch.len() as u64;
         let _ = shared.exec.resolution_strategy.drive_batch(
             shared,
             &mut comp_batch,
@@ -433,6 +461,7 @@ fn drain_and_process_batch_queue(
             frame_slot_activity,
             start_ns_batch,
         );
+        super::phase_prof::add_n(super::phase_prof::BQDRIVE, t, n);
         // comp_batch is now empty (drained); capacity is retained for the next call.
     });
     shared

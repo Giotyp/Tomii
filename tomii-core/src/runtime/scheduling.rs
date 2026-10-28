@@ -139,6 +139,7 @@ pub(super) fn send_to_scheduler(
             let mut current = node_info;
             let mut current_func = func_ptr;
             let mut first = true;
+            let mut spawn_ns = spawn_ns;
             loop {
                 let args = if first { pre_built_args.clone() } else { None };
                 first = false;
@@ -146,6 +147,9 @@ pub(super) fn send_to_scheduler(
                     Some(next) => {
                         current_func = sctx.cache.node_cache[next.id as usize].func_ptr;
                         current = next;
+                        if super::phase_prof::enabled() {
+                            spawn_ns = shared_clone.telemetry.base_instant.elapsed().as_nanos();
+                        }
                     }
                     None => break,
                 }
@@ -180,10 +184,14 @@ pub(super) fn run_node_desc(shared: &Arc<SharedData>, desc: crate::custom_schedu
     let mut current = desc.node;
     let mut current_func = desc.func;
     // Typed spawns never carry pre-built args (post-nodes stay on the boxed path).
-    while let Some(next) = execute_task(shared, &sctx, current_func, &current, None, desc.spawn_ns)
-    {
+    let mut spawn_ns = desc.spawn_ns;
+    while let Some(next) = execute_task(shared, &sctx, current_func, &current, None, spawn_ns) {
         current_func = sctx.cache.node_cache[next.id as usize].func_ptr;
         current = next;
+        // Inline continuation starts now; don't charge the predecessor's run as queue wait.
+        if super::phase_prof::enabled() {
+            spawn_ns = shared.telemetry.base_instant.elapsed().as_nanos();
+        }
     }
 }
 
@@ -202,6 +210,13 @@ pub(super) fn dispatch_nodes(
 ) {
     let start_time = sctx.telemetry.measure_start();
     let start_ns = sctx.telemetry.base_instant.elapsed().as_nanos();
+    let t = super::phase_prof::now();
+    if super::phase_prof::trace_on() && !nodes_to_schedule.is_empty() {
+        // sub 9: dispatch_nodes call: frame of first node, a=n nodes, b=first node id
+        let n0 = &nodes_to_schedule[0];
+        let f0 = shared.slot_data.frame_id[n0.slot].load(Ordering::Relaxed);
+        super::phase_prof::trace_admit(9, f0, nodes_to_schedule.len() as u64, n0.id as u64);
+    }
 
     // Schedule Task - args will be built in the worker thread.
     // Reuse thread-local buffer to avoid vec![None; N] heap allocation per flush.
@@ -212,6 +227,11 @@ pub(super) fn dispatch_nodes(
         args_buf.resize(n, None);
         send_to_scheduler(shared, sctx, nodes_to_schedule, &args_buf, None);
     });
+    super::phase_prof::add_n(
+        super::phase_prof::DISPATCH,
+        t,
+        nodes_to_schedule.len() as u64,
+    );
 
     sctx.telemetry
         .record_timing(start_time, thread_slot, "Preparation", usize::MAX);

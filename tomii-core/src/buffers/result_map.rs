@@ -84,6 +84,11 @@ pub struct LockFreeResultMap {
     node_factors: Vec<usize>,
     nodes_len: usize,
     slots: usize,
+    /// Set by [`LockFreeResultMap::with_deferred_reclaim`]: detached slot results are
+    /// sent here and dropped on a background thread instead of inline.
+    // Boxes on purpose: the reclaimer frees the result boxes themselves.
+    #[allow(clippy::vec_box)]
+    reclaim: Option<crossbeam_channel::Sender<Vec<Box<tomii_types::CmTypes>>>>,
 }
 
 impl LockFreeResultMap {
@@ -119,7 +124,29 @@ impl LockFreeResultMap {
             node_factors,
             nodes_len,
             slots,
+            reclaim: None,
         }
+    }
+
+    /// Free completed-slot results on a background thread pinned to `core`.
+    /// [`reinit_slot`](Self::reinit_slot) still clears the slot synchronously; only
+    /// dropping the detached results moves off the caller (a completed frame can hold
+    /// ~1 ms of frees, e.g. hundreds of decoded packets allocated on other threads).
+    pub fn with_deferred_reclaim(mut self, core: usize) -> Self {
+        let (tx, rx) = crossbeam_channel::unbounded::<Vec<Box<tomii_types::CmTypes>>>();
+        let spawned = std::thread::Builder::new()
+            .name("reclaimer".into())
+            .spawn(move || {
+                core_affinity::set_for_current(core_affinity::CoreId { id: core });
+                for batch in rx {
+                    drop(batch);
+                }
+            });
+        match spawned {
+            Ok(_) => self.reclaim = Some(tx),
+            Err(e) => tracing::warn!(error = %e, "reclaimer thread spawn failed; freeing inline"),
+        }
+        self
     }
 
     #[inline]
@@ -248,19 +275,35 @@ impl LockFreeResultMap {
         let start = slot * self.per_slot_size;
         let end = start + self.per_slot_size;
 
+        // The slot is always cleared here (callers rely on that before releasing it);
+        // with deferred reclaim only the *freeing* of the detached results moves to a
+        // background thread. Freeing a frame's results (e.g. ~900 decoded 8 KB packets
+        // allocated on receiver threads) costs ~1 ms, which otherwise stalls the
+        // resolution thread that completed the frame — and its ingest shard with it.
+        let reclaim_tx = self.reclaim.as_ref();
+        let mut detached: Vec<Box<tomii_types::CmTypes>> = Vec::new();
         for idx in start..end {
             let old_tag = self.inline_tag[idx].swap(0, Ordering::SeqCst);
             if old_tag == TAG_BOXED {
                 // SAFETY: the SeqCst swap gives exclusive ownership of the boxed ptr.
                 let old_ptr = self.buffer[idx].swap(null_mut(), Ordering::SeqCst);
                 if !old_ptr.is_null() {
-                    unsafe {
-                        drop(Box::from_raw(old_ptr));
+                    let b = unsafe { Box::from_raw(old_ptr) };
+                    if reclaim_tx.is_some() {
+                        detached.push(b);
+                    } else {
+                        drop(b);
                     }
                 }
             }
             // Inline primitives (old_tag 1-14): no heap allocation to free.
             // `inline_val` can be left with stale bits; `inline_tag = 0` gates access.
+        }
+        if let Some(tx) = reclaim_tx {
+            if !detached.is_empty() {
+                // On a closed channel the Vec comes back and is dropped here.
+                let _ = tx.send(detached);
+            }
         }
     }
 }

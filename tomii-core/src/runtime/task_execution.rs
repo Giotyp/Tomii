@@ -250,10 +250,57 @@ pub(super) fn execute_task(
         }
     }
 
-    if node_info.bulk_count > 1 {
-        return execute_bulk_task(shared, sctx, func, node_info);
+    let prof_t0 = if super::phase_prof::enabled() {
+        shared.telemetry.base_instant.elapsed().as_nanos()
+    } else {
+        0
+    };
+    let trace_t0 = if super::phase_prof::trace_on() {
+        let base_now = shared.telemetry.base_instant.elapsed().as_nanos();
+        let m = super::phase_prof::mono_ns();
+        (
+            m,
+            m.saturating_sub(base_now.saturating_sub(spawn_ns) as u64),
+        )
+    } else {
+        (0, 0)
+    };
+    let next = if node_info.bulk_count > 1 {
+        execute_bulk_task(shared, sctx, func, node_info)
+    } else {
+        execute_single_task(shared, sctx, func, node_info, pre_built_args, spawn_ns)
+    };
+    if super::phase_prof::enabled() {
+        let t1 = shared.telemetry.base_instant.elapsed().as_nanos();
+        if node_info.bulk_count <= 1 {
+            super::phase_prof::worker_kernel(node_info.id as usize);
+        }
+        super::phase_prof::worker_task(
+            node_info.id as usize,
+            node_info.bulk_count.max(1) as u64,
+            prof_t0.saturating_sub(spawn_ns) as u64,
+            t1.saturating_sub(prof_t0) as u64,
+        );
     }
-    execute_single_task(shared, sctx, func, node_info, pre_built_args, spawn_ns)
+    if trace_t0.0 != 0 {
+        if node_info.bulk_count <= 1 {
+            super::phase_prof::trace_slow_task(
+                node_info.id as usize,
+                trace_t0.0,
+                super::phase_prof::mono_ns(),
+            );
+        }
+        super::phase_prof::trace_task(
+            node_info.id as usize,
+            node_info.bulk_count.max(1),
+            shared.slot_data.frame_id[node_info.slot].load(std::sync::atomic::Ordering::Relaxed),
+            node_info.index,
+            trace_t0.1,
+            trace_t0.0,
+            super::phase_prof::mono_ns(),
+        );
+    }
+    next
 }
 
 /// Bulk execution path: run `bulk_count` consecutive instances in a tight loop.
@@ -478,6 +525,7 @@ fn execute_single_task(
                 if stale {
                     return None::<CmTypes>;
                 }
+                super::phase_prof::mark(0);
                 Some(func(buf))
             })
         } else {
@@ -499,6 +547,7 @@ fn execute_single_task(
                     buf.clear();
                     return None::<CmTypes>;
                 }
+                super::phase_prof::mark(0);
                 let r = func(&buf);
                 buf.clear();
                 Some(r)
@@ -518,6 +567,7 @@ fn execute_single_task(
         }
     };
 
+    super::phase_prof::mark(1);
     let node_name = &sctx.cache.node_cache[node_info.id as usize].name;
     sctx.telemetry
         .record_timing(start_time, node_info.slot, node_name, worker_id);

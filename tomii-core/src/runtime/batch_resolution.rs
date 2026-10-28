@@ -76,8 +76,12 @@ pub(super) fn process_batch_inner(
         let node_cache_entry = &rctx.cache.node_cache[node_id_usize];
 
         if node_cache_entry.is_condition {
-            let prev_cond =
-                rctx.slots.pending_cond_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
+            // `bulk_count` instances complete in one entry (1 for every entry that
+            // reaches this path today — only DR3's coalesced network entries carry
+            // bulk_count > 1; see `coalesce_network_batch`). Mirrors the worker path
+            // (worker_resolve_successors), which already decrements by bulk_count.
+            let prev_cond = rctx.slots.pending_cond_tasks[node_info.slot]
+                .fetch_sub(node_info.bulk_count, Ordering::SeqCst);
             if prev_cond <= 10 || prev_cond.is_multiple_of(100) {
                 print_debug(|| {
                     format!(
@@ -89,8 +93,10 @@ pub(super) fn process_batch_inner(
             }
         } else {
             // Initial (root) nodes decrement too — counted in total_tasks so completion
-            // waits for every root instance (see init.rs).
-            let _ = rctx.slots.pending_tasks[node_info.slot].fetch_sub(1, Ordering::SeqCst);
+            // waits for every root instance (see init.rs). `bulk_count` instances in one
+            // entry (DR3 coalesced network entries; 1 for everything else).
+            let _ = rctx.slots.pending_tasks[node_info.slot]
+                .fetch_sub(node_info.bulk_count, Ordering::SeqCst);
         }
 
         // Phase 3: Walk the flattened successor edges (no lookups, no allocations)
@@ -142,12 +148,17 @@ pub(super) fn process_batch_inner(
             // Decrement dependency counter; ready indices written into `ready`.
             // For 1:1 non-barrier deps, `decrement_and_collect_ready` computes
             // the specific successor instance so its result is guaranteed available.
+            // `bulk_count` covers a coalesced network run [index, index+bulk_count)
+            // (DR3); 1 for every other entry. decrement_and_collect_ready intersects
+            // the range with the edge's index filter itself, so a filtered edge stays
+            // correct under bulk — do NOT pre-skip on the chunk start (findings #21
+            // defect B). This mirrors the worker path's bulk completion exactly.
             decrement_and_collect_ready(
                 &rctx,
                 node_info.slot,
                 node_info.index,
                 edge,
-                1,
+                node_info.bulk_count,
                 slot_gen,
                 ready,
             );
@@ -325,5 +336,73 @@ fn dispatch_condition_successor(
             scheduled_succ_info.index,
             slot_gen,
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Loom model: DR3 bulk network completion — fire-exactly-once (care-point 3).
+// ---------------------------------------------------------------------------
+//
+// DR3 coalesces B contiguous node-0 cell completions into ONE batch entry whose
+// Phase-3 decrement is a single fetch_sub(B) on each successor's dependency
+// counter (via decrement_and_collect_ready with bulk_count = B), instead of B
+// individual fetch_sub(1)s. The invariant: that is equivalent — the successor
+// still fires EXACTLY ONCE, under every interleaving with the OTHER predecessors'
+// (worker-side) individual decrements on the same counter. The real counter is
+// the generational `remaining_deps` in resolution_state; this models its
+// essential "fire when a decrement reaches zero" semantics with plain atomics.
+#[cfg(loom)]
+mod loom_dr3 {
+    use loom::sync::atomic::{AtomicUsize, Ordering};
+    use loom::sync::{Arc, RwLock};
+
+    #[test]
+    fn bulk_decrement_fires_exactly_once() {
+        loom::model(|| {
+            const B: usize = 2; // node-0 bulk contribution (small for loom tractability)
+            const M: usize = 2; // other predecessors, each decrementing individually
+            let remaining = Arc::new(AtomicUsize::new(B + M));
+            let fires = Arc::new(RwLock::new(0usize));
+
+            // Resolution thread: ONE bulk decrement of B (DR3 coalesced entry).
+            let t_bulk = {
+                let (rem, fires) = (Arc::clone(&remaining), Arc::clone(&fires));
+                loom::thread::spawn(move || {
+                    let prev = rem.fetch_sub(B, Ordering::AcqRel);
+                    if prev == B {
+                        // this decrement brought the counter to exactly zero
+                        *fires.write().unwrap() += 1;
+                    }
+                })
+            };
+            // Worker threads: the other predecessors, M individual decrements.
+            let workers: Vec<_> = (0..M)
+                .map(|_| {
+                    let (rem, fires) = (Arc::clone(&remaining), Arc::clone(&fires));
+                    loom::thread::spawn(move || {
+                        let prev = rem.fetch_sub(1, Ordering::AcqRel);
+                        if prev == 1 {
+                            *fires.write().unwrap() += 1;
+                        }
+                    })
+                })
+                .collect();
+
+            t_bulk.join().unwrap();
+            for w in workers {
+                w.join().unwrap();
+            }
+
+            assert_eq!(
+                remaining.load(Ordering::Acquire),
+                0,
+                "dependency counter must reach zero"
+            );
+            assert_eq!(
+                *fires.read().unwrap(),
+                1,
+                "successor must fire exactly once (bulk == individual decrements)"
+            );
+        });
     }
 }

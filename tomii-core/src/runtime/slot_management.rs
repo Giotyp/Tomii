@@ -11,7 +11,7 @@
 //! This module does **not** own the lifecycle orchestration logic (what to do *after* a slot
 //! completes) — that lives in `slot_lifecycle`.
 
-use super::shared_data::{SharedData, SlotState};
+use super::shared_data::{SharedData, SlotState, FRAME_SLOT_EMPTY};
 use crate::buffers::*;
 use crate::debug::print_debug;
 use crate::graph::Graph;
@@ -47,6 +47,12 @@ pub(super) fn process_slot_completion(shared: &Arc<SharedData>, slot: usize) -> 
             .count()
     };
 
+    super::phase_prof::trace_admit(
+        6,
+        shared.slot_data.frame_id[slot].load(Ordering::Relaxed),
+        slot as u64,
+        0,
+    );
     // Increment global completion counter
     let completed_frames = shared
         .telemetry
@@ -138,6 +144,45 @@ pub fn dump_slot_check() {
     }
 }
 
+/// Lock-free lookup of the slot a `frame` is already assigned to, via the
+/// `frame_slot_map` cache. Returns `None` on a vacant cell or a frame-tag
+/// mismatch (stale aliased entry) — the caller then takes the write-locked slow
+/// path.
+#[inline]
+fn frame_slot_lookup(shared: &Arc<SharedData>, frame: usize) -> Option<usize> {
+    let map = &shared.slot_data.frame_slot_map;
+    let packed = map[frame & (map.len() - 1)].load(Ordering::Acquire);
+    if packed != FRAME_SLOT_EMPTY && gen_unpack_gen(packed) == frame as u32 {
+        Some(gen_unpack_val(packed) as usize)
+    } else {
+        None
+    }
+}
+
+/// Publish a `frame -> slot` mapping into the lock-free cache. MUST be called
+/// while holding `running_frames.write()`, right after the `running_frames.push`,
+/// so the cache cannot diverge from `running_frames`.
+#[inline]
+pub(super) fn frame_slot_publish(shared: &Arc<SharedData>, frame: usize, slot: usize) {
+    let map = &shared.slot_data.frame_slot_map;
+    map[frame & (map.len() - 1)].store(gen_pack(frame as u32, slot as u32), Ordering::Release);
+}
+
+/// Clear a `frame`'s cache cell when the frame leaves `running_frames`. MUST be
+/// called under `running_frames.write()`. Clears only if the cell still holds
+/// THIS frame: a later frame aliasing the same index would already have
+/// overwritten it (possible only once `frame` is gone, since `len >= 2*slots`
+/// keeps all live frames in distinct cells).
+#[inline]
+fn frame_slot_clear(shared: &Arc<SharedData>, frame: usize) {
+    let map = &shared.slot_data.frame_slot_map;
+    let idx = frame & (map.len() - 1);
+    let packed = map[idx].load(Ordering::Acquire);
+    if packed != FRAME_SLOT_EMPTY && gen_unpack_gen(packed) == frame as u32 {
+        map[idx].store(FRAME_SLOT_EMPTY, Ordering::Release);
+    }
+}
+
 /// Assign `frame` to an available slot and return `(slot_id, newly_activated)`.
 ///
 /// Prefers the `last_assigned` slot (sequential assignment keeps slot 0, 1, 2, … in order so
@@ -154,7 +199,20 @@ pub(super) fn assign_frame_to_available_slot(
     shared: &Arc<SharedData>,
     frame: usize,
 ) -> Option<(usize, bool)> {
-    // Get write access to have updated view of running frames
+    // Lock-free already-assigned fast path. The common case by far: every packet
+    // after a frame's first finds the frame already mapped to a slot. Serve it
+    // without the per-packet `running_frames.write()` + O(slots) scan this
+    // function used to take unconditionally — that write lock was the serial
+    // bottleneck throttling admission on a single resolution thread.
+    if let Some(slot_id) = frame_slot_lookup(shared, frame) {
+        return Some((slot_id, false)); // Already assigned, not newly activated
+    }
+
+    // Slow path (cache miss): take the write lock and RE-SCAN `running_frames`.
+    // This re-scan is the authoritative first-packet-wins check — two threads
+    // racing a frame's FIRST packet both miss the lock-free cache, serialise
+    // here, and the loser finds the frame already pushed by the winner, so only
+    // one slot is ever activated per frame.
     let mut running_frames = shared.slot_data.running_frames.write();
 
     // Check if this frame is already mapped to a slot
@@ -176,6 +234,7 @@ pub(super) fn assign_frame_to_available_slot(
             .fetch_or(1u64 << last_slot_assigned, Ordering::Release);
         shared.slot_data.needs_check[last_slot_assigned].store(true, Ordering::Release);
         running_frames.push((frame, last_slot_assigned));
+        frame_slot_publish(shared, frame, last_slot_assigned);
         shared.slot_data.frame_id[last_slot_assigned].store(frame, Ordering::Relaxed);
         print_debug(|| {
             format!(
@@ -228,6 +287,7 @@ pub(super) fn assign_frame_to_available_slot(
                     .fetch_or(1u64 << slot_id, Ordering::Release);
                 shared.slot_data.needs_check[slot_id].store(true, Ordering::Release);
                 running_frames.push((frame, slot_id));
+                frame_slot_publish(shared, frame, slot_id);
                 shared.slot_data.frame_id[slot_id].store(frame, Ordering::Relaxed);
                 shared
                     .slot_data
@@ -253,6 +313,7 @@ pub(super) fn assign_frame_to_available_slot(
 
             *state = SlotState::Buffering; // Mark slot as Buffering
             running_frames.push((frame, slot_id));
+            frame_slot_publish(shared, frame, slot_id);
             shared.slot_data.frame_id[slot_id].store(frame, Ordering::Relaxed);
             shared
                 .slot_data
@@ -323,6 +384,7 @@ pub(super) fn release_and_activate_next(
     shared.slot_data.frame_id[slot].store(usize::MAX, Ordering::Relaxed);
     if let Some(pos) = running_frames.iter().position(|&(_, s_id)| s_id == slot) {
         let (frame_id, _) = running_frames.remove(pos);
+        frame_slot_clear(shared, frame_id);
         print_debug(|| {
             format!(
                 "Released slot {} from frame {} (had state: {:?})",
@@ -679,5 +741,93 @@ mod generation_tests {
             vec![0],
             "non-wrap bump must leave the in-flight decrement count untouched"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Loom model: the `frame_slot_map` lock-free fast path vs. activation (QW2).
+// ---------------------------------------------------------------------------
+//
+// `assign_frame_to_available_slot` serves already-assigned frames from the
+// lock-free `frame_slot_map` cell and takes `running_frames.write()` only on a
+// cache miss. The invariant QW2 must preserve is FIRST-PACKET-WINS: when a
+// frame's first packet is admitted concurrently by two resolution threads, both
+// miss the cache, yet exactly ONE slot is ever activated for that frame.
+//
+// This model reconstructs that path with loom primitives — cell load (Acquire)
+// -> miss -> running_frames.write() -> authoritative re-scan -> activate + push
+// + cell.store (Release) — mirroring `frame_slot_lookup`/`frame_slot_publish`
+// and the slow-path re-scan. loom explores every interleaving, including the
+// one where a thread fully activates and publishes before the other loads the
+// cell (the latter must then observe the published slot via the fast path and
+// NOT re-activate).
+#[cfg(loom)]
+mod loom_frame_slot {
+    use loom::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use loom::sync::{Arc, RwLock};
+
+    const EMPTY: u64 = u64::MAX;
+    const FRAME: u64 = 1;
+    const SLOT: u64 = 0;
+
+    fn pack(frame: u64, slot: u64) -> u64 {
+        (frame << 32) | slot
+    }
+    fn unpack_frame(p: u64) -> u64 {
+        p >> 32
+    }
+    fn unpack_slot(p: u64) -> u64 {
+        p & 0xFFFF_FFFF
+    }
+
+    #[test]
+    fn frame_slot_fast_path_first_packet_wins() {
+        loom::model(|| {
+            let cell = Arc::new(AtomicU64::new(EMPTY));
+            let running_frames: Arc<RwLock<Vec<(u64, u64)>>> = Arc::new(RwLock::new(Vec::new()));
+            let activations = Arc::new(AtomicUsize::new(0));
+
+            let mk = || {
+                let (cell, rf, act) = (
+                    Arc::clone(&cell),
+                    Arc::clone(&running_frames),
+                    Arc::clone(&activations),
+                );
+                loom::thread::spawn(move || -> (u64, bool) {
+                    // Lock-free fast path (frame_slot_lookup).
+                    let packed = cell.load(Ordering::Acquire);
+                    if packed != EMPTY && unpack_frame(packed) == FRAME {
+                        return (unpack_slot(packed), false);
+                    }
+                    // Slow path: authoritative re-scan under the write lock.
+                    let mut rf = rf.write().unwrap();
+                    if let Some(&(_, slot)) = rf.iter().find(|&&(f, _)| f == FRAME) {
+                        return (slot, false);
+                    }
+                    // Activate: push then publish the cell (frame_slot_publish).
+                    act.fetch_add(1, Ordering::Relaxed);
+                    rf.push((FRAME, SLOT));
+                    cell.store(pack(FRAME, SLOT), Ordering::Release);
+                    (SLOT, true)
+                })
+            };
+
+            let t1 = mk();
+            let t2 = mk();
+            let (s1, a1) = t1.join().unwrap();
+            let (s2, a2) = t2.join().unwrap();
+
+            // First-packet-wins: the frame is activated exactly once.
+            assert_eq!(
+                activations.load(Ordering::Relaxed),
+                1,
+                "frame activated more than once (first-packet-wins violated)"
+            );
+            // Both admitters resolve to the same slot.
+            assert_eq!(s1, SLOT);
+            assert_eq!(s2, SLOT);
+            // Exactly one admitter reports the newly-activated transition.
+            assert!(a1 ^ a2, "exactly one admitter must report newly-activated");
+        });
     }
 }

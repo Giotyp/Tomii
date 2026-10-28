@@ -13,7 +13,9 @@
 //! "what happens when a slot completes" separate from "how slots are allocated and released".
 
 use super::shared_data::{ExecCtx, SharedData, SlotData, SlotState};
-use super::slot_management::{bump_slot_generation, initial_nodes, process_slot_completion};
+use super::slot_management::{
+    bump_slot_generation, frame_slot_publish, initial_nodes, process_slot_completion,
+};
 use crate::debug::print_debug;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -392,6 +394,9 @@ fn restart_slot_nonnetwork(
             .fetch_or(1u64 << slot, Ordering::Release);
         shared.slot_data.frame_id[slot].store(next_frame_id, Ordering::Relaxed);
         running_frames.push((next_frame_id, slot));
+        // Keep the lock-free cache a faithful mirror of every running_frames push
+        // (non-network mode never reads it, but the invariant stays auditable).
+        frame_slot_publish(shared, next_frame_id, slot);
     }
     // slots_dirty was already set by the caller after process_slot_completion.
 

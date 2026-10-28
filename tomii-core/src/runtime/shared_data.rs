@@ -134,6 +134,20 @@ pub struct RuntimeConfig {
     /// When true, disable the 1:1 fanout-bulk dispatch path (Upgrade 5).
     /// Produces bit-identical output to the per-cell path; used for verification.
     pub no_fanout_bulk: bool,
+    /// Network graphs: receiver threads run the graph's packet-extract function, so
+    /// resolution threads only admit. The extract function must be thread-safe.
+    pub rx_decode: bool,
+    /// Network graphs with `system_threads > 1`: one ingest channel per resolution
+    /// thread (receiver `i` feeds channel `i % n`) instead of one shared channel.
+    pub ingest_shards: bool,
+    /// Resolve and dispatch admitted packets every N packets within one poll, so a
+    /// large backlog does not delay all of its tasks until the poll ends (0 = once
+    /// per poll).
+    pub dispatch_chunk: usize,
+    /// Free completed-slot results on a background thread pinned to this core. The
+    /// slot is still cleared before release; only the freeing moves off the
+    /// resolution thread. `None` frees inline.
+    pub reclaim_core: Option<usize>,
 }
 
 impl Default for RuntimeConfig {
@@ -157,9 +171,19 @@ impl Default for RuntimeConfig {
             spin_wait: SpinWaitConfig::default(),
             batch: BatchConfig::default(),
             no_fanout_bulk: false,
+            rx_decode: false,
+            ingest_shards: false,
+            dispatch_chunk: 0,
+            reclaim_core: None,
         }
     }
 }
+
+/// Sentinel for an empty `SlotData::frame_slot_map` cell.
+///
+/// `gen_pack(frame_low, slot)` can never collide with this for a live entry:
+/// that would require `slot == u32::MAX`, but `slot < config.slots <= 64`.
+pub(crate) const FRAME_SLOT_EMPTY: u64 = u64::MAX;
 
 /// All per-slot atomics and lock-protected slot state.
 pub struct SlotData {
@@ -186,6 +210,21 @@ pub struct SlotData {
     pub fanout_bulk_arrived: Arc<Vec<Vec<AtomicU64>>>,
     pub states: Arc<RwLock<Vec<SlotState>>>,
     pub running_frames: Arc<RwLock<Vec<(usize, usize)>>>,
+    /// Lock-free cache of the `running_frames` map, serving the already-assigned
+    /// fast path in `assign_frame_to_available_slot` (the overwhelmingly common
+    /// case: every packet after a frame's first). Indexed `frame & (len - 1)`
+    /// where `len` is a power of two `>= 2 * slots`; each cell is
+    /// `gen_pack(frame_low_u32, slot_u32)`, or [`FRAME_SLOT_EMPTY`] when vacant.
+    ///
+    /// Published and cleared **only** under `running_frames.write()`, so it stays
+    /// consistent with `running_frames` under that lock. Lock-free readers
+    /// re-validate the packed frame tag (cheap protection against `frame`/`frame +
+    /// len` index aliasing) and fall through to the write-locked slow path on any
+    /// miss — where the authoritative `running_frames` re-scan preserves
+    /// first-packet-wins activation. `len >= 2 * slots` guarantees no two
+    /// simultaneously-live frames (at most `slots` of them, bounded by the
+    /// admission window) ever share a cell.
+    pub frame_slot_map: Arc<Vec<AtomicU64>>,
     /// Per-slot buffering: holds ready nodes with packet data waiting for slot activation.
     #[allow(clippy::type_complexity)]
     pub buffers: Arc<RwLock<Vec<Vec<(NodeInfo, Option<CmTypes>)>>>>,
@@ -211,6 +250,10 @@ pub struct NetworkInfra {
     /// Flume MPSC channel from network receivers to resolution threads.
     pub packet_sender: Sender<PacketMessage>,
     pub packet_receiver: Receiver<PacketMessage>,
+    /// Sharded ingest (TOMII_INGEST_SHARDS=1, system_threads > 1): one channel per
+    /// resolution thread; receiver thread i feeds shard i % n, resolution thread t
+    /// drains shard t. Empty = the single shared channel above.
+    pub ingest_shards: Vec<(Sender<PacketMessage>, Receiver<PacketMessage>)>,
     pub receiver_sockets: Arc<Vec<NetworkSocket>>,
     pub packet_drop_counters: Arc<Vec<AtomicUsize>>,
     /// Per-socket buffer return channels: resolution thread → receiver thread.

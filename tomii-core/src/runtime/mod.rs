@@ -26,6 +26,7 @@ mod node_cache;
 mod ordering;
 #[cfg(feature = "network")]
 mod packet_processing;
+pub(crate) mod phase_prof;
 mod reporting;
 mod resolution_loop;
 /// Pluggable resolution-strategy trait and the default `MultiSlotBatchStrategy`.
@@ -63,6 +64,7 @@ pub use dump::StateDumper;
 pub use resolution_strategy::{BatchOutcome, MultiSlotBatchStrategy, ResolutionStrategy};
 pub use shared_data::SchedCtx;
 pub(crate) use shared_data::SharedData;
+pub(crate) use shared_data::FRAME_SLOT_EMPTY;
 pub use shared_data::{BatchConfig, RuntimeConfig, SpinWaitConfig};
 pub(crate) use shared_data::{
     BatchQueueRx, BatchQueueTx, ExecCtx, GraphCache, SlotData, SlotState, Telemetry,
@@ -385,10 +387,16 @@ impl TomiiRtBuilder {
         // --- Assemble SharedData ---
         // Allocate one extra slot beyond the frame slots to cover post-node writes, which
         // use slot index `slots + system_threads` (see scheduling.rs `frame_use`).
-        let node_results = Arc::new(crate::buffers::LockFreeResultMap::new(
+        let mut node_results_map = crate::buffers::LockFreeResultMap::new(
             &graph.nodes,
             slots + self.config.system_threads + 1,
-        ));
+        );
+        if let Some(core) = self.config.reclaim_core {
+            node_results_map = node_results_map.with_deferred_reclaim(core);
+        }
+        let node_results = Arc::new(node_results_map);
+        #[cfg(feature = "network")]
+        let ingest_shards_enabled = self.config.ingest_shards;
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
         #[cfg(feature = "network")]
@@ -426,6 +434,12 @@ impl TomiiRtBuilder {
                 fanout_bulk_arrived: Arc::new(fanout_bulk_arrived),
                 states: Arc::new(RwLock::new(vec![SlotState::Inactive; slots])),
                 running_frames: Arc::new(RwLock::new(Vec::new())),
+                frame_slot_map: {
+                    // Power-of-two length >= 2*slots so the index mask is a bit-and
+                    // and no two simultaneously-live frames alias the same cell.
+                    let len = (2 * slots).next_power_of_two();
+                    Arc::new((0..len).map(|_| AtomicU64::new(FRAME_SLOT_EMPTY)).collect())
+                },
                 buffers: slot_buffers,
                 last_assigned: Arc::new(AtomicUsize::new(0)),
             },
@@ -434,6 +448,15 @@ impl TomiiRtBuilder {
             net: NetworkInfra {
                 frame_packets: AtomicUsize::new(0),
                 receive_finished: Arc::new(AtomicBool::new(false)),
+                ingest_shards: {
+                    let n = if ingest_shards_enabled && system_threads > 1 {
+                        system_threads
+                    } else {
+                        0
+                    };
+                    let cap = packet_sender.capacity().unwrap_or(65536);
+                    (0..n).map(|_| flume::bounded(cap)).collect()
+                },
                 packet_sender,
                 packet_receiver,
                 receiver_sockets,
