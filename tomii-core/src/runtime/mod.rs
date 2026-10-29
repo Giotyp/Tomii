@@ -114,6 +114,20 @@ pub struct TomiiRtBuilder {
     record: bool,
 }
 
+/// A network graph needs at least one receiver thread; non-network graphs run
+/// with none (`run_graph` zeroes `receiver_threads` for them).
+fn check_receiver_threads(
+    has_network: bool,
+    receiver_threads: usize,
+) -> Result<(), crate::BuildError> {
+    if has_network && receiver_threads == 0 {
+        return Err(crate::BuildError::InvalidConfig(
+            "receiver_threads must be >= 1 for a graph with a network_config (got 0)".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl TomiiRtBuilder {
     /// Create a builder from a compiled graph IR and scheduler.
     ///
@@ -288,6 +302,10 @@ impl TomiiRtBuilder {
                 "batch_queue_capacity must be > 0 (got 0)".to_string(),
             ));
         }
+        check_receiver_threads(
+            self.compiled.graph.network_config().is_some(),
+            self.config.receiver_threads,
+        )?;
 
         // --- Destructure compiled graph IR ---
         let GraphCompiled {
@@ -706,5 +724,17 @@ impl TomiiRt {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod receiver_threads_tests {
+    use super::check_receiver_threads;
+
+    #[test]
+    fn network_graph_rejects_zero_receivers() {
+        assert!(check_receiver_threads(true, 0).is_err());
+        assert!(check_receiver_threads(true, 1).is_ok());
+        assert!(check_receiver_threads(false, 0).is_ok());
     }
 }
