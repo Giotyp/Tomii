@@ -142,7 +142,7 @@ _KNOB_DOMAINS: Dict[str, Dict[str, Any]] = {
     "batching_size": {"kind": "int", "min": 1, "max": 512, "scale": "pow2"},
     "batching_limit": {"kind": "int", "min": 1, "max": 8, "scale": "pow2"},
     "system_threads": {"kind": "int", "min": 1, "max": 4, "scale": "linear"},
-    "receiver_threads": {"kind": "int", "min": 0, "max": 4, "scale": "linear"},
+    "receiver_threads": {"kind": "int", "min": 1, "max": 4, "scale": "linear"},
 }
 
 _KNOB_SEARCH_HINTS: Dict[str, str] = {
