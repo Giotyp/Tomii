@@ -415,6 +415,7 @@ impl TomiiRtBuilder {
         let node_results = Arc::new(node_results_map);
         #[cfg(feature = "network")]
         let ingest_shards_enabled = self.config.ingest_shards;
+        let join_stream = self.config.join_stream;
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
         #[cfg(feature = "network")]
@@ -490,6 +491,7 @@ impl TomiiRtBuilder {
                 ),
                 pending_frames: parking_lot::Mutex::new(std::collections::BTreeMap::new()),
                 pending_count: AtomicUsize::new(0),
+                frame_id_base: AtomicUsize::new(if join_stream { usize::MAX } else { 0 }),
             },
             exec: ExecCtx {
                 scheduler: Arc::new(self.scheduler),

@@ -26,6 +26,7 @@ class RunConfig:
     # ── Network ingest ───────────────────────────────────────────────────────
     rx_decode: bool = False
     ingest_shards: bool = False
+    join_stream: bool = False
     dispatch_chunk: int = 0
     reclaim_core: Optional[int] = None
     # ── Host / memory ────────────────────────────────────────────────────────
@@ -107,6 +108,8 @@ class RunConfig:
             args.append("--rx-decode")
         if self.ingest_shards:
             args.append("--ingest-shards")
+        if self.join_stream:
+            args.append("--join-stream")
         if self.dispatch_chunk:
             args += ["--dispatch-chunk", str(self.dispatch_chunk)]
         if self.reclaim_core is not None:

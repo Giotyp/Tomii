@@ -44,6 +44,7 @@ _BOOL_FLAGS: Dict[str, str] = {
     "no_fanout_bulk": "--no-fanout-bulk",
     "rx_decode": "--rx-decode",
     "ingest_shards": "--ingest-shards",
+    "join_stream": "--join-stream",
     "no_malloc_tune": "--no-malloc-tune",
 }
 
@@ -82,6 +83,7 @@ _KNOB_DESCRIPTIONS: Dict[str, str] = {
     "inline_continuation": "Run single-successor tasks inline (reduces scheduling overhead)",
     "rx_decode": "Network graphs: run the packet-extract function on receiver threads",
     "ingest_shards": "Network graphs: one ingest channel per resolution thread",
+    "join_stream": "Network graphs: number frames from the first frame id received (join a running stream)",
     "no_malloc_tune": "Keep glibc malloc defaults (trimming / mmap of large buffers)",
     # Str flags
     "output": "Path for raw timing output file",
@@ -121,6 +123,7 @@ _KNOB_ROLES: Dict[str, str] = {
     "no_fanout_bulk": "perf",
     "rx_decode": "perf",
     "ingest_shards": "perf",
+    "join_stream": "io",
     "dispatch_chunk": "perf",
     "reclaim_core": "env",
     "membind": "env",

@@ -137,6 +137,10 @@ pub(super) fn poll_and_process_network_packets(
             });
             continue;
         };
+        let Some(new_frame) = rebase_frame_id(&shared.net.frame_id_base, new_frame) else {
+            // `join_stream`: a frame older than the first one this run received.
+            continue;
+        };
 
         // Admission window: a frame at or beyond `completed + slots` cannot be
         // assigned a slot yet.  Park it for re-injection once the window advances —
@@ -471,6 +475,20 @@ fn admit_packet(
     }
 
     check_frame_completion(shared, node_info.slot, thread_id, frame_packets);
+}
+
+/// Maps a raw frame id to the runtime's frame number: `raw - base`, where `base` is
+/// the first raw id received (`join_stream`) or 0. Returns `None` for a frame older
+/// than `base`. The admission window and drop bitmap assume numbering from 0.
+fn rebase_frame_id(base: &std::sync::atomic::AtomicUsize, raw: usize) -> Option<usize> {
+    let mut b = base.load(Ordering::Acquire);
+    if b == usize::MAX {
+        b = match base.compare_exchange(usize::MAX, raw, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => raw,
+            Err(cur) => cur,
+        };
+    }
+    raw.checked_sub(b)
 }
 
 /// Parks a decoded packet that cannot be admitted right now — either its frame
@@ -911,5 +929,26 @@ mod loom_tests {
                 "packet vanished: not drained, not routed active, not buffered"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod join_stream_tests {
+    use super::rebase_frame_id;
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn base_zero_is_identity() {
+        let base = AtomicUsize::new(0);
+        assert_eq!(rebase_frame_id(&base, 0), Some(0));
+        assert_eq!(rebase_frame_id(&base, 4631), Some(4631));
+    }
+
+    #[test]
+    fn first_frame_sets_base_and_older_frames_are_stale() {
+        let base = AtomicUsize::new(usize::MAX);
+        assert_eq!(rebase_frame_id(&base, 4631), Some(0));
+        assert_eq!(rebase_frame_id(&base, 4633), Some(2));
+        assert_eq!(rebase_frame_id(&base, 4630), None);
     }
 }

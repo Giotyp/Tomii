@@ -140,6 +140,10 @@ pub struct RuntimeConfig {
     /// Network graphs with `system_threads > 1`: one ingest channel per resolution
     /// thread (receiver `i` feeds channel `i % n`) instead of one shared channel.
     pub ingest_shards: bool,
+    /// Network graphs: number frames relative to the first frame id received, so the
+    /// runtime can join a stream that is already running (frame ids not starting at 0).
+    /// Packets of frames older than that first frame are dropped as stale.
+    pub join_stream: bool,
     /// Resolve and dispatch admitted packets every N packets within one poll, so a
     /// large backlog does not delay all of its tasks until the poll ends (0 = once
     /// per poll).
@@ -173,6 +177,7 @@ impl Default for RuntimeConfig {
             no_fanout_bulk: false,
             rx_decode: false,
             ingest_shards: false,
+            join_stream: false,
             dispatch_chunk: 0,
             reclaim_core: None,
         }
@@ -273,6 +278,9 @@ pub struct NetworkInfra {
     /// Total packets parked in `pending_frames`.  Relaxed loads outside the lock are
     /// only an emptiness hint — a stale read delays re-injection by one poll iteration.
     pub pending_count: AtomicUsize,
+    /// Raw id of the frame numbered 0 (`join_stream`); `usize::MAX` until the first
+    /// packet sets it. Always 0 without `join_stream`.
+    pub frame_id_base: AtomicUsize,
 }
 
 /// Scheduler, batch queue, resolution state, result storage, and resolution strategy.

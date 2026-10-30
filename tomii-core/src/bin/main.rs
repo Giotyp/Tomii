@@ -143,6 +143,11 @@ struct Args {
     rx_decode: bool,
     #[clap(
         long,
+        help = "Network graphs: number frames from the first frame id received, so the runtime can join a stream that is already running."
+    )]
+    join_stream: bool,
+    #[clap(
+        long,
         help = "Network graphs with --system-threads > 1: give each resolution thread its own ingest channel (receiver i feeds channel i % n) instead of one shared channel."
     )]
     ingest_shards: bool,
@@ -472,6 +477,7 @@ fn main() {
         inline_continuation: args.inline_continuation,
         no_fanout_bulk: args.no_fanout_bulk,
         rx_decode: args.rx_decode,
+        join_stream: args.join_stream,
         ingest_shards: args.ingest_shards,
         dispatch_chunk: args.dispatch_chunk,
         reclaim_core: args.reclaim_core,
