@@ -82,6 +82,8 @@ use crate::time_buffer::TimeBufferManager;
 use crossbeam_channel::bounded as cb_bounded;
 
 pub const RUN_SLEEP: Duration = Duration::from_secs(10);
+/// How often the run loop checks max_frames / max_runtime / the caller's predicate.
+pub const RUN_POLL: Duration = Duration::from_millis(10);
 
 // ---------------------------------------------------------------------------
 // TomiiRtBuilder — fluent builder for the Τομί runtime
@@ -627,13 +629,10 @@ impl TomiiRt {
         let start_time = Instant::now();
         tracing::debug!("Max runtime check started");
         if self.shared.config.max_runtime.is_some() || predicate.is_some() {
-            // RUN_SLEEP (10s) matches max_runtime's whole-second granularity,
-            // but is far too coarse for a caller predicate — poll those at 10ms.
-            let tick = if predicate.is_some() {
-                Duration::from_millis(10)
-            } else {
-                RUN_SLEEP
-            };
+            // Poll at 10 ms: the process should exit (and release its sockets) as soon
+            // as its last frame completes. A whole-second tick kept a finished run alive
+            // for up to RUN_SLEEP, delaying a restarted receiver from binding the ports.
+            let tick = RUN_POLL;
             sleep(tick);
             let mut finish = false;
             loop {
