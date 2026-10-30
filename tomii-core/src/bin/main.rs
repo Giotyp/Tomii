@@ -284,6 +284,21 @@ fn tune_malloc() {
     }
 }
 
+/// The calling thread's CPU affinity mask.
+#[cfg(target_os = "linux")]
+fn current_affinity() -> Option<libc::cpu_set_t> {
+    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    let rc =
+        unsafe { libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) };
+    (rc == 0).then_some(set)
+}
+
+/// Restore an affinity mask saved by `current_affinity`.
+#[cfg(target_os = "linux")]
+fn set_affinity(set: &libc::cpu_set_t) {
+    unsafe { libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), set) };
+}
+
 /// `--membind <node>[,<node>...]`: bind this process's memory to the listed NUMA nodes
 /// (with several, pages come from the node nearest the allocating CPU). Besides
 /// locality, a bind policy opts the process out of automatic NUMA balancing, whose
@@ -399,6 +414,23 @@ fn main() {
         SchedulerType::WorkStealing
     };
 
+    // Pin main for graph initialization: init functions first-touch the frame buffers,
+    // and Linux places a page on the NUMA node that first writes it. Left unpinned, main
+    // may run on a remote node and leave the buffers there. The original mask is
+    // restored before run_graph, whose core allocation reads it (and which pins main
+    // again).
+    #[cfg(target_os = "linux")]
+    let init_affinity = current_affinity();
+    #[cfg(target_os = "linux")]
+    if let Some(core_id) = tomii_core::scheduler::planned_main_core(
+        args.core_offset,
+        args.system_threads,
+        args.receiver_threads,
+        args.workers,
+    ) {
+        core_affinity::set_for_current(core_id);
+    }
+
     tracing::debug!("starting graph initialization");
     let spec = from_json(&args.json, args.workers).expect("Failed to parse graph from JSON file");
     tracing::debug!("graph initialized");
@@ -470,6 +502,10 @@ fn main() {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    if let Some(set) = &init_affinity {
+        set_affinity(set);
+    }
     let synrt = run_graph(
         spec,
         cfg,
