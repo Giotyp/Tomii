@@ -445,6 +445,20 @@ impl SchedulerBase {
     }
 }
 
+/// The core the main thread is pinned to for this thread layout, if one is reserved.
+///
+/// `main` pins to it before graph initialization, so buffers the init functions
+/// allocate are first-touched on the same NUMA node as the runtime's threads.
+pub fn planned_main_core(
+    core_offset: usize,
+    system_threads: usize,
+    receiver_threads: usize,
+    workers: usize,
+) -> Option<core_affinity::CoreId> {
+    crate::core_alloc::allocate_cores(core_offset, system_threads, receiver_threads, workers)
+        .main_core
+}
+
 #[derive(Debug, Clone, Copy)]
 enum SpawnMode {
     Fifo,
