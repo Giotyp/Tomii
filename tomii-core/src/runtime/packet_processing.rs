@@ -477,14 +477,18 @@ fn admit_packet(
     check_frame_completion(shared, node_info.slot, thread_id, frame_packets);
 }
 
-/// Maps a raw frame id to the runtime's frame number: `raw - base`, where `base` is
-/// the first raw id received (`join_stream`) or 0. Returns `None` for a frame older
-/// than `base`. The admission window and drop bitmap assume numbering from 0.
+/// Maps a raw frame id to the runtime's frame number: `raw - base`. Without
+/// `join_stream`, base is 0. With it, base is the frame after the first one received:
+/// a receiver joining a running stream usually catches that first frame part-way,
+/// and a frame with missing packets would hold its slot forever. Returns `None` for
+/// frames before `base`. The admission window and drop bitmap assume numbering from 0.
 fn rebase_frame_id(base: &std::sync::atomic::AtomicUsize, raw: usize) -> Option<usize> {
     let mut b = base.load(Ordering::Acquire);
     if b == usize::MAX {
-        b = match base.compare_exchange(usize::MAX, raw, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => raw,
+        let first_full = raw + 1;
+        b = match base.compare_exchange(usize::MAX, first_full, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => first_full,
             Err(cur) => cur,
         };
     }
@@ -945,8 +949,9 @@ mod join_stream_tests {
     }
 
     #[test]
-    fn first_frame_sets_base_and_older_frames_are_stale() {
+    fn join_starts_at_the_frame_after_the_first_seen() {
         let base = AtomicUsize::new(usize::MAX);
+        assert_eq!(rebase_frame_id(&base, 4630), None); // likely partial: skipped
         assert_eq!(rebase_frame_id(&base, 4631), Some(0));
         assert_eq!(rebase_frame_id(&base, 4633), Some(2));
         assert_eq!(rebase_frame_id(&base, 4630), None);
