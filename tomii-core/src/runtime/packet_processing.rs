@@ -137,6 +137,10 @@ pub(super) fn poll_and_process_network_packets(
             });
             continue;
         };
+        let Some(new_frame) = rebase_frame_id(&shared.net.frame_id_base, new_frame) else {
+            // `join_stream`: a frame older than the first one this run received.
+            continue;
+        };
 
         // Admission window: a frame at or beyond `completed + slots` cannot be
         // assigned a slot yet.  Park it for re-injection once the window advances —
@@ -471,6 +475,24 @@ fn admit_packet(
     }
 
     check_frame_completion(shared, node_info.slot, thread_id, frame_packets);
+}
+
+/// Maps a raw frame id to the runtime's frame number: `raw - base`. Without
+/// `join_stream`, base is 0. With it, base is the frame after the first one received:
+/// a receiver joining a running stream usually catches that first frame part-way,
+/// and a frame with missing packets would hold its slot forever. Returns `None` for
+/// frames before `base`. The admission window and drop bitmap assume numbering from 0.
+fn rebase_frame_id(base: &std::sync::atomic::AtomicUsize, raw: usize) -> Option<usize> {
+    let mut b = base.load(Ordering::Acquire);
+    if b == usize::MAX {
+        let first_full = raw + 1;
+        b = match base.compare_exchange(usize::MAX, first_full, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => first_full,
+            Err(cur) => cur,
+        };
+    }
+    raw.checked_sub(b)
 }
 
 /// Parks a decoded packet that cannot be admitted right now — either its frame
@@ -911,5 +933,27 @@ mod loom_tests {
                 "packet vanished: not drained, not routed active, not buffered"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod join_stream_tests {
+    use super::rebase_frame_id;
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn base_zero_is_identity() {
+        let base = AtomicUsize::new(0);
+        assert_eq!(rebase_frame_id(&base, 0), Some(0));
+        assert_eq!(rebase_frame_id(&base, 4631), Some(4631));
+    }
+
+    #[test]
+    fn join_starts_at_the_frame_after_the_first_seen() {
+        let base = AtomicUsize::new(usize::MAX);
+        assert_eq!(rebase_frame_id(&base, 4630), None); // likely partial: skipped
+        assert_eq!(rebase_frame_id(&base, 4631), Some(0));
+        assert_eq!(rebase_frame_id(&base, 4633), Some(2));
+        assert_eq!(rebase_frame_id(&base, 4630), None);
     }
 }

@@ -82,6 +82,8 @@ use crate::time_buffer::TimeBufferManager;
 use crossbeam_channel::bounded as cb_bounded;
 
 pub const RUN_SLEEP: Duration = Duration::from_secs(10);
+/// How often the run loop checks max_frames / max_runtime / the caller's predicate.
+pub const RUN_POLL: Duration = Duration::from_millis(10);
 
 // ---------------------------------------------------------------------------
 // TomiiRtBuilder — fluent builder for the Τομί runtime
@@ -415,6 +417,7 @@ impl TomiiRtBuilder {
         let node_results = Arc::new(node_results_map);
         #[cfg(feature = "network")]
         let ingest_shards_enabled = self.config.ingest_shards;
+        let join_stream = self.config.join_stream;
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
         #[cfg(feature = "network")]
@@ -490,6 +493,7 @@ impl TomiiRtBuilder {
                 ),
                 pending_frames: parking_lot::Mutex::new(std::collections::BTreeMap::new()),
                 pending_count: AtomicUsize::new(0),
+                frame_id_base: AtomicUsize::new(if join_stream { usize::MAX } else { 0 }),
             },
             exec: ExecCtx {
                 scheduler: Arc::new(self.scheduler),
@@ -625,13 +629,10 @@ impl TomiiRt {
         let start_time = Instant::now();
         tracing::debug!("Max runtime check started");
         if self.shared.config.max_runtime.is_some() || predicate.is_some() {
-            // RUN_SLEEP (10s) matches max_runtime's whole-second granularity,
-            // but is far too coarse for a caller predicate — poll those at 10ms.
-            let tick = if predicate.is_some() {
-                Duration::from_millis(10)
-            } else {
-                RUN_SLEEP
-            };
+            // Poll at 10 ms: the process should exit (and release its sockets) as soon
+            // as its last frame completes. A whole-second tick kept a finished run alive
+            // for up to RUN_SLEEP, delaying a restarted receiver from binding the ports.
+            let tick = RUN_POLL;
             sleep(tick);
             let mut finish = false;
             loop {
