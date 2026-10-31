@@ -28,13 +28,14 @@ fn spawn_receiver_thread(
     recv_pool_size: usize,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
     tx: flume::Sender<crate::network::PacketMessage>,
-    sockets: Arc<Vec<crate::network::NetworkSocket>>,
+    sockets: crate::network::SocketCell,
     drop_counters: Arc<Vec<std::sync::atomic::AtomicUsize>>,
     thread_id: usize,
     socket_range: std::ops::Range<usize>,
     core_id: usize,
     return_rxs: Vec<flume::Receiver<Vec<u8>>>,
     decode: Option<tomii_types::CmPtr>,
+    handover: Arc<crate::network::HandoverState>,
 ) -> Result<JoinHandle<()>, crate::RuntimeError> {
     thread::Builder::new()
         .name(thread_name)
@@ -51,6 +52,7 @@ fn spawn_receiver_thread(
                 core_id,
                 return_rxs,
                 decode,
+                handover,
             );
         })
         .map_err(crate::RuntimeError::SpawnFailed)
@@ -88,13 +90,15 @@ impl TomiiRt {
             "initializing network receiver infrastructure"
         );
 
-        assert_eq!(
-            self.shared.net.receiver_sockets.len(),
-            num_sockets,
-            "Network config expected {} sockets but {} were allocated",
-            num_sockets,
-            self.shared.net.receiver_sockets.len()
-        );
+        if let Some(sockets) = self.shared.net.receiver_sockets.get() {
+            assert_eq!(
+                sockets.len(),
+                num_sockets,
+                "Network config expected {} sockets but {} were allocated",
+                num_sockets,
+                sockets.len()
+            );
+        }
 
         let receiver_threads = self.shared.config.receiver_threads;
         let receiver_offset = self.shared.config.receiver_core_offset;
@@ -151,6 +155,7 @@ impl TomiiRt {
                     core_id,
                     vec![return_rx],
                     rx_decode,
+                    Arc::clone(&self.shared.net.handover),
                 )?;
                 handles.push(handle);
                 tracing::debug!(socket_id, core_id, "receiver thread spawned");
@@ -189,6 +194,7 @@ impl TomiiRt {
                     core_id,
                     return_rxs,
                     rx_decode,
+                    Arc::clone(&self.shared.net.handover),
                 )?;
                 handles.push(handle);
                 tracing::debug!(

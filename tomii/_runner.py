@@ -54,6 +54,8 @@ _STR_FLAGS: Dict[str, str] = {
     "report": "--report",
     "dump_state": "--dump-state",
     "membind": "--membind",
+    "handover_listen": "--handover-listen",
+    "takeover": "--takeover",
 }
 
 _KNOB_DESCRIPTIONS: Dict[str, str] = {
@@ -92,6 +94,8 @@ _KNOB_DESCRIPTIONS: Dict[str, str] = {
     "timing": "Path for per-node timing CSV",
     "report": "Path for JSON summary report (avg/p99 latency, bottleneck hints)",
     "membind": "Bind memory to these NUMA nodes, e.g. '0' or '0,1' (also disables NUMA balancing for the process)",
+    "handover_listen": "Unix socket path: hand the bound sockets to a replacement process (--takeover) when it connects",
+    "takeover": "Unix socket path: take the bound sockets over from a running process (--handover-listen)",
 }
 
 # Role of each knob in a tuning context:
@@ -127,6 +131,8 @@ _KNOB_ROLES: Dict[str, str] = {
     "dispatch_chunk": "perf",
     "reclaim_core": "env",
     "membind": "env",
+    "handover_listen": "io",
+    "takeover": "io",
     "no_malloc_tune": "env",
     "output": "io",
     "timing": "io",

@@ -31,6 +31,9 @@ class RunConfig:
     reclaim_core: Optional[int] = None
     # ── Host / memory ────────────────────────────────────────────────────────
     membind: Optional[str] = None
+    # ── Live handover ────────────────────────────────────────────────────────
+    handover_listen: Optional[str] = None
+    takeover: Optional[str] = None
     no_malloc_tune: bool = False
     # ── Timing / output ──────────────────────────────────────────────────────
     timing: Optional[str] = None
@@ -116,6 +119,10 @@ class RunConfig:
             args += ["--reclaim-core", str(self.reclaim_core)]
         if self.membind is not None:
             args += ["--membind", self.membind]
+        if self.handover_listen is not None:
+            args += ["--handover-listen", self.handover_listen]
+        if self.takeover is not None:
+            args += ["--takeover", self.takeover]
         if self.no_malloc_tune:
             args.append("--no-malloc-tune")
         if self.record:
