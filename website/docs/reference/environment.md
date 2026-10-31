@@ -66,6 +66,15 @@ TOMII_DISABLE_ARG_TEMPLATES=1 \
 cargo run -p tomii-core --bin main -- --json graph.json --dylib plugin.so
 ```
 
+## Diagnostics
+
+Opt-in profiling and tuning variables, read once at startup; off unless set.
+
+| Variable | Effect when set |
+|---|---|
+| `TOMII_PHASE_PROF=1` | Enable the resolution-thread phase profiler (per-phase timing of the admission/resolution loop), summarized at shutdown |
+| `TOMII_WORKER_SPIN=N` | Worker spin iterations before a worker parks (default `64`); higher trades CPU for lower wake latency under bursty load |
+
 ## Python-bridge variables
 
 When a graph uses [Python plugins](/docs/guide/plugins/python),

@@ -79,10 +79,10 @@ best-so-far convergence curves (`examples/agent-tuning/README.md`).
 
 The headline result is that the agent stays in the valid region of a space
 where naive strategies waste most of their budget on invalid configurations.
-On the generated ~14-million-cell stream-analytics space, random search
-produced one valid configuration in 50 trials; the agent passed the verifier
-in 41 of 50, won single-trial best on all three workloads, and used ~9× less
-wall time than random search. It converges without source access — the agent
+On the generated ~14-million-cell stream-analytics space, random search stayed
+valid on only ~4% of its 50 trials; the agent passed the verifier on **92%**,
+won single-trial best on all three workloads, and used far less wall time than
+random search. It converges without source access — the agent
 receives only knob descriptions and its own trial history.
 
 Two honest caveats from `examples/agent-tuning/README.md`:

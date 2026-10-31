@@ -21,9 +21,10 @@ python -c "import tomii"
 
 ### Which platforms are supported?
 
-Linux x86_64, with wheels for CPython 3.9–3.13. macOS, Windows, and ARM
-wheels are planned. Building plugins requires a Rust toolchain regardless of
-platform — see [Installation](/docs/guide/getting-started/installation).
+Wheels ship for Linux (x86_64, arm64) and macOS (Intel, Apple Silicon), CPython
+3.9–3.14 including the free-threaded builds 3.13t and 3.14t. Windows wheels are
+planned. Building plugins requires a Rust toolchain regardless of platform — see
+[Installation](/docs/guide/getting-started/installation).
 
 ### Why JSON for the graph?
 
@@ -35,12 +36,14 @@ by hand, the Python builder emits it for you.
 
 ### Can the graph change shape at runtime?
 
-No. The graph is compiled once at startup and replayed across all slots.
-Data-dependent fan-out and dynamic node creation are out of scope; that
-constraint is what makes O(1) generational slot reset and pre-computed
-routing tables possible. However, conditional nodes are left for future upgrades.
-If your topology is dynamic, use a framework built
-for that (see the [comparison](/docs/overview/comparison)).
+No — the graph's topology is compiled once at startup and replayed across all
+slots. Data-dependent fan-out and dynamic node creation are out of scope; that
+constraint is what makes O(1) generational slot reset and pre-computed routing
+tables possible. Data-dependent *execution* is supported, though: conditional
+nodes (`Condition`) skip or fire based on a predecessor's result without changing
+the topology — see the stream-analytics example. If your topology itself must
+change at runtime, use a framework built for that (see the
+[comparison](/docs/overview/comparison)).
 
 ### How many concurrent frames can one process run?
 

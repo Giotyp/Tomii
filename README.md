@@ -204,17 +204,23 @@ Full flag list: `cargo run -p tomii-core --bin main -- --help`
 ## Pluggable scheduler
 
 Implement the `TaskScheduler` trait (defined entirely in `tomii-types` — no `tomii-core`
-dependency required) and load it at runtime:
+dependency required) and plug it in through the Rust builder API:
 
-```bash
-cargo build --release -p scheduler-plugin
-cargo run -p tomii-core --bin main -- \
-  --scheduler-plugin target/release/libscheduler_plugin.so \
-  --json graph.json --dylib plugin.so
+```rust
+use tomii_core::runtime::TomiiRtBuilder;
+use scheduler_plugin_example::FifoScheduler;
+
+let rt = TomiiRtBuilder::new_with_plugin(compiled, FifoScheduler::new())
+    .slots(4)
+    .max_frames(1000)
+    .build();
+rt.run();
 ```
 
-See `examples/scheduler-plugin/` for a minimal FIFO example and
-`tomii-core/PLUGIN_SCHEDULER_API.md` for the stability contract.
+The custom scheduler is supplied at build time via `new_with_plugin`, not a CLI flag
+(the `main` binary selects the built-in schedulers; `--custom` picks the lock-free
+`SchedulerImpl::Custom`). See `examples/scheduler-plugin/` for a minimal FIFO example
+and `tomii-core/PLUGIN_SCHEDULER_API.md` for the stability contract.
 
 ---
 

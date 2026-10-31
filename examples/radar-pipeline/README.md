@@ -195,12 +195,16 @@ throughput point in opposite directions. At the default 1024x128 CPI both
 processing tails are sub-millisecond — a wash. At the 4096x512 CPI (~16x the
 compute) the GPU's post-arrival latency tail is far lower and much tighter
 (~0.9 ms vs ~6.9 ms p50, ~10x tighter jitter) — once the CPI is resident,
-cuFFT clears it almost instantly. But *sustained frame rate* reverses: the
-8-core CPU sustains ~1.85x the GPU's rate, because the GPU is capped by
-per-chirp H2D + launch + stream-sync overhead (512 chirps/frame) that scaling
-`--slots` barely relieves. So the kernel choice is an SLA decision — per-frame
-latency/jitter (GPU) vs aggregate throughput (CPU) — measured cleanly by the
-same harness. Use compressed streamed pacing (`--chirp-gap-us`
+cuFFT clears it almost instantly. At this large CPI the GPU also leads
+*sustained frame rate* (~1.30x: ~50 vs ~38.5 fps), as cuFFT amortises the
+per-chirp H2D + launch + stream-sync overhead across the larger transform. The
+CPU's edge is footprint and small-CPI operation: at 1024x128 its tail is already
+sub-millisecond on far fewer cores. So the kernel choice is an SLA/footprint
+decision — large-CPI latency and throughput (GPU) vs core-efficiency and
+small-CPI latency (CPU) — measured cleanly by the same harness.
+(Earlier drafts claimed the CPU sustained ~1.85x the GPU's rate; that does not
+reproduce on current main — the GPU is ahead. See the project docs' benchmarks
+page for the measured figures.) Use compressed streamed pacing (`--chirp-gap-us`
 = frame_period/n_chirps) to probe the sustained-rate boundary; a burst
 (`--chirp-gap-us 0`) overruns the receiver socket buffer and measures drops,
 not compute.

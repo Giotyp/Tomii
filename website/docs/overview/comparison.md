@@ -43,7 +43,7 @@ block library, a mature ecosystem, and hardware drivers Tomii does not have.
 If you need those, use GNU Radio. What it lacks is a latency-predictable
 frame model: on an FMCW radar workload with identical DSP kernels, Tomii
 matches GNU Radio 4.0 end-to-end (~1.04×) while cutting the post-chirp tail
-~1.85× at p50 (310 µs vs 573 µs) and running on 7.4× fewer cores (2.56 vs
+~1.8× at p50 (315 µs vs 567 µs) and running on 8.5× fewer cores (2.23 vs
 18.9). GR4 wins at small CPIs; the trade is tail latency and core budget, not
 a blanket speedup
 ([benchmarks](/docs/overview/benchmarks), `bench/radar-bench/`).
@@ -60,12 +60,14 @@ what Tomii gives up on purpose.
 
 Measured in our evaluation on the same uplink pipeline with the same kernels
 (LDPC decode reinstated for an apples-to-apples comparison against Agora's
-published Table 3), the **kernels run at parity** — Tomii's decode is 0.88×
-Agora's per-task cost, with byte-identical output. The remaining end-to-end
-gap is dominated by a *tunable* graph barrier (a one-line edit recovers ~94%
-of the post-arrival term) and by ingest (UDP vs Agora's DPDK — a wall the best
-hand-written Taskflow/oneTBB baselines hit too), not by the decoupled design.
-The [benchmarks](/docs/overview/benchmarks) page has the decomposition.
+published figures, Tables 4–5), the **kernels run at parity** — Tomii's decode
+is 0.81× Agora's per-task cost (37.5 vs 46.5 µs), with byte-identical output.
+The remaining end-to-end gap is a bounded few tenths of a millisecond (e.g.
++0.23 ms median vs Agora's published 6130 figures) at a 10% longer frame period
+(1.1 vs 1.0 ms), over kernel UDP against Agora's DPDK — and most of the
+post-arrival term is a *tunable* graph barrier, where a ~30-line per-symbol
+barrier edit cuts it ~70% with bit-identical output. Not a cost of the decoupled
+design. The [benchmarks](/docs/overview/benchmarks) page has the numbers.
 
 What the decoupling buys is the reconfiguration surface:
 
@@ -78,10 +80,11 @@ What the decoupling buys is the reconfiguration surface:
 
 The same evaluation measured cost-of-change rather than raw line counts. A
 scheduling-policy change is a CLI flag (0 s) against a whole-binary rebuild in
-the hand-built baselines; a kernel swap rebuilds one plugin (~1.06 s) and
-leaves the runtime binary byte-identical; and *inserting a new stage* — which
-forces a ~21.3 s runtime rebuild under static registration — drops to a
-plugin-only rebuild with dynamic kernel registration. Reaching Tomii's
+the hand-built baselines; a kernel swap rebuilds one plugin (~1.15 s, against
+~6.1 s to rebuild a Taskflow baseline) and leaves the runtime binary
+byte-identical; and *inserting a new stage* — a ~23.9 s runtime rebuild under
+static registration — drops to ~0.6 s (plugin-only) with dynamic kernel
+registration, against ~83.9 s for the GNU Radio 4.0 baseline. Reaching Tomii's
 per-packet parity with Taskflow/oneTBB in the first place took a ~649-line
 hand-written streaming layer that Tomii provides from a graph and kernels.
 

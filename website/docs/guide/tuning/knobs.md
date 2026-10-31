@@ -51,7 +51,7 @@ python -m tomii --knob-space examples/stream-analytics/graph.json \
     --workload stream-analytics
 ```
 
-The output (schema `version: 2`) combines two sources:
+The output (schema `version: 3`) combines two sources:
 
 - catalog knobs with role `perf` (`kind: "cli"`), and
 - graph knobs extracted from the JSON: shared factor variables, literal node
