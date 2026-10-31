@@ -148,6 +148,18 @@ struct Args {
     join_stream: bool,
     #[clap(
         long,
+        value_name = "PATH",
+        help = "Network graphs: listen on this Unix socket and hand the bound sockets to a replacement process started with --takeover PATH."
+    )]
+    handover_listen: Option<String>,
+    #[clap(
+        long,
+        value_name = "PATH",
+        help = "Network graphs: take the bound sockets over from a running process started with --handover-listen PATH, instead of binding them (implies --join-stream)."
+    )]
+    takeover: Option<String>,
+    #[clap(
+        long,
         help = "Network graphs with --system-threads > 1: give each resolution thread its own ingest channel (receiver i feeds channel i % n) instead of one shared channel."
     )]
     ingest_shards: bool,
@@ -478,6 +490,8 @@ fn main() {
         no_fanout_bulk: args.no_fanout_bulk,
         rx_decode: args.rx_decode,
         join_stream: args.join_stream,
+        handover_listen: args.handover_listen.clone(),
+        takeover: args.takeover.clone(),
         ingest_shards: args.ingest_shards,
         dispatch_chunk: args.dispatch_chunk,
         reclaim_core: args.reclaim_core,
