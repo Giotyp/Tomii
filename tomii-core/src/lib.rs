@@ -8,6 +8,8 @@ pub mod dependency_counter;
 pub mod graph;
 pub mod graph_gen;
 pub mod graph_struct;
+#[cfg(all(feature = "network", target_os = "linux"))]
+pub mod handover;
 pub mod json_structs;
 pub mod network;
 pub(crate) mod network_funcs;

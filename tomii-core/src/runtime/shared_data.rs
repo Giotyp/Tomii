@@ -144,6 +144,12 @@ pub struct RuntimeConfig {
     /// runtime can join a stream that is already running (frame ids not starting at 0).
     /// Packets of frames older than that first frame are dropped as stale.
     pub join_stream: bool,
+    /// Listen on this Unix socket path and hand the bound sockets to a replacement
+    /// process (`--takeover`) when it connects.
+    pub handover_listen: Option<String>,
+    /// Take the bound sockets over from a running process listening on this path,
+    /// instead of binding them (implies `join_stream`).
+    pub takeover: Option<String>,
     /// Resolve and dispatch admitted packets every N packets within one poll, so a
     /// large backlog does not delay all of its tasks until the poll ends (0 = once
     /// per poll).
@@ -178,6 +184,8 @@ impl Default for RuntimeConfig {
             rx_decode: false,
             ingest_shards: false,
             join_stream: false,
+            handover_listen: None,
+            takeover: None,
             dispatch_chunk: 0,
             reclaim_core: None,
         }
@@ -281,6 +289,8 @@ pub struct NetworkInfra {
     /// Raw id of the frame numbered 0 (`join_stream`); `usize::MAX` until the first
     /// packet sets it. Always 0 without `join_stream`.
     pub frame_id_base: AtomicUsize,
+    /// Live socket handover state (`--handover-listen`).
+    pub handover: Arc<crate::network::HandoverState>,
 }
 
 /// Scheduler, batch queue, resolution state, result storage, and resolution strategy.

@@ -84,6 +84,8 @@ use crossbeam_channel::bounded as cb_bounded;
 pub const RUN_SLEEP: Duration = Duration::from_secs(10);
 /// How often the run loop checks max_frames / max_runtime / the caller's predicate.
 pub const RUN_POLL: Duration = Duration::from_millis(10);
+/// After a live handover, exit once no frame has completed for this long.
+pub const HANDOVER_QUIET: Duration = Duration::from_millis(20);
 
 // ---------------------------------------------------------------------------
 // TomiiRtBuilder — fluent builder for the Τομί runtime
@@ -402,6 +404,7 @@ impl TomiiRtBuilder {
             &graph,
             self.socket_recv_buf_bytes,
             self.config.recv_pool_size,
+            self.config.takeover.as_deref(),
         );
 
         // --- Assemble SharedData ---
@@ -417,7 +420,8 @@ impl TomiiRtBuilder {
         let node_results = Arc::new(node_results_map);
         #[cfg(feature = "network")]
         let ingest_shards_enabled = self.config.ingest_shards;
-        let join_stream = self.config.join_stream;
+        // A takeover joins the stream the previous process was serving.
+        let join_stream = self.config.join_stream || self.config.takeover.is_some();
         let slot_buffers = Arc::new(RwLock::new(vec![Vec::new(); slots]));
 
         #[cfg(feature = "network")]
@@ -494,6 +498,7 @@ impl TomiiRtBuilder {
                 pending_frames: parking_lot::Mutex::new(std::collections::BTreeMap::new()),
                 pending_count: AtomicUsize::new(0),
                 frame_id_base: AtomicUsize::new(if join_stream { usize::MAX } else { 0 }),
+                handover: Arc::new(crate::network::HandoverState::default()),
             },
             exec: ExecCtx {
                 scheduler: Arc::new(self.scheduler),
@@ -620,6 +625,23 @@ impl TomiiRt {
         #[cfg(feature = "network")]
         let receiver_handles = self.spawn_receiver_threads()?;
         let resolution_handles = self.spawn_resolution_threads()?;
+        #[cfg(all(feature = "network", target_os = "linux"))]
+        if let Some(path) = self.shared.config.handover_listen.clone() {
+            let fds = self
+                .shared
+                .net
+                .receiver_sockets
+                .iter()
+                .map(|s| s.raw_fd())
+                .collect();
+            crate::handover::spawn_listener(
+                path,
+                Arc::clone(&self.shared.net.handover),
+                fds,
+                receiver_handles.len(),
+            )
+            .map_err(crate::RuntimeError::SpawnFailed)?;
+        }
 
         // Wait loop: sleep until max_runtime exceeded, all frames complete,
         // or the caller's run_until predicate fires.  Without a max_runtime
@@ -628,13 +650,18 @@ impl TomiiRt {
         // behaviour exactly.
         let start_time = Instant::now();
         tracing::debug!("Max runtime check started");
-        if self.shared.config.max_runtime.is_some() || predicate.is_some() {
+        if self.shared.config.max_runtime.is_some()
+            || predicate.is_some()
+            || self.shared.config.handover_listen.is_some()
+        {
             // Poll at 10 ms: the process should exit (and release its sockets) as soon
             // as its last frame completes. A whole-second tick kept a finished run alive
             // for up to RUN_SLEEP, delaying a restarted receiver from binding the ports.
             let tick = RUN_POLL;
             sleep(tick);
             let mut finish = false;
+            // After a live handover: (frames completed, when that count last changed).
+            let mut handover_quiet: Option<(usize, Instant)> = None;
             loop {
                 let completed_frames = self
                     .shared
@@ -654,6 +681,19 @@ impl TomiiRt {
                 } else if completed {
                     tracing::info!("All frames completed, exiting");
                     finish = true;
+                } else if self.shared.net.handover.handed_over.load(Ordering::Acquire) {
+                    // The sockets now belong to the replacement process. Finish the frames
+                    // already received, then exit: once no frame has completed for
+                    // HANDOVER_QUIET, what remains can never complete here.
+                    match handover_quiet {
+                        Some((n, since)) if n == completed_frames => {
+                            if since.elapsed() >= HANDOVER_QUIET {
+                                tracing::info!(completed_frames, "handed over, exiting");
+                                finish = true;
+                            }
+                        }
+                        _ => handover_quiet = Some((completed_frames, Instant::now())),
+                    }
                 }
 
                 if !finish {

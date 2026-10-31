@@ -37,6 +37,7 @@ pub(super) fn prepare_network_infrastructure(
     graph: &Graph,
     socket_recv_buf_bytes: usize,
     recv_pool_size: usize,
+    takeover: Option<&str>,
 ) -> (
     Arc<Vec<NetworkSocket>>,
     flume::Sender<crate::network::PacketMessage>,
@@ -54,12 +55,21 @@ pub(super) fn prepare_network_infrastructure(
         let channel_cap = (config_spec.frame_packets * 4).max(65536);
         let (packet_sender, packet_receiver) = flume::bounded(channel_cap);
 
-        let receiver_sockets = bind_udp_socket_range(
-            &config_spec.address,
-            config_spec.start_port,
-            num_sockets,
-            socket_recv_buf_bytes,
-        );
+        let receiver_sockets = match takeover {
+            #[cfg(target_os = "linux")]
+            Some(path) => {
+                let fds = crate::handover::take_over(path, std::time::Duration::from_secs(120))
+                    .unwrap_or_else(|e| panic!("handover from {path} failed: {e}"));
+                assert_eq!(fds.len(), num_sockets, "handover: socket count mismatch");
+                crate::network::sockets_from_fds(fds)
+            }
+            _ => bind_udp_socket_range(
+                &config_spec.address,
+                config_spec.start_port,
+                num_sockets,
+                socket_recv_buf_bytes,
+            ),
+        };
 
         let packet_drop_counters = (0..num_sockets).map(|_| AtomicUsize::new(0)).collect();
 

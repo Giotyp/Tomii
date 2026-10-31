@@ -23,6 +23,17 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Shared between the listener and the receiver threads of the process handing over.
+#[derive(Debug, Default)]
+pub struct HandoverState {
+    /// Set when a takeover process connects: receivers stop reading their sockets.
+    pub freeze: AtomicBool,
+    /// Receiver threads that have stopped reading.
+    pub frozen: AtomicUsize,
+    /// Set once the sockets have been sent; the run loop then winds down.
+    pub handed_over: AtomicBool,
+}
+
 /// Raw packet message forwarded from receiver thread to resolution
 #[derive(Debug, Clone)]
 pub struct PacketMessage {
@@ -51,6 +62,13 @@ pub enum NetworkSocket {
 }
 
 impl NetworkSocket {
+    /// The underlying descriptor (for a live handover to another process).
+    pub fn raw_fd(&self) -> std::os::unix::io::RawFd {
+        match self {
+            NetworkSocket::Udp(s) => s.as_raw_fd(),
+        }
+    }
+
     /// Receive packet from socket into provided buffer
     pub fn recv(&self, buffer: &mut [u8]) -> std::io::Result<usize> {
         match self {
@@ -131,6 +149,21 @@ pub fn bind_udp_socket_range(
     sockets
 }
 
+/// Wraps bound UDP sockets received from another process (see `crate::handover`).
+pub fn sockets_from_fds(fds: Vec<std::os::unix::io::RawFd>) -> Vec<NetworkSocket> {
+    use std::os::unix::io::FromRawFd;
+    fds.into_iter()
+        .map(|fd| {
+            // SAFETY: each descriptor was received via SCM_RIGHTS and is owned by us now.
+            let socket = unsafe { UdpSocket::from_raw_fd(fd) };
+            socket
+                .set_nonblocking(false)
+                .expect("Failed to set blocking mode");
+            NetworkSocket::Udp(socket)
+        })
+        .collect()
+}
+
 /// Receiver loop for a range of sockets (round-robin polling).
 ///
 /// This function handles the case where we have fewer receiver threads than sockets.
@@ -150,6 +183,7 @@ pub fn multi_socket_receiver_loop(
     core_id: usize,
     return_rxs: Vec<flume::Receiver<Vec<u8>>>,
     decode: Option<tomii_types::CmPtr>,
+    handover: Arc<HandoverState>,
 ) {
     // Pin this receiver to its dedicated physical core (`core_id` =
     // receiver_core_offset + thread_id, the core the allocator reserved).
@@ -205,6 +239,15 @@ pub fn multi_socket_receiver_loop(
         if shutdown.load(Ordering::Relaxed) {
             let last_first_dur = last_packet_timestamp.duration_since(first_packet_timestamp);
             tracing::info!(thread_id, duration = ?last_first_dur, "multi-socket receiver shutting down");
+            return;
+        }
+        // Live handover: stop reading; the sockets are about to move to another process.
+        if handover.freeze.load(Ordering::Acquire) {
+            handover.frozen.fetch_add(1, Ordering::AcqRel);
+            tracing::info!(thread_id, "receiver stopped for handover");
+            while !shutdown.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
             return;
         }
 
