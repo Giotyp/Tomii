@@ -1,10 +1,11 @@
 name: Release crates
 
-# Publishes the Tomii Rust crates to crates.io on a version tag, in dependency
-# order. Runs alongside release.yml (which handles the PyPI wheel/sdist).
+# Publishes the Tomii Rust crates to crates.io when a GitHub Release is
+# published (backed by a vX.Y.Z tag), in dependency order. Runs alongside
+# release.yml (which handles the PyPI wheel/sdist).
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,6 +19,17 @@ jobs:
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      # Fail fast if the release tag does not match the workspace crate version,
+      # before pushing anything irreversible to crates.io.
+      - name: Check release tag matches crate version
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.release.tag_name }}"
+          VER="${TAG#v}"
+          ws=$(grep -A8 '^\[workspace\.package\]' Cargo.toml | grep -m1 '^version' | sed -E 's/version *= *"([^"]+)".*/\1/')
+          echo "Release tag $TAG -> version $VER ; workspace Cargo.toml = $ws"
+          [ "$ws" = "$VER" ] || { echo "::error::workspace crate version '$ws' != release '$VER'"; exit 1; }
 
       # Publish leaf crates first, then tomii-core which depends on tomii-types
       # (normal dep) and tomii-converter (build dep). `cargo publish` waits for
