@@ -34,6 +34,10 @@ pub struct HandoverState {
     pub handed_over: AtomicBool,
 }
 
+/// The receiver sockets: bound at build time, or published after a live takeover.
+/// Receiver threads may start before it is set and wait for it.
+pub type SocketCell = Arc<std::sync::OnceLock<Arc<Vec<NetworkSocket>>>>;
+
 /// Raw packet message forwarded from receiver thread to resolution
 #[derive(Debug, Clone)]
 pub struct PacketMessage {
@@ -176,7 +180,7 @@ pub fn multi_socket_receiver_loop(
     recv_pool_size: usize,
     shutdown: Arc<AtomicBool>,
     tx: flume::Sender<PacketMessage>,
-    sockets: Arc<Vec<NetworkSocket>>,
+    sockets: SocketCell,
     drop_counters: Arc<Vec<AtomicUsize>>,
     thread_id: usize,
     socket_range: std::ops::Range<usize>,
@@ -200,15 +204,6 @@ pub fn multi_socket_receiver_loop(
     // the process cpuset is permitted (workers already run on 6..31).
     core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
 
-    let read_timeout = Duration::from_micros(1);
-
-    // Set read timeout ONCE per socket during init — setsockopt on every
-    // poll iteration was a syscall (~100-500 ns) burned per socket per loop.
-    for socket_id in socket_range.clone() {
-        let socket = &sockets[socket_id];
-        let _ = socket.set_read_timeout(Some(read_timeout));
-    }
-
     // Pre-allocate one local pool per socket in this thread's range.
     // return_rxs[i] corresponds to socket_range.start + i.
     let range_start = socket_range.start;
@@ -220,6 +215,27 @@ pub fn multi_socket_receiver_loop(
                 .collect()
         })
         .collect();
+
+    // Wait for the sockets (set after a live takeover); the pools above are
+    // already allocated, so reading starts the moment they are published.
+    let sockets = loop {
+        if let Some(s) = sockets.get() {
+            break Arc::clone(s);
+        }
+        if shutdown.load(Ordering::Relaxed) {
+            return;
+        }
+        std::thread::sleep(Duration::from_micros(20));
+    };
+
+    let read_timeout = Duration::from_micros(1);
+
+    // Set read timeout ONCE per socket during init — setsockopt on every
+    // poll iteration was a syscall (~100-500 ns) burned per socket per loop.
+    for socket_id in socket_range.clone() {
+        let socket = &sockets[socket_id];
+        let _ = socket.set_read_timeout(Some(read_timeout));
+    }
 
     tracing::info!(
         thread_id,

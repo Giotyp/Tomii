@@ -28,7 +28,7 @@ fn spawn_receiver_thread(
     recv_pool_size: usize,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
     tx: flume::Sender<crate::network::PacketMessage>,
-    sockets: Arc<Vec<crate::network::NetworkSocket>>,
+    sockets: crate::network::SocketCell,
     drop_counters: Arc<Vec<std::sync::atomic::AtomicUsize>>,
     thread_id: usize,
     socket_range: std::ops::Range<usize>,
@@ -90,13 +90,15 @@ impl TomiiRt {
             "initializing network receiver infrastructure"
         );
 
-        assert_eq!(
-            self.shared.net.receiver_sockets.len(),
-            num_sockets,
-            "Network config expected {} sockets but {} were allocated",
-            num_sockets,
-            self.shared.net.receiver_sockets.len()
-        );
+        if let Some(sockets) = self.shared.net.receiver_sockets.get() {
+            assert_eq!(
+                sockets.len(),
+                num_sockets,
+                "Network config expected {} sockets but {} were allocated",
+                num_sockets,
+                sockets.len()
+            );
+        }
 
         let receiver_threads = self.shared.config.receiver_threads;
         let receiver_offset = self.shared.config.receiver_core_offset;

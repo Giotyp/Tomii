@@ -267,7 +267,8 @@ pub struct NetworkInfra {
     /// resolution thread; receiver thread i feeds shard i % n, resolution thread t
     /// drains shard t. Empty = the single shared channel above.
     pub ingest_shards: Vec<(Sender<PacketMessage>, Receiver<PacketMessage>)>,
-    pub receiver_sockets: Arc<Vec<NetworkSocket>>,
+    /// Bound at build time, or set by `TomiiRt::run` after a `--takeover` handover.
+    pub receiver_sockets: crate::network::SocketCell,
     pub packet_drop_counters: Arc<Vec<AtomicUsize>>,
     /// Per-socket buffer return channels: resolution thread → receiver thread.
     pub buffer_return_senders: Vec<Sender<Vec<u8>>>,
@@ -291,6 +292,17 @@ pub struct NetworkInfra {
     pub frame_id_base: AtomicUsize,
     /// Live socket handover state (`--handover-listen`).
     pub handover: Arc<crate::network::HandoverState>,
+}
+
+impl NetworkInfra {
+    /// The receiver sockets (set before any receiver thread starts).
+    pub fn sockets(&self) -> Arc<Vec<NetworkSocket>> {
+        Arc::clone(
+            self.receiver_sockets
+                .get()
+                .expect("receiver sockets are set before receivers start"),
+        )
+    }
 }
 
 /// Scheduler, batch queue, resolution state, result storage, and resolution strategy.

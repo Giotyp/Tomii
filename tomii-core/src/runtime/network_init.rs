@@ -2,7 +2,7 @@
 //! Called once at `TomiiRtBuilder::build` time; not invoked on the hot path.
 use super::shared_data::SharedData;
 use crate::graph::Graph;
-use crate::network::{bind_udp_socket_range, NetworkSocket};
+use crate::network::bind_udp_socket_range;
 use flume;
 use parking_lot;
 use std::sync::atomic::AtomicUsize;
@@ -39,7 +39,7 @@ pub(super) fn prepare_network_infrastructure(
     recv_pool_size: usize,
     takeover: Option<&str>,
 ) -> (
-    Arc<Vec<NetworkSocket>>,
+    crate::network::SocketCell,
     flume::Sender<crate::network::PacketMessage>,
     flume::Receiver<crate::network::PacketMessage>,
     Arc<Vec<AtomicUsize>>,
@@ -55,21 +55,18 @@ pub(super) fn prepare_network_infrastructure(
         let channel_cap = (config_spec.frame_packets * 4).max(65536);
         let (packet_sender, packet_receiver) = flume::bounded(channel_cap);
 
-        let receiver_sockets = match takeover {
-            #[cfg(target_os = "linux")]
-            Some(path) => {
-                let fds = crate::handover::take_over(path, std::time::Duration::from_secs(120))
-                    .unwrap_or_else(|e| panic!("handover from {path} failed: {e}"));
-                assert_eq!(fds.len(), num_sockets, "handover: socket count mismatch");
-                crate::network::sockets_from_fds(fds)
-            }
-            _ => bind_udp_socket_range(
+        // With a takeover, the sockets are taken over later, just before the receiver
+        // threads start (`TomiiRt::run`), so the previous process keeps serving the
+        // stream for as long as possible.
+        let receiver_sockets: crate::network::SocketCell = Arc::new(std::sync::OnceLock::new());
+        if takeover.is_none() {
+            let _ = receiver_sockets.set(Arc::new(bind_udp_socket_range(
                 &config_spec.address,
                 config_spec.start_port,
                 num_sockets,
                 socket_recv_buf_bytes,
-            ),
-        };
+            )));
+        }
 
         let packet_drop_counters = (0..num_sockets).map(|_| AtomicUsize::new(0)).collect();
 
@@ -87,7 +84,7 @@ pub(super) fn prepare_network_infrastructure(
         }
 
         (
-            Arc::new(receiver_sockets),
+            receiver_sockets,
             packet_sender,
             packet_receiver,
             Arc::new(packet_drop_counters),
@@ -97,7 +94,7 @@ pub(super) fn prepare_network_infrastructure(
     } else {
         let (packet_sender, packet_receiver) = flume::bounded(1);
         (
-            Arc::new(Vec::new()),
+            Arc::new(std::sync::OnceLock::from(Arc::new(Vec::new()))),
             packet_sender,
             packet_receiver,
             Arc::new(Vec::new()),
