@@ -65,6 +65,31 @@ cargo run -p tomii-core --bin main -- \
 | `--max-frames N` | int, `1` | Total frames to process |
 | `--max-runtime SECS` | int, `0` | Stop after this many seconds; `0` = no time limit |
 
+### Network and ingest flags
+
+These apply to graphs with a `$network` source; they are no-ops otherwise.
+
+| Flag | Type / default | Description |
+|---|---|---|
+| `--rx-decode` | bool, off | Run the packet-extract function on the receiver threads instead of the resolution threads (the extract function must be thread-safe) |
+| `--ingest-shards` | bool, off | With `--system-threads > 1`, give each resolution thread its own ingest channel (receiver `i` feeds channel `i % n`) instead of one shared channel |
+| `--dispatch-chunk N` | int, `0` | Resolve and dispatch admitted packets every N packets within one poll (`0` = once per poll) |
+| `--join-stream` | bool, off | Number frames from the first frame id received, so the runtime can join a stream already in progress |
+| `--handover-listen PATH` | string, unset | Listen on this Unix socket and hand the bound sockets to a replacement process started with `--takeover` (Linux only) |
+| `--takeover PATH` | string, unset | Take the bound sockets over from a process started with `--handover-listen` instead of binding them (implies `--join-stream`; Linux only) |
+
+### Deployment flags
+
+| Flag | Type / default | Description |
+|---|---|---|
+| `--membind NODES` | string, unset | Bind process memory to these NUMA nodes (comma-separated, e.g. `0` or `0,1`); a bind policy also opts the process out of automatic NUMA balancing |
+| `--reclaim-core CORE` | int, unset | Free completed-slot results on a background thread pinned to CORE instead of on the resolution thread that completed the frame |
+| `--no-malloc-tune` | bool, off | Do not tune glibc malloc (by default heap trimming and mmap of buffers up to 32 MiB are disabled to avoid page-fault churn) |
+
+:::tip Latency-critical deployments
+Run with `--membind <node>` (or set `kernel.numa_balancing=0` host-wide). With automatic NUMA balancing on, the kernel's page-migration scanner runs inside Tomii's threads and causes episodes of slow frames.
+:::
+
 ### Scheduling flags
 
 | Flag | Type / default | Description |

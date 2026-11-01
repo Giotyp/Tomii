@@ -38,7 +38,7 @@ Fields (from `NetworkConfigJson` in `tomii-core/src/json_structs.rs`):
 
 | Field | Meaning |
 |---|---|
-| `socket_type` | `"udp"` or `"tcp"` |
+| `socket_type` | `"udp"` (only UDP is supported today; TCP is planned) |
 | `num_sockets` | Sockets to open (factor: literal or variable name) |
 | `packet_length` | Bytes per packet |
 | `frame_packets` | Packets that make up one frame |
@@ -90,9 +90,10 @@ graph routes pilot symbols to `csi` and data symbols to `fft`.
 
 ## Receiver threads
 
-Set `receiver_threads` in `run()` (CLI `--receiver-threads`, default 0).
+Set `receiver_threads` in `run()` (CLI `--receiver-threads`, default 1).
 Network packets are handled by these dedicated threads, not the task
-scheduler. A network graph needs at least one receiver thread.
+scheduler. A network graph needs at least one receiver thread — passing
+`--receiver-threads 0` for a network graph is rejected at build time.
 
 ## Out-of-window packets
 

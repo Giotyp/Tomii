@@ -34,33 +34,41 @@ Tomii's decoupling at the performance limit. Tomii implements the same uplink
 pipeline (FFT → equalization → demodulation → LDPC decode) declaratively, with
 dynamically loaded kernels.
 
-The pipeline runs with the **same kernels on both sides** — LDPC decode
-reinstated so the comparison is apples-to-apples with Agora's published
-CoNEXT'20 Table 3. This isolates the price of Tomii's decoupling from any
-kernel difference.
+The pipeline runs with the **same kernels on both sides**, LDPC decode
+included, so the comparison is apples-to-apples with Agora's published numbers.
+This isolates the price of Tomii's decoupling from any kernel difference.
 
-**The kernels run at parity.** Tomii's LDPC decode is 40.8 µs/task against
-Agora's reported 46.5 µs (0.88×), and Tomii's output is byte-identical from
-W=1 to W=26; the per-stage costs match Table 3.
+**The kernels run at parity.** Tomii's LDPC decode is 37.5 µs/task against
+Agora's published 46.5 µs, and Tomii's output is byte-identical from W=1 to
+W=26.
 
-**Where the latency gap comes from.** On 64×16, Tomii's post-arrival tail is
-1.08 ms against Agora's ~0.18 ms. That gap decomposes into roughly **3%**
-intrinsic decoupling overhead, **36%** decode compute that Agora pipelines
-across frames, and **60%** a *tunable* graph barrier — a one-line graph edit
-(full barrier → per-symbol grouped barrier) recovers ~94% of that term,
-dropping the tail to **0.54 ms** with byte-identical output. End-to-end
-latency is **ingest-bound** (Tomii's UDP receiver vs Agora's DPDK); the best
-hand-written Taskflow and oneTBB baselines hit the same ingest wall, so it is
-not a cost of decoupling.
+**The latency cost of generality is bounded and small.** On Agora's 64×16
+uplink frame (full decode, 26 worker threads), Tomii runs **drop-free at a
+1.1 ms frame period** with end-to-end latency **1.42 ms median / 1.65 ms p99.9**
+(post-arrival 0.23 / 0.34 ms). Agora's published figures are **1.19 / 1.29 ms**
+at a 1.0 ms period on 4× Xeon Gold 6130, and 1.12–1.13 / 1.15–1.19 ms on newer
+Xeons. So the generality gap is **+0.23 ms median / +0.36 ms p99.9** against the
+6130 numbers (up to +0.30 / +0.50 ms against the newer-Xeon rows) — at a 10%
+longer frame period, over kernel UDP against Agora's DPDK fast path. At the
+1.0 ms period Tomii stays drop-free (1.36 ms median) but its tail queues
+(p99.9 ~13 ms); 1.1 ms is where it holds a bounded tail. Beyond the 26 workers
+Tomii uses 13 support cores (one main, four resolution, eight receiver), against
+Agora's fused design.
 
-The takeaway is modularity-first: the kernels run at parity, and the remaining
-latency is tunable configuration plus ingest — not the price of the decoupled
-design. What the decoupling buys is the reconfiguration surface: subcarrier
-count, scheduling policy, and kernel changes are graph edits or CLI flags,
-where in Agora they are manager code changes and recompilation.
+**The remaining post-arrival time is tunable configuration, not decode.** A
+~30-line graph edit — replacing the full decode barrier with a per-symbol
+grouped barrier — cuts median post-arrival latency from 0.78 ms to **0.23 ms
+(−70%)** and p99.9 from 0.99 ms to 0.34 ms, with bit-identical output and
+byte-identical kernels and runtime.
 
-*The Agora figures are the published CoNEXT'20 Table 3 numbers; no Agora
-binary is run, and this comparison is not reproducible from this repository.*
+The takeaway is modularity-first: the kernels run at parity and the gap to a
+fused DPDK engine is a few tenths of a millisecond at a slightly longer frame
+period. What the decoupling buys is the reconfiguration surface — subcarrier
+count, scheduling policy, and kernel changes are graph edits or CLI flags, where
+in Agora they are manager-code changes and recompilation.
+
+*The Agora figures are its published numbers (CoNEXT'20, Tables 4–5); no Agora
+binary is run, so this comparison is not reproducible from this repository.*
 
 ## MIMO uplink vs Taskflow / oneTBB (reproducible)
 
@@ -74,17 +82,21 @@ Mean per-frame latency (ms), best configuration per system:
 
 | Configuration | Tomii | tf-async | tbb-flow |
 |---|---|---|---|
-| 4×4, S=4 | 0.971 | 0.962 | 0.954 |
-| 16×16, S=8 | 5.958 | 5.914 | 5.904 |
-| 16×16, S=16 (steady) | 3.071 | 3.020 | 3.008 |
-| 64×16, S=8 | 23.609 | 23.559 | 23.513 |
+| 4×4, S=4 | 0.965 | 0.951 | 0.947 |
+| 16×16, S=8 | 5.902 | 5.882 | 5.876 |
+| 16×16, S=16 (steady) | 3.014 | 2.988 | 2.981 |
+| 64×16, S=8 | 23.451 | 23.480 | 23.437 |
+
+Median of 5 runs, byte-exact verified, no decode.
 
 **Tomii matches the best hand-written execution — parity, not a win.** It
-lands within **0.2–2.1%** of the fastest per-packet baseline (`tf-async` /
-`tbb-flow`) across configurations. Against the natural *collect-then-submit*
-formulation (`tf-orig`, which waits for every packet before submitting the
-DAG) Tomii is **11–49% faster**, because it dispatches each FFT as its UDP
-packet arrives.
+lands within **0.1–1.9%** of the fastest per-packet baseline (`tf-async` /
+`tbb-flow`) across configurations (and edges ahead of `tf-async` at 64×16).
+Against the natural *collect-then-submit* formulation (`tf-orig`, which waits
+for every packet before submitting the DAG) Tomii is **1.07–2.9× faster**
+(6–66%, the gap widening with more in-flight frames), because it dispatches each
+FFT as its UDP packet arrives; it is still **1–12% faster** than the best
+static-DAG variant.
 
 The parity result is the point: reaching it with Taskflow/oneTBB required a
 **~649-line** hand-written streaming layer (UDP receiver, frame parking, slot
@@ -132,20 +144,24 @@ claimed a "same pinned core set"; that is corrected here.
 
 | System | e2e mean / p99.9 | Post-CPI p50 / p99.9 | Cores |
 |---|---|---|---|
-| **Tomii (T32, W16)** | **6.64 / 6.82 ms** | **310 / 475 µs** | **2.56** |
-| GNU Radio 4.0 (tuned) | 6.91 / 7.71 ms | 573 / 1387 µs | 18.9 |
-| GNU Radio 3.10 (tuned) | 6.92 / 7.22 ms | 580 / 874 µs | 0.47 |
+| **Tomii (T32, W16)** | **6.65 / 6.77 ms** | **315 / 422 µs** | **2.23** |
+| GNU Radio 4.0 (tuned) | 6.90 / 6.95 ms | 567 / 613 µs | 18.9 |
+| GNU Radio 3.10 (tuned) | 6.92 / 7.19 ms | 578 / 853 µs | 0.47 |
 
-End-to-end, Tomii is **~1.04×** GNU Radio 4.0 — a match, not a blanket win.
-Where it separates is the post-chirp tail (**~1.85×** lower at p50, **~2.9×**
-lower at the tail) achieved on **7.4× fewer cores** than GR4 (2.56 vs 18.9).
-The mechanism is the same one the MIMO row measures: Tomii dispatches a
-range-FFT task the moment each chirp packet arrives, so finishing the frame
-after the last chirp costs microseconds of scheduling, not milliseconds of
-buffered hand-offs. Caveats, stated plainly: **GR4 wins at small CPIs**
-(512×64), and GR3 runs at a very low core budget but with a higher tail. The
-honest summary is "matches end-to-end, roughly halves the post-chirp tail, at
-a fraction of GR4's cores," not "faster everywhere."
+End-to-end, Tomii is **~1.04×** GNU Radio 4.0 — a match, not a blanket win,
+because the ~6.35 ms chirp window dominates every system. Where it separates is
+the post-chirp tail: **1.8× lower at the median** (against both GR versions) and
+**1.45× (vs GR4) to 2.0× (vs GR3) lower at p99.9**, achieved on **8.5× fewer
+cores than GR4** (2.23 vs 18.9). Sustained throughput points the same way —
+Tomii holds **1195 fps** with 2 frames in flight and **1435 fps** with 8,
+against GR3/GR4's 1088/1190 fps (all UDP-receiver-bound). The mechanism is the
+same one the MIMO row measures: Tomii dispatches a range-FFT task the moment
+each chirp packet arrives, so finishing the frame after the last chirp costs
+microseconds of scheduling, not milliseconds of buffered hand-offs. Caveats,
+stated plainly: **GR4 wins at small CPIs** (512×64), and GR3 runs at a far lower
+core budget (0.47) though with a higher tail. The honest summary is "matches
+end-to-end, ~1.8× lower post-chirp tail at the median, at a fraction of GR4's
+cores," not "faster everywhere."
 
 ### CPU vs GPU on the same radar graph
 
@@ -185,15 +201,17 @@ compute kernel, swept over S concurrent frames. Source: `bench/pipeline-bench/`.
 At S=1 Tomii pays a fixed per-frame runtime overhead and runs several-fold
 slower than Taskflow; by S≥16 multi-slot amortization spreads the
 resolution-thread cost across lanes and the gap narrows to a small constant
-factor. *The exact per-task compute figure and the S=1/S=16 ratios are being
-re-measured on the frozen commit and will be restored here.*
+factor. *The per-frame latency comparison has not been re-measured on the
+current evaluation pin — treat the S-scaling result qualitatively until the
+harness is re-run.*
 
-**Memory growth**, same benchmark: Tomii adds +83 kB per slot against
-Taskflow's +131 kB — a 1.6× lower growth rate (`/usr/bin/time -v`, W=4,
-measured at S=1 and S=64). Note the caveat: Tomii's *baseline* RSS is higher
-(pre-allocated worker stacks and resolution-thread machinery). The advantage
-is the slope, which matters for long-running services with many frames, not
-the base.
+**Memory growth**, same benchmark (re-measured on the pin): Tomii adds
+**+12–14 kB per slot** against Taskflow's **+130 kB** — an **~10× lower growth
+rate** (`/usr/bin/time -v`, W=4, slope from S=1 to S=64, same glibc malloc
+settings for both). The caveat is the floor: at S=1 Tomii's RSS is **~9.1 MB**
+against Taskflow's **~4.8 MB** (pre-allocated worker stacks and resolution-thread
+machinery). The advantage is the slope — it matters for long-running services
+with many in-flight frames, not the base.
 
 ## Slot reuse
 
@@ -215,9 +233,9 @@ outside Tomii's envelope; see [When to use Tomii](/docs/overview/when-to-use).
 
 What the static graph *does* buy on this workload is reconfiguration without a
 rebuild: coarsening the tile granularity (1→32) is a graph-only edit worth
-**10.6× at W=1**, and switching to a 2D block-DAG is worth **23.5× at W=8** —
-in both cases the kernel `.so` *and* the runtime binary stay byte-identical;
-only the graph artifact changes.
+**6.4× at W=1**, and switching to a 2D block-DAG is worth **23× at W=8** — in
+both cases the kernel `.so` *and* the runtime binary stay byte-identical; only
+the graph artifact changes.
 
 ## Agent tuning: four arms, one verifier
 
@@ -228,26 +246,53 @@ workload invariants, so a hard-coded verifier gates every trial — a rejected
 trial never counts toward best. Three workloads, best ms/frame among passing
 trials. Source: `examples/agent-tuning/`, `run_all.sh`.
 
-| Workload | Agent valid-trial rate | Agent best (ms/frame) |
-|---|---|---|
-| stream-analytics | 90% | 0.041 |
-| pipeline | 90% | 0.87 |
-| mimo | 97% | 5.58 |
+| Arm | stream-analytics | pipeline | mimo |
+|---|---|---|---|
+| Random | 4% / 0.11 | 38% / 1.28 | 83% / 1.62 |
+| Optuna TPE | 18% / 0.19 | 68% / 0.89 | 87% / 1.62 |
+| Grid | 4% / 0.090 | 36% / 0.92 | 90% / 2.05 |
+| **Agent (`claude-sonnet-5`)** | **92% / 0.042** | **94% / 0.87** | **93% / 1.45** |
+
+Each cell is *valid-trial rate / best ms-per-frame among passing trials*
+(5 seeds; each run's best re-measured 5×). Workload defaults for reference:
+0.134 / 17.35 / 23.29 ms/frame. On MIMO the agent's 1.45 ms/frame is a **16×**
+improvement over the default and **1.12× faster** than the best black-box arm.
 
 The black-box optimizers (random, Optuna TPE, grid) stay valid on only
-**4–70%** of trials on the same generated space, because it includes
-correctness-critical graph knobs that silently violate workload invariants; a
-hard-coded verifier gates every trial, so a rejected configuration never
-counts toward best.
+**4–90%** of trials on the same generated space, because it includes
+correctness-critical graph knobs that silently violate workload invariants; the
+hard-coded verifier gates every trial, so a rejected configuration never counts
+toward best.
 
-Two honest robustness points. Near a hard constraint (the MIMO keep-up
-deadline) a single-trial best is a mirage — it can pass once and fail on the
-next seed — so only configurations **re-validated across K=5 seeds** count,
-and the agent is the only arm robust on every seed (5/5). An ablation over the
-harness components shows the **machine-readable knob catalog** is the most
-load-bearing one: a language model can tune a graph it has never seen only
-because the surface is enumerable and verifier-gated. That is the property the
+Robustness is seed-dependent, and the honest picture is mixed. Every arm's
+single best re-validates 5/5 when re-measured. Counting seeds whose best lands
+within 10% of the best known configuration: on **pipeline** the agent is 5/5
+against the best black-box arm's 4/5; on **MIMO** the agent is 4/5 against
+≤2/5; on **stream-analytics** the agent is only 1/5 — a null result there (the
+best-known config is an outlier). An ablation over the harness components shows
+the **machine-readable knob catalog** is the most load-bearing one: a language
+model can tune a graph it has never seen only because the surface is enumerable
+and verifier-gated. That is the property the
 [tuning guide](/docs/guide/tuning/agent-tuning) builds on.
+
+## Live reconfiguration
+
+Changing a deployment — a new kernel, a different core layout, a code fix — is a
+graph edit or a CLI flag in Tomii, not a rebuild of the orchestrator. On a
+streaming MIMO 4×4 workload at a 1 ms frame period:
+
+- **Restart with a rebuild:** Tomii loses **1,241 frames (~1.24 s)** of the
+  stream against Taskflow's 6,179 and oneTBB's 5,894 — the baselines recompile
+  the orchestrator, Tomii only the plugin.
+- **A core-affinity change** is a flag in Tomii (**75 frames** lost) versus a
+  rebuild for the baselines (~5,900–6,200 frames).
+- **Prebuilt restart** (binary already built) costs **54–91 frames** for every
+  system — the floor is process restart, not compilation.
+- **Live socket handover** (`--handover-listen` / `--takeover`): a replacement
+  process takes the bound sockets over from the running one, losing **1 frame**
+  (a ~2.7 ms gap), with worst post-switch latency 0.97–1.18 ms against 0.96 ms
+  steady state. This is a standard technique — socket passing over a Unix-domain
+  socket — supported out of the box for network graphs on Linux.
 
 ## Reproducing
 

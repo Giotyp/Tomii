@@ -87,4 +87,5 @@ this trade, including the configurations where Tomii loses.
 Use Tomii when you are prototyping a streaming pipeline with concurrent
 frames, per-task work above ~16 µs, and a topology you want to edit, share,
 and optimize as data. Use a fused or fork-join system when you are past
-prototyping and need the last 3–4× of absolute latency.
+prototyping and need the last few tenths of a millisecond that a fully fused,
+application-specific engine buys.

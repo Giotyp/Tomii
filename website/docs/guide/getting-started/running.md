@@ -34,7 +34,7 @@ raises throughput.
 | `max_frames` | `--max-frames` | Total frames to process (0 = run indefinitely) |
 | `max_runtime` | `--max-runtime` | Stop after N seconds (0 = run until `max_frames` complete) |
 | `batching_size` | `--batching-size` | Max tasks per scheduler batch |
-| `batching_limit` | `--batching-limit` | Max outstanding batches before back-pressure |
+| `batching_limit` | `--batching-limit` | Microseconds to wait for a batch before processing it |
 | `exclude_frames` | `--exclude-frames` | Skip the first N frames from timing output |
 | `record_frame` | `--record-frame` | Record timing for one frame index only |
 
@@ -47,7 +47,7 @@ raises throughput.
 | `slot_priority` | `--slot-priority` | Prioritize tasks from the earliest active slot |
 | `coalesce_barriers` | `--coalesce-barriers` | Batch barrier fan-outs into bulk tasks |
 | `inline_continuation` | `--inline-continuation` | Run single-successor tasks inline |
-| `inits` | `--inits` | Re-run graph initializations on each frame |
+| `inits` | `--inits` | Print the graph and initialized objects to stdout at startup (diagnostic) |
 | `record` | `--record` | Enable timing/event recording to file |
 | `use_rdtsc` | `--use-rdtsc` | RDTSC for sub-microsecond timing (x86 only) |
 | `debug` | `--debug` | Verbose debug output |
