@@ -61,6 +61,31 @@ machine that produced this table).
 | `timing` | `--timing` | str | io | — | Path for per-node timing CSV |
 | `report` | `--report` | str | io | — | Path for JSON summary report (avg/p99 latency, bottleneck hints) |
 | `dump_state` | `--dump-state` | str | io | — | Path for a runtime state snapshot (JSON) written at shutdown; SIGUSR1 writes numbered live snapshots (wedged-run debugging) |
+| `rx_decode` | `--rx-decode` | bool | perf | bool | Network graphs: run the packet-extract function on receiver threads |
+| `ingest_shards` | `--ingest-shards` | bool | perf | bool | Network graphs: one ingest channel per resolution thread |
+| `join_stream` | `--join-stream` | bool | io | bool | Network graphs: number frames from the first frame id received (join a running stream) |
+| `no_malloc_tune` | `--no-malloc-tune` | bool | env | bool | Keep glibc malloc defaults (trimming / mmap of large buffers) |
+| `dispatch_chunk` | `--dispatch-chunk` | int | perf | — | Dispatch admitted packets every N packets within a poll (0 = once per poll) |
+| `reclaim_core` | `--reclaim-core` | int | env | — | Free completed-frame results on a background thread pinned to this core |
+| `batch_queue_capacity` | `--batch-queue-capacity` | int | perf | — | Capacity of the lock-free task-completion ring buffer |
+| `spin_iterations` | `--spin-iterations` | int | perf | — | Spin iterations before a resolution thread blocks on recv |
+| `sched_flush_threshold` | `--sched-flush-threshold` | int | perf | — | Flush accumulated successors to workers every N items during batch processing |
+| `socket_recv_buf_bytes` | `--socket-recv-buf-bytes` | int | perf | — | UDP socket kernel receive buffer size, in bytes |
+| `recv_pool_size` | `--recv-pool-size` | int | perf | — | Pre-allocated packet buffers per receiver thread |
+| `spin_wait_spin_iters` | `--spin-wait-spin-iters` | int | perf | — | `spin_loop()` iterations before switching to `yield_now()` |
+| `spin_wait_yield_iters` | `--spin-wait-yield-iters` | int | perf | — | `yield_now()` iterations before switching to `park_timeout()` |
+| `spin_wait_park_ns` | `--spin-wait-park-ns` | int | perf | — | `park_timeout()` duration, in nanoseconds |
+| `membind` | `--membind` | str | env | — | Bind memory to these NUMA nodes, e.g. `0` or `0,1` (also opts the process out of NUMA balancing) |
+| `handover_listen` | `--handover-listen` | str | io | — | Unix socket path: hand the bound sockets to a replacement process (`--takeover`) when it connects |
+| `takeover` | `--takeover` | str | io | — | Unix socket path: take the bound sockets over from a running process (`--handover-listen`) |
+| `resolution_strategy` | `--resolution-strategy` | str | perf | — | Batch resolution strategy (`multi-slot-batch` is the only value today) |
+
+A `perf` knob with a `—` domain is **settable** (via `run(**kwargs)` or the CLI
+flag) but is **not** part of the generated [knob space](/docs/guide/tuning/knobs)
+— the systematic search arms (grid/random/TPE) do not sweep it. The low-level
+scheduler, sizing, and strategy knobs are kept out of the auto-search space so
+the grid arm's full cross-product stays tractable; tune them by hand when a
+profile points at them.
 
 ## Search hints
 

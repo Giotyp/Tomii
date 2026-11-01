@@ -18,7 +18,7 @@ from tomii._knobs import (
     split,
     suggest_optuna,
 )
-from tomii._runner import list_knobs_json
+from tomii._runner import build_command, list_knobs_json
 
 
 # A minimal graph exercising all three graph-knob shapes: a Var-named factor
@@ -58,6 +58,38 @@ TOY_GRAPH: dict[str, Any] = {
 # --------------------------------------------------------------------------- #
 
 
+def test_low_level_knobs_are_reachable_from_run() -> None:
+    """The scheduler/sizing/strategy knobs must reach the command line via run(),
+    even though they are not in the auto-search space."""
+    cmd = build_command(
+        "bin",
+        "g.json",
+        "p.so",
+        spin_iterations=64,
+        sched_flush_threshold=16,
+        spin_wait_spin_iters=128,
+        spin_wait_yield_iters=512,
+        spin_wait_park_ns=200,
+        batch_queue_capacity=131072,
+        socket_recv_buf_bytes=33554432,
+        recv_pool_size=2048,
+        resolution_strategy="multi-slot-batch",
+    )
+    joined = " ".join(cmd)
+    for flag, val in (
+        ("--spin-iterations", "64"),
+        ("--sched-flush-threshold", "16"),
+        ("--spin-wait-spin-iters", "128"),
+        ("--spin-wait-yield-iters", "512"),
+        ("--spin-wait-park-ns", "200"),
+        ("--batch-queue-capacity", "131072"),
+        ("--socket-recv-buf-bytes", "33554432"),
+        ("--recv-pool-size", "2048"),
+        ("--resolution-strategy", "multi-slot-batch"),
+    ):
+        assert f"{flag} {val}" in joined, f"{flag} not emitted by build_command"
+
+
 def test_catalog_is_versioned_and_carries_domains() -> None:
     catalog = list_knobs_json()
     assert catalog["version"] == 3
@@ -69,6 +101,22 @@ def test_catalog_is_versioned_and_carries_domains() -> None:
     assert by_name["max_frames"]["role"] == "measurement"
     assert by_name["output"]["role"] == "io"
     assert by_name["workers"]["domain"]["max"] >= 1
+    # The low-level scheduler/sizing/strategy knobs are reachable from run()
+    # (role perf, listed in the catalog with a description) but deliberately not
+    # auto-searched: they carry no domain, so the space generator skips them.
+    for name in (
+        "spin_iterations",
+        "sched_flush_threshold",
+        "spin_wait_spin_iters",
+        "spin_wait_yield_iters",
+        "spin_wait_park_ns",
+        "batch_queue_capacity",
+        "socket_recv_buf_bytes",
+        "recv_pool_size",
+        "resolution_strategy",
+    ):
+        assert by_name[name]["role"] == "perf"
+        assert "domain" not in by_name[name]
 
 
 # --------------------------------------------------------------------------- #
@@ -81,6 +129,18 @@ def test_cli_only_space_has_no_graph_knobs() -> None:
     assert space["version"] == 3
     assert all(k["kind"] == "cli" for k in space["knobs"])
     assert all(k["role"] == "perf" for k in space["knobs"])
+    # The new low-level knobs are reachable via run() but stay OUT of the search
+    # space (no domain), so the grid arm's full cross-product does not explode.
+    names = {k["name"] for k in space["knobs"]}
+    assert not (
+        {
+            "spin_iterations",
+            "sched_flush_threshold",
+            "batch_queue_capacity",
+            "resolution_strategy",
+        }
+        & names
+    )
     assert space["forbidden"]
 
 
