@@ -29,6 +29,14 @@ _INT_FLAGS: Dict[str, str] = {
     "record_frame": "--record-frame",
     "dispatch_chunk": "--dispatch-chunk",
     "reclaim_core": "--reclaim-core",
+    "batch_queue_capacity": "--batch-queue-capacity",
+    "spin_iterations": "--spin-iterations",
+    "sched_flush_threshold": "--sched-flush-threshold",
+    "socket_recv_buf_bytes": "--socket-recv-buf-bytes",
+    "recv_pool_size": "--recv-pool-size",
+    "spin_wait_spin_iters": "--spin-wait-spin-iters",
+    "spin_wait_yield_iters": "--spin-wait-yield-iters",
+    "spin_wait_park_ns": "--spin-wait-park-ns",
 }
 
 _BOOL_FLAGS: Dict[str, str] = {
@@ -56,6 +64,7 @@ _STR_FLAGS: Dict[str, str] = {
     "membind": "--membind",
     "handover_listen": "--handover-listen",
     "takeover": "--takeover",
+    "resolution_strategy": "--resolution-strategy",
 }
 
 _KNOB_DESCRIPTIONS: Dict[str, str] = {
@@ -73,6 +82,14 @@ _KNOB_DESCRIPTIONS: Dict[str, str] = {
     "record_frame": "Record timing for this specific frame index only",
     "dispatch_chunk": "Dispatch admitted packets every N packets within a poll (0 = once per poll)",
     "reclaim_core": "Free completed-frame results on a background thread pinned to this core",
+    "batch_queue_capacity": "Capacity of the lock-free task-completion ring buffer",
+    "spin_iterations": "Spin iterations before a resolution thread blocks on recv",
+    "sched_flush_threshold": "Flush accumulated successors to workers every N items during batch processing",
+    "socket_recv_buf_bytes": "UDP socket kernel receive buffer size, in bytes",
+    "recv_pool_size": "Pre-allocated packet buffers per receiver thread",
+    "spin_wait_spin_iters": "spin_loop() iterations before switching to yield_now()",
+    "spin_wait_yield_iters": "yield_now() iterations before switching to park_timeout()",
+    "spin_wait_park_ns": "park_timeout() duration, in nanoseconds",
     # Bool flags
     "fifo": "Use FIFO task scheduling instead of default (depth-first)",
     "custom": "Enable custom scheduling strategy",
@@ -96,6 +113,7 @@ _KNOB_DESCRIPTIONS: Dict[str, str] = {
     "membind": "Bind memory to these NUMA nodes, e.g. '0' or '0,1' (also disables NUMA balancing for the process)",
     "handover_listen": "Unix socket path: hand the bound sockets to a replacement process (--takeover) when it connects",
     "takeover": "Unix socket path: take the bound sockets over from a running process (--handover-listen)",
+    "resolution_strategy": "Batch resolution strategy ('multi-slot-batch' is the only value today)",
 }
 
 # Role of each knob in a tuning context:
@@ -134,6 +152,21 @@ _KNOB_ROLES: Dict[str, str] = {
     "handover_listen": "io",
     "takeover": "io",
     "no_malloc_tune": "env",
+    # Low-level scheduler / sizing / strategy knobs. Perf-relevant and reachable
+    # from run(**kwargs), but deliberately left OUT of the auto-search space (no
+    # domain in _KNOB_DOMAINS): the grid arm enumerates the full Cartesian
+    # product, so adding searchable knobs here would explode it and change the
+    # grid methodology. Enabling systematic sweeps of these is a follow-up that
+    # must first bound the grid arm.
+    "spin_iterations": "perf",
+    "sched_flush_threshold": "perf",
+    "spin_wait_spin_iters": "perf",
+    "spin_wait_yield_iters": "perf",
+    "spin_wait_park_ns": "perf",
+    "batch_queue_capacity": "perf",
+    "socket_recv_buf_bytes": "perf",
+    "recv_pool_size": "perf",
+    "resolution_strategy": "perf",
     "output": "io",
     "timing": "io",
     "report": "io",
@@ -168,6 +201,11 @@ _KNOB_SEARCH_HINTS: Dict[str, str] = {
     "slot_priority": "try both when slots > 1; can reduce tail latency under imbalanced graphs",
     "fifo": "try both; depth-first (default) usually better for latency",
     "use_rdtsc": "enable for sub-us timing precision on x86; no effect on performance",
+    "spin_iterations": "resolution-thread spin before blocking; higher trades CPU for lower wake latency under bursty load",
+    "sched_flush_threshold": "lower flushes successors to workers sooner (less worker idle); higher amortizes dispatch for fine-grained graphs",
+    "spin_wait_spin_iters": "worker spin_loop() budget before yielding; raise under bursty load, lower to save CPU when idle",
+    "spin_wait_yield_iters": "worker yield_now() budget before parking; pairs with spin_wait_spin_iters",
+    "spin_wait_park_ns": "worker park duration; shorter wakes sooner at more CPU, longer saves CPU at higher wake latency",
 }
 
 
