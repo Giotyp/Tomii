@@ -1,21 +1,57 @@
 name: Release
 
 on:
-  push:
-    tags: ["v*"]
-  # Allows re-running the PyPI publish without re-tagging (e.g. after trimming the
-  # wheel matrix) and without re-triggering the crates.io workflow.
+  # Publishing is gated on a GitHub Release being *published* (not merely tagged).
+  # Create the release as a draft, review it, then publish to trigger the pipeline.
+  # The release is backed by a `vX.Y.Z` tag, so the tag convention is preserved.
+  release:
+    types: [published]
+  # Allows re-running the PyPI publish without re-publishing the Release (e.g.
+  # after trimming the wheel matrix) and without re-triggering the crates.io
+  # workflow. The version-consistency check is skipped on this path.
   workflow_dispatch: {}
 
-# OIDC token needed for PyPI trusted publishing (no stored API key required).
+# id-token for PyPI trusted publishing (no stored API key); contents:write to
+# upload the built wheels + sdist as assets on the GitHub Release.
 permissions:
   id-token: write
-  contents: read
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # --------------------------------------------------------------------------- #
+  # Fail fast if the published release tag (vX.Y.Z) does not match the versions
+  # baked into the manifests, before building 30 wheels for a mismatched release.
+  # Skipped on workflow_dispatch (no release tag in that context).
+  # --------------------------------------------------------------------------- #
+  version-check:
+    name: Version consistency
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check release tag matches manifest versions
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "release" ]; then
+            echo "Event is ${{ github.event_name }} (not a release) — skipping tag/version check."
+            exit 0
+          fi
+          TAG="${{ github.event.release.tag_name }}"
+          VER="${TAG#v}"
+          echo "Release tag: $TAG  ->  expected version: $VER"
+          extract() { grep -A8 "$1" "$2" | grep -m1 '^version' | sed -E 's/version *= *"([^"]+)".*/\1/'; }
+          ws=$(extract '^\[workspace\.package\]' Cargo.toml)
+          py=$(grep -m1 '^version' pyproject.toml | sed -E 's/version *= *"([^"]+)".*/\1/')
+          bridge=$(grep -m1 '^version' tomii/_python_bridge/Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')
+          echo "workspace Cargo.toml=$ws  pyproject.toml=$py  bridge Cargo.toml=$bridge"
+          fail=0
+          [ "$ws" = "$VER" ]     || { echo "::error::workspace version '$ws' != release '$VER'"; fail=1; }
+          [ "$py" = "$VER" ]     || { echo "::error::pyproject version '$py' != release '$VER'"; fail=1; }
+          [ "$bridge" = "$VER" ] || { echo "::error::bridge crate version '$bridge' != release '$VER'"; fail=1; }
+          exit $fail
+
   # --------------------------------------------------------------------------- #
   # Build one wheel per (platform, Python) combination.
   #
@@ -29,6 +65,7 @@ jobs:
   # --------------------------------------------------------------------------- #
   wheels:
     name: Wheel (${{ matrix.python }}, ${{ matrix.os }})
+    needs: version-check
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -98,6 +135,7 @@ jobs:
   # --------------------------------------------------------------------------- #
   sdist:
     name: Source distribution
+    needs: version-check
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -157,3 +195,12 @@ jobs:
           # Idempotent re-runs: skip files already on PyPI (e.g. wheels published
           # in a prior run) and upload only what's new, instead of 400-failing.
           skip-existing: true
+
+      # Attach the same wheels + sdist to the GitHub Release for provenance and
+      # direct download (and so a Zenodo/GitHub integration archives them).
+      # Skipped on workflow_dispatch, which has no release to attach to.
+      - name: Attach wheels + sdist to the GitHub Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber
