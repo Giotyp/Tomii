@@ -312,7 +312,8 @@ def test_build_command_unknown_kwarg_suggests_closest_match() -> None:
 
 def test_build_command_does_not_raise_on_unknown_kwarg() -> None:
     # Backward compat: unknown kwargs are dropped, not fatal.
-    cmd = build_command("bin", "g.json", "p.so", totally_unrecognized_knob=1)
+    with pytest.warns(UserWarning):
+        cmd = build_command("bin", "g.json", "p.so", totally_unrecognized_knob=1)
     assert "totally_unrecognized_knob" not in " ".join(cmd)
 
 

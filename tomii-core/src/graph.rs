@@ -225,10 +225,7 @@ impl Graph {
     /// is absent, the barrier is grouped, or the `$res` already covers every
     /// instance.
     pub fn validate_barrier_res_same_pred_conflict(&self) -> Result<(), crate::TomiiError> {
-        let all_nodes = self
-            .nodes
-            .iter()
-            .chain(self.post_nodes.iter().flatten());
+        let all_nodes = self.nodes.iter().chain(self.post_nodes.iter().flatten());
         for node in all_nodes {
             let num_groups = match node.group_size {
                 Some(gs) if gs > 0 && gs < node.factor => node.factor / gs,

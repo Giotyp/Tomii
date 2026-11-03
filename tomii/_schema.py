@@ -287,14 +287,14 @@ def graph_schema() -> "dict[str, Any]":
             "$workers": {
                 "description": (
                     "Reserved factor name resolving to the runtime's configured worker "
-                    "count. Use as a factor string: factor=\"$workers\"."
+                    'count. Use as a factor string: factor="$workers".'
                 ),
             },
             "$network": {
                 "description": (
                     "Virtual predecessor node for network-input graphs (graph.network()). "
                     "Not created with graph.node() — reference it by constructing a Node "
-                    "handle named \"$network\" and calling .out()/.wait() on it, as "
+                    'handle named "$network" and calling .out()/.wait() on it, as '
                     "examples/radar-pipeline/build_graph.py does: "
                     "Node('$network', func='').out(0, n_chirps)."
                 ),

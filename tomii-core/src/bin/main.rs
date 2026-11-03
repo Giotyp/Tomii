@@ -819,7 +819,10 @@ mod timing_enabled_tests {
     fn report_flag_alone_enables_timing() {
         // Regression: `--report` used to be a silent no-op without `--timing`
         // because the time buffer was never created.
-        assert!(timing_collection_enabled(&None, &Some("r.json".to_string())));
+        assert!(timing_collection_enabled(
+            &None,
+            &Some("r.json".to_string())
+        ));
     }
 
     #[test]

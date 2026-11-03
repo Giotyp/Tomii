@@ -122,7 +122,10 @@ fn rejected_error_names_node_and_predecessor() {
     .err()
     .expect("expected rejection");
     let msg = err.to_string();
-    assert!(msg.contains("consumer"), "error should name the node: {msg}");
+    assert!(
+        msg.contains("consumer"),
+        "error should name the node: {msg}"
+    );
     assert!(
         msg.contains("producer"),
         "error should name the predecessor: {msg}"
