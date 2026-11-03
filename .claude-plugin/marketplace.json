@@ -1,0 +1,14 @@
+{
+  "name": "tomii",
+  "description": "Tomii (Τομί) agent skills",
+  "owner": {
+    "name": "George Typaldos"
+  },
+  "plugins": [
+    {
+      "name": "tomii-skills",
+      "source": "./SKILLS",
+      "description": "Agent skills for building, validating, diagnosing and tuning Tomii (Τομί) task-graph applications."
+    }
+  ]
+}

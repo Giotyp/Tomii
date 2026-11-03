@@ -1,15 +1,30 @@
----
-name: Τομί skills index
-description: Overview of Τομί agent skills and the optimization lifecycle
----
-
 # Τομί Agent Skills
 
-This folder contains structured workflow skills that enable AI agents to work effectively
-with Τομί. Each skill is a self-contained markdown document that also follows the
-Claude Code SKILL.md convention (YAML frontmatter + step-by-step instructions), so they
-can be used as slash commands by copying them into `.claude/skills/`
-(`./SKILLS/install-skills.sh`).
+This folder is a Claude Code plugin (`tomii-skills`) of structured workflow skills that
+enable AI agents to work effectively with Τομί. Each skill is a directory
+`skills/<name>/` with a `SKILL.md` (YAML frontmatter + step-by-step instructions) and,
+where useful, reference files and scripts that the agent loads only when needed.
+
+## Install
+
+As a plugin (recommended; skills are then available as `/tomii-skills:<name>` and are
+picked up automatically when relevant):
+
+```
+/plugin install tomii-skills --marketplace Giotyp/Tomii
+```
+
+or, from a local checkout: `/plugin marketplace add /path/to/Tomii` then
+`/plugin install tomii-skills@tomii`. For quick local use: `claude --plugin-dir SKILLS`.
+
+Copying into a project's `.claude/skills/` (for harnesses that read that directory):
+
+```bash
+./SKILLS/install-skills.sh [project-dir]
+```
+
+The `SKILL.md` format is the open Agent Skills format, so other agents that read
+`SKILL.md` directories can use `skills/` as is.
 
 ## Optimization Lifecycle
 
@@ -38,16 +53,16 @@ run-validate ◄─────────────┘
 
 ## Skills
 
-| Skill | File | Trigger |
+| Skill | Path | Trigger |
 |-------|------|---------|
-| **project-discover** | [project-discover.md](project-discover.md) | Orient in an unknown Τομί project |
-| **graph-build** | [graph-build.md](graph-build.md) | Build a graph from a computation description |
-| **run-validate** | [run-validate.md](run-validate.md) | Execute, verify correctness, establish baseline |
-| **diagnose** | [diagnose.md](diagnose.md) | Classify bottleneck from report.json |
-| **knob-search** | [knob-search.md](knob-search.md) | Tune scheduler knobs (overhead_pct 20-60%) |
-| **graph-coarsen** | [graph-coarsen.md](graph-coarsen.md) | Reduce task count (overhead_pct > 60%) |
-| **network-ingest** | [network-ingest.md](network-ingest.md) | Tune packet ingest for graphs with `network_config` |
-| **plugin-author** | [plugin-author.md](plugin-author.md) | Write `#[tomii_export]` Rust / C / Python kernels |
+| **project-discover** | [skills/project-discover/](skills/project-discover/SKILL.md) | Orient in an unknown Τομί project |
+| **graph-build** | [skills/graph-build/](skills/graph-build/SKILL.md) | Build a graph from a computation description |
+| **run-validate** | [skills/run-validate/](skills/run-validate/SKILL.md) | Execute, verify correctness, establish baseline |
+| **diagnose** | [skills/diagnose/](skills/diagnose/SKILL.md) | Classify bottleneck from report.json |
+| **knob-search** | [skills/knob-search/](skills/knob-search/SKILL.md) | Tune scheduler knobs (overhead_pct 20-60%) |
+| **graph-coarsen** | [skills/graph-coarsen/](skills/graph-coarsen/SKILL.md) | Reduce task count (overhead_pct > 60%) |
+| **network-ingest** | [skills/network-ingest/](skills/network-ingest/SKILL.md) | Tune packet ingest for graphs with `network_config` |
+| **plugin-author** | [skills/plugin-author/](skills/plugin-author/SKILL.md) | Write `#[tomii_export]` Rust / C / Python kernels |
 
 ## Quick-Start for Agents
 

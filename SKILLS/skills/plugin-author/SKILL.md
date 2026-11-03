@@ -13,9 +13,9 @@ fan-in.
 ## Trigger
 
 - A new computation stage needs a plugin function
-- An existing function signature needs to change (e.g., for [graph-coarsen](graph-coarsen.md))
+- An existing function signature needs to change (e.g., for [graph-coarsen](../graph-coarsen/SKILL.md))
 - The build fails with type mismatch or FFI errors
-- Writing a plugin from scratch (usually follows [graph-build](graph-build.md))
+- Writing a plugin from scratch (usually follows [graph-build](../graph-build/SKILL.md))
 
 ## Rust plugins
 
@@ -143,92 +143,12 @@ Inside the Τομί repository, plugins live under `examples/<name>/` and join t
 workspace — do not add a `[workspace]` table there. Elsewhere, adjust the paths (or use
 git dependencies).
 
-### Dynamic registration (experimental, off by default)
+### Other plugin kinds and options
 
-By default `app.build()` regenerates the runtime's wrappers from your source
-(`FUNC_PATH`) and rebuilds `tomii-core`, so adding a kernel rebuilds the runtime. With
-the `dynamic-registration` feature, the plugin `.so` describes its own kernels in a
-`__tomii_exports` table and the runtime loads them at startup, so adding a kernel
-rebuilds only the plugin. To opt in (see `examples/radar-pipeline`):
-
-1. Plugin `Cargo.toml`: `[features] dynamic-registration = []` and
-   `[build-dependencies] tomii-converter = { path = "../../tomii-converter" }`.
-2. Plugin `build.rs`: when `CARGO_FEATURE_DYNAMIC_REGISTRATION` is set, call
-   `tomii_converter::generate_self_contained_file(src/lib.rs, $OUT_DIR/tomii_exports.rs)`.
-3. Plugin `src/lib.rs`: `#[cfg(feature = "dynamic-registration")] include!(concat!(env!("OUT_DIR"), "/tomii_exports.rs"));`
-4. Build the plugin with `--features dynamic-registration` and the runtime
-   (`tomii-core`) with `--features dynamic-registration`; run with `--dylib <plugin.so>`.
-   The runtime exits with an error if the table is missing or its ABI version differs.
-
-## C plugins (converter)
-
-### Basic pattern
-
-Annotate C function declarations in a header file with `// @tomii_export`:
-
-```c
-// @tomii_export
-void* fft_planner(size_t buf_size);
-```
-
-Set `func_path` in `app.build(...)` to the header file path. The converter generates
-Rust FFI wrappers automatically.
-
-### Annotations
-
-The annotation body is a comma-separated list directly after `@tomii_export`, with no
-space before `(`. Unknown tokens are silently ignored, so spell them exactly:
-
-```c
-// @tomii_export(out_len=n, free=free_vector)    ← returns a malloc'd array of length n, freed after copy
-complex_f32* generate_vector(size_t n);
-
-// @tomii_export(vector: array)                   ← read-only array; its length param is derived
-void* vec_to_mat(const complex_f32* vector, size_t vector_len);
-
-// @tomii_export(buffer: mut_array)               ← mutable array (borrowed mutably)
-void compute_fft(void* planner, complex_f32* buffer, size_t buffer_len);
-
-// @tomii_export(free=free_string)                ← returned C string freed after copy
-char* get_out_file(const char* env_var, const char* out_file);
-
-// @tomii_export(variadic)                        ← last (void**, size_t) pair collects predecessors
-void write_to_file(const char* file_path, void** buffers, size_t num_buffers);
-```
-
-Implement the named free functions in the C library (e.g. `void free_vector(complex_f32* p) { free(p); }`).
-
-### Build setup for C plugins
-
-Build the C shared library yourself, generate the runtime's wrappers from the header,
-and pass the library to `run()`:
-
-```python
-subprocess.run(["make", "-C", str(HERE)], check=True)        # builds libmylib.so
-app.build(func_path=str(HERE / "include" / "mylib.h"),        # no plugin_manifest
-          release=True, env={...})
-app.run(dylib=str(HERE / "libmylib.so"), ...)
-```
-
-(`plugin_manifest` is a Cargo manifest; it is not used for C plugins.) Full example:
-`examples/matrix-compute-C/run_bench.py`.
-
-## Python kernels
-
-```python
-import numpy as np
-import tomii
-
-@tomii.export
-def compute_fft(v: np.ndarray) -> np.ndarray:
-    return np.fft.fft(v).astype(np.complex64)
-```
-
-Wire them with `app.py_node("fft", fn=compute_fft, factor=n, args=[gen.out()])` and build
-with `app.build(python_plugin=True)` (optionally `python_interpreter="python3.13t"` for the
-free-threaded build). Use `@tomii.export(variadic=True)` for fan-in sinks. Kernels that
-release the GIL (NumPy, BLAS) run in parallel across workers. See
-`examples/matrix-compute-python/`.
+- C functions in a header annotated `// @tomii_export(...)`: see [c-plugins.md](c-plugins.md)
+- Python functions decorated `@tomii.export` (NumPy, free-threaded Python): see [python-kernels.md](python-kernels.md)
+- Loading a plugin's kernels without rebuilding the runtime (`dynamic-registration`
+  feature, experimental): see [dynamic-registration.md](dynamic-registration.md)
 
 ## Build and verify
 
@@ -269,9 +189,9 @@ body to trace the argument values.
 
 ## See also
 
-- [graph-build](graph-build.md) — for deciding what functions to write and their signatures
-- [graph-coarsen](graph-coarsen.md) — for tile kernel patterns
-- [run-validate](run-validate.md) — after fixing plugin issues
+- [graph-build](../graph-build/SKILL.md) — for deciding what functions to write and their signatures
+- [graph-coarsen](../graph-coarsen/SKILL.md) — for tile kernel patterns
+- [run-validate](../run-validate/SKILL.md) — after fixing plugin issues
 - `tomii-types/src/lib.rs` — CmTypes enum (complete list of supported types)
 - `examples/stream-analytics/src/lib.rs` — example with conditions and variadic fan-in
 - `examples/matrix-compute-C/include/matcomp.h` — example C plugin with array annotations

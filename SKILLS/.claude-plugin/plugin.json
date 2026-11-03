@@ -1,0 +1,10 @@
+{
+  "name": "tomii-skills",
+  "version": "1.2.0",
+  "description": "Agent skills for building, validating, diagnosing and tuning Tomii (Τομί) task-graph applications.",
+  "author": { "name": "George Typaldos" },
+  "homepage": "https://github.com/Giotyp/Tomii",
+  "repository": "https://github.com/Giotyp/Tomii",
+  "license": "Apache-2.0",
+  "keywords": ["tomii", "task-graph", "streaming", "scheduling", "tuning"]
+}

@@ -11,7 +11,7 @@ deterministically to action categories.
 
 ## Trigger
 
-- Performance is unsatisfactory after running [run-validate](run-validate.md)
+- Performance is unsatisfactory after running [run-validate](../run-validate/SKILL.md)
 - User asks "why is this slow?" or "what should I optimize?"
 - Automatically after any baseline measurement
 
@@ -22,14 +22,16 @@ deterministically to action categories.
 - The report is only written when the run had `timing=` set; make sure its file time is
   newer than the run you are diagnosing.
 - `summary.stale_task_drops` must be 0, and every frame must have completed. If not, the
-  problem is correctness (see [run-validate](run-validate.md)), not performance.
-- If the graph has `network_config`, go to [network-ingest](network-ingest.md) first:
+  problem is correctness (see [run-validate](../run-validate/SKILL.md)), not performance.
+- If the graph has `network_config`, go to [network-ingest](../network-ingest/SKILL.md) first:
   for network-input graphs, latency is dominated by packet arrival, ingest and admission,
   which `overhead_pct` does not separate. Come back here once ingest is tuned.
 
 ### 1. Read report.json
 
-Open `report.json` and extract the four diagnostic dimensions:
+`python3 <run-validate skill-dir>/scripts/check_report.py report.json` prints dimensions A–D
+and the top suggestions in one compact JSON. Otherwise open `report.json` and extract the
+four diagnostic dimensions:
 
 **Dimension A — Scheduling overhead ratio:**
 ```
@@ -162,15 +164,15 @@ Supporting evidence:
 
 | Bottleneck | Primary skill | Condition |
 |-----------|---------------|-----------|
-| Scheduling-dominated | [graph-coarsen](graph-coarsen.md) | overhead_pct > 60% |
-| Mixed | [knob-search](knob-search.md) | 20% ≤ overhead_pct ≤ 60% |
+| Scheduling-dominated | [graph-coarsen](../graph-coarsen/SKILL.md) | overhead_pct > 60% |
+| Mixed | [knob-search](../knob-search/SKILL.md) | 20% ≤ overhead_pct ≤ 60% |
 | Compute-dominated | kernel optimization | overhead_pct < 20% |
 | Worker underutilization | graph restructuring | max(worker_busy_pct) < 50% |
 | Load imbalance | review group_size/priority | spread > 30pp |
-| Network ingest | [network-ingest](network-ingest.md) | graph has `network_config` |
+| Network ingest | [network-ingest](../network-ingest/SKILL.md) | graph has `network_config` |
 
 ## See also
 
-- [knob-search](knob-search.md) — for mixed or knob-tunable bottlenecks
-- [graph-coarsen](graph-coarsen.md) — for scheduling-dominated bottlenecks
-- [network-ingest](network-ingest.md) — for graphs with `network_config`
+- [knob-search](../knob-search/SKILL.md) — for mixed or knob-tunable bottlenecks
+- [graph-coarsen](../graph-coarsen/SKILL.md) — for scheduling-dominated bottlenecks
+- [network-ingest](../network-ingest/SKILL.md) — for graphs with `network_config`

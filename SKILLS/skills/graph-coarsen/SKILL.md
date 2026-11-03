@@ -12,7 +12,7 @@ applies.
 
 ## Trigger
 
-- [diagnose](diagnose.md) reports `overhead_pct > 60%`
+- [diagnose](../diagnose/SKILL.md) reports `overhead_pct > 60%`
 - `optimization_suggestions` contains a priority-1 entry with `category: "graph_topology"`
 - User asks to "reduce scheduling overhead" or "coarsen the graph"
 
@@ -126,17 +126,17 @@ Typical starting value: `group_size = max(4, workers // 2)`.
 > own kernel call. It **also** defines how many consumer instances a grouped barrier
 > (`wait(..., group_by=k)`) releases at once: on a node with a grouped barrier, changing
 > `group_size` changes dependency counting, and a wrong value stalls frames or fires them
-> early (see [graph-build](graph-build.md), step 4). Only change it freely on nodes without
+> early (see [graph-build](../graph-build/SKILL.md), step 4). Only change it freely on nodes without
 > grouped barriers.
 
 If the kernel is annotated `#[tomii_export(bulk)]`, the runtime can also run a whole range
 of instances in one call (used by `coalesce_barriers` and 1:1 fan-out dispatch), which cuts
-per-task cost without changing the graph (see [plugin-author](plugin-author.md)).
+per-task cost without changing the graph (see [plugin-author](../plugin-author/SKILL.md)).
 
 ## Applying the change
 
 1. Modify `run_bench.py` per the chosen case above.
-2. If Case A or B requires kernel changes, modify `src/lib.rs` (see [plugin-author](plugin-author.md)).
+2. If Case A or B requires kernel changes, modify `src/lib.rs` (see [plugin-author](../plugin-author/SKILL.md)).
 3. Rebuild and re-run:
 
 ```python
@@ -164,9 +164,9 @@ After:  total_tasks_per_frame=X', overhead_pct=Y'%, avg_latency_us=Z'
 
 | New overhead_pct | Action |
 |-----------------|--------|
-| < 20% | Compute-dominated now; proceed to [knob-search](knob-search.md) for fine-tuning |
-| 20-60% | Mixed; proceed to [knob-search](knob-search.md) |
-| > 40% (still high) | Iterate: try halving tile_size, or chain [knob-search](knob-search.md) with `coalesce_barriers=True` |
+| < 20% | Compute-dominated now; proceed to [knob-search](../knob-search/SKILL.md) for fine-tuning |
+| 20-60% | Mixed; proceed to [knob-search](../knob-search/SKILL.md) |
+| > 40% (still high) | Iterate: try halving tile_size, or chain [knob-search](../knob-search/SKILL.md) with `coalesce_barriers=True` |
 
 ## Output
 
@@ -186,12 +186,12 @@ Modified files:
   run_bench.py: changed factor=width to factor=n_tiles, added tile_size parameter
   src/lib.rs:   added tile_fn kernel processing [start..end] range
 
-Next: [knob-search](knob-search.md) to tune scheduler knobs on the coarsened graph.
+Next: [knob-search](../knob-search/SKILL.md) to tune scheduler knobs on the coarsened graph.
 ```
 
 ## See also
 
-- [knob-search](knob-search.md) — follow-up tuning after coarsening
-- [plugin-author](plugin-author.md) — if the tile kernel requires non-trivial Rust changes
-- [run-validate](run-validate.md) — to measure the coarsened graph with a full frame count
-- [diagnose](diagnose.md) — the thresholds that route here
+- [knob-search](../knob-search/SKILL.md) — follow-up tuning after coarsening
+- [plugin-author](../plugin-author/SKILL.md) — if the tile kernel requires non-trivial Rust changes
+- [run-validate](../run-validate/SKILL.md) — to measure the coarsened graph with a full frame count
+- [diagnose](../diagnose/SKILL.md) — the thresholds that route here
