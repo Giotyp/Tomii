@@ -1,6 +1,6 @@
 ---
 name: graph-coarsen
-description: Use when report.json shows overhead_pct > 60% (scheduling dominates compute). Restructures the graph for fewer, larger tasks via tile_size, group_size, or loop coarsening — the primary remedy for scheduling-bound pipelines.
+description: "Use when report.json shows overhead_pct > 60% (scheduling dominates compute). Restructures the graph for fewer, larger tasks via tile_size, group_size, or loop coarsening — the primary remedy for scheduling-bound pipelines."
 ---
 
 # Skill: graph-coarsen
@@ -35,19 +35,27 @@ The graph creates too many fine-grained tasks. Replace per-element tasks with pe
 **Starting tile_size**: use `suggested_value` from `optimization_suggestions[0]` if available,
 otherwise start with `tile_size = max_node_factor / 8`.
 
-Follow the [AGENT.md Graph Coarsening Recipe](../AGENT.md):
+Recipe:
 
 ```python
-# Before: one task per element
-tile_size = 64  # starting point; tune with --report feedback
+import tomii as tm
+from tomii._types import TypedValue
+IDX = TypedValue("$ref", "$index")   # the instance index must be passed explicitly
+
+# Before: one task per element (factor=width). After: one task per tile.
+tile_size = 64  # starting point; tune with report feedback
 
 for step in range(num_steps):
     width = compute_width(step)
     n_tiles = (width + tile_size - 1) // tile_size
     node = app.node(f"step_{step}", func="your_tile_fn",
                     factor=n_tiles,
-                    args=[data, step, ss.usize(tile_size)])
+                    args=[data, tm.usize(step), tm.usize(tile_size), IDX])
 ```
+
+Downstream edges change with the factor: a consumer that waited for all `width`
+instances now waits for all `n_tiles` (`node.wait(0, n_tiles_var)`), and 1:1 edges stay
+1:1 only if both sides use the same tiling.
 
 The Rust kernel must process a tile internally:
 
@@ -61,9 +69,10 @@ pub fn your_tile_fn(data: &Vec<f64>, step: usize, tile_size: usize, tile_idx: us
 }
 ```
 
-> Note: `tile_idx` is the node's instance index, passed automatically by the runtime as
-> the last `usize` argument if named `idx` or matching the node's position.
-> Check `examples/wavefront-bench/src/lib.rs` for a concrete tile kernel.
+> Note: `tile_idx` receives the instance index only because the graph passes
+> `$index` (`IDX` above) in that position; nothing is injected automatically. For a
+> concrete tiled kernel, see `doppler_fft` / `cfar` in `examples/radar-pipeline`
+> (`factor=n_tiles`, `$index` arg).
 
 **Tile-size sweep**: after the initial run, sweep `tile_size` across `[16, 32, 64, 128]`
 and pick the knee of the latency curve (where further doubling gives < 5% improvement).
@@ -113,8 +122,16 @@ node = app.node("heavy_node", func="compute",
 
 Typical starting value: `group_size = max(4, workers // 2)`.
 
-> `group_size` is a scheduling hint, not a parallelism change. Each instance still runs
-> independently; they are just submitted to the scheduler in batches.
+> `group_size` batches consecutive instances for dispatch; each instance still runs its
+> own kernel call. It **also** defines how many consumer instances a grouped barrier
+> (`wait(..., group_by=k)`) releases at once: on a node with a grouped barrier, changing
+> `group_size` changes dependency counting, and a wrong value stalls frames or fires them
+> early (see [graph-build](graph-build.md), step 4). Only change it freely on nodes without
+> grouped barriers.
+
+If the kernel is annotated `#[tomii_export(bulk)]`, the runtime can also run a whole range
+of instances in one call (used by `coalesce_barriers` and 1:1 fan-out dispatch), which cuts
+per-task cost without changing the graph (see [plugin-author](plugin-author.md)).
 
 ## Applying the change
 
@@ -124,16 +141,19 @@ Typical starting value: `group_size = max(4, workers // 2)`.
 
 ```python
 build_result = app.build(..., clean=False)
-app.run(
+proc = app.run(
     dylib=build_result.dylib,
     workers=<your_workers>,
     max_frames=20,
     exclude_frames=5,
     report="report.json",
+    timing="timing.txt",    # required for the report to be written
 )
+assert proc.returncode == 0, proc.stderr
 ```
 
-4. Read the new `report.json`. Compare:
+4. Check the output is still correct (same result as before coarsening) and
+   `stale_task_drops == 0`. Then read the new `report.json` and compare:
 
 ```
 Before: total_tasks_per_frame=X, overhead_pct=Y%, avg_latency_us=Z
@@ -174,4 +194,4 @@ Next: [knob-search](knob-search.md) to tune scheduler knobs on the coarsened gra
 - [knob-search](knob-search.md) — follow-up tuning after coarsening
 - [plugin-author](plugin-author.md) — if the tile kernel requires non-trivial Rust changes
 - [run-validate](run-validate.md) — to measure the coarsened graph with a full frame count
-- [AGENT.md](../AGENT.md) — Graph Coarsening Recipe (canonical reference)
+- [diagnose](diagnose.md) — the thresholds that route here

@@ -159,10 +159,11 @@ lifecycle — from project discovery to graph coarsening:
 | `project-discover` | Orient in an unknown project: topology, knob inventory, baseline |
 | `graph-build` | Translate a computation description into a graph + plugin stubs |
 | `run-validate` | Build, verify correctness, establish baseline |
-| `diagnose` | Classify bottleneck (scheduling / compute / imbalance) |
+| `diagnose` | Classify bottleneck (scheduling / compute / imbalance / ingest) |
 | `knob-search` | 5-iteration search over scheduler knobs using per-knob hints |
 | `graph-coarsen` | Reduce task count when `overhead_pct > 60%` |
-| `plugin-author` | Write correct `#[tomii_export]` Rust/C plugin functions |
+| `network-ingest` | Tune receiver / ingest flags for network-input graphs |
+| `plugin-author` | Write correct Rust (`#[tomii_export]`), C and Python kernels |
 
 ```bash
 ./SKILLS/install-skills.sh            # installs to .claude/skills/ in CWD

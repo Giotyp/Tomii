@@ -1,6 +1,6 @@
 ---
 name: run-validate
-description: Use after editing the graph or plugin to re-measure performance. Builds the plugin, verifies correctness with a single worker, then scales up to establish a baseline and writes report.json.
+description: "Use after editing the graph or plugin to re-measure performance. Builds the plugin, verifies correctness with a single worker, then scales up to establish a baseline and writes report.json."
 ---
 
 # Skill: run-validate
@@ -32,7 +32,7 @@ build_result = app.build(
 ```
 
 If the build fails, read the compiler output carefully:
-- Type mismatch errors → check that return types match `CmTypes` variants
+- Type mismatch errors → check parameter kinds (`&T`, owned `T`, variadic `Vec<T>` last) against the graph args
 - `#[tomii_export]` not found → verify `tomii-macro` is in `Cargo.toml` dependencies
 - Linker errors → check `crate-type = ["dylib", "rlib"]` in `[lib]` section
 
@@ -41,19 +41,26 @@ If the build fails, read the compiler output carefully:
 Run with `workers=1, slots=1, max_frames=3` to isolate correctness issues from concurrency:
 
 ```python
-app.run(
+proc = app.run(
     dylib=build_result.dylib,
     workers=1,
     slots=1,
     max_frames=3,
+    max_runtime=60,            # watchdog: a stalled graph otherwise runs forever
+    dump_state="state.json",   # per-slot runtime state at shutdown
 )
+print(proc.returncode)
 ```
 
 Using `workers=1` eliminates data races as a source of incorrect output.
-Using `max_frames=3` keeps the run short.
+Using `max_frames=3` keeps the run short (the CLI default is 1 frame).
 
 Check for:
-- Non-zero exit code → read panic message in stderr (look for `thread 'main' panicked`)
+- Non-zero `proc.returncode` → read the panic message in stderr (look for `panicked`).
+  `run()` does not raise on failure.
+- Run hits `max_runtime` without finishing → a dependency count that never reaches zero
+  (see the traps table in [graph-build](graph-build.md)). Inspect `state.json`; for a live
+  process, `kill -USR1 <pid>` writes numbered snapshots `state.json.1`, `.2`, …
 - Index-out-of-bounds panics → check factor values vs. actual data sizes in plugin
 - Wrong output values → debug the plugin function logic
 
@@ -67,8 +74,11 @@ functions in the plugin), read the output and verify it is numerically/logically
 cat result.txt
 ```
 
-For network-input graphs, check that the expected number of frames completed by reading
-stdout (the runtime prints "Completed iteration N").
+For network-input graphs, check that every frame the sender sent completed: compare
+`summary.total_frames` in `report.json` (plus excluded warm-up frames) with the sender's
+count, and use the application's own output check. `debug=True` prints per-frame
+completions but slows the run; use it only while debugging. Start the receiver before the
+sender (see [network-ingest](network-ingest.md)).
 
 ### 4. Scale up for baseline measurement
 
@@ -76,19 +86,23 @@ Once correctness is confirmed, run with target configuration:
 
 ```python
 import os
-physical_cores = os.cpu_count()  # or read from /proc/cpuinfo
+cpus = len(os.sched_getaffinity(0))   # CPUs this process may use (logical)
+# Leave core_offset cores free and count physical cores if SMT is on.
 
-app.run(
+proc = app.run(
     dylib=build_result.dylib,
-    workers=physical_cores,
+    workers=cpus - 1,
     core_offset=1,
     slots=1,
     max_frames=20,
-    exclude_frames=5,       # skip first 5 frames (JIT warm-up)
+    exclude_frames=5,       # skip warm-up frames
     report="report.json",
-    timing="timing.txt",
+    timing="timing.txt",    # required: the report is only written when timing is collected
 )
+assert proc.returncode == 0, proc.stderr
 ```
+
+Remove an old `report.json` before the run, so a run that wrote none is noticed.
 
 ### 5. Read the baseline
 
@@ -98,8 +112,13 @@ Read `report.json` and record these fields as the baseline:
 {
   "summary": {
     "avg_latency_us": ...,
+    "p50_latency_us": ...,
     "p99_latency_us": ...,
+    "p999_latency_us": ...,
     "throughput_frames_per_sec": ...,
+    "total_frames": ...,
+    "total_tasks_per_frame": ...,
+    "stale_task_drops": ...,
     "scheduling_overhead_diagnostic": {
       "overhead_pct": ...,
       "interpretation": "..."
@@ -113,19 +132,24 @@ Read `report.json` and record these fields as the baseline:
 }
 ```
 
+`stale_task_drops` must be 0: a non-zero value means tasks were dropped and the run is
+not valid, whatever its latency.
+
 ### 6. Check variance
 
 If `p99_latency_us > 2 * avg_latency_us`, the measurements have high variance.
 Increase `max_frames` to 50 or `exclude_frames` to 10 for a more stable sample.
 
-### 7. Optional: validate scheduling recording
+For network-input graphs, also compare mean and tail across 3 repeated runs: one run is
+not a baseline.
 
-If `--record` was enabled (adds `timing_sched.csv`), run:
+### 7. Optional: scheduling recording
+
+With `record=True` (plus `timing=`), the runtime also writes `timing_sched.csv`:
 ```bash
-python3 scripts/validate_recording.py timing_sched.csv
+python3 scripts/analyze_sched.py timing_sched.csv --system-threads 1 --slots 1
+python3 scripts/scheduler_visualize.py timing_sched.csv -o gantt.png
 ```
-
-Check for "overlapping tasks" warnings (indicates a scheduling bug, not a user issue).
 
 ## Output
 
@@ -134,9 +158,9 @@ Baseline record:
 BASELINE
 ========
 Config: workers=N, slots=1, batching_size=1, coalesce_barriers=False, inline_continuation=False
-avg_latency_us: X
-p99_latency_us: X
+avg_latency_us: X   p50: X   p99: X   p999: X
 throughput_frames_per_sec: X
+frames completed: X / X   stale_task_drops: 0
 overhead_pct: X% (interpretation: ...)
 total_tasks_per_frame: X
 critical_path: N nodes, max_factor=N, estimated=Xus
@@ -148,4 +172,4 @@ Next: run [diagnose](diagnose.md) to classify the bottleneck.
 
 - [diagnose](diagnose.md) — classify the bottleneck from the baseline report
 - [plugin-author](plugin-author.md) — if the build fails due to plugin issues
-- [AGENT.md](../AGENT.md) — key `graph.run()` flags reference
+- `python -m tomii --list-knobs` — every `graph.run()` option
