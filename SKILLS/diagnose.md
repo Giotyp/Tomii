@@ -1,6 +1,6 @@
 ---
 name: diagnose
-description: Use when report.json was just written and you need to know which axis to optimize. Returns the dominant bottleneck (scheduling / compute / imbalance) plus a ranked remediation list with specific next steps.
+description: "Use when report.json was just written and you need to know which axis to optimize. Returns the dominant bottleneck (scheduling / compute / imbalance / network ingest) plus a ranked remediation list with specific next steps."
 ---
 
 # Skill: diagnose
@@ -17,6 +17,16 @@ deterministically to action categories.
 
 ## Steps
 
+### 0. Check the report is valid and current
+
+- The report is only written when the run had `timing=` set; make sure its file time is
+  newer than the run you are diagnosing.
+- `summary.stale_task_drops` must be 0, and every frame must have completed. If not, the
+  problem is correctness (see [run-validate](run-validate.md)), not performance.
+- If the graph has `network_config`, go to [network-ingest](network-ingest.md) first:
+  for network-input graphs, latency is dominated by packet arrival, ingest and admission,
+  which `overhead_pct` does not separate. Come back here once ingest is tuned.
+
 ### 1. Read report.json
 
 Open `report.json` and extract the four diagnostic dimensions:
@@ -25,7 +35,11 @@ Open `report.json` and extract the four diagnostic dimensions:
 ```
 summary.scheduling_overhead_diagnostic.overhead_pct
 summary.scheduling_overhead_diagnostic.interpretation
+summary.scheduling_overhead_diagnostic.overhead_us, critical_path_exec_us
 ```
+`overhead_pct = (avg latency − critical-path compute) / avg latency`. The runtime's
+`interpretation` text uses bands ≥80 / ≥50 / <20 %; the suggestion rules and the decision
+tree below use 60 / 40 / 20 %. Follow the decision tree; read the interpretation as context.
 
 **Dimension B — Critical path structure:**
 ```
@@ -49,6 +63,8 @@ per_node (array, sorted by total_exec_us descending)
 Also read:
 - `optimization_suggestions` — ranked rule-engine output (priority 1 = most impactful)
 - `bottleneck_hints` — free-text signals from the runtime
+- `summary.p999_latency_us` vs `p50_latency_us` — a large ratio points at stalls (host
+  interference, NUMA page migration, too few slots), not at average cost
 
 ### 2. Apply the decision tree
 
@@ -101,7 +117,7 @@ These complement the quantitative dimensions. Note any nodes flagged as dominant
 
 ### 5. Optional: deeper worker analysis
 
-If `timing_sched.csv` exists (produced by `timing="timing.txt"` + recording flags):
+If `timing_sched.csv` exists (produced by `timing="timing.txt"` + `record=True`):
 
 ```bash
 python3 scripts/analyze_sched.py timing_sched.csv --system-threads 1 --slots 1
@@ -151,9 +167,10 @@ Supporting evidence:
 | Compute-dominated | kernel optimization | overhead_pct < 20% |
 | Worker underutilization | graph restructuring | max(worker_busy_pct) < 50% |
 | Load imbalance | review group_size/priority | spread > 30pp |
+| Network ingest | [network-ingest](network-ingest.md) | graph has `network_config` |
 
 ## See also
 
 - [knob-search](knob-search.md) — for mixed or knob-tunable bottlenecks
 - [graph-coarsen](graph-coarsen.md) — for scheduling-dominated bottlenecks
-- [AGENT.md](../AGENT.md) — decision rule summary (overhead_pct thresholds)
+- [network-ingest](network-ingest.md) — for graphs with `network_config`

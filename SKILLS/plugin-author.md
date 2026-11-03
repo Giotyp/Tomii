@@ -1,13 +1,14 @@
 ---
 name: plugin-author
-description: Use when authoring or modifying a #[tomii_export] Rust function (or C function via the bridge). Produces a type-correct plugin body that conforms to Tomii's CmTypes system and FFI requirements.
+description: "Use when authoring or modifying a #[tomii_export] Rust function, a // @tomii_export C function, or an @tomii.export Python kernel. Produces a type-correct plugin body that conforms to Tomii's CmTypes system and FFI requirements."
 ---
 
 # Skill: plugin-author
 
 Write Τομί plugin functions that conform to the `#[tomii_export]` macro convention
-and the `CmTypes` type system. Covers Rust plugins, C plugins (via the converter), and
-special patterns for mutations, tile kernels, and variadic fan-in.
+and the `CmTypes` type system. Covers Rust plugins, C plugins (via the converter), Python
+kernels, and special patterns for mutation, tile kernels, bulk execution and variadic
+fan-in.
 
 ## Trigger
 
@@ -31,10 +32,14 @@ pub fn function_name(param1: Type1, param2: &Type2) -> ReturnType {
 
 **Rules:**
 - Function must be `pub`
-- Parameters from `$res` predecessor results arrive as `&T` (shared reference)
-- Parameters from `$ref` initialization variables arrive as `&T`
-- Plain constant arguments (inline values in JSON/Python) arrive as owned `T`
-- The return type must be owned and must implement `Into<CmTypes>`
+- Parameters map to graph `args` in order (the same count, the same order)
+- Primitives (`bool`, integers, floats, `&str`, `String`) are taken by value
+- Non-primitive values (predecessor results, init objects) can be taken as `&T`
+  (borrowed, no copy), `&mut T` (exclusive access, e.g. writing into a shared buffer
+  init), or owned `T` (cloned on every call — avoid for large data)
+- The instance index is an ordinary `usize` parameter fed by a `$index` arg
+- The return type can be any owned `T: Any + Send + Sync` (`()` for none); it is stored as
+  a type-erased value for successors
 
 ### Supported argument and return types
 
@@ -48,9 +53,9 @@ pub fn function_name(param1: Type1, param2: &Type2) -> ReturnType {
 | `String` | `String` (owned) / `&str` for input only |
 | `Vec<T>` | `Vec<T>` (owned) / `&Vec<T>` for input |
 | `Complex64` | `num_complex::Complex64` |
-| Custom structs | Must impl `Into<CmTypes>` + `From<CmTypes>` |
+| Custom structs / handles | any `T: Any + Send + Sync`, stored type-erased; consumers take `&T` / `&mut T` |
 
-See `tomii-types/src/lib.rs` for the full `CmTypes` enum.
+See `tomii-types/src/lib.rs` for the `CmTypes` enum.
 
 ### Variadic fan-in (collecting all predecessor instances)
 
@@ -59,18 +64,19 @@ predecessor, the receiving function must be marked `variadic`:
 
 ```rust
 #[tomii_export(variadic)]
-pub fn aggregate(results: Vec<f64>) -> f64 {
+pub fn aggregate(results: Vec<f64>) -> f64 {   // the LAST parameter must be Vec<T>
     results.iter().sum()
 }
 ```
 
 The runtime collects all predecessor outputs and passes them as a single `Vec<T>`.
-The Python graph uses `node.out(0, N)` to express this fan-in.
+The Python graph expresses this fan-in as the node's **last** argument with a Var end:
+`node.out(0, n)` (an int end is inclusive: `out(0, 5)` collects six instances).
 
 ### Tile-aware kernels (for graph-coarsen Case A)
 
-Tile kernels receive the tile index as an ordinary `usize` parameter. The index is the
-task's instance number (0-based), passed as the last `usize` arg matching position in `args`:
+Tile kernels receive the tile index as an ordinary `usize` parameter fed by an explicit
+`$index` argument in the graph:
 
 ```rust
 #[tomii_export]
@@ -83,33 +89,38 @@ pub fn compute_tile(data: &Vec<f64>, step: usize, tile_size: usize, tile_idx: us
 
 In the Python graph:
 ```python
+from tomii._types import TypedValue
+IDX = TypedValue("$ref", "$index")
 node = app.node("compute", func="compute_tile",
                 factor=n_tiles,
-                args=[data_var, step_var, ss.usize(tile_size)])
-# tile_idx is injected automatically as the instance index
+                args=[data_var, step_var, tm.usize(tile_size), IDX])
 ```
 
-### Mutation via raw pointers (advanced)
-
-The `#[tomii_export]` macro does NOT support functions that mutate shared state via
-raw pointers. For those, bypass the macro and write the raw FFI function directly:
+### Bulk kernels (`#[tomii_export(bulk)]`)
 
 ```rust
-use tomii_types::CmTypes;
-
-#[no_mangle]
-pub fn my_mutating_fn_cm(args: &[CmTypes]) -> CmTypes {
-    // Extract arguments manually
-    let matrix = match &args[0] {
-        CmTypes::VecF64(v) => v,
-        _ => panic!("expected VecF64"),
-    };
-    // ... mutate via unsafe raw pointer if needed ...
-    CmTypes::Bool(true)
+#[tomii_export(bulk)]
+pub fn scale(buf: &SharedBuf, idx: usize) {     // SharedBuf: a $ref buffer with per-cell writes
+    buf.set(idx, buf.get(idx) * 2.0);
 }
 ```
 
-Register this function using its `_cm` suffix — it bypasses the macro's type wrapping.
+Adds a `scale_bulk_cm(start, end, args)` companion that runs instances `start..end` in
+one call, extracting the static arguments once. The parameter named `idx`, `index` or `i`
+is the per-instance index. The bulk companion discards return values, so bulk kernels
+should write their results into a shared `$ref` buffer and return `()`. The runtime uses it when it dispatches a range at once
+(`coalesce_barriers`, 1:1 fan-out dispatch; `no_fanout_bulk=True` disables the latter
+for verification). Rust only — C plugins have no bulk form.
+
+### Shared buffers written by many instances
+
+`&mut T` gives one call exclusive access to a value. When many instances of one node
+write **disjoint** parts of one shared buffer concurrently (each at its `$index`), an
+exclusive borrow serializes them. Instead take `&T` of a buffer type with interior
+mutability (per-cell `UnsafeCell` / atomics) and write through raw cell pointers — never
+create a `&mut` to the whole buffer from several threads (that is undefined behaviour and
+shows up as nondeterministic output with more than one worker). The graph's barriers
+must guarantee that readers run after writers.
 
 ### Cargo.toml template
 
@@ -128,6 +139,27 @@ tomii-macro = { path = "../../tomii-macro" }
 # optional: nalgebra, num-complex, etc.
 ```
 
+Inside the Τομί repository, plugins live under `examples/<name>/` and join the root
+workspace — do not add a `[workspace]` table there. Elsewhere, adjust the paths (or use
+git dependencies).
+
+### Dynamic registration (experimental, off by default)
+
+By default `app.build()` regenerates the runtime's wrappers from your source
+(`FUNC_PATH`) and rebuilds `tomii-core`, so adding a kernel rebuilds the runtime. With
+the `dynamic-registration` feature, the plugin `.so` describes its own kernels in a
+`__tomii_exports` table and the runtime loads them at startup, so adding a kernel
+rebuilds only the plugin. To opt in (the repository's `examples/` contain a plugin with this feature):
+
+1. Plugin `Cargo.toml`: `[features] dynamic-registration = []` and
+   `[build-dependencies] tomii-converter = { path = "../../tomii-converter" }`.
+2. Plugin `build.rs`: when `CARGO_FEATURE_DYNAMIC_REGISTRATION` is set, call
+   `tomii_converter::generate_self_contained_file(src/lib.rs, $OUT_DIR/tomii_exports.rs)`.
+3. Plugin `src/lib.rs`: `#[cfg(feature = "dynamic-registration")] include!(concat!(env!("OUT_DIR"), "/tomii_exports.rs"));`
+4. Build the plugin with `--features dynamic-registration` and the runtime
+   (`tomii-core`) with `--features dynamic-registration`; run with `--dylib <plugin.so>`.
+   The runtime exits with an error if the table is missing or its ABI version differs.
+
 ## C plugins (converter)
 
 ### Basic pattern
@@ -136,42 +168,66 @@ Annotate C function declarations in a header file with `// @tomii_export`:
 
 ```c
 // @tomii_export
-float* compute_fft(const float* input, size_t n, size_t* out_len);
+void* make_context(size_t size);
 ```
 
 Set `func_path` in `app.build(...)` to the header file path. The converter generates
 Rust FFI wrappers automatically.
 
-### Annotations for arrays
+### Annotations
+
+The annotation body is a comma-separated list directly after `@tomii_export`, with no
+space before `(`. Unknown tokens are silently ignored, so spell them exactly:
 
 ```c
-// @tomii_export (out_len=result_len, free=free_result)
-double* process_batch(const double* data, size_t n, size_t tile, size_t* result_len);
+// @tomii_export(out_len=n, free=free_vector)    ← returns a malloc'd array of length n, freed after copy
+float* generate(size_t n);
 
-// @tomii_export (param: array)      ← input array (read-only)
-void analyze(const float* data, size_t n);
+// @tomii_export(data: array)                     ← read-only array; its length param is derived
+void* summarize(const float* data, size_t data_len);
 
-// @tomii_export (param: mut_array)  ← input array (mutable)
-void normalize_inplace(float* data, size_t n);
+// @tomii_export(buffer: mut_array)               ← mutable array (borrowed mutably)
+void transform(void* ctx, float* buffer, size_t buffer_len);
+
+// @tomii_export(free=free_string)                ← returned C string freed after copy
+char* get_out_file(const char* env_var, const char* out_file);
+
+// @tomii_export(variadic)                        ← last (void**, size_t) pair collects predecessors
+void write_all(const char* file_path, void** items, size_t num_items);
 ```
 
-Memory management: implement `free_result` (or `free_vector`, `free_matrix`, `free_string`)
-in the C source to allow the runtime to free returned heap memory:
-
-```c
-void free_result(double* ptr) { free(ptr); }
-```
+Implement the named free functions in the C library (e.g. `void free_vector(float* p) { free(p); }`).
 
 ### Build setup for C plugins
 
+Build the C shared library yourself, generate the runtime's wrappers from the header,
+and pass the library to `run()`:
+
 ```python
-build_result = app.build(
-    func_path=str(HERE / "include" / "mylib.h"),
-    plugin_manifest=str(HERE / "Makefile"),   # or CMakeLists.txt
-    env={...},
-    release=True,
-)
+subprocess.run(["make", "-C", str(HERE)], check=True)        # builds libmylib.so
+app.build(func_path=str(HERE / "include" / "mylib.h"),        # no plugin_manifest
+          release=True, env={...})
+app.run(dylib=str(HERE / "libmylib.so"), ...)
 ```
+
+(`plugin_manifest` is a Cargo manifest; it is not used for C plugins.) The repository's
+`examples/` contain a complete C plugin.
+
+## Python kernels
+
+```python
+import numpy as np
+import tomii
+
+@tomii.export
+def normalize(v: np.ndarray) -> np.ndarray:
+    return (v / np.linalg.norm(v)).astype(np.float32)
+```
+
+Wire them with `app.py_node("norm", fn=normalize, factor=n, args=[gen.out()])` and build
+with `app.build(python_plugin=True)` (optionally `python_interpreter="python3.13t"` for the
+free-threaded build). Use `@tomii.export(variadic=True)` for fan-in sinks. Kernels that
+release the GIL (NumPy, BLAS) run in parallel across workers.
 
 ## Build and verify
 
@@ -191,7 +247,7 @@ build_result = app.build(
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `the trait Into<CmTypes> is not implemented` | Return type not in CmTypes | Return a supported type (Vec, f64, etc.) |
+| `last parameter of ... must be Vec<T>` | `variadic` on a function whose last parameter is not `Vec<T>` | Make the collected parameter last and `Vec<T>` |
 | `expected &T, found T` | Passing owned where ref expected | Match predecessor's return type |
 | `cannot find function in scope` | Missing `pub` | Add `pub fn` |
 | `linker error: undefined reference` | Missing `crate-type` | Add `["dylib", "rlib"]` to `[lib]` |
@@ -203,7 +259,8 @@ After fixing build errors, run with 1 worker and 3 frames to verify the plugin l
 executes without panics:
 
 ```python
-app.run(dylib=build_result.dylib, workers=1, slots=1, max_frames=3)
+proc = app.run(dylib=build_result.dylib, workers=1, slots=1, max_frames=3, max_runtime=60)
+assert proc.returncode == 0, proc.stderr
 ```
 
 If the plugin loads but panics at runtime, add `println!` debug output to the function
@@ -214,7 +271,5 @@ body to trace the argument values.
 - [graph-build](graph-build.md) — for deciding what functions to write and their signatures
 - [graph-coarsen](graph-coarsen.md) — for tile kernel patterns
 - [run-validate](run-validate.md) — after fixing plugin issues
-- [AGENT.md](../AGENT.md) — plugin quick-reference with Cargo.toml template
 - `tomii-types/src/lib.rs` — CmTypes enum (complete list of supported types)
-- `examples/stream-analytics/src/lib.rs` — example with conditions and variadic fan-in
-- `examples/matrix-compute-C/include/matcomp.h` — example C plugin with array annotations
+- the repository's `examples/` — complete Rust, C and Python plugins

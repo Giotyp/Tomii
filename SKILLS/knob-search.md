@@ -1,6 +1,6 @@
 ---
 name: knob-search
-description: Use when overhead_pct is 20-60% (mixed profile) or you want to tune runtime knobs (workers, batching_size, coalesce_barriers, etc.). Runs a bounded 5-iteration sweep using per-knob search hints from --list-knobs-json.
+description: "Use when overhead_pct is 20-60% (mixed profile) or you want to tune runtime knobs (workers, batching_size, coalesce_barriers, etc.). Runs a bounded 5-iteration sweep using per-knob search hints from --list-knobs-json and the graph's generated knob space."
 ---
 
 # Skill: knob-search
@@ -17,11 +17,18 @@ each dimension. Converges in at most 5 iterations.
 
 ## Setup
 
-### Load per-knob search hints
+### Load the search space and per-knob hints
 
 ```bash
-python -m tomii --list-knobs-json
+python -m tomii --knob-space graph.json   # searchable knobs + domains for this graph
+python -m tomii --list-knobs-json         # every knob: role, description, search_hint, domain
 ```
+
+(`tm.knob_space("graph.json")` returns the same space in Python.) Search only knobs with
+`role == "perf"`. Knobs without a `domain` (e.g. `spin_iterations`, `sched_flush_threshold`,
+`spin_wait_*`) are settable but deliberately not auto-searched — touch them only with a
+specific reason. Network-only knobs appear only for graphs with `network_config`; tune
+those with [network-ingest](network-ingest.md) **before** this skill.
 
 Each knob entry has a `search_hint` field specifying how to search it, for example:
 - `workers`: "unimodal; binary search 1-physical_cores; diminishing returns past core count"
@@ -47,24 +54,29 @@ baseline_p99_latency_us: X
 Try each boolean knob independently. For each, toggle from the baseline and run:
 
 ```python
-app.run(
+proc = app.run(
     dylib=build_result.dylib,
     workers=<baseline_workers>,
     max_frames=20,
     exclude_frames=5,
     report="report.json",
+    timing="timing.txt",      # required for the report to be written
     coalesce_barriers=True,   # toggle this knob
     # all other knobs at baseline
 )
+assert proc.returncode == 0, proc.stderr
 ```
 
+Every run below uses the same `max_frames`, `exclude_frames`, `report=` and `timing=`.
+Spell knob names exactly as listed: `run()` ignores unknown keyword arguments.
+
 Knobs to try:
-1. `coalesce_barriers=True` — helps when `max_node_factor >> workers` (check `critical_path.max_node_factor`)
+1. `coalesce_barriers=True` — helps when `max_node_factor >> workers` (check `critical_path.max_node_factor`);
+   can serialize coarse-grained barrier fan-outs, so measure
 2. `inline_continuation=True` — helps for graphs with long linear chains (check `critical_path.length_nodes > 20`)
 3. `slot_priority=True` — helps when `slots > 1`; skip if running with `slots=1`
-
-> **Warning**: `coalesce_barriers=True` suppresses `total_tasks_per_frame` in subsequent
-> `report.json` outputs (field becomes `null`). Confirm graph structure is correct before enabling.
+4. `fifo=True` — depth-first (default) is usually better for latency
+5. `custom=True` — alternative scheduling strategy; measure at your worker count
 
 For each, record: `{knob, value, avg_latency_us, delta_pct}`.
 Keep the value that gives the lowest `avg_latency_us`.
@@ -76,7 +88,7 @@ Search hint: "unimodal; binary search 1-physical_cores"
 
 ```python
 import os
-cores = os.cpu_count()
+cores = len(os.sched_getaffinity(0)) - 1   # minus core_offset; count physical cores if SMT is on
 # Binary search: lo=1, hi=cores, target=minimum avg_latency_us
 lo, hi = 1, cores
 while hi - lo > 1:
@@ -107,10 +119,11 @@ for bs in candidates:
 
 ### Iteration 4: Sweep batching_limit
 
-Try values: 1, 2, 4, 10 (microseconds, the max wait before flushing a partial batch).
+Try values: 1, 2, 4, 8 (microseconds, the max wait before flushing a partial batch;
+search domain 1–8, CLI default 10).
 
 ```python
-for bl in [1, 2, 4, 10]:
+for bl in [1, 2, 4, 8]:
     run with batching_limit=bl, best batching_size from iter 3, record avg_latency_us
 ```
 
@@ -122,10 +135,13 @@ Run the best configuration 3 times:
 
 ```python
 for trial in range(3):
-    run with best_config, max_frames=30, exclude_frames=5, report=f"report_trial{trial}.json"
+    run with best_config, max_frames=30, exclude_frames=5,
+             report=f"report_trial{trial}.json", timing=f"timing_trial{trial}.txt"
 ```
 
-For each trial, read `avg_latency_us`. Compute mean and std_dev across the 3 trials.
+For each trial, read `avg_latency_us` and `p99_latency_us`, and check `stale_task_drops == 0`
+and the application's output check. Discard any configuration with an invalid trial.
+Compute mean and std_dev across the 3 trials.
 
 If `std_dev > 0.1 * mean`:
 - Increase `max_frames` to 50 or `exclude_frames` to 10
@@ -168,4 +184,5 @@ If overhead_pct is still > 40% after best config: proceed to [graph-coarsen](gra
 - [diagnose](diagnose.md) — to understand which bottleneck class warrants knob-search
 - [graph-coarsen](graph-coarsen.md) — if knob-search doesn't resolve the bottleneck
 - [run-validate](run-validate.md) — to confirm the final configuration with a full measurement
-- [AGENT.md](../AGENT.md) — performance model and `coalesce_barriers` warning
+- [network-ingest](network-ingest.md) — ingest knobs for network-input graphs (tune first)
+- `website/docs/reference/knob-catalog.md` — every knob with role and domain
