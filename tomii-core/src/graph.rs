@@ -144,6 +144,33 @@ impl Graph {
         }
     }
 
+    /// Warn about grouped barriers that [`Self::barrier_group_by_for_dependency`]
+    /// will treat as global: the declared `group_by` is valid but cannot take effect,
+    /// because a per-instance `$res` list on the same predecessor may reference
+    /// instances outside each group. Silent, this looks like "grouping does not help".
+    pub fn warn_ineffective_group_by(&self) {
+        for node in &self.nodes {
+            for arg in &node.args {
+                let Some(pred) = arg.predecessor.as_ref() else {
+                    continue;
+                };
+                if arg.type_.is_barrier()
+                    && pred.group_by.is_some()
+                    && self.barrier_group_by_for_dependency(node, pred).is_none()
+                {
+                    tracing::warn!(
+                        node = %node.name,
+                        predecessor = %self.nodes[pred.id as usize].name,
+                        "group_by on this $barrier has no effect (treated as a barrier over all \
+                         instances): a per-instance $res list on the same predecessor can \
+                         reference instances outside each group. To start groups early, read \
+                         that predecessor with a single-index $res (or via a $ref buffer)"
+                    );
+                }
+            }
+        }
+    }
+
     pub fn dependency_count_vec(&self) -> Vec<usize> {
         // Return a vector with the dependency count for each node.
         //

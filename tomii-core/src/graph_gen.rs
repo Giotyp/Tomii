@@ -380,6 +380,8 @@ pub fn from_json_str(contents: &str, workers: usize) -> Result<GraphSpec, crate:
         graph.add_post_node(node);
     }
 
+    graph.warn_ineffective_group_by();
+
     Ok(GraphSpec {
         graph,
         init_objects: init_vec,
