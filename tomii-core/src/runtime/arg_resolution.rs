@@ -271,6 +271,91 @@ fn spin_wait_for_result(
     }
 }
 
+/// Predecessor instance to fetch for a `$res` arg with a *single* declared index.
+///
+/// When the consumer has `group_size` set, the declared index is normally an
+/// offset *within the predecessor's own per-group chunk* (e.g. `$res fft "0"`
+/// alongside a `$barrier` on `fft` grouped by antenna: each of the consumer's
+/// symbol-groups reads antenna 0 of its own 4-antenna chunk). That only makes
+/// sense when the predecessor is actually produced in lockstep with the
+/// consumer's groups — i.e. `pred_eff_group_size` was resolved from a real
+/// `group_by` on an edge touching this predecessor, not defaulted.
+///
+/// When no such grouping exists for this predecessor (`pred_eff_group_size` is
+/// `None` — e.g. an *ungrouped* `$barrier` shares this same predecessor), the
+/// declared index is a plain broadcast: every instance of the consumer, in
+/// every group, reads the same absolute predecessor index. Previously this
+/// branch unconditionally multiplied by `pred_factor` as a fallback grouping
+/// width, producing an out-of-range predecessor index for every group beyond
+/// the first — `node_results` never stores anything at that index, so the
+/// requesting worker spins forever (see the module-level stall writeup).
+#[inline(always)]
+fn single_index_dep_idx(
+    node_index: usize,
+    declared: isize,
+    pred_factor: usize,
+    node_group_size: Option<usize>,
+    pred_eff_group_size: Option<usize>,
+) -> usize {
+    match node_group_size {
+        Some(ngs) => match pred_eff_group_size {
+            Some(eff_gs) => {
+                let symbol = node_index / ngs;
+                symbol * eff_gs + declared as usize
+            }
+            // Not grouped in lockstep with this consumer: absolute, broadcast
+            // index — identical for every instance regardless of its group.
+            None => declared.rem_euclid(pred_factor as isize) as usize,
+        },
+        None => find_pred_index(node_index, declared, pred_factor),
+    }
+}
+
+/// Predecessor instance to fetch for a `$res` arg with an explicit per-instance
+/// index list (`indexes.len() == node_factor`, one declared index per consumer
+/// instance).
+///
+/// When `pred_factor == node_factor` this is a genuine 1:1 fanout (the common
+/// network-ingest shape: `node[i]` is dispatched BY, and reads, `pred[i]`'s own
+/// completion) — `pred_index`, the index of the predecessor instance that
+/// *triggered* this dispatch, already identifies the right cell and is
+/// guaranteed to be stored (no `indexes` lookup needed, and no risk of a
+/// not-yet-stored result).
+///
+/// Otherwise the two factors differ, so this cannot be that trigger-paired 1:1
+/// edge — `indexes.len() == node_factor` here just means "one declared index
+/// per consumer instance" (e.g. a per-instance list used to route around
+/// `group_size`, or the declared indexes happen to number `node_factor`).
+/// Trusting `pred_index` in that case is wrong: `pred_index` is whichever
+/// predecessor instance's completion caused this *group* of consumer instances
+/// to become ready, which — when this predecessor is also behind a `$barrier`
+/// shared with ANOTHER predecessor's ungrouped/global barrier on the same
+/// node — can legitimately belong to that OTHER predecessor instead (an
+/// ungrouped barrier's completions decrement every dependency-counter group at
+/// once, so it can be the specific completion that tips a group to zero).
+/// Using it directly as a `pred_factor`-space index then points at an
+/// unrelated, frequently not-yet-produced predecessor instance, and the
+/// requesting worker spins — and because one such mis-dispatch typically fans
+/// out across many consumer instances/groups simultaneously, it can occupy
+/// every worker at once with nothing left to produce the awaited result
+/// (observed as the MIMO demul/fft "pending-frame buffer full" stall).  The
+/// correct, context-independent answer is simply the declared index for THIS
+/// consumer instance.
+#[inline(always)]
+fn per_instance_dep_idx(
+    indexes: &[isize],
+    node_index: usize,
+    pred_index: usize,
+    pred_factor: usize,
+    node_factor: usize,
+) -> usize {
+    if pred_factor == node_factor {
+        pred_index % pred_factor
+    } else {
+        indexes[node_index].rem_euclid(pred_factor as isize) as usize
+    }
+}
+
 /// Shared core of the `$res` resolution path.
 ///
 /// Both [`collect_arg_result`] (live-graph path) and [`collect_res_from_cache`]
@@ -308,13 +393,13 @@ fn fetch_res_results(
 
     // Single explicit index: use the declared index, not pred_index.
     if indexes.len() == 1 {
-        let dep_idx = if let Some(ngs) = node_group_size {
-            let symbol = node_index / ngs;
-            let eff_gs = pred_eff_group_size.unwrap_or(pred_factor);
-            symbol * eff_gs + indexes[0] as usize
-        } else {
-            find_pred_index(node_index, indexes[0], pred_factor)
-        };
+        let dep_idx = single_index_dep_idx(
+            node_index,
+            indexes[0],
+            pred_factor,
+            node_group_size,
+            pred_eff_group_size,
+        );
         let node_info = NodeInfo::new(res_node_id, slot, dep_idx, 0);
         if let Some(result) = shared.exec.node_results.get(&node_info) {
             return Some(vec![result]);
@@ -323,9 +408,11 @@ fn fetch_res_results(
             .map(|r| vec![r]);
     }
 
-    // 1:1 mapping: each successor instance reads one predecessor result via pred_index.
+    // Per-instance mapping: one declared index per consumer instance.
     if indexes.len() > 1 && indexes.len() == node_factor {
-        let node_info = NodeInfo::new(res_node_id, slot, pred_index % pred_factor, 0);
+        let dep_idx =
+            per_instance_dep_idx(indexes, node_index, pred_index, pred_factor, node_factor);
+        let node_info = NodeInfo::new(res_node_id, slot, dep_idx, 0);
         if let Some(result) = shared.exec.node_results.get(&node_info) {
             return Some(vec![result]);
         }
@@ -473,5 +560,112 @@ pub(super) fn collect_arg_result(
         }
         CmTypes::Barrier(_) => None,
         _ => Some(vec![arg.type_.clone()]),
+    }
+}
+
+#[cfg(test)]
+mod dep_idx_tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // single_index_dep_idx — shape A (ungrouped barrier sharing a $res
+    // predecessor, consumer has group_size) and the sibling working shapes.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn single_index_broadcasts_when_predecessor_is_not_grouped_in_lockstep() {
+        // Shape A: node has group_size, but this predecessor's barrier is
+        // ungrouped (pred_eff_group_size = None) — every group must read the
+        // SAME absolute predecessor index, never an out-of-range one.
+        let pred_factor = 8;
+        let node_group_size = Some(3); // 12/3 = 4 groups
+        for node_index in 0..12 {
+            let dep_idx = single_index_dep_idx(node_index, 0, pred_factor, node_group_size, None);
+            assert_eq!(
+                dep_idx, 0,
+                "node_index={node_index}: ungrouped predecessor must broadcast index 0, \
+                 not scale by group/symbol"
+            );
+            assert!(
+                dep_idx < pred_factor,
+                "dep_idx must stay in predecessor's range"
+            );
+        }
+    }
+
+    #[test]
+    fn single_index_grouped_predecessor_offsets_by_symbol() {
+        // Working sibling: predecessor IS grouped in lockstep (group_by=2 on
+        // the same edge) — each symbol group reads its own chunk.
+        let pred_factor = 8;
+        let node_group_size = Some(3);
+        let pred_eff_group_size = Some(2);
+        let expected = [0, 0, 0, 2, 2, 2, 4, 4, 4, 6, 6, 6];
+        for (node_index, &want) in expected.iter().enumerate() {
+            let dep_idx = single_index_dep_idx(
+                node_index,
+                0,
+                pred_factor,
+                node_group_size,
+                pred_eff_group_size,
+            );
+            assert_eq!(dep_idx, want, "node_index={node_index}");
+        }
+    }
+
+    #[test]
+    fn single_index_no_group_size_uses_relative_offset() {
+        // No group_size at all: unaffected by this fix, same as before.
+        assert_eq!(single_index_dep_idx(5, 0, 8, None, None), 5);
+        assert_eq!(single_index_dep_idx(5, 2, 8, None, None), 7);
+    }
+
+    // -----------------------------------------------------------------------
+    // per_instance_dep_idx — shape B (per-instance $res list sharing a
+    // dependency-counter group with another predecessor's global barrier).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn per_instance_uses_declared_value_when_factors_differ() {
+        // Shape B: pred_factor (4) != node_factor (12) — NOT a genuine 1:1
+        // fanout, so `pred_index` must be ignored even when it looks like a
+        // plausible (but wrong) predecessor index. The MIMO stall was exactly
+        // this: `pred_index` carried an unrelated predecessor's (beam's)
+        // triggering index instead of this predecessor's (fft's).
+        let indexes: Vec<isize> = (0..12).map(|i| i % 4).collect();
+        let pred_factor = 4;
+        let node_factor = 12;
+        for node_index in 0..12 {
+            for bogus_pred_index in [0usize, 1, 2, 3, 999] {
+                let dep_idx = per_instance_dep_idx(
+                    &indexes,
+                    node_index,
+                    bogus_pred_index,
+                    pred_factor,
+                    node_factor,
+                );
+                assert_eq!(
+                    dep_idx,
+                    (node_index % 4),
+                    "node_index={node_index} must read its own declared index \
+                     regardless of the triggering pred_index={bogus_pred_index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn per_instance_true_one_to_one_uses_pred_index() {
+        // Genuine 1:1 fanout (pred_factor == node_factor, e.g. network ingest):
+        // the triggering pred_index is authoritative and already guaranteed
+        // stored — this must keep working exactly as before.
+        let indexes: Vec<isize> = vec![0; 8]; // content irrelevant on this path
+        let pred_factor = 8;
+        let node_factor = 8;
+        for pred_index in 0..8 {
+            let dep_idx =
+                per_instance_dep_idx(&indexes, pred_index, pred_index, pred_factor, node_factor);
+            assert_eq!(dep_idx, pred_index);
+        }
     }
 }

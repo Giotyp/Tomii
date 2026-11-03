@@ -1,8 +1,13 @@
 //! Every Tomii graph JSON committed to the repo (examples/**, bench/**) must still
-//! parse after graph-loading changes — in particular after the
-//! `Graph::validate_barrier_res_same_pred_conflict` guard added for the
+//! parse after graph-loading changes. A load-time guard rejecting one
 //! "ungrouped-barrier + single-index-$res on the same predecessor, with
-//! group_size" silent-stall shape (see `tomii-core/src/graph.rs`).
+//! group_size" silent-stall shape briefly lived here
+//! (`Graph::validate_barrier_res_same_pred_conflict`); that shape, and a second
+//! one found later, are now both resolved correctly at runtime instead of
+//! rejected (see `tomii-core/src/graph.rs` and
+//! `tomii-core/src/runtime/arg_resolution.rs`), so the guard — and the
+//! `GUARD_MARKER` check below — is now vacuous but kept as a tripwire in case
+//! a similar guard is reintroduced for some other shape.
 //!
 //! This only exercises *static* graph JSON files checked into the repo. Several
 //! examples (radar-pipeline, mimo-bench, mapreduce, gpu-vectoradd, ...) build
