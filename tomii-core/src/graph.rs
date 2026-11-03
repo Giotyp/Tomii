@@ -196,6 +196,103 @@ impl Graph {
         dep_count_vec
     }
 
+    /// Reject the one graph shape empirically found to silently stall some of a
+    /// grouped consumer's instances forever (confirmed in
+    /// `tomii-core/tests/scratch_barrier_res_conflict.rs`; see that file for the
+    /// repro matrix this check is derived from):
+    ///
+    /// A node `C` with `group_size` set (`0 < group_size < factor`, i.e. more than
+    /// one independent dependency-group counter) that has, on the *same*
+    /// predecessor `P`:
+    ///   - a `$barrier` with no `group_by` and a genuine (non-trivial,
+    ///     more-than-one-instance) fan-in over `P` — this takes the "global
+    ///     barrier" path in `dependency_count_vec` above, requiring every one of
+    ///     `C`'s groups to see all of `P`'s contributing completions; AND
+    ///   - a non-barrier `$res` (not `$dep`) on `P` with *exactly one* index.
+    ///
+    /// Empirically, some of `C`'s instances then never execute (the run idles
+    /// until `max_runtime`/the test harness's own timeout): a subset of them never
+    /// get scheduled. The failure requires all three ingredients together — removing
+    /// `group_size`, adding `group_by` to the barrier (matching the aligned
+    /// predecessor-factor case, e.g. the MIMO reference graph's `beam`/`csi` and
+    /// `demul`/`fft` edges), widening the `$res` to an explicit per-instance index
+    /// list (one index per `C` instance, i.e. `indexes.len() == factor`), or using
+    /// `$dep` instead of `$res`, each independently avoid it.
+    ///
+    /// This is deliberately narrower than "any node with a barrier and a $res on
+    /// the same predecessor" — that combination is common and correct (e.g. a
+    /// barrier fan-in alongside a single shared `$res` value) whenever `group_size`
+    /// is absent, the barrier is grouped, or the `$res` already covers every
+    /// instance.
+    pub fn validate_barrier_res_same_pred_conflict(&self) -> Result<(), crate::TomiiError> {
+        let all_nodes = self
+            .nodes
+            .iter()
+            .chain(self.post_nodes.iter().flatten());
+        for node in all_nodes {
+            let num_groups = match node.group_size {
+                Some(gs) if gs > 0 && gs < node.factor => node.factor / gs,
+                _ => 1,
+            };
+            if num_groups <= 1 {
+                continue;
+            }
+
+            // Predecessors reached by a non-trivial, ungrouped barrier on this node.
+            let mut ungrouped_wide_barrier_preds: HashSet<IdType> = HashSet::new();
+            for arg in &node.args {
+                if !arg.type_.is_barrier() {
+                    continue;
+                }
+                let Some(pred) = &arg.predecessor else {
+                    continue;
+                };
+                if pred.group_by.is_some() {
+                    continue;
+                }
+                let pred_factor = self.nodes[pred.id as usize].factor;
+                if pred.contributing_instances(pred_factor, node.factor) > 1 {
+                    ungrouped_wide_barrier_preds.insert(pred.id);
+                }
+            }
+            if ungrouped_wide_barrier_preds.is_empty() {
+                continue;
+            }
+
+            for arg in &node.args {
+                if !arg.type_.is_result() {
+                    continue; // only $res; $dep does not hit this failure mode
+                }
+                let Some(pred) = &arg.predecessor else {
+                    continue;
+                };
+                if pred.indexes.len() != 1 {
+                    continue;
+                }
+                if ungrouped_wide_barrier_preds.contains(&pred.id) {
+                    let pred_name = &self.nodes[pred.id as usize].name;
+                    return Err(format!(
+                        "node '{node_name}': a $res on predecessor '{pred_name}' with a single \
+                         index coexists with an ungrouped $barrier on the same predecessor, on a \
+                         node with group_size set ({group_size} of {factor}). This combination \
+                         silently stalls a subset of '{node_name}'s instances (see \
+                         Graph::validate_barrier_res_same_pred_conflict). Fix by one of: \
+                         give the $barrier on '{pred_name}' a group_by matching '{node_name}'s \
+                         groups; widen the $res on '{pred_name}' to one index per instance \
+                         (indexes.len() == factor, a Var-ended range, or a per-instance list); \
+                         or read '{pred_name}'s value via $ref/$dep instead of $res.",
+                        node_name = node.name,
+                        pred_name = pred_name,
+                        group_size = node.group_size.unwrap_or(0),
+                        factor = node.factor,
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn new() -> Graph {
         Graph {
             nodes: Vec::new(),
