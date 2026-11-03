@@ -469,7 +469,7 @@ fn main() {
         utils_rdtsc::init_rdtsc_freq();
     }
 
-    let timing_enabled = args.timing.is_some();
+    let timing_enabled = timing_collection_enabled(&args.timing, &args.report);
 
     let cfg = RuntimeConfig {
         slots: args.slots,
@@ -562,6 +562,16 @@ fn main() {
     // TOMII_DEP_PROF=1: dependency-resolution cycle profile (diagnostic).
     tomii_core::dump_dep_prof();
     tomii_core::runtime::dump_slot_check();
+}
+
+/// Whether the time buffer (timing collection) should be turned on.
+///
+/// `--report FILE` needs the time buffer populated to produce anything but an
+/// empty report, so it enables timing collection on its own. The per-node
+/// timing CSV (`--timing FILE`) is still only written when `--timing` is
+/// explicitly given — see the `time_file` handling in `main()`.
+fn timing_collection_enabled(timing: &Option<String>, report: &Option<String>) -> bool {
+    timing.is_some() || report.is_some()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -789,4 +799,34 @@ fn check_python_bridge_abi(dylib_path: &str) {
         abi = format!("0x{:08X}", bridge_abi),
         "Python bridge ABI verified"
     );
+}
+
+#[cfg(test)]
+mod timing_enabled_tests {
+    use super::timing_collection_enabled;
+
+    #[test]
+    fn neither_flag_disables_timing() {
+        assert!(!timing_collection_enabled(&None, &None));
+    }
+
+    #[test]
+    fn timing_flag_alone_enables_timing() {
+        assert!(timing_collection_enabled(&Some("t.csv".to_string()), &None));
+    }
+
+    #[test]
+    fn report_flag_alone_enables_timing() {
+        // Regression: `--report` used to be a silent no-op without `--timing`
+        // because the time buffer was never created.
+        assert!(timing_collection_enabled(&None, &Some("r.json".to_string())));
+    }
+
+    #[test]
+    fn both_flags_enable_timing() {
+        assert!(timing_collection_enabled(
+            &Some("t.csv".to_string()),
+            &Some("r.json".to_string())
+        ));
+    }
 }
