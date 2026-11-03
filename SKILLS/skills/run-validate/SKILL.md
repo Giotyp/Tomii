@@ -70,8 +70,7 @@ If the graph writes to an output file (check `--inits` in the run, or look for f
 functions in the plugin), read the output and verify it is numerically/logically correct.
 
 ```bash
-# Example for matrix-compute
-cat result.txt
+cat result.txt   # whatever file the graph's output function writes
 ```
 
 For network-input graphs, check that every frame the sender sent completed: compare

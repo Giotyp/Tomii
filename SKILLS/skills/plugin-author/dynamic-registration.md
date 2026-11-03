@@ -4,7 +4,7 @@ By default `app.build()` regenerates the runtime's wrappers from your source
 (`FUNC_PATH`) and rebuilds `tomii-core`, so adding a kernel rebuilds the runtime. With
 the `dynamic-registration` feature, the plugin `.so` describes its own kernels in a
 `__tomii_exports` table and the runtime loads them at startup, so adding a kernel
-rebuilds only the plugin. To opt in (see `examples/radar-pipeline`):
+rebuilds only the plugin. To opt in (the repository's `examples/` contain a plugin with this feature):
 
 1. Plugin `Cargo.toml`: `[features] dynamic-registration = []` and
    `[build-dependencies] tomii-converter = { path = "../../tomii-converter" }`.

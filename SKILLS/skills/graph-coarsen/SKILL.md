@@ -70,9 +70,7 @@ pub fn your_tile_fn(data: &Vec<f64>, step: usize, tile_size: usize, tile_idx: us
 ```
 
 > Note: `tile_idx` receives the instance index only because the graph passes
-> `$index` (`IDX` above) in that position; nothing is injected automatically. For a
-> concrete tiled kernel, see `doppler_fft` / `cfar` in `examples/radar-pipeline`
-> (`factor=n_tiles`, `$index` arg).
+> `$index` (`IDX` above) in that position; nothing is injected automatically.
 
 **Tile-size sweep**: after the initial run, sweep `tile_size` across `[16, 32, 64, 128]`
 and pick the knee of the latency curve (where further doubling gives < 5% improvement).

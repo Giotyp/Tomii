@@ -193,7 +193,4 @@ body to trace the argument values.
 - [graph-coarsen](../graph-coarsen/SKILL.md) — for tile kernel patterns
 - [run-validate](../run-validate/SKILL.md) — after fixing plugin issues
 - `tomii-types/src/lib.rs` — CmTypes enum (complete list of supported types)
-- `examples/stream-analytics/src/lib.rs` — example with conditions and variadic fan-in
-- `examples/matrix-compute-C/include/matcomp.h` — example C plugin with array annotations
-- `examples/matrix-compute-python/` — Python kernels
-- `examples/radar-pipeline/` — network input, tiled kernels, dynamic registration
+- the repository's `examples/` — complete Rust, C and Python plugins
