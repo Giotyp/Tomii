@@ -354,6 +354,24 @@ impl TomiiRtBuilder {
         let system_threads = self.config.system_threads;
         let receiver_threads = self.config.receiver_threads;
 
+        // --rx-decode moves packet extraction onto receiver threads; with fewer
+        // receivers than bound sockets, a single receiver round-robins across
+        // several sockets and can't keep up with decode on top of polling, so
+        // packets back up and frames get dropped. The socket count is already
+        // resolved on the compiled network_config, so this check is free here.
+        if self.config.rx_decode {
+            if let Some(net) = graph.network_config() {
+                if receiver_threads < net.num_sockets {
+                    eprintln!(
+                        "tomii: warning: --rx-decode with receiver_threads={receiver_threads} \
+                         < {num_sockets} bound sockets — receivers may overflow and drop frames; \
+                         raise --receiver-threads to >= num_sockets",
+                        num_sockets = net.num_sockets,
+                    );
+                }
+            }
+        }
+
         // --- Telemetry ---
         let time_buffer = if self.timing_enabled {
             Some(Arc::new(TimeBufferManager::new_async(

@@ -206,6 +206,13 @@ _KNOB_SEARCH_HINTS: Dict[str, str] = {
     "spin_wait_spin_iters": "worker spin_loop() budget before yielding; raise under bursty load, lower to save CPU when idle",
     "spin_wait_yield_iters": "worker yield_now() budget before parking; pairs with spin_wait_spin_iters",
     "spin_wait_park_ns": "worker park duration; shorter wakes sooner at more CPU, longer saves CPU at higher wake latency",
+    "receiver_threads": "network graphs require >= 1 (PR #22 check_receiver_threads); with --rx-decode needs ~one receiver per busy socket or packets overflow and frames are lost; validated MIMO 4x4 (4 sockets): --workers 4 --system-threads 2 --receiver-threads 4 --slots 4 --dispatch-chunk 8 --reclaim-core 0 --rx-decode --no-malloc-tune",
+    "rx_decode": "moves packet-extraction onto receiver threads; needs enough receiver threads for the bound sockets (~one per busy socket), otherwise it overflows and loses frames",
+    "ingest_shards": "only takes effect with --system-threads > 1 (one ingest channel per resolution thread); no-op at system_threads=1",
+    "dispatch_chunk": "dispatch admitted packets every N packets within a poll (0 = once per poll); try 1,4,8,16; validated MIMO 4x4 uses 8",
+    "reclaim_core": "pin the background result-reclaim thread to this core; pick a core outside the worker/receiver pinning range",
+    "membind": "bind memory (and disable NUMA balancing) to the NUMA node(s) hosting the pinned worker cores; set once per host, don't search",
+    "no_malloc_tune": "set when a plugin already tunes malloc itself (e.g. MKL) to avoid conflicting trim/mmap thresholds; validated MIMO 4x4 sets it",
 }
 
 

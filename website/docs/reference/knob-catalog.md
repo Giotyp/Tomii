@@ -39,7 +39,7 @@ machine that produced this table).
 | `workers` | `--workers` | int | perf | 1–128, pow2 | Rayon worker threads (match physical cores) |
 | `core_offset` | `--core-offset` | int | env | — | First CPU to pin workers to (use 1 to leave CPU 0 for OS) |
 | `system_threads` | `--system-threads` | int | perf | 1–4, linear | Resolution/scheduler threads (default 1; rarely needs changing) |
-| `receiver_threads` | `--receiver-threads` | int | perf | 0–4, linear | Dedicated network receiver threads (for network-input graphs) |
+| `receiver_threads` | `--receiver-threads` | int | perf | 0–4, linear | Dedicated network receiver threads; network graphs require &gt;= 1 |
 | `max_runtime` | `--max-runtime` | int | measurement | — | Stop after N seconds (0 = run until max_frames complete) |
 | `slots` | `--slots` | int | perf | 1–64, pow2 | Concurrent in-flight frames (1 for latency, &gt;1 for throughput) |
 | `max_frames` | `--max-frames` | int | measurement | — | Total frames to process (0 = run indefinitely) |
@@ -108,6 +108,13 @@ string knobs carry none.
 | `slot_priority` | try both when slots &gt; 1; can reduce tail latency under imbalanced graphs |
 | `coalesce_barriers` | helpful when node factor &gt;&gt; worker count (reduces barrier overhead) |
 | `inline_continuation` | try both; often reduces latency for linear chains or low-fan-out graphs |
+| `receiver_threads` | network graphs require &gt;= 1; with `--rx-decode` needs ~one receiver per busy socket or packets overflow and frames are lost; validated MIMO 4x4 (4 sockets): `--workers 4 --system-threads 2 --receiver-threads 4 --slots 4 --dispatch-chunk 8 --reclaim-core 0 --rx-decode --no-malloc-tune` |
+| `rx_decode` | moves packet-extraction onto receiver threads; needs enough receiver threads for the bound sockets (~one per busy socket), otherwise it overflows and loses frames |
+| `ingest_shards` | only takes effect with `--system-threads &gt; 1` (one ingest channel per resolution thread); no-op at `system_threads=1` |
+| `dispatch_chunk` | dispatch admitted packets every N packets within a poll (0 = once per poll); try 1,4,8,16; validated MIMO 4x4 uses 8 |
+| `reclaim_core` | pin the background result-reclaim thread to this core; pick a core outside the worker/receiver pinning range |
+| `membind` | bind memory (and disable NUMA balancing) to the NUMA node(s) hosting the pinned worker cores; set once per host, don't search |
+| `no_malloc_tune` | set when a plugin already tunes malloc itself (e.g. MKL) to avoid conflicting trim/mmap thresholds; validated MIMO 4x4 sets it |
 
 The runner binary also accepts low-level flags that are not part of this
 catalog (ring-buffer capacity, spin-wait parameters, socket buffer sizes);
