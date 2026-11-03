@@ -42,9 +42,9 @@ PROMPTS_DIR = SCRIPT_DIR / "prompts"
 TOMII_ORACLE_DIR = Path(os.environ.get("TOMII_ORACLE_DIR", ""))
 
 # SKILL names that count as "used a SKILL" in signal extraction.
-# Derived from SKILLS/*.md (excluding README) so it stays in sync automatically.
+# Derived from SKILLS/skills/<name>/SKILL.md so it stays in sync automatically.
 KNOWN_SKILLS: frozenset[str] = (
-    frozenset(p.stem for p in SKILLS_DIR.glob("*.md") if p.stem.lower() != "readme")
+    frozenset(p.parent.name for p in SKILLS_DIR.glob("skills/*/SKILL.md"))
     if SKILLS_DIR.exists()
     else frozenset()
 )
@@ -277,18 +277,14 @@ def setup_workspace(
 
 
 def install_skills(workspace: Path) -> None:
-    """Copy SKILLS/*.md into workspace/.claude/skills/<name>/SKILL.md."""
+    """Copy SKILLS/skills/<name>/ (SKILL.md + references/scripts) into workspace/.claude/skills/."""
     if not SKILLS_DIR.exists():
         print(f"[WARN] SKILLS dir not found at {SKILLS_DIR}")
         return
     target = workspace / ".claude" / "skills"
     target.mkdir(parents=True, exist_ok=True)
-    for skill_file in SKILLS_DIR.glob("*.md"):
-        if skill_file.stem == "README":
-            continue
-        dest = target / skill_file.stem
-        dest.mkdir(exist_ok=True)
-        shutil.copy2(skill_file, dest / "SKILL.md")
+    for skill_md in SKILLS_DIR.glob("skills/*/SKILL.md"):
+        shutil.copytree(skill_md.parent, target / skill_md.parent.name, dirs_exist_ok=True)
 
 
 def _absolutize_cargo_paths(workspace: Path, scaffold_src: Path) -> None:

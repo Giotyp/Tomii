@@ -11,9 +11,9 @@ each dimension. Converges in at most 5 iterations.
 
 ## Trigger
 
-- [diagnose](diagnose.md) reports overhead_pct between 20-60% (mixed profile)
+- [diagnose](../diagnose/SKILL.md) reports overhead_pct between 20-60% (mixed profile)
 - User asks to tune runtime parameters or reduce latency
-- After [graph-coarsen](graph-coarsen.md) brings overhead below 60%, for further tuning
+- After [graph-coarsen](../graph-coarsen/SKILL.md) brings overhead below 60%, for further tuning
 
 ## Setup
 
@@ -28,7 +28,7 @@ python -m tomii --list-knobs-json         # every knob: role, description, searc
 `role == "perf"`. Knobs without a `domain` (e.g. `spin_iterations`, `sched_flush_threshold`,
 `spin_wait_*`) are settable but deliberately not auto-searched — touch them only with a
 specific reason. Network-only knobs appear only for graphs with `network_config`; tune
-those with [network-ingest](network-ingest.md) **before** this skill.
+those with [network-ingest](../network-ingest/SKILL.md) **before** this skill.
 
 Each knob entry has a `search_hint` field specifying how to search it, for example:
 - `workers`: "unimodal; binary search 1-physical_cores; diminishing returns past core count"
@@ -175,14 +175,14 @@ Best config:  avg_latency_us=X  (-Y.Y% improvement)
 
 Trial log: <see above>
 
-If improvement > 5%: run [run-validate](run-validate.md) to confirm with full frame count.
-If overhead_pct is still > 40% after best config: proceed to [graph-coarsen](graph-coarsen.md).
+If improvement > 5%: run [run-validate](../run-validate/SKILL.md) to confirm with full frame count.
+If overhead_pct is still > 40% after best config: proceed to [graph-coarsen](../graph-coarsen/SKILL.md).
 ```
 
 ## See also
 
-- [diagnose](diagnose.md) — to understand which bottleneck class warrants knob-search
-- [graph-coarsen](graph-coarsen.md) — if knob-search doesn't resolve the bottleneck
-- [run-validate](run-validate.md) — to confirm the final configuration with a full measurement
-- [network-ingest](network-ingest.md) — ingest knobs for network-input graphs (tune first)
+- [diagnose](../diagnose/SKILL.md) — to understand which bottleneck class warrants knob-search
+- [graph-coarsen](../graph-coarsen/SKILL.md) — if knob-search doesn't resolve the bottleneck
+- [run-validate](../run-validate/SKILL.md) — to confirm the final configuration with a full measurement
+- [network-ingest](../network-ingest/SKILL.md) — ingest knobs for network-input graphs (tune first)
 - `website/docs/reference/knob-catalog.md` — every knob with role and domain

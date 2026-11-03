@@ -7,12 +7,12 @@ description: "Use after editing the graph or plugin to re-measure performance. B
 
 Execute a Τομί graph safely: build the plugin, verify correctness with a single worker,
 then scale up to establish a stable performance baseline. Produces a baseline record used by
-[diagnose](diagnose.md) and [knob-search](knob-search.md).
+[diagnose](../diagnose/SKILL.md) and [knob-search](../knob-search/SKILL.md).
 
 ## Trigger
 
-- After building or modifying a graph (via [graph-build](graph-build.md))
-- After modifying the plugin (via [plugin-author](plugin-author.md))
+- After building or modifying a graph (via [graph-build](../graph-build/SKILL.md))
+- After modifying the plugin (via [plugin-author](../plugin-author/SKILL.md))
 - After applying graph coarsening or knob changes, to measure the new configuration
 
 ## Steps
@@ -59,7 +59,7 @@ Check for:
 - Non-zero `proc.returncode` → read the panic message in stderr (look for `panicked`).
   `run()` does not raise on failure.
 - Run hits `max_runtime` without finishing → a dependency count that never reaches zero
-  (see the traps table in [graph-build](graph-build.md)). Inspect `state.json`; for a live
+  (see the traps table in [graph-build](../graph-build/SKILL.md)). Inspect `state.json`; for a live
   process, `kill -USR1 <pid>` writes numbered snapshots `state.json.1`, `.2`, …
 - Index-out-of-bounds panics → check factor values vs. actual data sizes in plugin
 - Wrong output values → debug the plugin function logic
@@ -77,7 +77,7 @@ For network-input graphs, check that every frame the sender sent completed: comp
 `summary.total_frames` in `report.json` (plus excluded warm-up frames) with the sender's
 count, and use the application's own output check. `debug=True` prints per-frame
 completions but slows the run; use it only while debugging. Start the receiver before the
-sender (see [network-ingest](network-ingest.md)).
+sender (see [network-ingest](../network-ingest/SKILL.md)).
 
 ### 4. Scale up for baseline measurement
 
@@ -105,7 +105,17 @@ Remove an old `report.json` before the run, so a run that wrote none is noticed.
 
 ### 5. Read the baseline
 
-Read `report.json` and record these fields as the baseline:
+Check and summarize the report with the bundled script (in this skill's directory):
+
+```bash
+touch .run_start            # before the run
+# ... run ...
+python3 <skill-dir>/scripts/check_report.py report.json --newer-than .run_start \
+        --expect-frames <max_frames - exclude_frames>
+```
+
+It exits 1 if the report is missing (no `timing=`), stale, reports dropped tasks or covers
+too few frames, and otherwise prints the fields below. Record them as the baseline:
 
 ```json
 {
@@ -164,11 +174,11 @@ overhead_pct: X% (interpretation: ...)
 total_tasks_per_frame: X
 critical_path: N nodes, max_factor=N, estimated=Xus
 
-Next: run [diagnose](diagnose.md) to classify the bottleneck.
+Next: run [diagnose](../diagnose/SKILL.md) to classify the bottleneck.
 ```
 
 ## See also
 
-- [diagnose](diagnose.md) — classify the bottleneck from the baseline report
-- [plugin-author](plugin-author.md) — if the build fails due to plugin issues
+- [diagnose](../diagnose/SKILL.md) — classify the bottleneck from the baseline report
+- [plugin-author](../plugin-author/SKILL.md) — if the build fails due to plugin issues
 - `python -m tomii --list-knobs` — every `graph.run()` option

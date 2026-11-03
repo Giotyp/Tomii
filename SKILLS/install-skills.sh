@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# install-skills.sh — install Τομί skills as Claude Code slash commands
+# install-skills.sh — copy Τομί skills into a project's .claude/skills/
+#
+# Prefer installing the plugin instead (see SKILLS/README.md):
+#   /plugin install tomii-skills --marketplace Giotyp/Tomii
+# This script is for agents/harnesses that read .claude/skills/ directly.
 #
 # Usage:
 #   ./SKILLS/install-skills.sh            # installs to .claude/skills/ in CWD
@@ -11,12 +15,11 @@ SKILLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST_ROOT="${1:-.}"
 TARGET_DIR="$DEST_ROOT/.claude/skills"
 
-# Collect skills (all .md files except README.md and this script's dir)
+# Collect skills: every SKILLS/skills/<name>/ directory with a SKILL.md
 skills=()
-for f in "$SKILLS_DIR"/*.md; do
-    name="$(basename "$f" .md)"
-    [[ "$name" == "README" ]] && continue
-    skills+=("$name")
+for d in "$SKILLS_DIR"/skills/*/; do
+    [[ -f "$d/SKILL.md" ]] || continue
+    skills+=("$(basename "$d")")
 done
 
 echo "Τομί skill installer"
@@ -38,8 +41,8 @@ read -r -p "Proceed? [y/N] " confirm
 echo ""
 mkdir -p "$TARGET_DIR"
 for name in "${skills[@]}"; do
-    mkdir -p "$TARGET_DIR/$name"
-    cp "$SKILLS_DIR/$name.md" "$TARGET_DIR/$name/SKILL.md"
+    rm -rf "${TARGET_DIR:?}/$name"
+    cp -r "$SKILLS_DIR/skills/$name" "$TARGET_DIR/$name"
     echo "  installed: /$name"
 done
 

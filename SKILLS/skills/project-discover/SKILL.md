@@ -31,7 +31,7 @@ actually used. From the graph, extract:
   with their `indexes` and `group_by`
 - Initialization variables (`initializations` / `app.var`) and which ones are used as factors
 - Whether args pass the instance index (`{"type": "$ref", "value": "$index"}`)
-- Whether the graph has `network_config` (network-input workload — see [network-ingest](network-ingest.md))
+- Whether the graph has `network_config` (network-input workload — see [network-ingest](../network-ingest/SKILL.md))
 - Whether it uses `condition`, `loop`, `post_nodes`
 
 To see the topology quickly:
@@ -51,7 +51,7 @@ python -m tomii --knob-space graph.json       # the search space for this graph
 `type`, `cli`, `role` (`perf` / `env` / `io` / `measurement`), `description`, `search_hint`
 and `domain` (absent for knobs that are settable but not auto-searched). Only `perf` knobs
 change performance; `measurement` knobs (`max_frames`, `exclude_frames`) must stay fixed
-across a comparison. Hints are consumed by [knob-search](knob-search.md).
+across a comparison. Hints are consumed by [knob-search](../knob-search/SKILL.md).
 
 ### 3. Load the graph construction schema
 
@@ -62,7 +62,7 @@ python -m tomii --schema
 Node parameters (`factor`, `group_size`, `priority`, `condition`, `loop`, `use_workers`) and
 argument types (`$res`, `$barrier`, `$dep`, `$ref`) with `optimization_hint` fields.
 Cross-check examples against `website/docs/reference/json-graph-format.md` and the
-Python API section of [graph-build](graph-build.md).
+Python API section of [graph-build](../graph-build/SKILL.md).
 
 ### 4. Catalog plugin functions
 
@@ -82,7 +82,7 @@ attribute: `variadic` (last parameter `Vec<T>` collects many predecessor instanc
 Check `Cargo.toml` for a `dynamic-registration` feature and `build.rs` for
 `generate_self_contained_file`: such a plugin describes its own kernels
 (`__tomii_exports`) and can be loaded without rebuilding the runtime (see
-[plugin-author](plugin-author.md)).
+[plugin-author](../plugin-author/SKILL.md)).
 
 For **C plugins**: search for `// @tomii_export` annotations:
 ```bash
@@ -144,7 +144,7 @@ Performance baseline:
     stale_task_drops: N
     Top optimization_suggestions: <priority-1 entries>
   <If no report.json:>
-    No baseline found. Run [run-validate](run-validate.md) to establish one.
+    No baseline found. Run [run-validate](../run-validate/SKILL.md) to establish one.
 
 Recommended next step: <one of: run-validate, graph-build, diagnose, knob-search, graph-coarsen, network-ingest>
 ```
@@ -156,7 +156,7 @@ for all subsequent skills in the session.
 
 ## See also
 
-- [graph-build](graph-build.md) — if no graph exists yet
-- [run-validate](run-validate.md) — to establish a performance baseline
-- [diagnose](diagnose.md) — if a baseline exists and performance needs investigation
+- [graph-build](../graph-build/SKILL.md) — if no graph exists yet
+- [run-validate](../run-validate/SKILL.md) — to establish a performance baseline
+- [diagnose](../diagnose/SKILL.md) — if a baseline exists and performance needs investigation
 - `website/docs/reference/` — CLI, knob catalog, JSON graph format, Python API

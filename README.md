@@ -165,9 +165,11 @@ lifecycle — from project discovery to graph coarsening:
 | `network-ingest` | Tune receiver / ingest flags for network-input graphs |
 | `plugin-author` | Write correct Rust (`#[tomii_export]`), C and Python kernels |
 
-```bash
-./SKILLS/install-skills.sh            # installs to .claude/skills/ in CWD
 ```
+/plugin install tomii-skills --marketplace Giotyp/Tomii    # Claude Code plugin
+```
+
+or `./SKILLS/install-skills.sh` to copy them into `.claude/skills/` of the current directory.
 
 ---
 

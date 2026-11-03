@@ -14,7 +14,7 @@ good configurations.
 
 - The graph has `network_config` (JSON) / `app.network(...)` (Python)
 - Latency is far above the sum of kernel times, frames are lost, or the run does not keep up
-- [diagnose](diagnose.md) routes a network-input graph here
+- [diagnose](../diagnose/SKILL.md) routes a network-input graph here
 
 ## Background: the threads of a network run
 
@@ -85,7 +85,7 @@ Keep the best of each step, then re-check step 1 once with the final settings.
 
 With ingest fixed: `workers` (fewer workers can be faster when they would share cores with
 ingest threads), `slots` `{2, 4, 8}`, then the boolean knobs from
-[knob-search](knob-search.md).
+[knob-search](../knob-search/SKILL.md).
 
 ### 5. Verify
 
@@ -113,7 +113,7 @@ Validity: 3/3 runs, all frames completed and verified
 
 ## See also
 
-- [knob-search](knob-search.md) — scheduler knobs after ingest is tuned
-- [run-validate](run-validate.md) — validity checks
+- [knob-search](../knob-search/SKILL.md) — scheduler knobs after ingest is tuned
+- [run-validate](../run-validate/SKILL.md) — validity checks
 - `website/docs/reference/cli.md` (network ingest and deployment flags),
   `website/docs/guide/graphs/network-sources.md`

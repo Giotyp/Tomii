@@ -92,7 +92,7 @@ Chunk `c`'s `combine` tasks start as soon as chunk `c` is loaded, while later ch
 still loading.
 
 If `group_size` does not match, frames either never complete or fire early. Run a short
-validation ([run-validate](run-validate.md)) after every barrier change.
+validation ([run-validate](../run-validate/SKILL.md)) after every barrier change.
 
 ### 5. Known traps (check before running)
 
@@ -174,7 +174,7 @@ rx = app.node("rx", func="decode", factor=pkts_per_frame,
               args=[net.out(0, pkts_per_frame), cfg, IDX])   # 1:1 packet → instance
 ```
 
-Then tune ingest with [network-ingest](network-ingest.md); network graphs need
+Then tune ingest with [network-ingest](../network-ingest/SKILL.md); network graphs need
 `receiver_threads >= 1`.
 
 ### 8. Write the plugin skeleton
@@ -242,7 +242,7 @@ Verify:
 - `workers` = number of physical cores you may use minus support threads; `core_offset=1`
 - `slots=1` (minimize latency; raise later for throughput)
 - `max_frames=10`, `exclude_frames=2` for the first run
-- `report="report.json"` **and** `timing="timing.txt"` (needed by [diagnose](diagnose.md))
+- `report="report.json"` **and** `timing="timing.txt"` (needed by [diagnose](../diagnose/SKILL.md))
 
 ## Output
 
@@ -252,6 +252,6 @@ Verify:
 
 ## See also
 
-- [plugin-author](plugin-author.md) — kernel patterns (C, Python, `bulk`, `&mut`, dynamic registration)
-- [run-validate](run-validate.md) — next step after building the graph
-- [network-ingest](network-ingest.md) — runtime flags for network-input graphs
+- [plugin-author](../plugin-author/SKILL.md) — kernel patterns (C, Python, `bulk`, `&mut`, dynamic registration)
+- [run-validate](../run-validate/SKILL.md) — next step after building the graph
+- [network-ingest](../network-ingest/SKILL.md) — runtime flags for network-input graphs
