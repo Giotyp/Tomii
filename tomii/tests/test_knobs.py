@@ -292,3 +292,34 @@ def test_suggest_optuna_matches_domains() -> None:
 def test_network_only_knobs_hidden_without_network() -> None:
     names = {k["name"] for k in knob_space(TOY_GRAPH, workload="toy")["knobs"]}
     assert not names & {"receiver_threads", "rx_decode", "ingest_shards"}
+
+
+# --------------------------------------------------------------------------- #
+# Unknown run(**kwargs) keys
+# --------------------------------------------------------------------------- #
+
+
+def test_build_command_warns_on_unknown_kwarg() -> None:
+    """A typo'd knob name must warn (not raise) and not silently vanish."""
+    with pytest.warns(UserWarning, match="wrokers"):
+        build_command("bin", "g.json", "p.so", wrokers=4)
+
+
+def test_build_command_unknown_kwarg_suggests_closest_match() -> None:
+    with pytest.warns(UserWarning, match="'workers'"):
+        build_command("bin", "g.json", "p.so", wrokers=4)
+
+
+def test_build_command_does_not_raise_on_unknown_kwarg() -> None:
+    # Backward compat: unknown kwargs are dropped, not fatal.
+    with pytest.warns(UserWarning):
+        cmd = build_command("bin", "g.json", "p.so", totally_unrecognized_knob=1)
+    assert "totally_unrecognized_knob" not in " ".join(cmd)
+
+
+def test_build_command_no_warning_for_known_kwargs() -> None:
+    import warnings as _warnings
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error")
+        build_command("bin", "g.json", "p.so", workers=4, slots=2, fifo=True)

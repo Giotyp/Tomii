@@ -1,9 +1,11 @@
 """Run the Τομί binary with a graph JSON."""
 
 from __future__ import annotations
+import difflib
 import os
 import subprocess
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -206,6 +208,13 @@ _KNOB_SEARCH_HINTS: Dict[str, str] = {
     "spin_wait_spin_iters": "worker spin_loop() budget before yielding; raise under bursty load, lower to save CPU when idle",
     "spin_wait_yield_iters": "worker yield_now() budget before parking; pairs with spin_wait_spin_iters",
     "spin_wait_park_ns": "worker park duration; shorter wakes sooner at more CPU, longer saves CPU at higher wake latency",
+    "receiver_threads": "network graphs require >= 1; with --rx-decode needs ~one receiver per busy socket or packets overflow and frames are lost; search together with rx_decode, not separately",
+    "rx_decode": "moves packet-extraction onto receiver threads; needs enough receiver threads for the bound sockets (~one per busy socket), otherwise it overflows and loses frames",
+    "ingest_shards": "only takes effect with --system-threads > 1 (one ingest channel per resolution thread); no-op at system_threads=1",
+    "dispatch_chunk": "dispatch admitted packets every N packets within a poll (0 = once per poll); try 0,4,8,16; helps frames with many packets",
+    "reclaim_core": "pin the background result-reclaim thread to this core; pick a core outside the worker/receiver pinning range",
+    "membind": "bind memory (and disable NUMA balancing) to the NUMA node(s) hosting the pinned worker cores; set once per host, don't search",
+    "no_malloc_tune": "set when the environment already sets glibc MALLOC_* tunables, so the runtime does not override them",
 }
 
 
@@ -285,6 +294,26 @@ def list_knobs_json() -> "dict[str, Any]":
     return {"version": 3, "knobs": knobs}
 
 
+_ALL_KNOB_KEYS: "set[str]" = set(_INT_FLAGS) | set(_BOOL_FLAGS) | set(_STR_FLAGS)
+
+
+def _warn_unknown_kwargs(kwargs: "Dict[str, Any]") -> None:
+    """Warn (without raising) about run(**kwargs) keys that don't map to any
+    known knob. Without this, a typo'd knob name is silently dropped on the
+    floor by build_command instead of reaching the binary."""
+    for key in kwargs:
+        if key in _ALL_KNOB_KEYS:
+            continue
+        matches = difflib.get_close_matches(key, _ALL_KNOB_KEYS, n=1)
+        suggestion = f" Did you mean {matches[0]!r}?" if matches else ""
+        warnings.warn(
+            f"tomii: unknown run() argument {key!r} — it will be silently "
+            f"ignored (not passed to the binary).{suggestion}",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 def build_command(
     binary: str,
     json_path: str,
@@ -292,6 +321,7 @@ def build_command(
     **kwargs: Any,
 ) -> List[str]:
     """Build the subprocess command list for the Τομί binary."""
+    _warn_unknown_kwargs(kwargs)
     cmd: List[str] = [binary, "--json", json_path, "--dylib", dylib]
 
     for key, flag in _INT_FLAGS.items():
