@@ -1,9 +1,11 @@
 """Run the Τομί binary with a graph JSON."""
 
 from __future__ import annotations
+import difflib
 import os
 import subprocess
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -292,6 +294,26 @@ def list_knobs_json() -> "dict[str, Any]":
     return {"version": 3, "knobs": knobs}
 
 
+_ALL_KNOB_KEYS: "set[str]" = set(_INT_FLAGS) | set(_BOOL_FLAGS) | set(_STR_FLAGS)
+
+
+def _warn_unknown_kwargs(kwargs: "Dict[str, Any]") -> None:
+    """Warn (without raising) about run(**kwargs) keys that don't map to any
+    known knob. Without this, a typo'd knob name is silently dropped on the
+    floor by build_command instead of reaching the binary."""
+    for key in kwargs:
+        if key in _ALL_KNOB_KEYS:
+            continue
+        matches = difflib.get_close_matches(key, _ALL_KNOB_KEYS, n=1)
+        suggestion = f" Did you mean {matches[0]!r}?" if matches else ""
+        warnings.warn(
+            f"tomii: unknown run() argument {key!r} — it will be silently "
+            f"ignored (not passed to the binary).{suggestion}",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 def build_command(
     binary: str,
     json_path: str,
@@ -299,6 +321,7 @@ def build_command(
     **kwargs: Any,
 ) -> List[str]:
     """Build the subprocess command list for the Τομί binary."""
+    _warn_unknown_kwargs(kwargs)
     cmd: List[str] = [binary, "--json", json_path, "--dylib", dylib]
 
     for key, flag in _INT_FLAGS.items():
