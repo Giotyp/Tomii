@@ -72,20 +72,24 @@ instances as **offsets relative to the consuming instance's index**:
 | Ordering only | `p.dep(0, n)` | the slot receives no value |
 | Different factors, shared data | write into a `$ref` buffer indexed by `$index`; order with `wait(...)` | read the buffer at `$index` |
 
-**Mixing a grouped barrier with a global barrier on one node** (for example, per-symbol
-demodulation: each consumer group waits for *its* symbol's FFTs and for *all* beamforming
-tasks) requires `group_size` on the consumer to equal `factor / (pred_count / group_by)` —
-the number of consumer instances released by one group. The working MIMO pattern:
+**Mixing a grouped barrier with a global barrier on one node** (each consumer group waits
+for *its own* slice of one producer and for *all* instances of another) requires
+`group_size` on the consumer to equal `factor / (pred_count / group_by)` — the number of
+consumer instances released by one group:
 
 ```python
-# fft: factor = ul_symbols * antennas (52); beam: factor = 24; demul: factor = ul_symbols * 24 (312)
-demul = app.node("demul", func="demul", factor=total_demul_tasks,
-                 group_size=demul_per_symbol,          # 312 / (52 / 4) = 24
-                 priority="low",
-                 args=[cfg, fft_buffer, beam_matrices, demod_buffers, idx,
-                       fft.wait(0, total_ul_symbols, group_by=antennas),  # 13 groups of 4 FFTs
-                       beam.wait(0, beam_events)])                         # all beams
+# load:    factor = n_chunks * parts_per_chunk   (one task per part)
+# prepare: factor = n_prep                        (needed by every combine task)
+# combine: factor = n_chunks * tasks_per_chunk    (chunk c's tasks need only chunk c's parts)
+combine = app.node("combine", func="combine", factor=n_combine,
+                   group_size=tasks_per_chunk,   # = n_combine / (n_load / parts_per_chunk)
+                   args=[cfg, buffers, IDX,
+                         load.wait(0, n_load, group_by=parts_per_chunk),  # one group per chunk
+                         prepare.wait(0, n_prep)])                        # all prepare tasks
 ```
+
+Chunk `c`'s `combine` tasks start as soon as chunk `c` is loaded, while later chunks are
+still loading.
 
 If `group_size` does not match, frames either never complete or fire early. Run a short
 validation ([run-validate](run-validate.md)) after every barrier change.
@@ -154,9 +158,8 @@ if proc.returncode != 0:
     raise SystemExit(f"tomii run failed (rc={proc.returncode})")
 ```
 
-Richer examples: `examples/stream-analytics/run_bench.py` (conditions, priorities, grouped
-barriers, `$dep`, post-node), `examples/radar-pipeline/build_graph.py` (network input,
-`$index`, per-instance init vars), `examples/matrix-compute-python/` (Python kernels).
+More complete graphs (conditions, priorities, grouped barriers, `$dep`, post-nodes,
+network input, Python kernels) are in the repository's `examples/` directory.
 
 ### 7. Network-input graphs
 

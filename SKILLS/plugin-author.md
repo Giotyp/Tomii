@@ -149,7 +149,7 @@ By default `app.build()` regenerates the runtime's wrappers from your source
 (`FUNC_PATH`) and rebuilds `tomii-core`, so adding a kernel rebuilds the runtime. With
 the `dynamic-registration` feature, the plugin `.so` describes its own kernels in a
 `__tomii_exports` table and the runtime loads them at startup, so adding a kernel
-rebuilds only the plugin. To opt in (see `examples/radar-pipeline`):
+rebuilds only the plugin. To opt in (the repository's `examples/` contain a plugin with this feature):
 
 1. Plugin `Cargo.toml`: `[features] dynamic-registration = []` and
    `[build-dependencies] tomii-converter = { path = "../../tomii-converter" }`.
@@ -168,7 +168,7 @@ Annotate C function declarations in a header file with `// @tomii_export`:
 
 ```c
 // @tomii_export
-void* fft_planner(size_t buf_size);
+void* make_context(size_t size);
 ```
 
 Set `func_path` in `app.build(...)` to the header file path. The converter generates
@@ -181,22 +181,22 @@ space before `(`. Unknown tokens are silently ignored, so spell them exactly:
 
 ```c
 // @tomii_export(out_len=n, free=free_vector)    ← returns a malloc'd array of length n, freed after copy
-complex_f32* generate_vector(size_t n);
+float* generate(size_t n);
 
-// @tomii_export(vector: array)                   ← read-only array; its length param is derived
-void* vec_to_mat(const complex_f32* vector, size_t vector_len);
+// @tomii_export(data: array)                     ← read-only array; its length param is derived
+void* summarize(const float* data, size_t data_len);
 
 // @tomii_export(buffer: mut_array)               ← mutable array (borrowed mutably)
-void compute_fft(void* planner, complex_f32* buffer, size_t buffer_len);
+void transform(void* ctx, float* buffer, size_t buffer_len);
 
 // @tomii_export(free=free_string)                ← returned C string freed after copy
 char* get_out_file(const char* env_var, const char* out_file);
 
 // @tomii_export(variadic)                        ← last (void**, size_t) pair collects predecessors
-void write_to_file(const char* file_path, void** buffers, size_t num_buffers);
+void write_all(const char* file_path, void** items, size_t num_items);
 ```
 
-Implement the named free functions in the C library (e.g. `void free_vector(complex_f32* p) { free(p); }`).
+Implement the named free functions in the C library (e.g. `void free_vector(float* p) { free(p); }`).
 
 ### Build setup for C plugins
 
@@ -210,8 +210,8 @@ app.build(func_path=str(HERE / "include" / "mylib.h"),        # no plugin_manife
 app.run(dylib=str(HERE / "libmylib.so"), ...)
 ```
 
-(`plugin_manifest` is a Cargo manifest; it is not used for C plugins.) Full example:
-`examples/matrix-compute-C/run_bench.py`.
+(`plugin_manifest` is a Cargo manifest; it is not used for C plugins.) The repository's
+`examples/` contain a complete C plugin.
 
 ## Python kernels
 
@@ -220,15 +220,14 @@ import numpy as np
 import tomii
 
 @tomii.export
-def compute_fft(v: np.ndarray) -> np.ndarray:
-    return np.fft.fft(v).astype(np.complex64)
+def normalize(v: np.ndarray) -> np.ndarray:
+    return (v / np.linalg.norm(v)).astype(np.float32)
 ```
 
-Wire them with `app.py_node("fft", fn=compute_fft, factor=n, args=[gen.out()])` and build
+Wire them with `app.py_node("norm", fn=normalize, factor=n, args=[gen.out()])` and build
 with `app.build(python_plugin=True)` (optionally `python_interpreter="python3.13t"` for the
 free-threaded build). Use `@tomii.export(variadic=True)` for fan-in sinks. Kernels that
-release the GIL (NumPy, BLAS) run in parallel across workers. See
-`examples/matrix-compute-python/`.
+release the GIL (NumPy, BLAS) run in parallel across workers.
 
 ## Build and verify
 
@@ -273,7 +272,4 @@ body to trace the argument values.
 - [graph-coarsen](graph-coarsen.md) — for tile kernel patterns
 - [run-validate](run-validate.md) — after fixing plugin issues
 - `tomii-types/src/lib.rs` — CmTypes enum (complete list of supported types)
-- `examples/stream-analytics/src/lib.rs` — example with conditions and variadic fan-in
-- `examples/matrix-compute-C/include/matcomp.h` — example C plugin with array annotations
-- `examples/matrix-compute-python/` — Python kernels
-- `examples/radar-pipeline/` — network input, tiled kernels, dynamic registration
+- the repository's `examples/` — complete Rust, C and Python plugins

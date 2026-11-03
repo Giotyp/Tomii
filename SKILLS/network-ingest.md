@@ -36,7 +36,7 @@ threads share cores and latency degrades sharply. Network graphs require
 | Knob | Effect | Interaction |
 |------|--------|-------------|
 | `rx_decode` | runs `extract_packet_func` on the receiver threads instead of resolution threads | needs enough receivers (≈ one per busy socket); with one receiver serving many sockets it falls behind and frames are lost. The extract function must be thread-safe |
-| `receiver_threads` | number of socket readers | raise together with `rx_decode`; one receiver can serve several sockets when not decoding (e.g. 64 sockets drained by 8 receivers) |
+| `receiver_threads` | number of socket readers | raise together with `rx_decode`; one receiver can serve several sockets when not decoding |
 | `system_threads` | resolution threads | default 1; raise for many sockets / high packet rates |
 | `ingest_shards` | one ingest channel per resolution thread | no effect unless `system_threads > 1` |
 | `dispatch_chunk N` | dispatch admitted packets every N packets instead of once per poll | lowers admission latency for frames with many packets; try 4–16 |
@@ -48,15 +48,9 @@ threads share cores and latency degrades sharply. Network graphs require
 | `use_rdtsc` | TSC timestamps | measurement precision only |
 | `socket_recv_buf_bytes`, `recv_pool_size` | kernel / user receive buffers | raise if packets drop in bursts |
 
-Validated example — MIMO uplink, 4 sockets (one per antenna), 56 packets per 1 ms frame
-(about 0.96 ms mean frame latency, within 2% of a hand-written C++/Taskflow version):
-
-```bash
---workers 4 --core-offset 1 --system-threads 2 --receiver-threads 4 --slots 4 \
---dispatch-chunk 8 --reclaim-core 0 --use-rdtsc --rx-decode --no-malloc-tune
-```
-
-With `rx_decode` but a single receiver, the same application loses frames.
+Typical failure of one-at-a-time tuning: enabling `rx_decode` while keeping a single
+receiver for several sockets loses frames, so `rx_decode` looks harmful; raising
+`receiver_threads` without `rx_decode` gives little; only the two together help.
 
 ## Steps
 
