@@ -791,7 +791,7 @@ pub(super) fn generate_optimization_suggestions(
                                For a wavefront sweep: loop over anti-diagonals \
                                (d in 0..2N-1), one node per diagonal with \
                                factor = min(d+1, N, 2N-1-d), then apply coarsening \
-                               as shown in SKILLS/graph-coarsen.md, Case B (graph loop \
+                               as shown in the graph-coarsen agent skill (SKILLS/), Case B (graph loop \
                                restructuring). \
                                Do NOT simply change tile_size — the graph loop \
                                structure itself needs to change.",
