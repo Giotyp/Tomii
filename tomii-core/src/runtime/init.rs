@@ -245,7 +245,16 @@ pub(crate) fn build_predecessor_tables(
                 filter[succ_id][pred_id] = Some(range);
             }
 
-            if let Some(gb) = pred.group_by {
+            // Mirrors `Graph::barrier_group_by_for_dependency` (the counting side,
+            // in graph.rs): a grouped barrier only guarantees its own narrow
+            // group_by-wide slice of the predecessor is done before firing a
+            // group. If this successor ALSO has a per-instance $res list on the
+            // same predecessor (one declared cell per successor instance,
+            // independent of group_by's partitioning), that guarantee is not
+            // enough — fall back to the global/ungrouped dispatch semantics
+            // (every completion decrements every group) so a group never fires
+            // before a declared cell outside its own slice is ready.
+            if let Some(gb) = app_graph.barrier_group_by_for_dependency(succ_node, pred) {
                 group_by[succ_id][pred_id] = Some(gb);
             }
 

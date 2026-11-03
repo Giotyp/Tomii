@@ -380,7 +380,7 @@ pub fn from_json_str(contents: &str, workers: usize) -> Result<GraphSpec, crate:
         graph.add_post_node(node);
     }
 
-    graph.validate_barrier_res_same_pred_conflict()?;
+    graph.warn_ineffective_group_by();
 
     Ok(GraphSpec {
         graph,

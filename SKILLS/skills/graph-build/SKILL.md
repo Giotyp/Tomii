@@ -98,7 +98,7 @@ validation ([run-validate](../run-validate/SKILL.md)) after every barrier change
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Frames stall; some consumer instances never run | Consumer has `group_size` < `factor`, an **ungrouped** `$barrier` over several instances of P, **and** a single-index `$res` on the same P (e.g. `p.out()` + `p.wait(0, n)`). Current runtimes reject this graph at load | Any one of: group the barrier (`group_by`, step 4); give the `$res` one index per consumer instance; use `p.dep()` instead of `p.out()` if the value is not needed |
+| A grouped barrier gives no speedup; log warns "group_by on this $barrier has no effect" | The consumer also has a per-instance `$res` list on the same predecessor: such a list may reference instances outside each group, so the runtime waits for all of them | Read that predecessor with a single-index `$res` (e.g. `p.out()`) or through a `$ref` buffer |
 | Frames never complete or fire early | Grouped and global barriers on one node with a `group_size` that does not match the barrier groups | `group_size = factor / (pred_count / group_by)` (step 4) |
 | Off-by-one instance count | int range end is inclusive (`out(0, 5)` = 6 instances) | Use a Var end |
 | "collect-all must be last" parse error | variadic `$res` not the last arg | Move it last |

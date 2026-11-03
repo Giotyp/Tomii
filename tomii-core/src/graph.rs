@@ -95,6 +95,82 @@ impl Graph {
         &self.successors[node_id as usize]
     }
 
+    /// True when `node` has a per-instance `$res` list on `pred_id`
+    /// (`indexes.len() == node.factor`, with the predecessor's OWN factor
+    /// different from `node.factor` — i.e. not the true 1:1 fanout shape).
+    ///
+    /// Each of `node`'s instances then declares its own, individually chosen
+    /// predecessor cell (see `per_instance_dep_idx` in
+    /// `runtime/arg_resolution.rs`) — nothing ties those declared cells to
+    /// `pred_id`'s own `group_by` partitioning (if `pred_id` is also behind a
+    /// *grouped* `$barrier` on the same node). A grouped barrier only
+    /// guarantees ITS OWN narrow `group_by`-wide slice of `pred_id` is done
+    /// before firing a group; an arbitrary per-instance list can legitimately
+    /// need cells outside that slice. [`Self::barrier_group_by_for_dependency`]
+    /// uses this to fall back to the safe, already-supported "global barrier"
+    /// semantics (wait for ALL of `pred_id`) for such an edge, instead of the
+    /// narrow per-group one that could fire before the declared cell exists.
+    fn has_scattered_per_instance_res(&self, node: &Node, pred_id: IdType) -> bool {
+        let pred_factor = self.nodes[pred_id as usize].factor;
+        node.args.iter().any(|arg| {
+            arg.type_.is_result()
+                && arg.predecessor.as_ref().is_some_and(|p| {
+                    p.id == pred_id && p.indexes.len() == node.factor && pred_factor != node.factor
+                })
+        })
+    }
+
+    /// Effective `group_by` to use when counting/routing a `$barrier` on
+    /// `pred` within `node`, for dependency-counting and dispatch purposes.
+    ///
+    /// Normally this is just `pred.group_by` (the declared value). It is
+    /// forced to `None` — i.e. the barrier is treated as global/ungrouped,
+    /// requiring every one of `node`'s groups to wait for ALL of the
+    /// predecessor's contributing instances — when `node` also has a
+    /// `has_scattered_per_instance_res` edge on the same predecessor.
+    /// This is the single authoritative definition shared by
+    /// `dependency_count_vec` (below) and `runtime::init::build_predecessor_tables`,
+    /// matching the existing convention for `Predecessor::index_filter` /
+    /// `contributing_instances`.
+    pub fn barrier_group_by_for_dependency(
+        &self,
+        node: &Node,
+        pred: &Predecessor,
+    ) -> Option<usize> {
+        if self.has_scattered_per_instance_res(node, pred.id) {
+            None
+        } else {
+            pred.group_by
+        }
+    }
+
+    /// Warn about grouped barriers that [`Self::barrier_group_by_for_dependency`]
+    /// will treat as global: the declared `group_by` is valid but cannot take effect,
+    /// because a per-instance `$res` list on the same predecessor may reference
+    /// instances outside each group. Silent, this looks like "grouping does not help".
+    pub fn warn_ineffective_group_by(&self) {
+        for node in &self.nodes {
+            for arg in &node.args {
+                let Some(pred) = arg.predecessor.as_ref() else {
+                    continue;
+                };
+                if arg.type_.is_barrier()
+                    && pred.group_by.is_some()
+                    && self.barrier_group_by_for_dependency(node, pred).is_none()
+                {
+                    tracing::warn!(
+                        node = %node.name,
+                        predecessor = %self.nodes[pred.id as usize].name,
+                        "group_by on this $barrier has no effect (treated as a barrier over all \
+                         instances): a per-instance $res list on the same predecessor can \
+                         reference instances outside each group. To start groups early, read \
+                         that predecessor with a single-index $res (or via a $ref buffer)"
+                    );
+                }
+            }
+        }
+    }
+
     pub fn dependency_count_vec(&self) -> Vec<usize> {
         // Return a vector with the dependency count for each node.
         //
@@ -126,7 +202,9 @@ impl Graph {
                 if arg.type_.is_barrier() {
                     if let Some(pred) = &arg.predecessor {
                         if preds_seen.insert(pred.id) {
-                            if let Some(group_by_size) = pred.group_by {
+                            if let Some(group_by_size) =
+                                self.barrier_group_by_for_dependency(node, pred)
+                            {
                                 // Per-group barrier: dependencies based on BARRIER groups, not instance groups
                                 // num_barrier_groups = how many packet groups exist (indexes / group_by)
                                 // Example CSI: 64 packets / 64 group_by = 1 barrier group needing 64 deps
@@ -196,99 +274,16 @@ impl Graph {
         dep_count_vec
     }
 
-    /// Reject the one graph shape empirically found to silently stall some of a
-    /// grouped consumer's instances forever (confirmed in
-    /// `tomii-core/tests/scratch_barrier_res_conflict.rs`; see that file for the
-    /// repro matrix this check is derived from):
-    ///
-    /// A node `C` with `group_size` set (`0 < group_size < factor`, i.e. more than
-    /// one independent dependency-group counter) that has, on the *same*
-    /// predecessor `P`:
-    ///   - a `$barrier` with no `group_by` and a genuine (non-trivial,
-    ///     more-than-one-instance) fan-in over `P` — this takes the "global
-    ///     barrier" path in `dependency_count_vec` above, requiring every one of
-    ///     `C`'s groups to see all of `P`'s contributing completions; AND
-    ///   - a non-barrier `$res` (not `$dep`) on `P` with *exactly one* index.
-    ///
-    /// Empirically, some of `C`'s instances then never execute (the run idles
-    /// until `max_runtime`/the test harness's own timeout): a subset of them never
-    /// get scheduled. The failure requires all three ingredients together — removing
-    /// `group_size`, adding `group_by` to the barrier (matching the aligned
-    /// predecessor-factor case, e.g. the MIMO reference graph's `beam`/`csi` and
-    /// `demul`/`fft` edges), widening the `$res` to an explicit per-instance index
-    /// list (one index per `C` instance, i.e. `indexes.len() == factor`), or using
-    /// `$dep` instead of `$res`, each independently avoid it.
-    ///
-    /// This is deliberately narrower than "any node with a barrier and a $res on
-    /// the same predecessor" — that combination is common and correct (e.g. a
-    /// barrier fan-in alongside a single shared `$res` value) whenever `group_size`
-    /// is absent, the barrier is grouped, or the `$res` already covers every
-    /// instance.
-    pub fn validate_barrier_res_same_pred_conflict(&self) -> Result<(), crate::TomiiError> {
-        let all_nodes = self.nodes.iter().chain(self.post_nodes.iter().flatten());
-        for node in all_nodes {
-            let num_groups = match node.group_size {
-                Some(gs) if gs > 0 && gs < node.factor => node.factor / gs,
-                _ => 1,
-            };
-            if num_groups <= 1 {
-                continue;
-            }
-
-            // Predecessors reached by a non-trivial, ungrouped barrier on this node.
-            let mut ungrouped_wide_barrier_preds: HashSet<IdType> = HashSet::new();
-            for arg in &node.args {
-                if !arg.type_.is_barrier() {
-                    continue;
-                }
-                let Some(pred) = &arg.predecessor else {
-                    continue;
-                };
-                if pred.group_by.is_some() {
-                    continue;
-                }
-                let pred_factor = self.nodes[pred.id as usize].factor;
-                if pred.contributing_instances(pred_factor, node.factor) > 1 {
-                    ungrouped_wide_barrier_preds.insert(pred.id);
-                }
-            }
-            if ungrouped_wide_barrier_preds.is_empty() {
-                continue;
-            }
-
-            for arg in &node.args {
-                if !arg.type_.is_result() {
-                    continue; // only $res; $dep does not hit this failure mode
-                }
-                let Some(pred) = &arg.predecessor else {
-                    continue;
-                };
-                if pred.indexes.len() != 1 {
-                    continue;
-                }
-                if ungrouped_wide_barrier_preds.contains(&pred.id) {
-                    let pred_name = &self.nodes[pred.id as usize].name;
-                    return Err(format!(
-                        "node '{node_name}': a $res on predecessor '{pred_name}' with a single \
-                         index coexists with an ungrouped $barrier on the same predecessor, on a \
-                         node with group_size set ({group_size} of {factor}). This combination \
-                         silently stalls a subset of '{node_name}'s instances (see \
-                         Graph::validate_barrier_res_same_pred_conflict). Fix by one of: \
-                         give the $barrier on '{pred_name}' a group_by matching '{node_name}'s \
-                         groups; widen the $res on '{pred_name}' to one index per instance \
-                         (indexes.len() == factor, a Var-ended range, or a per-instance list); \
-                         or read '{pred_name}'s value via $ref/$dep instead of $res.",
-                        node_name = node.name,
-                        pred_name = pred_name,
-                        group_size = node.group_size.unwrap_or(0),
-                        factor = node.factor,
-                    )
-                    .into());
-                }
-            }
-        }
-        Ok(())
-    }
+    // A load-time guard used to live here (`validate_barrier_res_same_pred_conflict`,
+    // added for a shape that silently stalled some of a grouped consumer's
+    // instances forever: group_size set, an ungrouped $barrier fanning in over a
+    // predecessor P, and a single-index $res on that same P). That shape, and a
+    // second one found later (a per-instance $res list on one predecessor sharing
+    // a dependency-counter group with an ungrouped/global $barrier on a DIFFERENT
+    // predecessor), are both now resolved correctly instead of rejected — see
+    // `single_index_dep_idx` and `per_instance_dep_idx` in
+    // `runtime/arg_resolution.rs`. No known barrier/$res-on-the-same-or-a-shared
+    // predecessor combination needs rejecting any more.
 
     pub fn new() -> Graph {
         Graph {
@@ -664,5 +659,85 @@ mod tests {
             counts[1], 1,
             "same pred counted twice would give 2; preds_seen should prevent that"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // barrier_group_by_for_dependency / has_scattered_per_instance_res —
+    // shape B (a per-instance $res list sharing a dependency-counter group
+    // with a grouped $barrier on the same predecessor; see
+    // `runtime/arg_resolution.rs::per_instance_dep_idx`)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn scattered_per_instance_res_forces_global_barrier_dependency() {
+        // p: factor 8. c: factor 12, group_size 3 (4 groups) — grouped barrier
+        // (group_by=2, matching c's groups) PLUS a per-instance $res list
+        // (length 12 == c.factor, != p.factor 8). The declared per-instance
+        // cells aren't guaranteed to stay within the barrier's own
+        // group_by-wide slice, so the barrier must be counted as global (every
+        // group waits for ALL 8 of p), not per-group (2 per group).
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 8, vec![])); // p
+        g.add_node(make_node_grouped(
+            1,
+            12,
+            3,
+            vec![
+                res_arg(0, (0..12).map(|i: isize| i % 8).collect()),
+                barrier_arg_group_by(0, vec![0, 1, 2, 3, 4, 5, 6, 7], 2),
+            ],
+        ));
+        let counts = g.dependency_count_vec();
+        // Global: contributing(8) * num_groups(4) = 32 — NOT the grouped
+        // reading of 8 (2 per group * 4 groups, counted once overall).
+        assert_eq!(
+            counts[1], 32,
+            "a scattered per-instance $res must force the shared barrier to \
+             global (every group waits for all of p), not stay per-group"
+        );
+    }
+
+    #[test]
+    fn non_scattered_res_keeps_grouped_barrier_dependency() {
+        // Same shape, but the $res is a single broadcast index (the working,
+        // unaffected case) — the grouped barrier's own counting must be
+        // untouched.
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 8, vec![])); // p
+        g.add_node(make_node_grouped(
+            1,
+            12,
+            3,
+            vec![
+                res_arg(0, vec![0]),
+                barrier_arg_group_by(0, vec![0, 1, 2, 3, 4, 5, 6, 7], 2),
+            ],
+        ));
+        let counts = g.dependency_count_vec();
+        // Grouped: num_barrier_groups(8/2=4) * group_by(2) = 8 (unchanged by
+        // this fix — matches the pre-existing, already-correct behaviour).
+        assert_eq!(counts[1], 8);
+    }
+
+    #[test]
+    fn scattered_res_with_matching_factors_is_not_forced_global() {
+        // pred_factor == node_factor: a genuine 1:1 edge, not the "scattered"
+        // shape (per_instance_dep_idx's own `pred_factor == node_factor`
+        // branch handles it, trusting pred_index) — must NOT force global.
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 12, vec![])); // p, same factor as c
+        g.add_node(make_node_grouped(
+            1,
+            12,
+            3,
+            vec![
+                res_arg(0, (0..12).map(|i| i as isize).collect()),
+                barrier_arg_group_by(0, (0..12).map(|i| i as isize).collect(), 3),
+            ],
+        ));
+        let counts = g.dependency_count_vec();
+        // Grouped: num_barrier_groups(12/3=4) * group_by(3) = 12, not forced
+        // to the global 12*4=48.
+        assert_eq!(counts[1], 12);
     }
 }
