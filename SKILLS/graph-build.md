@@ -94,8 +94,8 @@ validation ([run-validate](run-validate.md)) after every barrier change.
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Every frame stalls; nothing completes | `$barrier` over all instances of P **and** a single-offset `$res` (`p.out()`) on the same P, when the consumer has `factor=1`, or a `group_size` that does not match the barrier groups | Read P's data through a `$ref` buffer, or give the `$res` an explicit per-instance list; check `group_size` (step 4) |
-| Dependency violations / reads of unfinished data | Same combination when consumer and P have **equal** factors: the `$res` installs 1:1 dispatch that bypasses the barrier | Same fix |
+| Frames stall; some consumer instances never run | Consumer has `group_size` < `factor`, an **ungrouped** `$barrier` over several instances of P, **and** a single-index `$res` on the same P (e.g. `p.out()` + `p.wait(0, n)`). Current runtimes reject this graph at load | Any one of: group the barrier (`group_by`, step 4); give the `$res` one index per consumer instance; use `p.dep()` instead of `p.out()` if the value is not needed |
+| Frames never complete or fire early | Grouped and global barriers on one node with a `group_size` that does not match the barrier groups | `group_size = factor / (pred_count / group_by)` (step 4) |
 | Off-by-one instance count | int range end is inclusive (`out(0, 5)` = 6 instances) | Use a Var end |
 | "collect-all must be last" parse error | variadic `$res` not the last arg | Move it last |
 | Barrier waits for instance 0 only | `p.wait()` without a range on a `factor=1` consumer | `p.wait(0, n)` |
