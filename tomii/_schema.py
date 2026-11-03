@@ -59,7 +59,7 @@ def graph_schema() -> "dict[str, Any]":
                     "import tomii as tm\n"
                     "app = tm.Graph()\n"
                     "buf_size = app.var('buf_size', 100)\n"
-                    "fft_planner = app.var('fft_planner', func='fft_planner', args=[buf_size])\n"
+                    "table = app.var('table', func='make_table', args=[buf_size])\n"
                     "app.node('producer', func='produce', args=[buf_size])\n"
                     "app.to_json()\n"
                 ),
@@ -295,8 +295,8 @@ def graph_schema() -> "dict[str, Any]":
                     "Virtual predecessor node for network-input graphs (graph.network()). "
                     "Not created with graph.node() — reference it by constructing a Node "
                     'handle named "$network" and calling .out()/.wait() on it, as '
-                    "examples/radar-pipeline/build_graph.py does: "
-                    "Node('$network', func='').out(0, n_chirps)."
+                    "Node('$network', func='').out(0, n_packets) "
+                    "(n_packets: a Var holding the packets per frame)."
                 ),
             },
         },

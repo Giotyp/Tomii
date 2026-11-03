@@ -108,13 +108,13 @@ string knobs carry none.
 | `slot_priority` | try both when slots &gt; 1; can reduce tail latency under imbalanced graphs |
 | `coalesce_barriers` | helpful when node factor &gt;&gt; worker count (reduces barrier overhead) |
 | `inline_continuation` | try both; often reduces latency for linear chains or low-fan-out graphs |
-| `receiver_threads` | network graphs require &gt;= 1; with `--rx-decode` needs ~one receiver per busy socket or packets overflow and frames are lost; validated MIMO 4x4 (4 sockets): `--workers 4 --system-threads 2 --receiver-threads 4 --slots 4 --dispatch-chunk 8 --reclaim-core 0 --rx-decode --no-malloc-tune` |
+| `receiver_threads` | network graphs require &gt;= 1; with `--rx-decode` needs ~one receiver per busy socket or packets overflow and frames are lost; search together with `rx_decode`, not separately |
 | `rx_decode` | moves packet-extraction onto receiver threads; needs enough receiver threads for the bound sockets (~one per busy socket), otherwise it overflows and loses frames |
 | `ingest_shards` | only takes effect with `--system-threads &gt; 1` (one ingest channel per resolution thread); no-op at `system_threads=1` |
-| `dispatch_chunk` | dispatch admitted packets every N packets within a poll (0 = once per poll); try 1,4,8,16; validated MIMO 4x4 uses 8 |
+| `dispatch_chunk` | dispatch admitted packets every N packets within a poll (0 = once per poll); try 0,4,8,16; helps frames with many packets |
 | `reclaim_core` | pin the background result-reclaim thread to this core; pick a core outside the worker/receiver pinning range |
 | `membind` | bind memory (and disable NUMA balancing) to the NUMA node(s) hosting the pinned worker cores; set once per host, don't search |
-| `no_malloc_tune` | set when a plugin already tunes malloc itself (e.g. MKL) to avoid conflicting trim/mmap thresholds; validated MIMO 4x4 sets it |
+| `no_malloc_tune` | set when the environment already sets glibc MALLOC_* tunables, so the runtime does not override them |
 
 The runner binary also accepts low-level flags that are not part of this
 catalog (ring-buffer capacity, spin-wait parameters, socket buffer sizes);
