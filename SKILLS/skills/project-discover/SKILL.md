@@ -15,6 +15,21 @@ baseline (if a prior run exists). Run this skill first before any other skill.
 - Asked "what does this project do?"
 - Starting a new optimization or development session
 
+## What to read (and what to skip)
+
+The Τομί docs are large; read only what the task needs, in this order:
+
+| Need | Read | Not needed |
+|------|------|------------|
+| Graph structure, dependency types, index ranges | the [graph-build](../graph-build/SKILL.md) skill, then `reference/json-graph-format.md` | the `tomii/` Python package source |
+| Python graph API (`Graph`, `node`, `out`/`wait`/`dep`, `network`) | `python -m tomii --schema` and `reference/python-api.md` | `tomii/_*.py` source |
+| Runtime flags and their effect | `python -m tomii --list-knobs-json` (or `bin/main --help`) and `reference/cli.md` | `overview/`, benchmark pages |
+| Network-input graphs | the [network-ingest](../network-ingest/SKILL.md) skill and `guide/graphs/network-sources.md` | |
+| Report fields and diagnosis | the [diagnose](../diagnose/SKILL.md) skill | `guide/tuning/observability.md` unless debugging |
+
+Paths are under the docs' `website/docs/` tree. Read the library source only when a documented
+behaviour does not match what you observe.
+
 ## Steps
 
 ### 1. Locate entry points
