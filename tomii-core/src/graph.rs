@@ -282,25 +282,47 @@ impl Graph {
                 let has_barrier_on_pred = node.args.iter().any(|a| {
                     a.is_barrier() && a.predecessor.as_ref().is_some_and(|p| p.id == pred_id)
                 });
-                let union_indexes = self.union_pred_indexes(node, pred_id);
-                let union_pred = Predecessor {
-                    id: pred_id,
-                    indexes: union_indexes,
-                    group_by: None,
+                // Two or more genuinely differing, barrier-free args on this
+                // predecessor (e.g. `$res "0"` + `$res "-1"` on an equal-factor
+                // predecessor) cannot be safely counted via the generic
+                // index-filter heuristic: it is tuned for a single arg / a
+                // literal barrier's own declared range, can under-count a
+                // multi-cell-per-instance requirement, and — for the
+                // equal-factor relative-offset convention — has no sensible
+                // notion of an absolute range over signed deltas. Force the
+                // full predecessor factor instead; `NodeDepMap::new` pairs
+                // this with forcing `has_barrier` so the counter releases
+                // every dependent instance together only once all of it has
+                // arrived, never partially/ordinally. Identical duplicate
+                // args (`mat_mul`'s `[vec_mat.out(), vec_mat.out()]`) are NOT
+                // ambiguous — `union_pred_indexes` already dedupes those to a
+                // single value, so they fall through to the unchanged,
+                // already-correct union computation below.
+                let ambiguous = pred_is_ambiguous_multi_arg(node, pred_id);
+                let contributing = if ambiguous {
+                    pred_factor
+                } else {
+                    let union_indexes = self.union_pred_indexes(node, pred_id);
+                    let union_pred = Predecessor {
+                        id: pred_id,
+                        indexes: union_indexes,
+                        group_by: None,
+                    };
+                    union_pred.contributing_instances(pred_factor, node.factor)
                 };
-                let contributing = union_pred.contributing_instances(pred_factor, node.factor);
                 // Matches the pre-existing global-barrier-with-groups semantics:
-                // every dependency-counter group needs the full contribution. Plain
-                // non-barrier predecessors are never multiplied by num_groups (as
-                // before this fix) — they are not routed per dependency-counter group.
-                let adding = if has_barrier_on_pred && num_groups > 1 {
+                // every dependency-counter group needs the full contribution.
+                // Plain, unambiguous non-barrier predecessors are never
+                // multiplied by num_groups (as before this fix) — they are not
+                // routed per dependency-counter group.
+                let adding = if (has_barrier_on_pred || ambiguous) && num_groups > 1 {
                     contributing * num_groups
                 } else {
                     contributing
                 };
                 print_debug(|| {
-                    format!("DEPCOUNT: node={}, factor={}, group_size={:?}, num_groups={}, pred={}, has_barrier_on_pred={}, contributing={}, dep_count_before={}, adding={}",
-                    node.name, node.factor, node.group_size, num_groups, pred_id, has_barrier_on_pred, contributing, dep_count, adding)
+                    format!("DEPCOUNT: node={}, factor={}, group_size={:?}, num_groups={}, pred={}, has_barrier_on_pred={}, ambiguous={}, contributing={}, dep_count_before={}, adding={}",
+                    node.name, node.factor, node.group_size, num_groups, pred_id, has_barrier_on_pred, ambiguous, contributing, dep_count, adding)
                 });
                 dep_count += adding;
             }

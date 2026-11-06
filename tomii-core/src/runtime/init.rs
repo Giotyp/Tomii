@@ -329,25 +329,82 @@ pub(crate) fn build_predecessor_tables(
                     succ_1to1_offset[succ_id][pred_id] = Some(pred.indexes[0]);
                 }
             } else {
-                // Multiple distinct args reference this predecessor and none of
-                // them is an effective grouped barrier: route from the UNION of
-                // every arg's declared indexes (mirrors
-                // `Graph::dependency_count_vec`'s pass 2), so a predecessor
-                // instance that only ONE of the args needs still drives this
-                // successor and decrements its counter. Never set the 1:1 exact-
-                // dispatch offset here: with more than one differently-indexed
-                // arg on the same predecessor there is no single offset that is
-                // correct for all of them — guessing one could silently
-                // mis-dispatch, so fall back to the safe ordinal threshold scan.
-                let union_indexes = app_graph.union_pred_indexes(succ_node, pred_id_tag);
-                let union_pred = Predecessor {
-                    id: pred_id_tag,
-                    indexes: union_indexes,
-                    group_by: None,
-                };
-                if let Some(range) = union_pred.index_filter(pred_factor, succ_factor) {
-                    filter[succ_id][pred_id] = Some(range);
+                // More than one arg on this predecessor, none an effective
+                // grouped barrier. Two or more IDENTICAL args (same declared
+                // (indexes, group_by) — e.g. `mat_mul`'s
+                // `[vec_mat.out(), vec_mat.out()]`) impose exactly the same
+                // requirement a single copy would: dedupe to one
+                // representative and take the EXACT single-arg path above,
+                // preserving the 1:1 exact-dispatch offset. Without this,
+                // disabling 1:1 dispatch for a shape that is really just a
+                // (duplicated) ordinary 1:1 edge reintroduces the exact
+                // ordinal-dispatch race the offset exists to prevent — and
+                // with a large equal-factor chain and few workers, that race
+                // can starve every worker in `fetch_res_results`: a real
+                // deadlock, not just wrong values (found via the
+                // `matrix-compute` example's CI check).
+                let first_pred = args_on_pred[0].predecessor.as_ref().unwrap();
+                let all_identical = args_on_pred[1..].iter().all(|a| {
+                    let p = a.predecessor.as_ref().unwrap();
+                    p.indexes == first_pred.indexes && p.group_by == first_pred.group_by
+                });
+                if all_identical {
+                    let arg = args_on_pred[0];
+                    let pred = first_pred;
+                    if let Some(range) = pred.index_filter(pred_factor, succ_factor) {
+                        filter[succ_id][pred_id] = Some(range);
+                    }
+                    let single_1to1 = pred.indexes.len() == 1 && succ_factor == pred_factor;
+                    let contiguous_range_1to1 = range_1to1_enabled
+                        && pred.indexes.len() == succ_factor
+                        && pred.indexes.windows(2).all(|w| w[1] == w[0] + 1);
+                    if !arg.is_barrier()
+                        && pred.group_by.is_none()
+                        && (single_1to1 || contiguous_range_1to1)
+                        && succ_factor > 1
+                    {
+                        succ_1to1_offset[succ_id][pred_id] = Some(pred.indexes[0]);
+                    }
+                    continue;
                 }
+
+                // Genuinely differing args. Never set the 1:1 exact-dispatch
+                // offset here: with more than one differently-indexed arg on
+                // the same predecessor there is no single offset that is
+                // correct for all of them — guessing one could silently
+                // mis-dispatch.
+                if args_on_pred.iter().any(|a| a.is_barrier()) {
+                    // A literal (ungrouped) barrier is present: its own
+                    // `has_barrier` dispatch (release-the-whole-range-at-zero,
+                    // `NodeDepMap`) is already safe regardless of the other
+                    // args sharing this predecessor. Route the filter from the
+                    // union of every arg's declared indexes (mirrors
+                    // `Graph::dependency_count_vec`'s pass 2) — guarding
+                    // against the equal-factor relative-offset convention,
+                    // where a declared index can be negative and a union of
+                    // signed deltas has no sensible absolute range.
+                    let union_indexes = app_graph.union_pred_indexes(succ_node, pred_id_tag);
+                    if !union_indexes.iter().any(|&i| i < 0) {
+                        let union_pred = Predecessor {
+                            id: pred_id_tag,
+                            indexes: union_indexes,
+                            group_by: None,
+                        };
+                        if let Some(range) = union_pred.index_filter(pred_factor, succ_factor) {
+                            filter[succ_id][pred_id] = Some(range);
+                        }
+                    }
+                }
+                // Else: no barrier at all among genuinely differing args
+                // (e.g. `$res "0"` + `$res "-1"` on an equal-factor
+                // predecessor). Leave the filter unfiltered (`None`, the
+                // table's default) — every predecessor instance must drive
+                // this successor. The safe "wait for the full factor, release
+                // every dependent instance together" behaviour this needs
+                // comes from `has_barrier` being forced true for this node by
+                // `node_has_ambiguous_multi_res_args`
+                // (`buffers::node_dep::NodeDepMap::new`), independent of this
+                // routing table.
             }
         }
     }

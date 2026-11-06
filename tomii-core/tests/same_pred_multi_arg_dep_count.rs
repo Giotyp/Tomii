@@ -420,3 +420,95 @@ fn single_res_arg_per_predecessor_completes() {
         Duration::from_secs(5),
     );
 }
+
+// --------------------------------------------------------------------------- //
+// Follow-up regression: the fix above (union the index sets across a
+// predecessor's args) initially disabled the 1:1 exact-dispatch offset for
+// EVERY predecessor referenced by more than one arg — including two
+// IDENTICAL args (`mat_mul`'s `[vec_mat.out(), vec_mat.out()]` in
+// `examples/matrix-compute`, found by that example's CI check, not by this
+// suite: `cargo test` resolves every plugin function to `noop`, so it cannot
+// observe a wrong-VALUE regression — only a hang/non-completion, and this
+// specific regression's usual symptom at the example's actual scale (200
+// instances, 2 workers) was a real deadlock, confirmed by reproducing it
+// locally). Identical duplicate args impose exactly what a single copy would
+// and must take the exact single-arg path, 1:1 offset included — see
+// `pred_is_ambiguous_multi_arg` / `node_has_ambiguous_multi_res_args` in
+// `graph_struct.rs`. VALUE-level proof that this is actually fixed (every
+// instance reads the predecessor cell it declared, not merely that the run
+// completes) lives in `same_pred_multi_arg_values.rs`, which builds and runs
+// a real plugin instead of `noop`.
+// --------------------------------------------------------------------------- //
+
+#[test]
+fn identical_duplicate_res_args_equal_factor_completes() {
+    // Mirrors mat_mul: two IDENTICAL $res args on an equal-factor predecessor,
+    // factor large enough (and workers small enough) to matter if the 1:1
+    // exact-dispatch offset were disabled for this shape.
+    assert_runs_to_completion(
+        r#"
+        {
+            "nodes": [
+                { "name": "p", "factor": 64, "function": "noop", "args": [] },
+                {
+                    "name": "c",
+                    "factor": 64,
+                    "function": "noop",
+                    "args": [
+                        { "type": "$res", "predecessor": { "name": "p", "indexes": "0" } },
+                        { "type": "$res", "predecessor": { "name": "p", "indexes": "0" } }
+                    ]
+                }
+            ]
+        }
+        "#,
+        2,
+        20,
+        Duration::from_secs(5),
+    );
+}
+
+// --------------------------------------------------------------------------- //
+// The OTHER new-regression risk flagged alongside the identical-args fix:
+// two DIFFERING, barrier-free $res args on the same equal-factor predecessor
+// (e.g. offsets "0" and "1" — c[j] needs BOTH p[j] and p[(j+1) % factor]).
+// With no literal $barrier, this node's dependency counter would otherwise
+// fall through to the 1:1-offset (which can only ever encode ONE of the two
+// offsets) or ordinal-threshold (arrival-order, not identity-matched) paths —
+// neither safe for a genuine two-cell-per-instance requirement. This must
+// force the same "wait for the full predecessor factor, release every
+// instance together" treatment a literal barrier already gets
+// (`node_has_ambiguous_multi_res_args`, consumed by
+// `buffers::node_dep::NodeDepMap::new`).
+//
+// (Not "0" and "-1": the JSON predecessor-index grammar
+// (`graph_gen.rs::parse_predecessor`) treats any `-`-containing index string
+// as a `start-end` range, so a bare single negative offset can't currently be
+// expressed in JSON — a separate, pre-existing limitation unrelated to this
+// fix. "0"/"1" exercises the identical mechanism without depending on it.)
+// --------------------------------------------------------------------------- //
+
+#[test]
+fn differing_nonidentical_res_args_equal_factor_completes() {
+    assert_runs_to_completion(
+        r#"
+        {
+            "nodes": [
+                { "name": "p", "factor": 64, "function": "noop", "args": [] },
+                {
+                    "name": "c",
+                    "factor": 64,
+                    "function": "noop",
+                    "args": [
+                        { "type": "$res", "predecessor": { "name": "p", "indexes": "0" } },
+                        { "type": "$res", "predecessor": { "name": "p", "indexes": "1" } }
+                    ]
+                }
+            ]
+        }
+        "#,
+        2,
+        20,
+        Duration::from_secs(5),
+    );
+}
