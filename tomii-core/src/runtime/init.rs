@@ -6,6 +6,7 @@
 //! Pure analysis — no threading, no shared state writes.
 use super::node_cache::{node_cache_entry, NodeCacheEntry, ResPredCache};
 use crate::graph::*;
+use crate::graph_struct::Predecessor;
 use crate::scheduler::SchedulerImpl;
 use crate::IdType;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
@@ -230,20 +231,41 @@ pub(crate) fn build_predecessor_tables(
     let mut group_by: Vec<Vec<Option<usize>>> = vec![vec![None; num_nodes]; num_nodes];
     let mut succ_1to1_offset: Vec<Vec<Option<isize>>> = vec![vec![None; num_nodes]; num_nodes];
 
+    let range_1to1_enabled = std::env::var("TOMII_DISABLE_RANGE_1TO1").is_err();
+
     for succ_node in &app_graph.nodes {
         let succ_id = succ_node.id as usize;
         let succ_factor = succ_node.factor;
 
+        // Group this successor's args by predecessor ID first. A node can read the
+        // SAME predecessor through more than one arg with different index sets
+        // (e.g. `$res pred "0"` on one instance and `$barrier pred "1"` on
+        // another of a factor-2 predecessor — the QEC leaf/fuse shape). The old
+        // per-arg loop below computed `filter`/`group_by`/the 1:1 offset from
+        // whichever arg it visited LAST, silently dropping any instance only
+        // some OTHER arg on the same predecessor referenced — that instance's
+        // completion would then never pass `passes_filter` and never decrement
+        // this successor's counter at all, so the successor could become ready
+        // (and read its `$res` value) before that instance had even run. Mirrors
+        // `Graph::dependency_count_vec`'s union-based pass 2 (graph.rs).
+        let mut preds_on_node: Vec<IdType> = Vec::new();
         for arg in &succ_node.args {
-            let Some(pred) = &arg.predecessor else {
-                continue;
-            };
-            let pred_id = pred.id as usize;
+            if let Some(pred) = &arg.predecessor {
+                if !preds_on_node.contains(&pred.id) {
+                    preds_on_node.push(pred.id);
+                }
+            }
+        }
+
+        for pred_id_tag in preds_on_node {
+            let pred_id = pred_id_tag as usize;
             let pred_factor = app_graph.nodes[pred_id].factor;
 
-            if let Some(range) = pred.index_filter(pred_factor, succ_factor) {
-                filter[succ_id][pred_id] = Some(range);
-            }
+            let args_on_pred: Vec<&crate::graph_struct::Arg> = succ_node
+                .args
+                .iter()
+                .filter(|a| a.predecessor.as_ref().is_some_and(|p| p.id == pred_id_tag))
+                .collect();
 
             // Mirrors `Graph::barrier_group_by_for_dependency` (the counting side,
             // in graph.rs): a grouped barrier only guarantees its own narrow
@@ -254,32 +276,78 @@ pub(crate) fn build_predecessor_tables(
             // enough — fall back to the global/ungrouped dispatch semantics
             // (every completion decrements every group) so a group never fires
             // before a declared cell outside its own slice is ready.
-            if let Some(gb) = app_graph.barrier_group_by_for_dependency(succ_node, pred) {
+            let grouped_barrier = args_on_pred.iter().find_map(|a| {
+                if !a.is_barrier() {
+                    return None;
+                }
+                let pred = a.predecessor.as_ref()?;
+                app_graph
+                    .barrier_group_by_for_dependency(succ_node, pred)
+                    .map(|gb| (pred, gb))
+            });
+
+            if let Some((pred, gb)) = grouped_barrier {
+                // Genuinely (non-overridden) grouped barrier: route from its own
+                // declared index range, same as before this fix.
+                if let Some(range) = pred.index_filter(pred_factor, succ_factor) {
+                    filter[succ_id][pred_id] = Some(range);
+                }
                 group_by[succ_id][pred_id] = Some(gb);
+                // 1:1 exact dispatch never applies to a grouped edge.
+                continue;
             }
 
-            // 1:1 non-barrier $res: store offset so we can fire the exact successor
-            // instance that reads this predecessor. Two shapes qualify:
-            //  - single index with equal factors (succ[j] reads pred[j + k]);
-            //  - contiguous index range of length succ_factor (succ[j] reads
-            //    pred[start + j]) — e.g. a $network range edge. Without exact
-            //    dispatch these fall to the ordinal threshold scan, where two
-            //    resolution threads racing on the instance-claim CAS can pair an
-            //    instance with the WRONG predecessor's index; the pred_index-based
-            //    $res fetch then reads one predecessor twice and another never.
-            // TOMII_DISABLE_RANGE_1TO1: same-binary A/B toggle (diagnostic only —
-            // disabling restores the pre-fix ordinal path and its dispatch race).
-            let range_1to1_enabled = std::env::var("TOMII_DISABLE_RANGE_1TO1").is_err();
-            let single_1to1 = pred.indexes.len() == 1 && succ_factor == pred_factor;
-            let contiguous_range_1to1 = range_1to1_enabled
-                && pred.indexes.len() == succ_factor
-                && pred.indexes.windows(2).all(|w| w[1] == w[0] + 1);
-            if !arg.is_barrier()
-                && pred.group_by.is_none()
-                && (single_1to1 || contiguous_range_1to1)
-                && succ_factor > 1
-            {
-                succ_1to1_offset[succ_id][pred_id] = Some(pred.indexes[0]);
+            // Global/ungrouped routing. The overwhelmingly common case is a
+            // single arg per predecessor — handle it exactly as before (same
+            // computation, same cost) so that path is unchanged and no slower.
+            if let [arg] = args_on_pred[..] {
+                let pred = arg.predecessor.as_ref().unwrap();
+                if let Some(range) = pred.index_filter(pred_factor, succ_factor) {
+                    filter[succ_id][pred_id] = Some(range);
+                }
+
+                // 1:1 non-barrier $res: store offset so we can fire the exact successor
+                // instance that reads this predecessor. Two shapes qualify:
+                //  - single index with equal factors (succ[j] reads pred[j + k]);
+                //  - contiguous index range of length succ_factor (succ[j] reads
+                //    pred[start + j]) — e.g. a $network range edge. Without exact
+                //    dispatch these fall to the ordinal threshold scan, where two
+                //    resolution threads racing on the instance-claim CAS can pair an
+                //    instance with the WRONG predecessor's index; the pred_index-based
+                //    $res fetch then reads one predecessor twice and another never.
+                // TOMII_DISABLE_RANGE_1TO1: same-binary A/B toggle (diagnostic only —
+                // disabling restores the pre-fix ordinal path and its dispatch race).
+                let single_1to1 = pred.indexes.len() == 1 && succ_factor == pred_factor;
+                let contiguous_range_1to1 = range_1to1_enabled
+                    && pred.indexes.len() == succ_factor
+                    && pred.indexes.windows(2).all(|w| w[1] == w[0] + 1);
+                if !arg.is_barrier()
+                    && pred.group_by.is_none()
+                    && (single_1to1 || contiguous_range_1to1)
+                    && succ_factor > 1
+                {
+                    succ_1to1_offset[succ_id][pred_id] = Some(pred.indexes[0]);
+                }
+            } else {
+                // Multiple distinct args reference this predecessor and none of
+                // them is an effective grouped barrier: route from the UNION of
+                // every arg's declared indexes (mirrors
+                // `Graph::dependency_count_vec`'s pass 2), so a predecessor
+                // instance that only ONE of the args needs still drives this
+                // successor and decrements its counter. Never set the 1:1 exact-
+                // dispatch offset here: with more than one differently-indexed
+                // arg on the same predecessor there is no single offset that is
+                // correct for all of them — guessing one could silently
+                // mis-dispatch, so fall back to the safe ordinal threshold scan.
+                let union_indexes = app_graph.union_pred_indexes(succ_node, pred_id_tag);
+                let union_pred = Predecessor {
+                    id: pred_id_tag,
+                    indexes: union_indexes,
+                    group_by: None,
+                };
+                if let Some(range) = union_pred.index_filter(pred_factor, succ_factor) {
+                    filter[succ_id][pred_id] = Some(range);
+                }
             }
         }
     }
