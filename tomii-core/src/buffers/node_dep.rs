@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::debug::print_debug;
-use crate::graph_struct::Node;
+use crate::graph_struct::{node_has_ambiguous_multi_res_args, Node};
 
 use super::{gen_pack, gen_unpack_gen, gen_unpack_val};
 
@@ -390,7 +390,18 @@ impl NodeDepMap {
             for node_id in 0..num_nodes {
                 let node = &nodes[node_id];
                 let total_deps = dep_counts[node_id];
-                let has_barrier = node.args.iter().any(|arg| arg.is_barrier());
+                // A literal $barrier forces the safe "release the whole range
+                // at once, only once every decrement has arrived" dispatch
+                // path (below). An ambiguous multi-arg predecessor (two or
+                // more genuinely differing, barrier-free args on the same
+                // predecessor — see `node_has_ambiguous_multi_res_args`) needs
+                // that exact same safety net: with no barrier, this node
+                // would otherwise fall through to the 1:1-exact-dispatch or
+                // ordinal-threshold paths, neither of which can correctly
+                // hand out two DIFFERENT required predecessor cells per
+                // instance.
+                let has_barrier = node.args.iter().any(|arg| arg.is_barrier())
+                    || node_has_ambiguous_multi_res_args(node);
 
                 // Calculate barrier-based grouping for per-group barriers
                 let effective_group_size = if has_barrier {

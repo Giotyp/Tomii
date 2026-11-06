@@ -458,6 +458,78 @@ impl Node {
     }
 }
 
+/// True when `node` reads `pred_id` through two or more args whose declared
+/// `(indexes, group_by)` genuinely differ — e.g. a `$res` on offset `"0"` and
+/// a second `$res` on offset `"-1"` of the same equal-factor predecessor —
+/// AND none of those args is a `$barrier`.
+///
+/// Two or more IDENTICAL args on the same predecessor (same declared
+/// `(indexes, group_by)`, as in `mat_mul`'s `[vec_mat.out(), vec_mat.out()]`)
+/// are NOT ambiguous: they impose exactly the dependency a single copy of
+/// that arg would, and the call sites below must treat them exactly like a
+/// single arg (preserving the 1:1 exact-dispatch offset that premature-
+/// dispatch safety depends on — see `runtime::init::build_predecessor_tables`).
+///
+/// A literal `$barrier` among the args is also not ambiguous by this
+/// definition: it already makes the node's dependency counter release its
+/// whole range at once only once every decrement has arrived (`has_barrier`
+/// in [`crate::buffers::node_dep::NodeDepMap::new`]), which is already safe
+/// for however many OTHER args (barrier or not) share that predecessor —
+/// this is the mechanism `Graph::dependency_count_vec` and
+/// `runtime::init::build_predecessor_tables` already rely on for e.g. the QEC
+/// leaf/fuse shape (`$res` on one instance, `$barrier` on another).
+///
+/// What IS ambiguous: two or more genuinely different, barrier-free args on
+/// one predecessor. With no barrier, the node's `has_barrier` stays false, so
+/// its dependency counter uses either the exact 1:1-offset dispatch (which
+/// can only ever encode ONE offset, not two) or the ordinal threshold scan
+/// (which hands out successor instances in arrival order, not matched to
+/// which predecessor instance actually completed). Either can dispatch a
+/// consumer instance before every cell it declared has run — and because the
+/// worker pool is shared with the predecessor's own pending instances, enough
+/// such mis-timed dispatches spinning in `fetch_res_results` can starve every
+/// worker: a true deadlock, not just a race. [`node_has_ambiguous_multi_res_args`]
+/// detects this so the dependency count/routing can fall back to the same
+/// safe "wait for the full predecessor factor, then release everything at
+/// once" treatment a literal barrier already gets.
+pub(crate) fn pred_is_ambiguous_multi_arg(node: &Node, pred_id: IdType) -> bool {
+    let args_on_pred: Vec<&Arg> = node
+        .args
+        .iter()
+        .filter(|a| a.predecessor.as_ref().is_some_and(|p| p.id == pred_id))
+        .collect();
+    if args_on_pred.len() < 2 || args_on_pred.iter().any(|a| a.is_barrier()) {
+        return false;
+    }
+    let first = args_on_pred[0].predecessor.as_ref().unwrap();
+    args_on_pred[1..].iter().any(|a| {
+        let p = a.predecessor.as_ref().unwrap();
+        p.indexes != first.indexes || p.group_by != first.group_by
+    })
+}
+
+/// True when ANY predecessor `node` reads is ambiguous per
+/// [`pred_is_ambiguous_multi_arg`]. Used by
+/// `buffers::node_dep::NodeDepMap::new` to force `has_barrier` (and so the
+/// safe, all-at-once release path) for such a node, independent of whether it
+/// has a literal `$barrier` arg.
+pub(crate) fn node_has_ambiguous_multi_res_args(node: &Node) -> bool {
+    let mut seen: Vec<IdType> = Vec::new();
+    for arg in &node.args {
+        let Some(pred) = &arg.predecessor else {
+            continue;
+        };
+        if seen.contains(&pred.id) {
+            continue;
+        }
+        seen.push(pred.id);
+        if pred_is_ambiguous_multi_arg(node, pred.id) {
+            return true;
+        }
+    }
+    false
+}
+
 /// User-supplied function that extracts a frame ID from a received packet.
 ///
 /// The function receives the predecessor node's output plus any extra `args`

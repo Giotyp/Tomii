@@ -171,6 +171,34 @@ impl Graph {
         }
     }
 
+    /// Union of the predecessor-instance indexes `node` references on `pred_id`,
+    /// across EVERY one of its args (barrier and non-barrier alike) that reads
+    /// that predecessor.
+    ///
+    /// A node can read the same predecessor through more than one arg with
+    /// *different* index sets — e.g. a single-index `$res` on one instance and a
+    /// single-index `$barrier` on another instance of a factor-2 predecessor (the
+    /// QEC leaf/fuse shape: `fuse_2` reads `leaf[0]` via `$res` and gates on
+    /// `leaf[1]` via `$barrier`). Computing readiness/routing from only one of
+    /// those args' own index set — whichever happens to be visited first/last —
+    /// silently drops the other instance from the requirement, letting the
+    /// successor fire (and read its `$res` value) before that instance has run.
+    /// This is the single, authoritative union both [`Self::dependency_count_vec`]
+    /// and `runtime::init::build_predecessor_tables` use so a successor is only
+    /// ever considered ready once every instance referenced by ANY of its args on
+    /// that predecessor has completed.
+    pub(crate) fn union_pred_indexes(&self, node: &Node, pred_id: IdType) -> Vec<isize> {
+        let mut seen: HashSet<isize> = HashSet::new();
+        for arg in &node.args {
+            if let Some(pred) = &arg.predecessor {
+                if pred.id == pred_id {
+                    seen.extend(pred.indexes.iter().copied());
+                }
+            }
+        }
+        seen.into_iter().collect()
+    }
+
     pub fn dependency_count_vec(&self) -> Vec<usize> {
         // Return a vector with the dependency count for each node.
         //
@@ -186,74 +214,117 @@ impl Graph {
         // For nodes with group_size, global predecessors (no group_by) have
         // their contribution multiplied by num_groups, since each group
         // counter needs the full set of decrements from global predecessors.
+        //
+        // A node may reference the SAME predecessor through more than one arg
+        // with different index sets (see `union_pred_indexes` above). Pass 1
+        // below counts predecessors behind a genuinely (non-overridden) grouped
+        // barrier exactly as before, from that barrier's own declared range.
+        // Pass 2 counts every other predecessor this node reads — naturally or
+        // forced-global barriers, plain `$res`/`$dep` args, or several of
+        // either — from the UNION of indexes across all of that predecessor's
+        // args, so no instance any arg depends on is ever left uncounted.
         let mut dep_count_vec: Vec<usize> = Vec::new();
 
         for node in &self.nodes {
             let mut dep_count = 0;
             let mut preds_seen = HashSet::new();
+            let mut grouped_candidates_seen = HashSet::new();
 
             let num_groups = match node.group_size {
                 Some(gs) if gs > 0 && gs < node.factor => node.factor / gs,
                 _ => 1,
             };
 
-            // First check barriers - they take precedence for dependency counting
+            // Pass 1: barriers with an EFFECTIVE (non-overridden) group_by.
             for arg in &node.args {
-                if arg.type_.is_barrier() {
-                    if let Some(pred) = &arg.predecessor {
-                        if preds_seen.insert(pred.id) {
-                            if let Some(group_by_size) =
-                                self.barrier_group_by_for_dependency(node, pred)
-                            {
-                                // Per-group barrier: dependencies based on BARRIER groups, not instance groups
-                                // num_barrier_groups = how many packet groups exist (indexes / group_by)
-                                // Example CSI: 64 packets / 64 group_by = 1 barrier group needing 64 deps
-                                // Example FFT: 832 packets / 64 group_by = 13 barrier groups, each needing 64 deps
-                                let num_barrier_groups =
-                                    pred.indexes.len().checked_div(group_by_size).unwrap_or(1);
+                if !arg.type_.is_barrier() {
+                    continue;
+                }
+                let Some(pred) = &arg.predecessor else {
+                    continue;
+                };
+                if !grouped_candidates_seen.insert(pred.id) {
+                    continue;
+                }
+                let Some(group_by_size) = self.barrier_group_by_for_dependency(node, pred) else {
+                    // Not (or no longer, due to scattering) grouped — picked up in
+                    // pass 2 below, from the union of every arg on this predecessor.
+                    continue;
+                };
+                preds_seen.insert(pred.id);
+                // Per-group barrier: dependencies based on BARRIER groups, not instance groups
+                // num_barrier_groups = how many packet groups exist (indexes / group_by)
+                // Example CSI: 64 packets / 64 group_by = 1 barrier group needing 64 deps
+                // Example FFT: 832 packets / 64 group_by = 13 barrier groups, each needing 64 deps
+                let num_barrier_groups = pred.indexes.len().checked_div(group_by_size).unwrap_or(1);
+                let barrier_deps = num_barrier_groups * group_by_size;
+                print_debug(|| {
+                    format!("DEPCOUNT: node={}, factor={}, group_size={:?}, num_barrier_groups={}, group_by={}, indexes.len()={}, dep_count_before={}, adding={}",
+                    node.name, node.factor, node.group_size, num_barrier_groups, group_by_size, pred.indexes.len(), dep_count, barrier_deps)
+                });
+                dep_count += barrier_deps;
+            }
 
-                                let barrier_deps = num_barrier_groups * group_by_size;
-                                print_debug(|| {
-                                    format!("DEPCOUNT: node={}, factor={}, group_size={:?}, num_barrier_groups={}, group_by={}, indexes.len()={}, dep_count_before={}, adding={}",
-                                    node.name, node.factor, node.group_size, num_barrier_groups, group_by_size, pred.indexes.len(), dep_count, barrier_deps)
-                                });
-                                dep_count += barrier_deps;
-                            } else {
-                                let pred_factor = self.nodes[pred.id as usize].factor;
-                                let contributing =
-                                    pred.contributing_instances(pred_factor, node.factor);
-                                if num_groups > 1 {
-                                    // Global barrier: each instance group needs all deps
-                                    print_debug(|| {
-                                        format!("DEPCOUNT: node={}, factor={}, group_size={:?}, num_groups={}, group_by=None, contributing={}, dep_count_before={}, adding={}",
-                                        node.name, node.factor, node.group_size, num_groups, contributing, dep_count, contributing * num_groups)
-                                    });
-                                    dep_count += contributing * num_groups;
-                                } else {
-                                    print_debug(|| {
-                                        format!("DEPCOUNT: node={}, factor={}, group_size={:?}, num_groups={} (<=1), contributing={}, dep_count_before={}, adding={}",
-                                        node.name, node.factor, node.group_size, num_groups, contributing, dep_count, contributing)
-                                    });
-                                    dep_count += contributing;
-                                }
-                            }
-                        }
+            // Pass 2: every predecessor not already accounted for in pass 1 —
+            // counted from the union of indexes across all args that read it.
+            let mut remaining_preds: Vec<IdType> = Vec::new();
+            for arg in &node.args {
+                if let Some(pred) = &arg.predecessor {
+                    if !preds_seen.contains(&pred.id) && !remaining_preds.contains(&pred.id) {
+                        remaining_preds.push(pred.id);
                     }
                 }
             }
 
-            // Then check non-barrier predecessors
-            for arg in &node.args {
-                if !arg.type_.is_barrier() {
-                    if let Some(pred) = &arg.predecessor {
-                        if preds_seen.insert(pred.id) {
-                            let pred_factor = self.nodes[pred.id as usize].factor;
-                            let contributing =
-                                pred.contributing_instances(pred_factor, node.factor);
-                            dep_count += contributing;
-                        }
-                    }
-                }
+            for pred_id in remaining_preds {
+                preds_seen.insert(pred_id);
+                let pred_factor = self.nodes[pred_id as usize].factor;
+                let has_barrier_on_pred = node.args.iter().any(|a| {
+                    a.is_barrier() && a.predecessor.as_ref().is_some_and(|p| p.id == pred_id)
+                });
+                // Two or more genuinely differing, barrier-free args on this
+                // predecessor (e.g. `$res "0"` + `$res "-1"` on an equal-factor
+                // predecessor) cannot be safely counted via the generic
+                // index-filter heuristic: it is tuned for a single arg / a
+                // literal barrier's own declared range, can under-count a
+                // multi-cell-per-instance requirement, and — for the
+                // equal-factor relative-offset convention — has no sensible
+                // notion of an absolute range over signed deltas. Force the
+                // full predecessor factor instead; `NodeDepMap::new` pairs
+                // this with forcing `has_barrier` so the counter releases
+                // every dependent instance together only once all of it has
+                // arrived, never partially/ordinally. Identical duplicate
+                // args (`mat_mul`'s `[vec_mat.out(), vec_mat.out()]`) are NOT
+                // ambiguous — `union_pred_indexes` already dedupes those to a
+                // single value, so they fall through to the unchanged,
+                // already-correct union computation below.
+                let ambiguous = pred_is_ambiguous_multi_arg(node, pred_id);
+                let contributing = if ambiguous {
+                    pred_factor
+                } else {
+                    let union_indexes = self.union_pred_indexes(node, pred_id);
+                    let union_pred = Predecessor {
+                        id: pred_id,
+                        indexes: union_indexes,
+                        group_by: None,
+                    };
+                    union_pred.contributing_instances(pred_factor, node.factor)
+                };
+                // Matches the pre-existing global-barrier-with-groups semantics:
+                // every dependency-counter group needs the full contribution.
+                // Plain, unambiguous non-barrier predecessors are never
+                // multiplied by num_groups (as before this fix) — they are not
+                // routed per dependency-counter group.
+                let adding = if (has_barrier_on_pred || ambiguous) && num_groups > 1 {
+                    contributing * num_groups
+                } else {
+                    contributing
+                };
+                print_debug(|| {
+                    format!("DEPCOUNT: node={}, factor={}, group_size={:?}, num_groups={}, pred={}, has_barrier_on_pred={}, ambiguous={}, contributing={}, dep_count_before={}, adding={}",
+                    node.name, node.factor, node.group_size, num_groups, pred_id, has_barrier_on_pred, ambiguous, contributing, dep_count, adding)
+                });
+                dep_count += adding;
             }
 
             // Final summary for this node
