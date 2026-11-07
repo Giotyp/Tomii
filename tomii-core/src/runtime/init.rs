@@ -86,7 +86,12 @@ pub(crate) fn build_node_cache(
 
     // is_fanout_bulk — true when the node is eligible for 1:1 fanout bulk dispatch (Upgrade 5).
     // Eligibility: single $res predecessor with equal factor > 1, worker_resolvable,
-    // not a condition/network node, no $barrier args.
+    // not a condition/network node, no $barrier args, and the predecessor is not the
+    // `$network` node. Fanout-bulk holds every ready instance until ALL `factor` of them
+    // have arrived, then dispatches them as min(workers, factor) chunks — right for a
+    // compute fan-out whose predecessor instances finish together, wrong for packets that
+    // trickle in over a frame: each consumer would wait for the frame's LAST packet
+    // instead of starting on its own (e.g. QEC leaves paced 20 us apart sat ~1 ms each).
     for (node_id, cache_entry) in cache.iter_mut().enumerate() {
         if !cache_entry.worker_resolvable
             || cache_entry.is_condition
@@ -101,8 +106,11 @@ pub(crate) fn build_node_cache(
         let res_args: Vec<_> = node.args.iter().filter(|a| a.type_.is_result()).collect();
         if res_args.len() == 1 {
             if let Some(pred) = res_args[0].predecessor.as_ref() {
-                let pred_factor = app_graph.nodes[pred.id as usize].factor;
-                if pred_factor == node.factor && node.factor > 1 {
+                let pred_node = &app_graph.nodes[pred.id as usize];
+                if pred_node.factor == node.factor
+                    && node.factor > 1
+                    && pred_node.name != "$network"
+                {
                     cache_entry.is_fanout_bulk = true;
                 }
             }
