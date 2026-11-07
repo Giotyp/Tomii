@@ -137,10 +137,26 @@ impl Predecessor {
         let max_idx = *self.indexes.iter().max().unwrap() as usize;
         let range_len = max_idx - min_idx + 1;
 
+        // `range_len == indexes.len()`: the declared set is exactly the contiguous
+        // range (no duplicates, no holes), so filtering to it neither drops a
+        // declared instance nor counts an undeclared one.
+        //
+        // Two shapes qualify for a filter:
+        //  - `range_len == succ_factor`: succ[j] reads pred[min + j] (a 1:1-style
+        //    range spread across the successor's instances);
+        //  - `succ_factor == 1`: a single-instance successor reads absolute
+        //    predecessor indexes, so it needs exactly those instances and no
+        //    others. Without this, a factor-1 node reading two or more cells of a
+        //    wider predecessor (e.g. the union `{0, 1}` of a `$res "0"` + a
+        //    `$barrier "1"` on the same factor-50 predecessor — a fusion-tree
+        //    fuse over two leaves) fell back to "every predecessor instance
+        //    contributes" and waited for all 50 leaves instead of its two.
         let should_filter = if self.group_by.is_some() {
             true
         } else {
-            range_len < pred_factor && range_len == self.indexes.len() && range_len == succ_factor
+            range_len < pred_factor
+                && range_len == self.indexes.len()
+                && (range_len == succ_factor || succ_factor == 1)
         };
 
         if should_filter {
@@ -268,6 +284,46 @@ mod tests {
             group_by: None,
         };
         assert_eq!(pred.index_filter(4, 4), None);
+    }
+
+    #[test]
+    fn test_index_filter_factor1_succ_contiguous_range_filters() {
+        // A factor-1 successor reads absolute indexes: a contiguous 2-cell set of a
+        // factor-50 predecessor (QEC fuse over leaves 0 and 1) needs only those 2.
+        let pred = Predecessor {
+            id: 0,
+            indexes: vec![1, 0],
+            group_by: None,
+        };
+        assert_eq!(pred.index_filter(50, 1), Some((0, 2)));
+        assert_eq!(pred.contributing_instances(50, 1), 2);
+        // Interior range, also collect-style (`pred.out(10, 13)`).
+        let pred = Predecessor {
+            id: 0,
+            indexes: vec![10, 11, 12, 13],
+            group_by: None,
+        };
+        assert_eq!(pred.index_filter(16, 1), Some((10, 14)));
+        assert_eq!(pred.contributing_instances(16, 1), 4);
+    }
+
+    #[test]
+    fn test_index_filter_factor1_succ_noncontiguous_or_full_no_filter() {
+        // Holes in the set: unchanged conservative behaviour (all instances).
+        let pred = Predecessor {
+            id: 0,
+            indexes: vec![0, 5],
+            group_by: None,
+        };
+        assert_eq!(pred.index_filter(8, 1), None);
+        assert_eq!(pred.contributing_instances(8, 1), 8);
+        // The full range is never filtered (nothing to skip).
+        let pred = Predecessor {
+            id: 0,
+            indexes: vec![0, 1, 2, 3],
+            group_by: None,
+        };
+        assert_eq!(pred.index_filter(4, 1), None);
     }
 
     #[test]
