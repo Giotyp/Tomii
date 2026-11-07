@@ -6,7 +6,7 @@
 //! Pure analysis — no threading, no shared state writes.
 use super::node_cache::{node_cache_entry, NodeCacheEntry, ResPredCache};
 use crate::graph::*;
-use crate::graph_struct::Predecessor;
+use crate::graph_struct::{node_has_ambiguous_multi_res_args, Predecessor};
 use crate::scheduler::SchedulerImpl;
 use crate::IdType;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
@@ -131,6 +131,17 @@ pub(crate) fn build_node_cache(
     for (node_id, cache_entry) in cache.iter_mut().enumerate() {
         let node = &app_graph.nodes[node_id];
 
+        // Mirrors `buffers::node_dep::NodeDepMap::new`'s own `has_barrier` exactly:
+        // true when this node's dependency counter releases every instance together
+        // ("forced bulk release") rather than firing each instance individually —
+        // a literal `$barrier` arg on ANY predecessor, or an ambiguous multi-arg
+        // predecessor (see `node_has_ambiguous_multi_res_args`). `per_instance_dep_idx`
+        // needs this to know whether the triggering `pred_index` passed into a
+        // bulk-released instance's dispatch is trustworthy for THIS predecessor
+        // (see `ResPredCache::node_has_barrier`'s doc comment).
+        let node_has_barrier =
+            node.args.iter().any(|a| a.is_barrier()) || node_has_ambiguous_multi_res_args(node);
+
         // Helper closure: build ResPredCache entries from an arg slice.
         // `skip_cond` mirrors the `skip_conditions` flag used in build_arg_cache.
         let build_res_preds =
@@ -155,6 +166,7 @@ pub(crate) fn build_node_cache(
                                 node_group_size: node.group_size,
                                 node_factor: node.factor,
                                 is_dep: false,
+                                node_has_barrier,
                             });
                         }
                         CmTypes::Dep(res_nid) => {
@@ -167,6 +179,7 @@ pub(crate) fn build_node_cache(
                                 node_group_size: None,
                                 node_factor: node.factor,
                                 is_dep: true,
+                                node_has_barrier,
                             });
                         }
                         _ => {}

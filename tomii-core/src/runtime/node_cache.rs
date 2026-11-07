@@ -124,6 +124,25 @@ pub struct ResPredCache {
     pub node_factor: usize,
     /// True when this is a `$dep` (ordering-only) argument; result is always `CmTypes::None`.
     pub is_dep: bool,
+    /// True when the CURRENT (successor) node's dependency counter is in
+    /// forced "release the whole factor together" mode — i.e.
+    /// `buffers::node_dep::NodeDepMap::new`'s own `has_barrier` is true for
+    /// this node (a literal `$barrier` arg on ANY predecessor, or an
+    /// ambiguous multi-arg predecessor; see `node_has_ambiguous_multi_res_args`).
+    ///
+    /// `per_instance_dep_idx`'s `pred_factor == node_factor` fast path assumes
+    /// the triggering `pred_index` already identifies the correct predecessor
+    /// cell for the firing successor instance — true only for a genuine 1:1
+    /// trigger-paired dispatch (`NodeDependencyEntry`'s `specific_succ_idx`
+    /// path). When `node_has_barrier` is true, EVERY instance in the batch is
+    /// released together carrying the SAME triggering `pred_index` (whichever
+    /// predecessor completion zeroed the shared counter — on ANY predecessor,
+    /// not necessarily this `$res` arg's own), so trusting it for this
+    /// predecessor's per-instance index is wrong; the declared `indexes[node_index]`
+    /// must be used instead. Safe to do so unconditionally in that case: the
+    /// shared counter cannot reach zero until every declared cell on every
+    /// predecessor has completed, so the result is already stored.
+    pub node_has_barrier: bool,
 }
 
 #[derive(Clone, Default)]

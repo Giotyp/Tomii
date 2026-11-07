@@ -315,32 +315,54 @@ fn single_index_dep_idx(
 /// index list (`indexes.len() == node_factor`, one declared index per consumer
 /// instance).
 ///
-/// When `pred_factor == node_factor` this is a genuine 1:1 fanout (the common
-/// network-ingest shape: `node[i]` is dispatched BY, and reads, `pred[i]`'s own
-/// completion) — `pred_index`, the index of the predecessor instance that
-/// *triggered* this dispatch, already identifies the right cell and is
-/// guaranteed to be stored (no `indexes` lookup needed, and no risk of a
-/// not-yet-stored result).
+/// When `pred_factor == node_factor` AND the consumer is dispatched via a
+/// genuine 1:1 trigger-paired edge — i.e. `node_has_barrier` is false, see
+/// below — this is the common network-ingest shape: `node[i]` is dispatched
+/// BY, and reads, `pred[i]`'s own completion, so `pred_index` (the index of
+/// the predecessor instance that *triggered* this dispatch) already
+/// identifies the right cell and is guaranteed to be stored (no `indexes`
+/// lookup needed, and no risk of a not-yet-stored result).
 ///
-/// Otherwise the two factors differ, so this cannot be that trigger-paired 1:1
-/// edge — `indexes.len() == node_factor` here just means "one declared index
-/// per consumer instance" (e.g. a per-instance list used to route around
-/// `group_size`, or the declared indexes happen to number `node_factor`).
-/// Trusting `pred_index` in that case is wrong: `pred_index` is whichever
-/// predecessor instance's completion caused this *group* of consumer instances
-/// to become ready, which — when this predecessor is also behind a `$barrier`
-/// shared with ANOTHER predecessor's ungrouped/global barrier on the same
-/// node — can legitimately belong to that OTHER predecessor instead (an
-/// ungrouped barrier's completions decrement every dependency-counter group at
-/// once, so it can be the specific completion that tips a group to zero).
-/// Using it directly as a `pred_factor`-space index then points at an
-/// unrelated, frequently not-yet-produced predecessor instance, and the
-/// requesting worker spins — and because one such mis-dispatch typically fans
-/// out across many consumer instances/groups simultaneously, it can occupy
-/// every worker at once with nothing left to produce the awaited result
-/// (observed as the MIMO demul/fft "pending-frame buffer full" stall).  The
-/// correct, context-independent answer is simply the declared index for THIS
-/// consumer instance.
+/// Otherwise (factors differ, OR `node_has_barrier` is true) `pred_index` is
+/// not trustworthy as a per-instance index for THIS predecessor, for two
+/// distinct reasons that both need the same fix:
+///
+/// 1. Factors differ: `indexes.len() == node_factor` here just means "one
+///    declared index per consumer instance" (e.g. a per-instance list used to
+///    route around `group_size`, or the declared indexes happen to number
+///    `node_factor`) — not a true 1:1 fanout. `pred_index` is whichever
+///    predecessor instance's completion caused this *group* of consumer
+///    instances to become ready, which — when this predecessor is also
+///    behind a `$barrier` shared with ANOTHER predecessor's ungrouped/global
+///    barrier on the same node — can legitimately belong to that OTHER
+///    predecessor instead. Using it directly as a `pred_factor`-space index
+///    then points at an unrelated, frequently not-yet-produced predecessor
+///    instance, and the requesting worker spins — and because one such
+///    mis-dispatch typically fans out across many consumer instances/groups
+///    simultaneously, it can occupy every worker at once with nothing left to
+///    produce the awaited result (observed as the MIMO demul/fft
+///    "pending-frame buffer full" stall).
+/// 2. Factors are EQUAL but `node_has_barrier` is true: the node's dependency
+///    counter is in `NodeDependencyEntry`'s forced "release the whole factor
+///    together" mode (a literal `$barrier` on ANY predecessor — not
+///    necessarily this one — or an ambiguous multi-arg predecessor; see
+///    `buffers::node_dep::NodeDepMap::new`). That mode releases every
+///    instance of this batch with the SAME triggering `pred_index` —
+///    whichever predecessor completion (on ANY predecessor feeding this node)
+///    happened to zero the shared counter — not a per-instance trigger at
+///    all. Trusting it here makes EVERY consumer instance read the SAME
+///    predecessor cell instead of its own declared one (confirmed: a node
+///    with one 1:1 `$network` `$res` edge plus an unrelated `$barrier` from a
+///    second, no-predecessor producer — every instance printed the same
+///    `leaf_idx`, the index of whichever network packet happened to zero the
+///    barrier-forced shared counter, instead of 0..factor).
+///
+/// In both cases the correct, context-independent answer is simply the
+/// declared index for THIS consumer instance — safe even under case 2's
+/// bulk release, since the shared counter cannot reach zero until every
+/// declared cell on every predecessor (the UNION `Graph::dependency_count_vec`
+/// computes) has completed, so `indexes[node_index]`'s result is already
+/// stored by the time any instance fires.
 #[inline(always)]
 fn per_instance_dep_idx(
     indexes: &[isize],
@@ -348,8 +370,9 @@ fn per_instance_dep_idx(
     pred_index: usize,
     pred_factor: usize,
     node_factor: usize,
+    node_has_barrier: bool,
 ) -> usize {
-    if pred_factor == node_factor {
+    if pred_factor == node_factor && !node_has_barrier {
         pred_index % pred_factor
     } else {
         indexes[node_index].rem_euclid(pred_factor as isize) as usize
@@ -370,6 +393,10 @@ fn per_instance_dep_idx(
 /// - `pred_factor`: parallelism factor of the predecessor node
 /// - `node_group_size`: `group_size` of the successor node (for grouped barrier edges)
 /// - `pred_eff_group_size`: effective group size of the predecessor (pre-resolved by caller)
+/// - `node_has_barrier`: true when the CURRENT node's dependency counter is in
+///   forced bulk-release mode (see [`per_instance_dep_idx`]) — required to tell
+///   whether a genuine-1:1-shaped `$res` edge is actually dispatched 1:1 or
+///   released in a barrier-triggered batch sharing one `pred_index`.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn fetch_res_results(
@@ -381,6 +408,7 @@ fn fetch_res_results(
     pred_factor: usize,
     node_group_size: Option<usize>,
     pred_eff_group_size: Option<usize>,
+    node_has_barrier: bool,
     slot: usize,
     shared: &Arc<SharedData>,
     exec_slot: usize,
@@ -410,8 +438,14 @@ fn fetch_res_results(
 
     // Per-instance mapping: one declared index per consumer instance.
     if indexes.len() > 1 && indexes.len() == node_factor {
-        let dep_idx =
-            per_instance_dep_idx(indexes, node_index, pred_index, pred_factor, node_factor);
+        let dep_idx = per_instance_dep_idx(
+            indexes,
+            node_index,
+            pred_index,
+            pred_factor,
+            node_factor,
+            node_has_barrier,
+        );
         let node_info = NodeInfo::new(res_node_id, slot, dep_idx, 0);
         if let Some(result) = shared.exec.node_results.get(&node_info) {
             return Some(vec![result]);
@@ -482,6 +516,7 @@ fn collect_res_from_cache(
         rp.pred_factor,
         rp.node_group_size,
         pred_eff_gs,
+        rp.node_has_barrier,
         slot,
         shared,
         exec_slot,
@@ -542,6 +577,12 @@ pub(super) fn collect_arg_result(
                 .group_size
                 .or_else(|| shared.graph_cache.pred_group_by[node_id as usize][*res_node_id]);
 
+            // Mirrors `buffers::node_dep::NodeDepMap::new`'s `has_barrier` exactly
+            // (see `ResPredCache::node_has_barrier`'s doc comment) — this live-graph
+            // path has no precomputed cache, so recompute it from `current_node`.
+            let node_has_barrier = current_node.args.iter().any(|a| a.is_barrier())
+                || node_has_ambiguous_multi_res_args(current_node);
+
             fetch_res_results(
                 *res_node_id as IdType,
                 &predecessor.indexes,
@@ -551,6 +592,7 @@ pub(super) fn collect_arg_result(
                 pred_factor,
                 current_node.group_size,
                 pred_eff_gs,
+                node_has_barrier,
                 slot,
                 shared,
                 exec_slot,
@@ -637,35 +679,79 @@ mod dep_idx_tests {
         let node_factor = 12;
         for node_index in 0..12 {
             for bogus_pred_index in [0usize, 1, 2, 3, 999] {
-                let dep_idx = per_instance_dep_idx(
-                    &indexes,
-                    node_index,
-                    bogus_pred_index,
-                    pred_factor,
-                    node_factor,
-                );
-                assert_eq!(
-                    dep_idx,
-                    (node_index % 4),
-                    "node_index={node_index} must read its own declared index \
-                     regardless of the triggering pred_index={bogus_pred_index}"
-                );
+                for node_has_barrier in [false, true] {
+                    let dep_idx = per_instance_dep_idx(
+                        &indexes,
+                        node_index,
+                        bogus_pred_index,
+                        pred_factor,
+                        node_factor,
+                        node_has_barrier,
+                    );
+                    assert_eq!(
+                        dep_idx,
+                        (node_index % 4),
+                        "node_index={node_index} must read its own declared index \
+                         regardless of the triggering pred_index={bogus_pred_index}, \
+                         node_has_barrier={node_has_barrier}"
+                    );
+                }
             }
         }
     }
 
     #[test]
     fn per_instance_true_one_to_one_uses_pred_index() {
-        // Genuine 1:1 fanout (pred_factor == node_factor, e.g. network ingest):
-        // the triggering pred_index is authoritative and already guaranteed
-        // stored — this must keep working exactly as before.
+        // Genuine 1:1 fanout (pred_factor == node_factor, e.g. network ingest)
+        // with NO barrier forcing bulk release: the triggering pred_index is
+        // authoritative and already guaranteed stored — this must keep working
+        // exactly as before.
         let indexes: Vec<isize> = vec![0; 8]; // content irrelevant on this path
         let pred_factor = 8;
         let node_factor = 8;
         for pred_index in 0..8 {
-            let dep_idx =
-                per_instance_dep_idx(&indexes, pred_index, pred_index, pred_factor, node_factor);
+            let dep_idx = per_instance_dep_idx(
+                &indexes,
+                pred_index,
+                pred_index,
+                pred_factor,
+                node_factor,
+                false,
+            );
             assert_eq!(dep_idx, pred_index);
+        }
+    }
+
+    #[test]
+    fn per_instance_one_to_one_shape_but_node_has_barrier_uses_declared_index() {
+        // Bug A/B repro shape: pred_factor == node_factor (a true 1:1 $network
+        // edge) but the node ALSO carries an unrelated $barrier from a
+        // different, no-predecessor producer (e.g. `clear`), forcing
+        // `node_has_barrier`. Every consumer instance is released together
+        // carrying the SAME triggering pred_index (whichever predecessor
+        // completion zeroed the shared counter) — trusting it here would make
+        // every instance read the same predecessor cell. Must fall back to
+        // the declared per-instance index regardless of what pred_index is.
+        let indexes: Vec<isize> = vec![0, 1, 2, 3];
+        let pred_factor = 4;
+        let node_factor = 4;
+        for node_index in 0..4 {
+            for triggering_pred_index in 0..4 {
+                let dep_idx = per_instance_dep_idx(
+                    &indexes,
+                    node_index,
+                    triggering_pred_index,
+                    pred_factor,
+                    node_factor,
+                    true, // node_has_barrier
+                );
+                assert_eq!(
+                    dep_idx, node_index,
+                    "node_index={node_index} must read its own declared index \
+                     regardless of the triggering pred_index={triggering_pred_index} \
+                     once node_has_barrier forces bulk release"
+                );
+            }
         }
     }
 }

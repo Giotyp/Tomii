@@ -131,6 +131,26 @@ pub(super) fn worker_resolve_successors(
                 ready,
             );
 
+            // Mirrors `batch_resolution::process_batch_inner`'s "DECREMENT" trace line
+            // (tagged `(worker)` to distinguish the two call sites). Without this, a
+            // predecessor that completes on a worker thread — e.g. an initial/root
+            // node like a `clear`-style barrier source dispatched via
+            // `initial_nodes`/`perform_initial_preparation` — left NO trace of its
+            // contribution to a successor's dependency counter, which previously read
+            // as "this predecessor's completion is never counted" when in fact it
+            // was counted correctly, just invisibly (root-caused while investigating
+            // a `$network` + unrelated `$barrier` consumer shape).
+            print_debug(|| {
+                format!(
+                    "DECREMENT(worker): pred={} index={} succ={} ({}) ready_count={}",
+                    node_info.id,
+                    node_info.index,
+                    succ_node_id,
+                    rctx.cache.node_cache[succ_node_id].name,
+                    ready.len()
+                )
+            });
+
             // Only apply fanout-bulk when inline_continuation is disabled or W=1.
             // With inline_continuation + W>1, ingest→transform runs zero-cost inline;
             // batching would block that pipeline and lose the Rayon-free fast path.
