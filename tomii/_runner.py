@@ -71,7 +71,7 @@ _STR_FLAGS: Dict[str, str] = {
 
 _KNOB_DESCRIPTIONS: Dict[str, str] = {
     # Int flags
-    "workers": "Rayon worker threads (match physical cores)",
+    "workers": "Worker threads (size to the graph's peak runnable tasks, not the core count: on turbo CPUs every extra active core lowers the clock)",
     "core_offset": "First CPU to pin workers to (use 1 to leave CPU 0 for OS)",
     "system_threads": "Resolution/scheduler threads (default 1; rarely needs changing)",
     "receiver_threads": "Dedicated network receiver threads (for network-input graphs)",
@@ -190,7 +190,7 @@ _KNOB_DOMAINS: Dict[str, Dict[str, Any]] = {
 }
 
 _KNOB_SEARCH_HINTS: Dict[str, str] = {
-    "workers": "unimodal; binary search 1–physical_cores; diminishing returns past core count",
+    "workers": "unimodal; binary search 1–physical_cores; can get slower past the graph's peak task concurrency (turbo drops as more cores are active)",
     "slots": "1 minimizes latency; >1 increases throughput; try 1,2,4,8",
     "batching_size": "unimodal; binary search 1–512; larger reduces scheduling overhead for fine-grained graphs",
     "batching_limit": "microseconds to wait for a batch; try 1,2,4; higher waits longer to fill a batch",

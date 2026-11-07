@@ -24,8 +24,8 @@ Each JSON entry carries everything a search loop needs. One entry from
   "type": "int",
   "cli": "--workers",
   "role": "perf",
-  "description": "Rayon worker threads (match physical cores)",
-  "search_hint": "unimodal; binary search 1-physical_cores; diminishing returns past core count",
+  "description": "Worker threads (size to the graph's peak runnable tasks, not the core count: on turbo CPUs every extra active core lowers the clock)",
+  "search_hint": "unimodal; binary search 1-physical_cores; can get slower past the graph's peak task concurrency (turbo drops as more cores are active)",
   "domain": { "kind": "int", "min": 1, "max": 128, "scale": "pow2" }
 }
 ```
