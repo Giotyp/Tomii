@@ -36,7 +36,7 @@ machine that produced this table).
 
 | Name | CLI flag | Type | Role | Domain | Description |
 |---|---|---|---|---|---|
-| `workers` | `--workers` | int | perf | 1–128, pow2 | Rayon worker threads (match physical cores) |
+| `workers` | `--workers` | int | perf | 1–128, pow2 | Worker threads (size to the graph's peak runnable tasks, not the core count: on turbo CPUs every extra active core lowers the clock) |
 | `core_offset` | `--core-offset` | int | env | — | First CPU to pin workers to (use 1 to leave CPU 0 for OS) |
 | `system_threads` | `--system-threads` | int | perf | 1–4, linear | Resolution/scheduler threads (default 1; rarely needs changing) |
 | `receiver_threads` | `--receiver-threads` | int | perf | 0–4, linear | Dedicated network receiver threads; network graphs require &gt;= 1 |
@@ -95,7 +95,7 @@ string knobs carry none.
 
 | Name | Search hint |
 |---|---|
-| `workers` | unimodal; binary search 1–physical_cores; diminishing returns past core count |
+| `workers` | unimodal; binary search 1–physical_cores; can get slower past the graph's peak task concurrency (turbo drops as more cores are active) |
 | `core_offset` | set to 1 to leave CPU 0 for OS; rarely needs tuning otherwise |
 | `system_threads` | leave at default 1 unless profiling shows scheduler bottleneck |
 | `slots` | 1 minimizes latency; &gt;1 increases throughput; try 1,2,4,8 |

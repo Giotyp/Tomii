@@ -26,7 +26,7 @@ raises throughput.
 
 | Option | CLI flag | Meaning |
 |---|---|---|
-| `workers` | `--workers` | Rayon worker threads (match physical cores) |
+| `workers` | `--workers` | Worker threads (size to the graph's peak runnable tasks, not the core count: on turbo CPUs every extra active core lowers the clock) |
 | `core_offset` | `--core-offset` | First CPU to pin workers to (use 1 to leave CPU 0 for the OS) |
 | `system_threads` | `--system-threads` | Resolution/scheduler threads (default 1) |
 | `receiver_threads` | `--receiver-threads` | Dedicated network receiver threads |
