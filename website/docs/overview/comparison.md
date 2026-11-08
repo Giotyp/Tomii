@@ -43,8 +43,8 @@ block library, a mature ecosystem, and hardware drivers Tomii does not have.
 If you need those, use GNU Radio. What it lacks is a latency-predictable
 frame model: on an FMCW radar workload with identical DSP kernels, Tomii
 matches GNU Radio 4.0 end-to-end (~1.04×) while cutting the post-chirp tail
-~1.8× at p50 (315 µs vs 567 µs) and running on 8.5× fewer cores (2.23 vs
-18.9). GR4 wins at small CPIs; the trade is tail latency and core budget, not
+~1.8× at p50 (315 µs vs 567 µs) and running on 6.1× fewer cores (3.13 vs
+19.1). GR4 wins at small CPIs; the trade is tail latency and core budget, not
 a blanket speedup
 ([benchmarks](/docs/overview/benchmarks), `bench/radar-bench/`).
 

@@ -144,22 +144,26 @@ claimed a "same pinned core set"; that is corrected here.
 
 | System | e2e mean / p99.9 | Post-CPI p50 / p99.9 | Cores |
 |---|---|---|---|
-| **Tomii (T32, W16)** | **6.65 / 6.77 ms** | **315 / 422 µs** | **2.23** |
-| GNU Radio 4.0 (tuned) | 6.90 / 6.95 ms | 567 / 613 µs | 18.9 |
-| GNU Radio 3.10 (tuned) | 6.92 / 7.19 ms | 578 / 853 µs | 0.47 |
+| **Tomii (T32, W16)** | **6.65 / 6.77 ms** | **315 / 422 µs** | **3.13** |
+| GNU Radio 4.0 (tuned) | 6.90 / 6.95 ms | 567 / 613 µs | 19.1 |
+| GNU Radio 3.10 (tuned) | 6.92 / 7.19 ms | 578 / 853 µs | 0.70 |
+
+*Cores* is CPU time over all threads divided by wall time over the streaming
+window (first to last packet sent), measured identically for every system; a
+busy-spinning thread counts as one full core.
 
 End-to-end, Tomii is **~1.04×** GNU Radio 4.0 — a match, not a blanket win,
 because the ~6.35 ms chirp window dominates every system. Where it separates is
 the post-chirp tail: **1.8× lower at the median** (against both GR versions) and
-**1.45× (vs GR4) to 2.0× (vs GR3) lower at p99.9**, achieved on **8.5× fewer
-cores than GR4** (2.23 vs 18.9). Sustained throughput points the same way —
+**1.45× (vs GR4) to 2.0× (vs GR3) lower at p99.9**, achieved on **6.1× fewer
+cores than GR4** (3.13 vs 19.1). Sustained throughput points the same way —
 Tomii holds **1195 fps** with 2 frames in flight and **1435 fps** with 8,
 against GR3/GR4's 1088/1190 fps (all UDP-receiver-bound). The mechanism is the
 same one the MIMO row measures: Tomii dispatches a range-FFT task the moment
 each chirp packet arrives, so finishing the frame after the last chirp costs
 microseconds of scheduling, not milliseconds of buffered hand-offs. Caveats,
 stated plainly: **GR4 wins at small CPIs** (512×64), and GR3 runs at a far lower
-core budget (0.47) though with a higher tail. The honest summary is "matches
+core budget (0.70) though with a higher tail. The honest summary is "matches
 end-to-end, ~1.8× lower post-chirp tail at the median, at a fraction of GR4's
 cores," not "faster everywhere."
 
