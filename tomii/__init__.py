@@ -22,6 +22,7 @@ Typical usage::
 
 from ._export import export
 from ._graph import Graph
+from ._instance_map import halo, stride
 from ._procs import procs
 from ._runner import list_knobs
 from ._knobs import knob_space
@@ -63,6 +64,9 @@ __all__ = [
     # Node dependency helpers
     "NodeOutput",
     "NodeDep",
+    # instance_map helpers
+    "halo",
+    "stride",
     # Helpers
     "Loop",
     "Condition",

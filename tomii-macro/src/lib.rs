@@ -16,6 +16,15 @@
 //!
 //! The generated `_cm` receives `buffers: &[CmTypes]` and extracts each element
 //! via `with_any::<T>()` before calling the original function.
+//!
+//! The slice handed to a variadic parameter is whatever trailing span of the
+//! node's materialized args the runtime passes — which can include trailing
+//! ordering-only `$barrier`/`$dep` slots declared AFTER the variadic arg on
+//! the same node (e.g. a mapped `$barrier` used purely for gating). Those
+//! slots always resolve to `CmTypes::None` and never carry a real value,
+//! so the generated collection loop filters `None` out before extracting
+//! elements — this is "collect only MY OWN values", not "collect the whole
+//! slice".
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
@@ -571,7 +580,19 @@ fn build_companion(func: &ItemFn, variadic: bool) -> proc_macro2::TokenStream {
         if is_numeric {
             let fn_name_str2 = fn_name_str.clone();
             quote! {
+                // Trailing ordering-only args (a mapped `$barrier`/`$dep` declared
+                // AFTER this variadic `$res`/range arg on the same node) always
+                // materialise as `CmTypes::None` placeholders in the flattened args
+                // slice (see `tomii-core::runtime::arg_resolution` / `node_cache`'s
+                // `build_arg_cache`: a `$barrier` arg's slot is left at its default
+                // `None`, and a `$dep` arg's slot is explicitly resolved to `None`).
+                // Neither ever carries a real value, so filtering `None` out of the
+                // slice before collecting is exactly "stop at the end of MY OWN
+                // declared values" — without it, those trailing slots land in this
+                // variadic `Vec` and the match below panics on the first one found
+                // (see the `instance_map` end-to-end validation report).
                 let #vname: Vec<#elem_ty> = #vname.iter()
+                    .filter(|__v| !matches!(__v, ::tomii_types::CmTypes::None))
                     .map(|__v| match __v {
                         ::tomii_types::CmTypes::Bool(x)   => (*x as u8) as #elem_ty,
                         ::tomii_types::CmTypes::I8(x)     => *x as #elem_ty,
@@ -596,7 +617,11 @@ fn build_companion(func: &ItemFn, variadic: bool) -> proc_macro2::TokenStream {
             }
         } else {
             quote! {
+                // See the numeric branch above: trailing ordering-only
+                // (`$barrier`/`$dep`) slots always materialise as `CmTypes::None`
+                // and never belong to this variadic argument's own values.
                 let #vname: Vec<#elem_ty> = #vname.iter()
+                    .filter(|__v| !matches!(__v, ::tomii_types::CmTypes::None))
                     .map(|__v| __v.with_any(|__v: &#elem_ty| __v.clone()).expect(#msg))
                     .collect();
                 #body

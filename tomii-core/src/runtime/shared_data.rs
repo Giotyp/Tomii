@@ -57,6 +57,14 @@ pub struct GraphCache {
     /// Materialized initialization objects, indexed by `$ref` IDs in `Arg` values.
     /// Moved here from `Graph` so the graph remains a pure topological description.
     pub init_objects: Vec<Vec<CmTypes>>,
+    /// `[node] -> Some(zero-threshold instance indices)` for `instance_map`
+    /// nodes with at least one consumer instance whose total dependency
+    /// threshold is 0 (see `crate::instance_map`'s module docs). `None` for
+    /// every other node (the vast majority — unaffected). Consumed by
+    /// `runtime::slot_management::initial_nodes` to dispatch exactly these
+    /// instances once per frame at admission, alongside ordinary root/initial
+    /// nodes — nothing else ever decrements them.
+    pub zero_threshold_instances: Vec<Option<Arc<Vec<u32>>>>,
 }
 
 /// Tuning parameters for the worker spin-wait loop.

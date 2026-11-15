@@ -61,8 +61,17 @@ pub struct NodeConditionJson {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PredJson {
     pub name: String,
-    pub indexes: String,
+    /// Relative/absolute offset expression (`"0"`, `"-1"`, `"0-5"`, ...). Omitted
+    /// (or absent) when `instance_map` is used instead.
+    #[serde(default)]
+    pub indexes: Option<String>,
+    #[serde(default)]
     pub group_by: Option<Factor>,
+    /// Explicit per-consumer-instance dependency map: `instance_map[j]` lists the
+    /// ABSOLUTE producer instance indexes consumer instance `j` depends on. Mutually
+    /// exclusive with `indexes` and `group_by` — see `crate::instance_map`.
+    #[serde(default)]
+    pub instance_map: Option<Vec<Vec<usize>>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

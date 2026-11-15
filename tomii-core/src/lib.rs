@@ -10,6 +10,7 @@ pub mod graph_gen;
 pub mod graph_struct;
 #[cfg(all(feature = "network", target_os = "linux"))]
 pub mod handover;
+pub mod instance_map;
 pub mod json_structs;
 pub mod network;
 pub(crate) mod network_funcs;

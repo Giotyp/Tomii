@@ -96,6 +96,14 @@ pub(crate) fn build_node_cache(
         if !cache_entry.worker_resolvable
             || cache_entry.is_condition
             || cache_entry.name == "$network"
+            // An instance_map predecessor is never eligible for 1:1 fanout-bulk
+            // (it isn't a $res edge — instance_map is barrier/dep-only — but a
+            // node with ONE $res pred of equal factor could still slip through
+            // this check if it ALSO has an unrelated instance_map $dep/$barrier
+            // predecessor; such a node uses the per-instance dependency-counter
+            // mechanism end to end, which fanout-bulk's arrival counter does not
+            // know about). See `crate::instance_map`.
+            || cache_entry.has_instance_map
         {
             continue;
         }
@@ -242,6 +250,7 @@ pub(crate) fn build_node_cache(
 #[allow(clippy::type_complexity)]
 pub(crate) fn build_predecessor_tables(
     app_graph: &Graph,
+    has_instance_map: &[bool],
 ) -> (
     Vec<Vec<Option<(usize, usize)>>>,
     Vec<Vec<Option<usize>>>,
@@ -257,6 +266,24 @@ pub(crate) fn build_predecessor_tables(
     for succ_node in &app_graph.nodes {
         let succ_id = succ_node.id as usize;
         let succ_factor = succ_node.factor;
+        // A node with an `instance_map` predecessor routes ALL of its
+        // predecessors — mapped and ordinary alike — through the per-instance
+        // dependency-counter mechanism (`crate::instance_map`), which needs
+        // every instance to independently see the SAME declared absolute
+        // subset of a coexisting ordinary predecessor, regardless of the
+        // node's own factor. That is exactly the existing `succ_factor == 1`
+        // branch of `Predecessor::index_filter` ("a single-instance successor
+        // reads absolute indexes"); force it here instead of the node's real
+        // factor. Does not affect the 1:1 exact-dispatch offset below (that
+        // still needs the REAL factor — mirrors
+        // `instance_map::classify_coexisting_predecessor`'s own check).
+        // Unmapped nodes (the overwhelming majority) are completely
+        // unaffected: `filter_succ_factor == succ_factor` for them.
+        let filter_succ_factor = if has_instance_map.get(succ_id).copied().unwrap_or(false) {
+            1
+        } else {
+            succ_factor
+        };
 
         // Group this successor's args by predecessor ID first. A node can read the
         // SAME predecessor through more than one arg with different index sets
@@ -323,9 +350,6 @@ pub(crate) fn build_predecessor_tables(
             // computation, same cost) so that path is unchanged and no slower.
             if let [arg] = args_on_pred[..] {
                 let pred = arg.predecessor.as_ref().unwrap();
-                if let Some(range) = pred.index_filter(pred_factor, succ_factor) {
-                    filter[succ_id][pred_id] = Some(range);
-                }
 
                 // 1:1 non-barrier $res: store offset so we can fire the exact successor
                 // instance that reads this predecessor. Two shapes qualify:
@@ -342,11 +366,28 @@ pub(crate) fn build_predecessor_tables(
                 let contiguous_range_1to1 = range_1to1_enabled
                     && pred.indexes.len() == succ_factor
                     && pred.indexes.windows(2).all(|w| w[1] == w[0] + 1);
-                if !arg.is_barrier()
+                let is_1to1_shape = !arg.is_barrier()
                     && pred.group_by.is_none()
                     && (single_1to1 || contiguous_range_1to1)
-                    && succ_factor > 1
-                {
+                    && succ_factor > 1;
+
+                // The `filter_succ_factor` override (forcing the "absolute subset"
+                // branch of `index_filter`) is for the BROADCAST shapes a mapped
+                // node's coexisting predecessor can take — every instance needs the
+                // SAME absolute subset. A 1:1 edge is the opposite: each instance
+                // needs a DIFFERENT, position-dependent single cell, dispatched below
+                // via `succ_1to1_offset`, not via a filter. Applying the override here
+                // would spuriously filter every edge down to the first instance only.
+                let this_filter_succ_factor = if is_1to1_shape {
+                    succ_factor
+                } else {
+                    filter_succ_factor
+                };
+                if let Some(range) = pred.index_filter(pred_factor, this_filter_succ_factor) {
+                    filter[succ_id][pred_id] = Some(range);
+                }
+
+                if is_1to1_shape {
                     succ_1to1_offset[succ_id][pred_id] = Some(pred.indexes[0]);
                 }
             } else {
@@ -372,18 +413,25 @@ pub(crate) fn build_predecessor_tables(
                 if all_identical {
                     let arg = args_on_pred[0];
                     let pred = first_pred;
-                    if let Some(range) = pred.index_filter(pred_factor, succ_factor) {
-                        filter[succ_id][pred_id] = Some(range);
-                    }
                     let single_1to1 = pred.indexes.len() == 1 && succ_factor == pred_factor;
                     let contiguous_range_1to1 = range_1to1_enabled
                         && pred.indexes.len() == succ_factor
                         && pred.indexes.windows(2).all(|w| w[1] == w[0] + 1);
-                    if !arg.is_barrier()
+                    let is_1to1_shape = !arg.is_barrier()
                         && pred.group_by.is_none()
                         && (single_1to1 || contiguous_range_1to1)
-                        && succ_factor > 1
-                    {
+                        && succ_factor > 1;
+                    // See the single-arg branch above for why the override must not
+                    // apply to a 1:1-shaped edge.
+                    let this_filter_succ_factor = if is_1to1_shape {
+                        succ_factor
+                    } else {
+                        filter_succ_factor
+                    };
+                    if let Some(range) = pred.index_filter(pred_factor, this_filter_succ_factor) {
+                        filter[succ_id][pred_id] = Some(range);
+                    }
+                    if is_1to1_shape {
                         succ_1to1_offset[succ_id][pred_id] = Some(pred.indexes[0]);
                     }
                     continue;
@@ -410,6 +458,7 @@ pub(crate) fn build_predecessor_tables(
                             id: pred_id_tag,
                             indexes: union_indexes,
                             group_by: None,
+                            instance_map: None,
                         };
                         if let Some(range) = union_pred.index_filter(pred_factor, succ_factor) {
                             filter[succ_id][pred_id] = Some(range);
@@ -592,7 +641,10 @@ fn provable_variant(
         return crate::func_reg::get_func_ret_variant(&pred.func_name);
     }
 
-    if ac.rt_idxs_indexes.contains(&arg_idx) || ac.rt_workers_indexes.contains(&arg_idx) {
+    if ac.rt_idxs_indexes.contains(&arg_idx)
+        || ac.rt_workers_indexes.contains(&arg_idx)
+        || ac.rt_frame_indexes.contains(&arg_idx)
+    {
         return Some("Usize");
     }
 

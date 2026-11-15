@@ -356,9 +356,18 @@ fn execute_bulk_task(
     } else {
         0
     };
+    // Hoisted once per bulk dispatch (constant across every cell in the range),
+    // same pattern as `workers` above. Only touches `frame_id[slot]` (one
+    // Relaxed atomic load) when this node declares a `$frame_id` arg.
+    let frame_id = if !args_cache.rt_frame_indexes.is_empty() {
+        shared.slot_data.frame_id[node_info.slot].load(std::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    };
     let has_dynamic = !args_cache.buffer_ref_indexes.is_empty()
         || !args_cache.rt_idxs_indexes.is_empty()
         || !args_cache.rt_workers_indexes.is_empty()
+        || !args_cache.rt_frame_indexes.is_empty()
         || !args_cache.res_indexes.is_empty();
 
     ARG_BUF.with(|buf_cell| {
@@ -436,6 +445,7 @@ fn execute_bulk_task(
                         exec_slot,
                         exec_gen,
                         workers,
+                        frame_id,
                     );
                     if stale {
                         bulk_stale = true;
@@ -528,6 +538,12 @@ fn execute_single_task(
                 } else {
                     0
                 };
+                let frame_id = if !args_cache.rt_frame_indexes.is_empty() {
+                    shared.slot_data.frame_id[node_info.slot]
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                } else {
+                    0
+                };
                 // template_stable guarantees every $res is width-1, so the
                 // splice arm inside populate_dynamic_args_into is unreachable
                 // and the buffer length stays constant across tasks.
@@ -541,6 +557,7 @@ fn execute_single_task(
                     exec_slot,
                     exec_gen,
                     workers,
+                    frame_id,
                 );
                 if stale {
                     return None::<CmTypes>;

@@ -58,10 +58,16 @@ With `function`, the plugin function is called at init time with `args`:
 
 (from `examples/matrix-compute/graph.json`)
 
-Two names are reserved and resolved at runtime rather than defined by you:
-`$index` (the instance index of the consuming node) and `$workers` (the
-worker count). Use them as `$ref` values, e.g.
-`{"type": "$ref", "value": "$index"}`.
+Three names are reserved and resolved at runtime rather than defined by you:
+`$index` (the instance index of the consuming node), `$workers` (the
+worker count), and `$frame_id` (the id of the frame the consuming task
+belongs to — the same id network admission and frame slots use; for
+non-network graphs, a monotonically increasing counter starting at 0, one
+per admitted frame). Use them as `$ref` values, e.g.
+`{"type": "$ref", "value": "$index"}` or
+`{"type": "$ref", "value": "$frame_id"}`. Resolving `$frame_id` costs
+nothing for graphs that never reference it: the decision is made once at
+graph-compile time, not per task.
 
 ## Nodes
 
@@ -131,8 +137,9 @@ the `$network` node exists when `network_config` is present)
 | Field | Required | Type | Description |
 |---|---|---|---|
 | `name` | yes | string | Predecessor node name (or `$network`) |
-| `indexes` | yes | string | Instance selection (see below) |
+| `indexes` | one of `indexes`/`instance_map` | string | Instance selection (see below) |
 | `group_by` | no | [factor](#factor) | Group this many predecessor completions before firing one successor |
+| `instance_map` | one of `indexes`/`instance_map` | array of arrays of integers | Explicit per-consumer-instance dependency map (see below) |
 
 `indexes` selects which predecessor instances the consuming instance depends
 on, as relative instance offsets: `0` means the same index, `-1` the
@@ -169,6 +176,58 @@ all instances of a `factor` node:
 With `group_by`, a barrier over N predecessor instances fires the successor
 once per group of `group_by` completions instead of once for all N. See
 [control flow](/docs/guide/graphs/control-flow).
+
+### `instance_map`: explicit per-instance dependencies
+
+`indexes`/`group_by` express uniform shapes — every consumer instance reads
+the same relative offset or the same fan-in. `instance_map` instead declares,
+for EACH consumer instance, the exact (absolute, not relative) set of
+producer instances it depends on:
+
+```json
+{
+    "type": "$barrier",
+    "predecessor": {
+        "name": "leaves",
+        "instance_map": [[0, 1, 2], [3, 4], [5, 6, 7, 8]]
+    }
+}
+```
+
+Here the consumer has factor 3: instance 0 waits for producer instances
+`0, 1, 2`; instance 1 for `3, 4`; instance 2 for `5, 6, 7, 8` — an irregular
+reduction tree where branches join different numbers of leaves. A
+neighbourhood (halo) stencil is the same idea with overlapping, wrapping
+lists: `tile[j]` depending on `tile[j-1], tile[j], tile[j+1]` (mod `n`).
+
+Rules, enforced at load time:
+
+- `instance_map` is mutually exclusive with `indexes` and `group_by` on the
+  same predecessor object.
+- `instance_map` is only valid on `$barrier`/`$dep` arguments, never `$res`
+  — a mapped edge never delivers a value in this release.
+- The array's length must equal the consumer node's `factor`; each inner
+  array lists absolute producer indexes (not relative offsets), each `< `
+  the producer's `factor`, with no duplicates within one entry.
+- An empty entry (`[]`) means that argument does not gate that consumer
+  instance. If NO argument (mapped or coexisting) contributes to a consumer
+  instance, its total dependency count is 0 — that instance is dispatched
+  exactly once per frame at frame admission, like a root/initial node,
+  instead of through the dependency-counter path (nothing would otherwise
+  ever decrement it). This can apply to some instances of a node (mixed with
+  ordinary nonzero-threshold instances) or to every instance.
+- A node with `group_size` set cannot have an `instance_map` predecessor.
+- A node with an `instance_map` predecessor may still have an ordinary
+  (non-mapped) predecessor on a DIFFERENT producer, but only in a shape with
+  a uniform per-instance contribution: a `$barrier`/`$dep` (optionally
+  filtered to a range), a factor-1 producer (broadcasts to every instance),
+  or an exact 1:1 same-factor single-offset edge. Any other shape on a
+  coexisting predecessor is rejected with a load-time error naming the
+  offending predecessor.
+
+The [Python builder guide](/docs/guide/graphs/nodes-and-vars#explicit-per-instance-dependency-maps)
+covers the `map=` parameter and the `tomii.halo`/`tomii.stride` helpers that
+generate common `instance_map` shapes.
 
 ## Factor
 

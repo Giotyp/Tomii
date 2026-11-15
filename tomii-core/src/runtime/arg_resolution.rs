@@ -30,6 +30,7 @@ fn process_runtime_refs(
     cache: &ArgCacheEntry,
     node_index: usize,
     workers: usize,
+    frame_id: usize,
 ) {
     // Process both types of runtime refs in a single iteration if possible
     if cache.rt_idxs_indexes.len() == cache.rt_workers_indexes.len() {
@@ -50,14 +51,26 @@ fn process_runtime_refs(
             arg_vec[*idx] = CmTypes::Usize(workers);
         }
     }
+    // `$frame_id`: a third, independent runtime-injected ref. Empty for every
+    // node that does not reference it (the overwhelming majority), so this
+    // loop is a single `is_empty()`-equivalent no-op iteration — no extra work
+    // on the hot path for graphs that never use `$frame_id`.
+    for idx in cache.rt_frame_indexes.iter() {
+        arg_vec[*idx] = CmTypes::Usize(frame_id);
+    }
 }
 
 /// Patch only the instance-dependent slots of an already-filled arg buffer.
 ///
 /// Called per-instance inside `execute_bulk_task` after the static template has been
 /// `extend`ed into `buf` once in the prologue (Tier 1 hoist). Only overwrites
-/// `buffer_ref_indexes`, `rt_idxs_indexes`, `rt_workers_indexes`, and `res_indexes`
-/// positions — static slots (including `Any`/`AnyHeld` arcs) are left untouched.
+/// `buffer_ref_indexes`, `rt_idxs_indexes`, `rt_workers_indexes`, `rt_frame_indexes`,
+/// and `res_indexes` positions — static slots (including `Any`/`AnyHeld` arcs) are
+/// left untouched.
+///
+/// `workers` and `frame_id` are hoisted by the caller (constant across every cell
+/// in one bulk dispatch — same pattern for both: `shared.config.workers` /
+/// `shared.slot_data.frame_id[slot]` resolve once per bulk task, not once per cell).
 ///
 /// Returns `true` if a stale-task was detected.
 #[inline(always)]
@@ -72,9 +85,10 @@ pub(super) fn populate_dynamic_args_into(
     exec_slot: usize,
     exec_gen: u32,
     workers: usize,
+    frame_id: usize,
 ) -> bool {
     process_buffer_refs(buf, args_cache, node_index);
-    process_runtime_refs(buf, args_cache, node_index, workers);
+    process_runtime_refs(buf, args_cache, node_index, workers, frame_id);
 
     let mut stale = false;
     for (res_idx, rp) in args_cache
@@ -121,6 +135,7 @@ pub(super) fn populate_cached_args_into(
     if args_cache.buffer_ref_indexes.is_empty()
         && args_cache.rt_idxs_indexes.is_empty()
         && args_cache.rt_workers_indexes.is_empty()
+        && args_cache.rt_frame_indexes.is_empty()
         && args_cache.res_indexes.is_empty()
     {
         return false;
@@ -131,9 +146,17 @@ pub(super) fn populate_cached_args_into(
     } else {
         0
     };
+    // Only touches `shared.slot_data.frame_id[slot]` (one Relaxed atomic load)
+    // when this node actually declares a `$frame_id` arg — zero extra work on
+    // the hot path otherwise.
+    let frame_id = if !args_cache.rt_frame_indexes.is_empty() {
+        shared.slot_data.frame_id[slot].load(std::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    };
 
     process_buffer_refs(buf, args_cache, node_index);
-    process_runtime_refs(buf, args_cache, node_index, workers);
+    process_runtime_refs(buf, args_cache, node_index, workers, frame_id);
 
     let mut stale = false;
     for (res_idx, rp) in args_cache
@@ -196,12 +219,41 @@ pub(super) fn parse_args(
 }
 
 #[inline(always)]
-fn handle_special_ref(obj_id: usize, node_index: usize, workers: usize) -> Option<Vec<CmTypes>> {
+fn handle_special_ref(
+    obj_id: usize,
+    node_index: usize,
+    workers: usize,
+    frame_id: usize,
+) -> Option<Vec<CmTypes>> {
     match obj_id {
         0 => Some(vec![CmTypes::Usize(node_index)]),
         1 => Some(vec![CmTypes::Usize(workers)]),
+        2 => Some(vec![CmTypes::Usize(frame_id)]),
         _ => None,
     }
+}
+
+/// Bounds-checked `$frame_id` lookup for the slow/uncached arg-resolution path
+/// (`collect_arg_result`, used by condition-arg evaluation, post-node args, and
+/// network index-function args).
+///
+/// `SlotData::frame_id` is sized exactly `config.slots`; `schedule_post_nodes`
+/// deliberately dispatches post-nodes on a sentinel "virtual" slot beyond that
+/// range (`config.slots + config.system_threads`) that was never assigned a
+/// frame. Rather than indexing out of bounds there, this returns
+/// [`usize::MAX`] — the SAME "no frame" sentinel `release_and_activate_next`
+/// stores on an ordinary slot when it is released (see `slot_management.rs`).
+/// The hot per-task path (`populate_cached_args_into`/`populate_dynamic_args_into`)
+/// never needs this: `NodeInfo::slot` there is always a real, in-range slot, so
+/// it indexes `frame_id` directly with no bounds check.
+#[inline]
+fn frame_id_for_slot(shared: &SharedData, slot: usize) -> usize {
+    shared
+        .slot_data
+        .frame_id
+        .get(slot)
+        .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(usize::MAX)
 }
 
 #[inline(always)]
@@ -543,7 +595,15 @@ pub(super) fn collect_arg_result(
     match &arg.type_ {
         CmTypes::Ref(obj_id) => {
             let obj_id = *obj_id;
-            if let Some(result) = handle_special_ref(obj_id, node_index, shared.config.workers) {
+            // This is the slow/uncached path (condition args, loop args, network
+            // index-function args) — not the per-task hot path, so an
+            // unconditional (bounds-checked) frame_id load here is fine; see
+            // `frame_id_for_slot`'s doc comment for why it must be bounds-checked
+            // on this path specifically (post-node sentinel slot).
+            let frame_id = frame_id_for_slot(shared, slot);
+            if let Some(result) =
+                handle_special_ref(obj_id, node_index, shared.config.workers, frame_id)
+            {
                 return Some(result);
             }
 
@@ -753,5 +813,189 @@ mod dep_idx_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod frame_id_tests {
+    use super::*;
+    use crate::graph_gen::from_json_str;
+    use crate::runtime::{RuntimeConfig, TomiiRt, TomiiRtBuilder};
+    use crate::scheduler::{create_scheduler, SchedulerConfig, SchedulerType};
+    use std::sync::atomic::Ordering;
+
+    /// A single root node (`tagged`) whose only arg is `{"type": "$ref", "value":
+    /// "$frame_id"}` — the Python-builder-equivalent idiom is
+    /// `TypedValue('$ref', '$frame_id')` (mirrors `$index`/`$workers`; see
+    /// `tomii/_schema.py`'s `special_refs`).
+    const FRAME_ID_GRAPH: &str = r#"
+    {
+        "nodes": [
+            { "name": "tagged", "factor": 1, "function": "noop",
+              "args": [ { "type": "$ref", "value": "$frame_id" } ] }
+        ]
+    }
+    "#;
+
+    /// A node with no `$frame_id` (or any `$ref`) arg at all — the zero-cost
+    /// baseline every existing graph (including the MIMO benchmark this
+    /// feature is A/B-measured against) takes.
+    const NO_FRAME_ID_GRAPH: &str = r#"
+    {
+        "nodes": [
+            { "name": "plain", "factor": 1, "function": "noop", "args": [] }
+        ]
+    }
+    "#;
+
+    fn build_test_rt(json: &str) -> TomiiRt {
+        let spec = from_json_str(json, 2).expect("JSON parse failed");
+        let scheduler = create_scheduler(SchedulerConfig {
+            scheduler_type: SchedulerType::WorkStealing,
+            core_offset: 0,
+            num_workers: 2,
+            record: false,
+            external_recorder: None,
+            base_instant: std::time::Instant::now(),
+            system_threads: 1,
+            receiver_threads: 0,
+            target_batch_size: 1,
+            batch_timeout_us: 10,
+            worker_affinity: None,
+            worker_hook: None,
+        });
+        let compiled = spec.compile(&scheduler);
+        let config = RuntimeConfig {
+            slots: 1,
+            max_frames: 1,
+            max_runtime: Some(5),
+            system_threads: 1,
+            workers: 2,
+            ..RuntimeConfig::default()
+        };
+        TomiiRtBuilder::with_config(compiled, scheduler, config)
+            .build()
+            .expect("build failed")
+    }
+
+    #[test]
+    fn frame_id_is_delivered_into_the_arg_buffer_at_its_declared_slot() {
+        let rt = build_test_rt(FRAME_ID_GRAPH);
+        let shared = &rt.shared;
+        let node_id: usize = 0; // "tagged" is the only (and first) node
+
+        let node_cache = &shared.graph_cache.node_cache[node_id];
+        let args_cache = &node_cache.arg_cache;
+        assert_eq!(
+            args_cache.rt_frame_indexes,
+            vec![0],
+            "the sole $frame_id arg must occupy buffer slot 0"
+        );
+
+        // Simulate the slot currently belonging to frame 42 (exactly what
+        // `assign_frame_to_available_slot`/network admission writes into
+        // `SlotData::frame_id` for a real frame).
+        shared.slot_data.frame_id[0].store(42, Ordering::Relaxed);
+
+        let mut buf = Vec::new();
+        let stale = populate_cached_args_into(
+            &mut buf,
+            shared,
+            args_cache,
+            node_id as crate::IdType,
+            0, // node_index
+            0, // slot
+            0, // pred_index
+            usize::MAX,
+            0,
+        );
+        assert!(!stale);
+        assert_eq!(buf.len(), 1);
+        assert_eq!(
+            buf[0],
+            CmTypes::Usize(42),
+            "the $frame_id arg must deliver the CURRENT frame id for its slot, not a stale \
+             placeholder or a different slot's id"
+        );
+
+        // A new frame takes the slot (generational reuse): the SAME arg must
+        // now deliver the NEW frame id, never the old one — no stale read
+        // across frame/slot reuse.
+        shared.slot_data.frame_id[0].store(43, Ordering::Relaxed);
+        buf.clear();
+        let stale2 = populate_cached_args_into(
+            &mut buf,
+            shared,
+            args_cache,
+            node_id as crate::IdType,
+            0,
+            0,
+            0,
+            usize::MAX,
+            0,
+        );
+        assert!(!stale2);
+        assert_eq!(
+            buf[0],
+            CmTypes::Usize(43),
+            "$frame_id must track slot reuse across frames, not cache the first value"
+        );
+    }
+
+    #[test]
+    fn no_frame_id_arg_takes_the_zero_cost_early_return_path() {
+        let rt = build_test_rt(NO_FRAME_ID_GRAPH);
+        let shared = &rt.shared;
+        let node_id: usize = 0;
+        let node_cache = &shared.graph_cache.node_cache[node_id];
+        let args_cache = &node_cache.arg_cache;
+
+        assert!(
+            args_cache.rt_frame_indexes.is_empty(),
+            "a node with no $frame_id arg must have an empty rt_frame_indexes — this emptiness \
+             is exactly what gates the early-return fast path below"
+        );
+        assert!(args_cache.buffer_ref_indexes.is_empty());
+        assert!(args_cache.rt_idxs_indexes.is_empty());
+        assert!(args_cache.rt_workers_indexes.is_empty());
+        assert!(args_cache.res_indexes.is_empty());
+
+        // Poison the slot's frame_id to a value that would be visibly wrong if
+        // (incorrectly) injected anywhere — proves the early-return path never
+        // touches `slot_data.frame_id` at all for this node.
+        shared.slot_data.frame_id[0].store(usize::MAX, Ordering::Relaxed);
+
+        let mut buf = Vec::new();
+        let stale = populate_cached_args_into(
+            &mut buf,
+            shared,
+            args_cache,
+            node_id as crate::IdType,
+            0,
+            0,
+            0,
+            usize::MAX,
+            0,
+        );
+        assert!(!stale);
+        assert!(
+            buf.is_empty(),
+            "node has zero declared args; the static template extend is the only write"
+        );
+    }
+
+    #[test]
+    fn frame_id_for_slot_returns_sentinel_for_out_of_range_slot() {
+        // The post-node "virtual" slot (config.slots + config.system_threads)
+        // is deliberately out of SlotData::frame_id's range (sized exactly
+        // config.slots) — see `collect_arg_result`'s doc comment. Must return
+        // the established "no frame" sentinel, never panic.
+        let rt = build_test_rt(NO_FRAME_ID_GRAPH);
+        let shared = &rt.shared;
+        let out_of_range = shared.slot_data.frame_id.len() + 5;
+        assert_eq!(frame_id_for_slot(shared, out_of_range), usize::MAX);
+        // A real, in-range slot still resolves normally.
+        shared.slot_data.frame_id[0].store(7, Ordering::Relaxed);
+        assert_eq!(frame_id_for_slot(shared, 0), 7);
     }
 }

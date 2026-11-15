@@ -7,6 +7,15 @@
 # To regenerate after modifying json_structs.rs:
 #   make schema
 #
+# NOTE (instance_map feature): `PredJson` below was hand-patched instead of
+# regenerated — the `datamodel-codegen` version available in this environment
+# produces a materially different style (drops the `type_`/`Field(alias=...)`
+# pattern, switches to `X | None` unions, reorders fields alphabetically,
+# wraps `Factor` in a `RootModel`) from what is committed here. Regenerating
+# with that version would rewrite this whole file unrelated to the actual
+# schema change. Re-run `make schema` with a pinned/matching codegen version
+# when one is available, and diff carefully before committing wholesale.
+#
 from __future__ import annotations
 
 from typing import List, Optional, Union
@@ -29,12 +38,16 @@ class ConditionJson(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Predecessor reference used by $res / $barrier args
+# Predecessor reference used by $res / $barrier / $dep args
 # ---------------------------------------------------------------------------
 class PredJson(BaseModel):
     name: str
-    indexes: str
+    # Omitted when `instance_map` is used instead.
+    indexes: Optional[str] = None
     group_by: Optional[Factor] = None
+    # Per-consumer-instance absolute dependency map; mutually exclusive with
+    # `indexes` / `group_by`. See `tomii_core::instance_map`.
+    instance_map: Optional[List[List[int]]] = None
 
 
 # ---------------------------------------------------------------------------

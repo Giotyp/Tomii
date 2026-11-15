@@ -109,7 +109,10 @@ impl NodeCondition {
 ///
 /// `indexes` is the list of relative instance offsets used to select which
 /// predecessor instance(s) a successor consumes. `group_by` enables grouping
-/// multiple predecessor instances before firing the successor.
+/// multiple predecessor instances before firing the successor. `instance_map`
+/// is a third, mutually-exclusive way to declare the edge: an explicit,
+/// per-consumer-instance list of absolute producer indexes (see
+/// [`crate::instance_map`]).
 #[derive(Clone, Debug)]
 pub struct Predecessor {
     /// ID of the predecessor node.
@@ -118,9 +121,21 @@ pub struct Predecessor {
     pub indexes: Vec<isize>,
     /// If set, group this many predecessor completions before spawning one successor.
     pub group_by: Option<usize>,
+    /// Explicit per-consumer-instance dependency map: `instance_map[j]` lists the
+    /// ABSOLUTE producer instance indexes consumer instance `j` depends on through
+    /// this arg. `None` when this edge uses the classic `indexes`/`group_by`
+    /// convention instead. Mutually exclusive with non-empty `indexes` and with
+    /// `group_by` (enforced at load time — see `crate::instance_map::validate`).
+    pub instance_map: Option<Vec<Vec<usize>>>,
 }
 
 impl Predecessor {
+    /// True when this edge is declared via an explicit `instance_map` rather than
+    /// the classic `indexes`/`group_by` convention.
+    pub fn has_instance_map(&self) -> bool {
+        self.instance_map.is_some()
+    }
+
     /// Computes the predecessor index filter range if this edge should be filtered.
     ///
     /// Returns `Some((min_idx, max_idx_exclusive))` when only instances in `[min, max)` of
@@ -249,6 +264,7 @@ mod tests {
             id: 0,
             indexes: vec![],
             group_by: None,
+            instance_map: None,
         };
         assert_eq!(pred.index_filter(4, 4), None);
     }
@@ -260,6 +276,7 @@ mod tests {
             id: 0,
             indexes: vec![0, 1, 2, 3],
             group_by: None,
+            instance_map: None,
         };
         assert_eq!(pred.index_filter(4, 4), None);
     }
@@ -271,6 +288,7 @@ mod tests {
             id: 0,
             indexes: vec![1, 2],
             group_by: None,
+            instance_map: None,
         };
         assert_eq!(pred.index_filter(4, 2), Some((1, 3)));
     }
@@ -282,6 +300,7 @@ mod tests {
             id: 0,
             indexes: vec![1, 2],
             group_by: None,
+            instance_map: None,
         };
         assert_eq!(pred.index_filter(4, 4), None);
     }
@@ -294,6 +313,7 @@ mod tests {
             id: 0,
             indexes: vec![1, 0],
             group_by: None,
+            instance_map: None,
         };
         assert_eq!(pred.index_filter(50, 1), Some((0, 2)));
         assert_eq!(pred.contributing_instances(50, 1), 2);
@@ -302,6 +322,7 @@ mod tests {
             id: 0,
             indexes: vec![10, 11, 12, 13],
             group_by: None,
+            instance_map: None,
         };
         assert_eq!(pred.index_filter(16, 1), Some((10, 14)));
         assert_eq!(pred.contributing_instances(16, 1), 4);
@@ -314,6 +335,7 @@ mod tests {
             id: 0,
             indexes: vec![0, 5],
             group_by: None,
+            instance_map: None,
         };
         assert_eq!(pred.index_filter(8, 1), None);
         assert_eq!(pred.contributing_instances(8, 1), 8);
@@ -322,6 +344,7 @@ mod tests {
             id: 0,
             indexes: vec![0, 1, 2, 3],
             group_by: None,
+            instance_map: None,
         };
         assert_eq!(pred.index_filter(4, 1), None);
     }
@@ -333,6 +356,7 @@ mod tests {
             id: 0,
             indexes: vec![0, 1, 2, 3],
             group_by: Some(4),
+            instance_map: None,
         };
         assert_eq!(pred.index_filter(4, 4), Some((0, 4)));
     }
@@ -348,6 +372,7 @@ mod tests {
             id: 0,
             indexes: vec![0, 1, 2, 3],
             group_by: None,
+            instance_map: None,
         };
         assert_eq!(pred.contributing_instances(4, 4), 4);
     }
@@ -359,6 +384,7 @@ mod tests {
             id: 0,
             indexes: vec![1, 2],
             group_by: None,
+            instance_map: None,
         };
         assert_eq!(pred.contributing_instances(4, 2), 2);
     }
@@ -370,6 +396,7 @@ mod tests {
             id: 0,
             indexes: vec![0],
             group_by: None,
+            instance_map: None,
         };
         assert_eq!(pred.contributing_instances(1, 1), 1);
     }

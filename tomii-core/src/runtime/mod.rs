@@ -327,6 +327,8 @@ impl TomiiRtBuilder {
             dependency_count_vec,
             max_factor,
             num_nodes,
+            instance_map_thresholds,
+            zero_threshold_instances,
         } = self.compiled;
 
         // P3 Phase B: swap in unchecked wrapper twins for nodes whose argument
@@ -401,6 +403,7 @@ impl TomiiRtBuilder {
             max_factor,
             dependency_count_vec,
             &graph.nodes,
+            &instance_map_thresholds,
         ));
         tracing::debug!(
             "\nDependencyCounter initialized:\n{}\n",
@@ -458,6 +461,7 @@ impl TomiiRtBuilder {
                 total_tasks,
                 total_cond_tasks,
                 init_objects,
+                zero_threshold_instances,
             },
             config: self.config,
             slot_data: SlotData {

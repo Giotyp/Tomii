@@ -74,7 +74,11 @@ def _edges_from_args(args: "list[Any]", target_name: str) -> List[VizEdge]:
             continue
 
         source = pred.get("name", "")
-        indexes = pred.get("indexes", "0")
+        instance_map = pred.get("instance_map")
+        # A mapped edge omits "indexes" entirely — represent it with a short
+        # "map" marker instead of falling back to the "0" default, which would
+        # mislabel it as an ordinary same-index edge.
+        indexes = "map" if instance_map is not None else pred.get("indexes", "0")
         group_by = pred.get("group_by")
         edge_type = type_[1:]  # strip leading "$"
 
@@ -84,7 +88,9 @@ def _edges_from_args(args: "list[Any]", target_name: str) -> List[VizEdge]:
         seen.add(key)
 
         label_parts = [edge_type]
-        if indexes and indexes != "0":
+        if instance_map is not None:
+            label_parts.append(f"map[{len(instance_map)}]")
+        elif indexes and indexes != "0":
             label_parts.append(f"[{indexes}]")
         if group_by:
             label_parts.append(f"grp={group_by}")

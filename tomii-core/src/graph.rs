@@ -226,6 +226,21 @@ impl Graph {
         let mut dep_count_vec: Vec<usize> = Vec::new();
 
         for node in &self.nodes {
+            // A node with an `instance_map` predecessor is routed entirely through
+            // the per-instance dependency-counter mechanism
+            // (`crate::instance_map`, `buffers::instance_map_dep`) — its
+            // `NodeDependencyEntry` (seeded from this vector) is never consulted,
+            // so leave its contribution at 0 rather than computing a value that
+            // would be misleading if ever read for diagnostics.
+            if node
+                .args
+                .iter()
+                .any(|a| a.predecessor.as_ref().is_some_and(|p| p.has_instance_map()))
+            {
+                dep_count_vec.push(0);
+                continue;
+            }
+
             let mut dep_count = 0;
             let mut preds_seen = HashSet::new();
             let mut grouped_candidates_seen = HashSet::new();
@@ -307,6 +322,7 @@ impl Graph {
                         id: pred_id,
                         indexes: union_indexes,
                         group_by: None,
+                        instance_map: None,
                     };
                     union_pred.contributing_instances(pred_factor, node.factor)
                 };
@@ -499,6 +515,7 @@ mod tests {
                 id: pred_id,
                 indexes,
                 group_by: None,
+                instance_map: None,
             }),
             init_condition: None,
         }
@@ -511,6 +528,7 @@ mod tests {
                 id: pred_id,
                 indexes,
                 group_by: None,
+                instance_map: None,
             }),
             init_condition: None,
         }
@@ -523,6 +541,7 @@ mod tests {
                 id: pred_id,
                 indexes,
                 group_by: Some(group_by),
+                instance_map: None,
             }),
             init_condition: None,
         }
@@ -583,6 +602,7 @@ mod tests {
                 id: 0,
                 indexes: vec![0],
                 group_by: None,
+                instance_map: None,
             }),
             init_condition: Some(InitCondition {
                 operation: CondOp::Eq,

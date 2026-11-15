@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased
+
+### New features
+
+- **Explicit per-instance dependency maps (`instance_map`)**: a predecessor
+  object on a `$barrier`/`$dep` argument may now declare, per consumer
+  instance, the exact absolute set of producer instances it depends on
+  (`"instance_map": [[0, 1, 2], [3, 4], ...]`), instead of the uniform
+  `indexes`/`group_by` convention. This expresses irregular fan-in shapes
+  (a reduction tree whose branches join different numbers of leaves) and
+  neighbourhood (halo) stencils (`tile[j]` depending on `tile[j-1..j+1]`,
+  optionally wrapping) without one node definition per fusion unit. Python
+  builder: `n.wait(map=...)` / `n.dep(map=...)`, plus `tomii.halo(radius,
+  wrap=True)` and `tomii.stride(k)` helpers for the common shapes. Not
+  supported on `$res` (a mapped edge never delivers a value), together with
+  a node's own `group_size`. A consumer instance with an empty map entry (and
+  no other predecessor contributing) has a total dependency threshold of 0;
+  it is dispatched exactly once per frame at frame admission, like a
+  root/initial node, rather than through the dependency-counter path (which
+  nothing would ever decrement it through). See the
+  [JSON graph format reference](website/docs/reference/json-graph-format.md)
+  and [nodes-and-vars guide](website/docs/guide/graphs/nodes-and-vars.md).
+
+- **`$frame_id` built-in argument**: a node arg may now reference `{"type":
+  "$ref", "value": "$frame_id"}` (Python: `TypedValue('$ref', '$frame_id')`,
+  the same idiom as `$index`/`$workers`) to receive the id of the frame the
+  consuming task belongs to — the same id network admission and frame slots
+  use (`SlotData::frame_id`); for non-network graphs, a monotonically
+  increasing counter starting at 0, one value per admitted frame. Resolved
+  at graph-compile time into a per-node cache flag
+  (`ArgCacheEntry::rt_frame_indexes`), so graphs that never reference
+  `$frame_id` take the identical hot path as before — zero added work, and
+  no change to the per-task `NodeInfo` struct's size or layout.
+
+### Fixes
+
+- **Variadic `$res`/`$dep` kernel macro**: a `#[tomii_export(variadic)]`
+  kernel whose variadic argument is followed, on the same node, by trailing
+  mapped `$barrier`/`$dep` args (ordering-only — see `instance_map` above)
+  previously panicked, because those trailing slots always resolve to
+  `CmTypes::None` placeholders and the generated collection loop iterated
+  the whole slice unconditionally. The loop now filters `CmTypes::None` out
+  before collecting, so the kernel sees exactly its own declared values.
+
 ## v1.2.0 — 2026-07-10
 
 ### Terminology: "stream" → "frame"

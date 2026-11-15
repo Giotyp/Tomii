@@ -706,7 +706,12 @@ fn assign_packet_to_slot(
         super::phase_prof::trace_admit(4, new_frame, assigned_slot as u64, 0);
         *slots_dirty = true;
         // Spawn initial nodes immediately so workers start while remaining packets arrive.
-        let init_nodes = initial_nodes(&shared.graph, vec![assigned_slot], shared.config.workers);
+        let init_nodes = initial_nodes(
+            &shared.graph,
+            vec![assigned_slot],
+            shared.config.workers,
+            &shared.graph_cache.zero_threshold_instances,
+        );
         if !init_nodes.is_empty() {
             print_debug(|| {
                 format!(

@@ -68,3 +68,28 @@ impl std::fmt::Debug for NodeInfo {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::NodeInfo;
+
+    /// `NodeInfo` is the per-task struct copied through every scheduler queue
+    /// and dispatch path (see the `gen` field's doc comment: it was placed to
+    /// fit in existing padding specifically to avoid a struct-size increase).
+    /// `$frame_id` (see `crate::runtime::arg_resolution`) is resolved from
+    /// `SharedData::slot_data.frame_id[node_info.slot]` using the field
+    /// `NodeInfo` already carries — it must add NOTHING to this struct. This
+    /// locks the size so a future change that accidentally grows `NodeInfo`
+    /// (e.g. to carry a frame id directly) is caught here instead of only
+    /// showing up as an unexplained regression in a later benchmark.
+    #[test]
+    fn size_is_unchanged_by_the_frame_id_feature() {
+        assert_eq!(
+            std::mem::size_of::<NodeInfo>(),
+            40,
+            "NodeInfo size changed — if this is intentional, update this assert AND confirm \
+             `$frame_id` still adds nothing to it (frame_id is read from \
+             SharedData::slot_data.frame_id[slot], not stored on NodeInfo itself)"
+        );
+    }
+}

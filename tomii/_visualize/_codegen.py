@@ -177,11 +177,20 @@ def _encode_arg(
 
     if type_ in ("$res", "$dep", "$barrier") and pred:
         src_name = pred.get("name", "")
-        indexes = pred.get("indexes", "0")
+        instance_map = pred.get("instance_map")
         group_by = pred.get("group_by")
         src_py = node_pynames.get(src_name, _pyname(src_name))
 
         method = {"$res": "out", "$dep": "dep", "$barrier": "wait"}[type_]
+
+        if instance_map is not None:
+            # A mapped edge carries no `indexes` — emit the explicit list of
+            # lists directly rather than falling back to a wrong `indexes="0"`
+            # default (round-tripping silently different code is worse than
+            # an explicit, correct `map=`).
+            return f"{src_py}.{method}(map={instance_map!r})"
+
+        indexes = pred.get("indexes", "0")
         index_args = _format_indexes(indexes, var_names)
         gb_kw = (
             f", group_by={_factor_expr(group_by, var_names)}"

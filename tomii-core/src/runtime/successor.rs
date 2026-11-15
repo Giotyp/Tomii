@@ -306,6 +306,12 @@ pub(super) fn decrement_and_collect_ready(
     slot_gen: u32,
     ready: &mut Vec<usize>,
 ) {
+    if edge.succ_uses_instance_map() {
+        decrement_and_collect_ready_mapped(
+            ctx, slot, pred_index, edge, bulk_count, slot_gen, ready,
+        );
+        return;
+    }
     match edge.filter_bounds() {
         None => {
             // Unfiltered edge: every completing instance drives the successor.
@@ -373,4 +379,99 @@ pub(super) fn decrement_and_collect_ready(
             }
         }
     }
+}
+
+/// `decrement_and_collect_ready` for a successor using the per-instance
+/// (`instance_map`) dependency-counter mechanism — see `crate::instance_map`.
+///
+/// Two shapes, both already classified at graph-compile time:
+/// - [`SuccEdge::mapped_routing`] is `Some`: this edge IS the `instance_map`
+///   edge — decrement exactly the consumer instances the reverse routing
+///   table lists for each completing producer cell, once per listing.
+/// - `None`: an ordinary edge coexisting on the same (mapped) node — either
+///   an exact 1:1 dispatch (reuses `one_to_one_succ_idx`, one specific
+///   instance per producer cell) or a uniform broadcast (every producer cell
+///   decrements EVERY consumer instance by one) — see
+///   `crate::instance_map::classify_coexisting_predecessor` for why those are
+///   the only two shapes that can coexist with a mapped predecessor.
+fn decrement_and_collect_ready_mapped(
+    ctx: &super::shared_data::ResolveCtx<'_>,
+    slot: usize,
+    pred_index: usize,
+    edge: &SuccEdge,
+    bulk_count: usize,
+    slot_gen: u32,
+    ready: &mut Vec<usize>,
+) {
+    let succ_id = edge.succ_id as usize;
+    let count = bulk_count.max(1);
+
+    if let Some(routing) = edge.mapped_routing() {
+        let end = (pred_index + count).min(routing.producer_to_consumers.len());
+        if pred_index >= end {
+            ready.clear();
+            return;
+        }
+        // Scratch buffer: the number of (producer cell, consumer) listings
+        // touched by this completion — small in every supported shape (QEC-tree
+        // fuse widths, halo radii), so a per-call allocation is acceptable here
+        // (this path is never hit for ordinary, unmapped edges).
+        let mut idxs: Vec<u32> = Vec::new();
+        for i in pred_index..end {
+            idxs.extend_from_slice(&routing.producer_to_consumers[i]);
+        }
+        if idxs.is_empty() {
+            ready.clear();
+            return;
+        }
+        ctx.exec
+            .resolution_state
+            .decrease_instances_and_get_ready_into(slot, succ_id, slot_gen, &idxs, 1, ready);
+        return;
+    }
+
+    if edge.is_one_to_one() {
+        let (lo, hi) = match edge.filter_bounds() {
+            None => (pred_index, pred_index + count),
+            Some((flo, fhi)) => match filter_overlap(pred_index, count, flo, fhi) {
+                Some(bounds) => bounds,
+                None => {
+                    ready.clear();
+                    return;
+                }
+            },
+        };
+        let mut idxs: Vec<u32> = Vec::with_capacity(hi - lo);
+        for cell in lo..hi {
+            if let Some(j) = edge.one_to_one_succ_idx(cell) {
+                idxs.push(j as u32);
+            }
+        }
+        if idxs.is_empty() {
+            ready.clear();
+            return;
+        }
+        ctx.exec
+            .resolution_state
+            .decrease_instances_and_get_ready_into(slot, succ_id, slot_gen, &idxs, 1, ready);
+        return;
+    }
+
+    // Broadcast: an ordinary barrier/dep/factor-1 predecessor coexisting with a
+    // mapped one. The covered predecessor-cell count (after filter
+    // intersection) decrements EVERY consumer instance by that amount — see
+    // `classify_coexisting_predecessor`'s `UniformKind::Broadcast`.
+    let covered = match edge.filter_bounds() {
+        None => count,
+        Some((flo, fhi)) => match filter_overlap(pred_index, count, flo, fhi) {
+            Some((lo, hi)) => hi - lo,
+            None => {
+                ready.clear();
+                return;
+            }
+        },
+    };
+    ctx.exec
+        .resolution_state
+        .decrease_broadcast_and_get_ready_into(slot, succ_id, slot_gen, covered as u32, ready);
 }

@@ -290,6 +290,26 @@ def graph_schema() -> "dict[str, Any]":
                     'count. Use as a factor string: factor="$workers".'
                 ),
             },
+            "$frame_id": {
+                "description": (
+                    "Reserved init name resolved at runtime to the id of the frame the "
+                    "consuming task belongs to — the same id network admission and frame "
+                    "slots use. For non-network graphs this is a monotonically increasing "
+                    "counter starting at 0, one value per admitted frame. Not created with "
+                    "graph.var() — referenced directly as a $ref value, exactly like "
+                    "$index/$workers. Resolving it costs nothing for graphs that never "
+                    "reference it (decided once at graph-compile time, not per task)."
+                ),
+                "usage": "from tomii._types import TypedValue; fid = TypedValue('$ref', '$frame_id')",
+                "example": (
+                    "import tomii as tm\n"
+                    "from tomii._types import TypedValue\n"
+                    "app = tm.Graph()\n"
+                    "fid = TypedValue('$ref', '$frame_id')\n"
+                    "app.node('tagged', func='tag_with_frame', factor=1, args=[fid])\n"
+                    "app.to_json()\n"
+                ),
+            },
             "$network": {
                 "description": (
                     "Virtual predecessor node for network-input graphs (graph.network()). "
@@ -302,7 +322,7 @@ def graph_schema() -> "dict[str, Any]":
         },
         "arg_types": {
             "$ref": {
-                "syntax": "var_handle  (a Var object returned by graph.var(), or a TypedValue for $index/$workers)",
+                "syntax": "var_handle  (a Var object returned by graph.var(), or a TypedValue for $index/$workers/$frame_id)",
                 "description": "Reference to an initialization variable. Passed as a pointer to the pre-computed result.",
             },
             "$res": {

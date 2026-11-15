@@ -31,7 +31,9 @@
 //!   per-slot or per-frame state lives here.
 
 use super::node_cache::NodeCacheEntry;
+use crate::instance_map::MappedEdgeRouting;
 use crate::IdType;
+use std::sync::Arc;
 
 /// `filter_end` sentinel: no predecessor-index filter on this edge.
 const NO_FILTER: u32 = u32::MAX;
@@ -47,9 +49,12 @@ const NO_GROUP: u32 = 0;
 /// 2. *Which dependency-counter group does it decrement?* — [`SuccEdge::pred_group`]
 /// 3. *Does it map 1:1 onto a specific successor instance?* — [`SuccEdge::one_to_one_succ_idx`]
 ///
-/// Fields are kept compact (28 bytes, two edges per cache line); the semantics live
-/// in the accessor methods so call sites stay self-describing.
-#[derive(Clone, Copy, Debug)]
+/// Fields are kept compact; the semantics live in the accessor methods so call
+/// sites stay self-describing.
+///
+/// NOT `Copy` (carries an `Arc` for mapped edges) — always accessed by
+/// reference on the hot path, matching every existing call site.
+#[derive(Clone, Debug)]
 pub struct SuccEdge {
     /// Successor node ID.
     pub succ_id: IdType,
@@ -74,6 +79,15 @@ pub struct SuccEdge {
     one_to_one_offset: i32,
     /// True when the 1:1 instance mapping applies to this edge.
     has_one_to_one: bool,
+    /// True when the SUCCESSOR node has at least one `instance_map` predecessor
+    /// — set on EVERY edge into such a node (mapped or an ordinary coexisting
+    /// edge alike), so `decrement_and_collect_ready` can route the whole node
+    /// through the per-instance dependency-counter mechanism instead of the
+    /// pooled/ordinal one. See `crate::instance_map`.
+    succ_uses_instance_map: bool,
+    /// Present only when THIS (pred, succ) edge is itself declared via
+    /// `instance_map`: the reverse producer→consumer routing table.
+    mapped: Option<Arc<MappedEdgeRouting>>,
 }
 
 impl SuccEdge {
@@ -149,6 +163,21 @@ impl SuccEdge {
             None
         }
     }
+
+    /// True when this edge drives a successor that uses the per-instance
+    /// (`instance_map`) dependency-counter mechanism.
+    #[inline]
+    pub fn succ_uses_instance_map(&self) -> bool {
+        self.succ_uses_instance_map
+    }
+
+    /// The reverse producer→consumer routing table, when THIS edge is itself
+    /// declared via `instance_map`. `None` for an ordinary edge (even one that
+    /// coexists on a node where `succ_uses_instance_map()` is true).
+    #[inline]
+    pub fn mapped_routing(&self) -> Option<&Arc<MappedEdgeRouting>> {
+        self.mapped.as_ref()
+    }
 }
 
 /// Contiguous successor-edge storage for the whole graph.
@@ -180,6 +209,7 @@ impl SuccessorArena {
     /// `successors[pred]` lists successor node IDs (as built by `Graph::add_node`);
     /// the three tables are the output of `init::build_predecessor_tables` and are
     /// indexed `[succ][pred]`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn build(
         successors: &[Vec<IdType>],
         num_nodes: usize,
@@ -187,6 +217,8 @@ impl SuccessorArena {
         pred_index_filter: &[Vec<Option<(usize, usize)>>],
         pred_group_by: &[Vec<Option<usize>>],
         pred_succ_1to1_offset: &[Vec<Option<isize>>],
+        pred_instance_map: &[Vec<Option<Arc<MappedEdgeRouting>>>],
+        succ_has_instance_map: &[bool],
     ) -> Self {
         let total_edges: usize = successors.iter().map(|s| s.len()).sum();
         let mut edges = Vec::with_capacity(total_edges);
@@ -199,8 +231,18 @@ impl SuccessorArena {
                     let succ = succ_id as usize;
                     let entry = &node_cache[succ];
 
+                    let succ_uses_instance_map =
+                        succ_has_instance_map.get(succ).copied().unwrap_or(false);
+                    let mapped = pred_instance_map
+                        .get(succ)
+                        .and_then(|row| row.get(pred_id))
+                        .and_then(|opt| opt.clone());
+
                     let (filter_start, filter_end) = match pred_index_filter[succ][pred_id] {
                         Some((s, e)) => (s as u32, e as u32),
+                        // A mapped edge carries no filter of its own — `passes_filter`
+                        // must stay permissive; `decrement_and_collect_ready` consults
+                        // `mapped` directly instead (see successor.rs).
                         None => (0, NO_FILTER),
                     };
                     let group_by = match pred_group_by[succ][pred_id] {
@@ -226,6 +268,8 @@ impl SuccessorArena {
                         group_by,
                         one_to_one_offset,
                         has_one_to_one,
+                        succ_uses_instance_map,
+                        mapped,
                     });
                 }
             }
@@ -266,6 +310,7 @@ mod tests {
             template_stable: false,
             func_name: String::new(),
             uses_unchecked: false,
+            has_instance_map: false,
         }
     }
 
@@ -284,8 +329,19 @@ mod tests {
         filter[1][0] = Some((2, 6)); // succ 1 reads pred-0 instances [2, 6)
         group_by[1][0] = Some(2); //    ...grouped in pairs
         one_to_one[2][0] = Some(1); //  succ 2 is 1:1 from pred 0 with offset 1
+        let instance_map = vec![vec![None; n]; n];
+        let has_instance_map = vec![false; n];
 
-        SuccessorArena::build(&successors, n, &node_cache, &filter, &group_by, &one_to_one)
+        SuccessorArena::build(
+            &successors,
+            n,
+            &node_cache,
+            &filter,
+            &group_by,
+            &one_to_one,
+            &instance_map,
+            &has_instance_map,
+        )
     }
 
     #[test]

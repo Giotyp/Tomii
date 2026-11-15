@@ -314,7 +314,12 @@ fn release_and_dispatch_next(
     });
 
     // Spawn initial compute nodes for the activated slot first
-    let initial = initial_nodes(&shared.graph, vec![activated_slot], shared.config.workers);
+    let initial = initial_nodes(
+        &shared.graph,
+        vec![activated_slot],
+        shared.config.workers,
+        &shared.graph_cache.zero_threshold_instances,
+    );
     print_debug(|| {
         format!(
             "Spawning {} initial nodes for activated slot {}",
@@ -404,7 +409,12 @@ fn restart_slot_nonnetwork(
         .telemetry
         .with_timing(|tb| tb.start_slot_processing(slot));
 
-    let compute_nodes = initial_nodes(&shared.graph, vec![slot], shared.config.workers);
+    let compute_nodes = initial_nodes(
+        &shared.graph,
+        vec![slot],
+        shared.config.workers,
+        &shared.graph_cache.zero_threshold_instances,
+    );
     print_debug(|| {
         format!(
             "Spawned {} initial nodes for restarting slot {}",
