@@ -28,15 +28,18 @@
 //!   table targets an instance whose forward map is empty). See
 //!   [`validate_and_build`]'s `zero_threshold_instances` output and
 //!   `runtime::slot_management::initial_nodes`.
-//! - A non-mapped predecessor may coexist on the same node as a mapped one
-//!   (e.g. a mapped `$barrier` plus an ordinary 1:1 `$res`), but only in
-//!   shapes with a uniform per-instance contribution: a literal/filtered
-//!   `$barrier` or `$dep` (broadcast — every instance waits for the same N
-//!   arrivals), a producer with factor 1 (broadcast of a single arrival), or
-//!   an exact 1:1 same-factor single-offset edge. Any other shape (the
+//! - A non-mapped predecessor may coexist on the same node as a mapped one,
+//!   either on a DIFFERENT predecessor or on the SAME predecessor a mapped
+//!   argument also reads — but only in shapes with a uniform or exactly
+//!   positional per-instance contribution: a literal/filtered `$barrier` or
+//!   `$dep` (broadcast — every instance waits for the same N arrivals), a
+//!   producer with factor 1 (broadcast of a single arrival), or an exact 1:1
+//!   same-factor single-offset / contiguous-range edge. Any other shape (the
 //!   "ordinal" fallback used for irregular fan-in/fan-out without a declared
-//!   1:1/filter/barrier) is rejected with a clear error — see
-//!   `classify_coexisting_predecessor`.
+//!   1:1/filter/barrier) is rejected with a clear error, as is a `group_by`
+//!   plain argument coexisting with a mapped one (the two partitioning
+//!   schemes are not reconciled) — see `classify_coexisting_predecessor` /
+//!   `coexisting_predecessor_shape`.
 //!
 //! # Threshold / union semantics
 //!
@@ -49,8 +52,22 @@
 //!   from the same-predecessor multi-arg fixes). A producer instance listed by
 //!   two mapped arguments of the same consumer instance is therefore counted,
 //!   and decremented, exactly once.
-//! - A non-mapped (coexisting) predecessor contributes the same, uniform
-//!   amount to every instance — see `classify_coexisting_predecessor`.
+//! - A non-mapped (coexisting) predecessor on a DIFFERENT predecessor id
+//!   contributes the same, uniform amount to every instance — see
+//!   `classify_coexisting_predecessor`.
+//! - A non-mapped argument coexisting on the SAME predecessor id as a mapped
+//!   argument has its per-instance absolute index set (see
+//!   `coexisting_predecessor_per_instance`) unioned directly into that
+//!   predecessor's mapped forward map before routing is built, exactly as if
+//!   it had been declared as another mapped argument's list for the same
+//!   instance. A producer instance reachable through both the mapped
+//!   argument and the plain argument is therefore still counted, and
+//!   decremented, exactly once (the same union convention, extended to mix
+//!   declared and derived lists). This predecessor is then routed ENTIRELY
+//!   through the per-instance mechanism — it is excluded from the ordinary
+//!   `pred_index_filter`/`pred_group_by`/`pred_succ_1to1_offset` tables (see
+//!   `runtime::init::build_predecessor_tables`) so no instance is ever
+//!   decremented through two independent paths.
 //!
 //! # Routing
 //!
@@ -65,7 +82,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::graph::Graph;
-use crate::graph_struct::{pred_is_ambiguous_multi_arg, Arg, Node, Predecessor};
+use crate::graph_struct::{find_pred_index, Arg, Node, Predecessor};
 use crate::IdType;
 
 /// Reverse producer→consumer routing table for one mapped `(pred, succ)` edge.
@@ -123,15 +140,33 @@ pub struct InstanceMapTables {
     pub zero_threshold_instances: Vec<Option<Arc<Vec<u32>>>>,
 }
 
-/// How a non-mapped predecessor coexisting with a mapped one on the same node
-/// contributes to every instance's threshold.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UniformKind {
+/// Fully-resolved shape of a non-mapped predecessor coexisting, on the same
+/// node, with at least one `instance_map` predecessor — either on a
+/// different predecessor id (the original Phase 1 "coexisting predecessor"
+/// case) or on the SAME predecessor id a mapped argument also reads (Item 2:
+/// mixed mapped + plain args on one predecessor). Carries enough information
+/// to derive either a uniform per-instance contribution
+/// ([`classify_coexisting_predecessor`]) or the exact per-instance absolute
+/// index list ([`coexisting_predecessor_per_instance`]).
+#[derive(Debug, Clone)]
+pub(crate) enum CoexistingShape {
     /// Each producer instance `i` fires exactly consumer instance `j = i - k`
     /// (mod factor) — one decrement, to one specific instance, per arrival.
+    /// `offset` is `k` for the relative single-index shape, or the first
+    /// (smallest) absolute index of a declared contiguous range — both
+    /// resolve identically via `find_pred_index(j, offset, pred_factor)`.
+    OneToOne { offset: isize },
+    /// Every arrival decrements EVERY consumer instance by one, and every
+    /// consumer instance's forward map is exactly `members` — the producer is
+    /// a literal/filtered barrier, a `$dep`, or a factor-1 fan-out source.
+    Broadcast { members: Vec<usize> },
+}
+
+/// How a non-mapped predecessor coexisting with a mapped one contributes to
+/// every instance's threshold — the uniform-amount view of [`CoexistingShape`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UniformKind {
     OneToOne,
-    /// Every arrival decrements EVERY consumer instance by one — the producer
-    /// is a literal/filtered barrier, a `$dep`, or a factor-1 fan-out source.
     Broadcast,
 }
 
@@ -148,40 +183,72 @@ pub(crate) struct UniformContribution {
     pub amount: u32,
 }
 
-/// Classify a non-mapped predecessor coexisting, on `node`, with at least one
-/// `instance_map` predecessor. Returns the uniform per-instance contribution,
-/// or `Err(reason)` when the edge's shape has no uniform interpretation (the
-/// "ordinal fallback" shape — see module docs).
-pub(crate) fn classify_coexisting_predecessor(
+/// Classify the shape of every non-mapped argument `node` has on `pred_id`,
+/// or `Err(reason)` when the combined shape has no uniform/positional
+/// per-instance interpretation (the "ordinal fallback" shape, or a `group_by`
+/// argument — see module docs). Shared by both the uniform-contribution view
+/// (`classify_coexisting_predecessor`, used when `pred_id` is NOT also
+/// mapped) and the per-instance-list view (`coexisting_predecessor_per_instance`,
+/// used when `pred_id` IS also mapped — Item 2).
+pub(crate) fn coexisting_predecessor_shape(
     graph: &Graph,
     node: &Node,
     pred_id: IdType,
-) -> Result<UniformContribution, String> {
+) -> Result<CoexistingShape, String> {
     let pred_factor = graph.nodes[pred_id as usize].factor;
     let succ_factor = node.factor;
 
-    if pred_is_ambiguous_multi_arg(node, pred_id) {
-        // Two or more genuinely different, barrier-free args on the SAME
-        // non-mapped predecessor (e.g. `$res "0"` + `$res "-1"`). Reconciling
-        // this with `runtime::init::build_predecessor_tables`'s filter
-        // computation for a mapped successor (which must force
-        // `succ_factor=1` semantics — see below) would require threading that
-        // override through the "genuinely differing args" branch too; reject
-        // instead and keep this release's scope to the well-defined single
-        // literal-barrier / single-$dep / exact-1:1 shapes.
-        return Err(format!(
-            "predecessor '{}' has two or more differing dependency arguments on node \
-             '{}' (ambiguous multi-arg) — not supported coexisting with an instance_map \
-             predecessor on the same node.",
-            graph.nodes[pred_id as usize].name, node.name
-        ));
-    }
-
-    let args_on_pred: Vec<&Arg> = node
+    // Scope strictly to the NON-mapped args on `pred_id`. For a predecessor
+    // referenced on a DIFFERENT node than any mapped one, this is every arg
+    // on `pred_id` (unchanged from before Item 2). For the SAME predecessor
+    // as a mapped arg (Item 2: mixed mapped + plain args on one
+    // predecessor), a mapped arg's own `indexes`/`group_by` are always empty
+    // (mutually exclusive with `instance_map` at load time) and its `$barrier`
+    // type tag (if any) describes the MAPPED edge, not this classification —
+    // including it here would corrupt both the ambiguity check (an empty
+    // mapped `indexes` looks "different" from a real plain `indexes` list)
+    // and `any_barrier` (a barrier-typed mapped arg would wrongly force
+    // broadcast semantics onto an unrelated plain arg). The mapped arg's own
+    // contribution is handled entirely by `union_instance_maps` instead.
+    let plain_args_on_pred: Vec<&Arg> = node
         .args
         .iter()
-        .filter(|a| a.predecessor.as_ref().is_some_and(|p| p.id == pred_id))
+        .filter(|a| {
+            a.predecessor
+                .as_ref()
+                .is_some_and(|p| p.id == pred_id && p.instance_map.is_none())
+        })
         .collect();
+
+    // Ambiguous multi-arg check, scoped to the plain args only (mirrors
+    // `pred_is_ambiguous_multi_arg`, which can't be reused directly here
+    // since it inspects every arg on `pred_id`, including any mapped one).
+    if plain_args_on_pred.len() >= 2 && !plain_args_on_pred.iter().any(|a| a.is_barrier()) {
+        let first = plain_args_on_pred[0].predecessor.as_ref().unwrap();
+        let ambiguous = plain_args_on_pred[1..].iter().any(|a| {
+            let p = a.predecessor.as_ref().unwrap();
+            p.indexes != first.indexes || p.group_by != first.group_by
+        });
+        if ambiguous {
+            // Two or more genuinely different, barrier-free plain args on the
+            // same predecessor (e.g. `$res "0"` and `$res "-1"`). Reconciling
+            // this with `runtime::init::build_predecessor_tables`'s filter
+            // computation for a mapped successor (which must force
+            // `succ_factor=1` semantics — see below) would require threading
+            // that override through the "genuinely differing args" branch
+            // too; reject instead and keep this release's scope to the
+            // well-defined single literal-barrier / single-$dep / exact-1:1
+            // shapes.
+            return Err(format!(
+                "predecessor '{}' has two or more differing dependency arguments on node \
+                 '{}' (ambiguous multi-arg) — not supported coexisting with an instance_map \
+                 predecessor on the same node.",
+                graph.nodes[pred_id as usize].name, node.name
+            ));
+        }
+    }
+
+    let args_on_pred = plain_args_on_pred;
     let any_barrier = args_on_pred.iter().any(|a| a.is_barrier());
     let any_group_by = args_on_pred
         .iter()
@@ -202,7 +269,21 @@ pub(crate) fn classify_coexisting_predecessor(
         ));
     }
 
-    let union_indexes = graph.union_pred_indexes(node, pred_id);
+    // Union restricted to the plain args' own declared indexes. A mapped
+    // arg's `indexes` is always empty (see above), so this agrees with
+    // `graph.union_pred_indexes(node, pred_id)` whenever a mapped arg is
+    // also present — computed explicitly here (rather than reusing that
+    // helper) to make the scoping invariant self-contained and independent
+    // of that assumption holding elsewhere.
+    let mut union_indexes: Vec<isize> = Vec::new();
+    for arg in &args_on_pred {
+        let idxs = &arg.predecessor.as_ref().unwrap().indexes;
+        for &i in idxs {
+            if !union_indexes.contains(&i) {
+                union_indexes.push(i);
+            }
+        }
+    }
     let mut sorted = union_indexes.clone();
     sorted.sort_unstable();
 
@@ -215,10 +296,7 @@ pub(crate) fn classify_coexisting_predecessor(
         && sorted.windows(2).all(|w| w[1] == w[0] + 1);
 
     if single_1to1 || contiguous_range_1to1 {
-        return Ok(UniformContribution {
-            kind: UniformKind::OneToOne,
-            amount: 1,
-        });
+        return Ok(CoexistingShape::OneToOne { offset: sorted[0] });
     }
 
     // Broadcast-eligible shapes: a literal barrier (any filter), a factor-1
@@ -234,11 +312,16 @@ pub(crate) fn classify_coexisting_predecessor(
     };
     let filter_applies = union_pred.index_filter(pred_factor, 1).is_some();
     if any_barrier || pred_factor == 1 || filter_applies {
-        let contributing = union_pred.contributing_instances(pred_factor, 1);
-        return Ok(UniformContribution {
-            kind: UniformKind::Broadcast,
-            amount: contributing as u32,
-        });
+        let members: Vec<usize> = if filter_applies || pred_factor == 1 {
+            // Literal absolute indexes (or the sole index of a factor-1
+            // producer) — every instance's forward set is exactly this list.
+            sorted.iter().map(|&i| i as usize).collect()
+        } else {
+            // An unfiltered literal barrier: every one of the predecessor's
+            // `pred_factor` instances contributes, to every consumer instance.
+            (0..pred_factor).collect()
+        };
+        return Ok(CoexistingShape::Broadcast { members });
     }
 
     Err(format!(
@@ -248,6 +331,52 @@ pub(crate) fn classify_coexisting_predecessor(
          filtered range (e.g. `.out(a, b)`), or a 1:1 (same-factor, single-offset) edge instead.",
         node.name, graph.nodes[pred_id as usize].name, pred_factor, succ_factor
     ))
+}
+
+/// Classify a non-mapped predecessor coexisting, on `node`, with at least one
+/// `instance_map` predecessor, on a DIFFERENT predecessor id. Returns the
+/// uniform per-instance contribution, or `Err(reason)` — see
+/// `coexisting_predecessor_shape`.
+pub(crate) fn classify_coexisting_predecessor(
+    graph: &Graph,
+    node: &Node,
+    pred_id: IdType,
+) -> Result<UniformContribution, String> {
+    match coexisting_predecessor_shape(graph, node, pred_id)? {
+        CoexistingShape::OneToOne { .. } => Ok(UniformContribution {
+            kind: UniformKind::OneToOne,
+            amount: 1,
+        }),
+        CoexistingShape::Broadcast { members } => Ok(UniformContribution {
+            kind: UniformKind::Broadcast,
+            amount: members.len() as u32,
+        }),
+    }
+}
+
+/// Per-consumer-instance absolute producer index list contributed by every
+/// non-mapped argument `node` has on `pred_id`, for `pred_id` SAME as a
+/// mapped predecessor (Item 2: mixed mapped + plain args on one
+/// predecessor). `result[j]` is unioned directly into that predecessor's
+/// mapped forward map (see `validate_and_build`) before routing is built —
+/// so a producer instance reachable through both the mapped argument and
+/// this plain argument is still counted, and decremented, exactly once.
+pub(crate) fn coexisting_predecessor_per_instance(
+    graph: &Graph,
+    node: &Node,
+    pred_id: IdType,
+) -> Result<Vec<Vec<usize>>, String> {
+    let pred_factor = graph.nodes[pred_id as usize].factor;
+    let succ_factor = node.factor;
+    let shape = coexisting_predecessor_shape(graph, node, pred_id)?;
+    Ok(match shape {
+        CoexistingShape::OneToOne { offset } => (0..succ_factor)
+            .map(|j| vec![find_pred_index(j, offset, pred_factor)])
+            .collect(),
+        CoexistingShape::Broadcast { members } => {
+            (0..succ_factor).map(|_| members.clone()).collect()
+        }
+    })
 }
 
 /// Union, across every `instance_map` argument `node` has on `pred_id`, of the
@@ -317,19 +446,6 @@ pub fn validate_and_build(graph: &Graph) -> Result<InstanceMapTables, String> {
 
         if mapped_preds.is_empty() {
             continue;
-        }
-
-        // Reject mixing mapped and non-mapped args on the SAME predecessor.
-        for &pid in &mapped_preds {
-            if plain_preds.contains(&pid) {
-                return Err(format!(
-                    "node '{}': predecessor '{}' is referenced via instance_map in one \
-                     argument and via positional indexes/group_by in another — use \
-                     instance_map consistently for every argument that reads this \
-                     predecessor.",
-                    node.name, graph.nodes[pid as usize].name
-                ));
-            }
         }
 
         // $res + instance_map is rejected (see module docs): a mapped edge
@@ -408,7 +524,36 @@ pub fn validate_and_build(graph: &Graph) -> Result<InstanceMapTables, String> {
                 }
             }
 
-            let union = union_instance_maps(node, pred_id, factor);
+            let mut union = union_instance_maps(node, pred_id, factor);
+
+            // Item 2: mixed mapped + plain args on the SAME predecessor. A
+            // plain (non-instance_map) argument on this SAME `pred_id` — a
+            // 1:1/contiguous-range offset or a broadcast (literal barrier,
+            // $dep, or factor-1 producer) — contributes its own per-instance
+            // absolute index set, unioned directly into the mapped forward
+            // map. This mirrors `union_instance_maps`'s own union convention
+            // extended to a derived (rather than declared) list: a producer
+            // instance reachable through both the mapped arg and this plain
+            // arg is still counted, and decremented, exactly once. An
+            // unsupported shape (ordinal fallback, or `group_by`) is
+            // rejected here with the same error `classify_coexisting_predecessor`
+            // would give for a different predecessor.
+            if plain_preds.contains(&pred_id) {
+                let plain_per_instance = coexisting_predecessor_per_instance(graph, node, pred_id)
+                    .map_err(|e| format!("node '{}': {}", node.name, e))?;
+                for (j, extra) in plain_per_instance.into_iter().enumerate() {
+                    if j >= union.len() {
+                        continue;
+                    }
+                    for idx in extra {
+                        if !union[j].contains(&idx) {
+                            union[j].push(idx);
+                        }
+                    }
+                    union[j].sort_unstable();
+                }
+            }
+
             for (j, list) in union.iter().enumerate() {
                 thresholds[j] += list.len() as u32;
             }
@@ -416,8 +561,14 @@ pub fn validate_and_build(graph: &Graph) -> Result<InstanceMapTables, String> {
             pred_instance_map[succ_id][pred_id as usize] = Some(Arc::new(routing));
         }
 
-        // Non-mapped, coexisting predecessors: uniform contribution per instance.
+        // Non-mapped, coexisting predecessors on a DIFFERENT predecessor id:
+        // uniform contribution per instance. A plain predecessor that is
+        // ALSO mapped on this node was already folded into the mapped loop
+        // above (Item 2) — skip it here so it is never counted twice.
         for &pred_id in &plain_preds {
+            if mapped_preds.contains(&pred_id) {
+                continue;
+            }
             let contribution = classify_coexisting_predecessor(graph, node, pred_id)
                 .map_err(|e| format!("node '{}': {}", node.name, e))?;
             for t in thresholds.iter_mut() {
@@ -504,6 +655,22 @@ mod tests {
     fn res_arg(pred_id: IdType, indexes: Vec<isize>) -> Arg {
         Arg {
             type_: CmTypes::Res(pred_id as usize),
+            predecessor: Some(Predecessor {
+                id: pred_id,
+                indexes,
+                group_by: None,
+                instance_map: None,
+            }),
+            init_condition: None,
+        }
+    }
+
+    /// A plain (non-mapped) `$dep` arg — used for Item 2 tests (mixed mapped
+    /// + plain args on the SAME predecessor), where the plain arg's shape is
+    /// gating-only and type-independent of the mapped arg it coexists with.
+    fn plain_dep_arg(pred_id: IdType, indexes: Vec<isize>) -> Arg {
+        Arg {
+            type_: CmTypes::Dep(pred_id as usize),
             predecessor: Some(Predecessor {
                 id: pred_id,
                 indexes,
@@ -729,7 +896,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_mixing_mapped_and_plain_on_same_pred() {
+    fn mixed_mapped_and_plain_broadcast_on_same_pred_is_unioned() {
+        // Item 2: a mapped $dep (instance 0 -> producers {0,1}) PLUS a plain
+        // literal $barrier on the SAME predecessor (producers {2,3}, filtered
+        // broadcast since succ_factor forces absolute-subset semantics).
+        // Every producer instance 0..4 must end up routed to consumer 0
+        // exactly once, union {0,1} u {2,3} = {0,1,2,3} -> threshold 4.
         let mut g = Graph::new();
         g.add_node(make_node(0, 4, vec![]));
         g.add_node(make_node(
@@ -737,8 +909,84 @@ mod tests {
             1,
             vec![dep_arg(0, vec![vec![0, 1]]), barrier_arg(0, vec![2, 3])],
         ));
+        let tables = validate_and_build(&g).unwrap();
+        assert_eq!(
+            *tables.node_thresholds[1].as_ref().unwrap().as_ref(),
+            vec![4]
+        );
+        let routing = tables.pred_instance_map[1][0].as_ref().unwrap();
+        assert_eq!(
+            routing.producer_to_consumers,
+            vec![vec![0], vec![0], vec![0], vec![0]]
+        );
+    }
+
+    #[test]
+    fn mixed_mapped_and_plain_1to1_on_same_pred_is_unioned_per_instance() {
+        // A mapped $dep with an irregular per-instance map on pred 0 (factor
+        // 4), PLUS a plain 1:1 same-factor $res on the SAME predecessor
+        // (succ[j] reads pred[j]). Each consumer instance's threshold is the
+        // union of its declared map entry and its own 1:1 cell.
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 4, vec![]));
+        g.add_node(make_node(
+            1,
+            4,
+            vec![
+                dep_arg(0, vec![vec![1], vec![], vec![0], vec![3]]),
+                res_arg(0, vec![0]),
+            ],
+        ));
+        let tables = validate_and_build(&g).unwrap();
+        let thresholds = tables.node_thresholds[1].as_ref().unwrap();
+        // j=0: {1} u {0} = {0,1} -> 2.  j=1: {} u {1} = {1} -> 1.
+        // j=2: {0} u {2} = {0,2} -> 2.  j=3: {3} u {3} = {3} -> 1.
+        assert_eq!(thresholds.as_slice(), &[2, 1, 2, 1]);
+        let routing = tables.pred_instance_map[1][0].as_ref().unwrap();
+        // Per-instance forward maps after the union: j0={0,1}, j1={1},
+        // j2={0,2}, j3={3}. Inverted: producer 0 -> {0,2}; producer 1 ->
+        // {0,1}; producer 2 -> {2}; producer 3 -> {3}.
+        assert_eq!(routing.producer_to_consumers[0], vec![0, 2]);
+        assert_eq!(routing.producer_to_consumers[1], vec![0, 1]);
+        assert_eq!(routing.producer_to_consumers[2], vec![2]);
+        assert_eq!(routing.producer_to_consumers[3], vec![3]);
+    }
+
+    #[test]
+    fn mixed_same_pred_ordinal_fallback_shape_is_rejected() {
+        // The plain arg's shape (no barrier, no 1:1, no filtered range) has no
+        // uniform/positional per-instance interpretation even when coexisting
+        // with a mapped arg on the SAME predecessor.
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 4, vec![]));
+        g.add_node(make_node(
+            1,
+            1,
+            vec![
+                dep_arg(0, vec![vec![0, 1, 2, 3]]),
+                res_arg(0, vec![0, 2]), // 2 of 4, non-contiguous-with-hole -> no filter
+            ],
+        ));
         let err = validate_and_build(&g).unwrap_err();
-        assert!(err.contains("consistently"), "{err}");
+        assert!(
+            err.contains("no uniform per-instance interpretation"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn mixed_same_pred_group_by_is_rejected() {
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 4, vec![]));
+        let mut grouped_res = res_arg(0, vec![0, 1, 2, 3]);
+        grouped_res.predecessor.as_mut().unwrap().group_by = Some(2);
+        g.add_node(make_node(
+            1,
+            1,
+            vec![dep_arg(0, vec![vec![0, 1, 2, 3]]), grouped_res],
+        ));
+        let err = validate_and_build(&g).unwrap_err();
+        assert!(err.contains("group_by"), "{err}");
     }
 
     #[test]
@@ -926,6 +1174,213 @@ mod tests {
                         forward[j as usize]
                     );
                 }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Item 2 property cross-check: a plain argument coexisting on the SAME
+    // predecessor as the mapped one. The expected per-instance forward map is
+    // the union of the random mapped map with the plain arg's OWN derived
+    // per-instance list (computed independently, in the test, from the plain
+    // shape — not by calling production code) — exactly the invariant
+    // `validate_and_build` is supposed to establish.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn property_random_mixed_same_pred_1to1_threshold_and_routing_agree() {
+        // 1:1 shape requires succ_factor == pred_factor (the exact-offset
+        // convention); offset `k` is a random relative index into the SAME
+        // factor.
+        let mut rng = Xorshift64(0xD1B54A32D192ED03);
+        for trial in 0..200u32 {
+            let factor = 1 + rng.range(10);
+            let offset = rng.range(factor) as isize;
+
+            let forward: Vec<Vec<usize>> = (0..factor)
+                .map(|_| {
+                    let mut seen = HashSet::new();
+                    let picks = rng.range(factor + 1);
+                    for _ in 0..picks {
+                        seen.insert(rng.range(factor));
+                    }
+                    let mut v: Vec<usize> = seen.into_iter().collect();
+                    v.sort_unstable();
+                    v
+                })
+                .collect();
+
+            let mut g = Graph::new();
+            g.add_node(make_node(0, factor, vec![]));
+            g.add_node(make_node(
+                1,
+                factor,
+                vec![dep_arg(0, forward.clone()), plain_dep_arg(0, vec![offset])],
+            ));
+            let tables = validate_and_build(&g).unwrap_or_else(|e| {
+                panic!(
+                    "trial {trial}: unexpected rejection (factor={factor}, offset={offset}): {e}"
+                )
+            });
+            let thresholds = tables.node_thresholds[1].as_ref().unwrap();
+            let routing = tables.pred_instance_map[1][0].as_ref().unwrap();
+
+            // Expected union: forward[j] u {(j + offset) mod factor} —
+            // computed independently of `coexisting_predecessor_per_instance`.
+            let expected: Vec<Vec<usize>> = (0..factor)
+                .map(|j| {
+                    let one_to_one = ((j as isize + offset).rem_euclid(factor as isize)) as usize;
+                    let mut v = forward[j].clone();
+                    if !v.contains(&one_to_one) {
+                        v.push(one_to_one);
+                    }
+                    v.sort_unstable();
+                    v
+                })
+                .collect();
+
+            for (j, exp) in expected.iter().enumerate() {
+                assert_eq!(
+                    thresholds[j] as usize,
+                    exp.len(),
+                    "trial {trial} (factor={factor}, offset={offset}): threshold[{j}] mismatch, \
+                     forward={forward:?}, expected={expected:?}"
+                );
+            }
+
+            let mut brute_force_received: Vec<usize> = vec![0; factor];
+            for i in 0..factor {
+                for &j in &routing.producer_to_consumers[i] {
+                    brute_force_received[j as usize] += 1;
+                }
+            }
+            for (j, exp) in expected.iter().enumerate() {
+                assert_eq!(
+                    brute_force_received[j],
+                    exp.len(),
+                    "trial {trial} (factor={factor}, offset={offset}): consumer {j} received \
+                     {} decrements via the reverse table, expected {} — expected={expected:?}",
+                    brute_force_received[j],
+                    exp.len()
+                );
+            }
+            for i in 0..factor {
+                for &j in &routing.producer_to_consumers[i] {
+                    assert!(
+                        expected[j as usize].contains(&i),
+                        "trial {trial} (factor={factor}, offset={offset}): reverse table lists \
+                         producer {i} for consumer {j}, but expected[{j}] = {:?} does not \
+                         contain it",
+                        expected[j as usize]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn property_random_mixed_same_pred_broadcast_threshold_and_routing_agree() {
+        // Broadcast shape: a plain, filtered, CONTIGUOUS absolute index
+        // range on the same predecessor as the mapped arg — every consumer
+        // instance's forward map gains the SAME extra members.
+        let mut rng = Xorshift64(0x27D4EB2F165667C5);
+        for trial in 0..200u32 {
+            let pred_factor = 2 + rng.range(10); // >= 2 so a proper subset exists
+            let succ_factor = 1 + rng.range(10);
+
+            let forward: Vec<Vec<usize>> = (0..succ_factor)
+                .map(|_| {
+                    let mut seen = HashSet::new();
+                    let picks = rng.range(pred_factor + 1);
+                    for _ in 0..picks {
+                        seen.insert(rng.range(pred_factor));
+                    }
+                    let mut v: Vec<usize> = seen.into_iter().collect();
+                    v.sort_unstable();
+                    v
+                })
+                .collect();
+
+            // A proper, contiguous subset [lo, lo+len) of the predecessor's
+            // factor — guaranteed to qualify as a filtered broadcast (see
+            // `coexisting_predecessor_shape`). A contiguous range whose
+            // length happens to equal `succ_factor` is a GENUINELY different,
+            // correctly-handled shape (the `contiguous_range_1to1` 1:1
+            // interpretation takes priority — see
+            // `property_random_mixed_same_pred_1to1_threshold_and_routing_agree`
+            // for that case) — skip trials that land on it so this test
+            // exercises only the unambiguous broadcast shape.
+            let len = 1 + rng.range(pred_factor - 1);
+            // A single-index member set on a same-factor predecessor is ALSO
+            // the (prioritized) `single_1to1` shape — skip that collision
+            // too, for the same reason as the `len == succ_factor` skip
+            // above.
+            if len == succ_factor || (len == 1 && pred_factor == succ_factor) {
+                continue;
+            }
+            let lo = rng.range(pred_factor - len + 1);
+            let members: Vec<isize> = (lo..lo + len).map(|i| i as isize).collect();
+
+            let mut g = Graph::new();
+            g.add_node(make_node(0, pred_factor, vec![]));
+            g.add_node(make_node(
+                1,
+                succ_factor,
+                vec![
+                    dep_arg(0, forward.clone()),
+                    plain_dep_arg(0, members.clone()),
+                ],
+            ));
+            let tables = validate_and_build(&g).unwrap_or_else(|e| {
+                panic!(
+                    "trial {trial}: unexpected rejection (pred_factor={pred_factor}, \
+                     succ_factor={succ_factor}, members={members:?}): {e}"
+                )
+            });
+            let thresholds = tables.node_thresholds[1].as_ref().unwrap();
+            let routing = tables.pred_instance_map[1][0].as_ref().unwrap();
+
+            let members_usize: Vec<usize> = members.iter().map(|&i| i as usize).collect();
+            let expected: Vec<Vec<usize>> = forward
+                .iter()
+                .map(|list| {
+                    let mut v = list.clone();
+                    for &m in &members_usize {
+                        if !v.contains(&m) {
+                            v.push(m);
+                        }
+                    }
+                    v.sort_unstable();
+                    v
+                })
+                .collect();
+
+            for (j, exp) in expected.iter().enumerate() {
+                assert_eq!(
+                    thresholds[j] as usize,
+                    exp.len(),
+                    "trial {trial} (pred_factor={pred_factor}, succ_factor={succ_factor}, \
+                     members={members:?}): threshold[{j}] mismatch, forward={forward:?}, \
+                     expected={expected:?}"
+                );
+            }
+
+            let mut brute_force_received: Vec<usize> = vec![0; succ_factor];
+            for i in 0..pred_factor {
+                for &j in &routing.producer_to_consumers[i] {
+                    brute_force_received[j as usize] += 1;
+                }
+            }
+            for (j, exp) in expected.iter().enumerate() {
+                assert_eq!(
+                    brute_force_received[j],
+                    exp.len(),
+                    "trial {trial} (pred_factor={pred_factor}, succ_factor={succ_factor}): \
+                     consumer {j} received {} decrements via the reverse table, expected {} — \
+                     expected={expected:?}",
+                    brute_force_received[j],
+                    exp.len()
+                );
             }
         }
     }

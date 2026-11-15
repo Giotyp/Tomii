@@ -659,6 +659,259 @@ fn all_zero_threshold_many_slots_many_frames() {
 }
 
 // ---------------------------------------------------------------------------
+// (e) Item 2: mixed mapped + plain args on the SAME predecessor. `level`
+// reads `leaves` through BOTH a mapped `$barrier` (an irregular, QEC-tree-
+// style grouping: level[0] fuses leaves {0,1,2}, level[1] fuses leaves
+// {3,4}) AND a plain `$dep` on the SAME `leaves` predecessor — leaf 5 is a
+// "halo"/boundary leaf every level instance also needs (filtered broadcast),
+// exactly the shape `bench/qec-bench`'s real `frame_tag` broadcast node was
+// invented to work around before this item landed. `root` barrier-waits the
+// full `level` range, so completion is only possible if every leaf AND every
+// level instance ran exactly once (a wrong union, a double-routed decrement,
+// or the predecessor leaking into the ordinary N×N tables would each hang or
+// double-dispatch).
+// ---------------------------------------------------------------------------
+
+fn mixed_same_pred_broadcast_json() -> &'static str {
+    r#"
+    {
+        "nodes": [
+            { "name": "leaves", "factor": 6, "function": "noop", "args": [] },
+            {
+                "name": "level",
+                "factor": 2,
+                "function": "noop",
+                "args": [
+                    {
+                        "type": "$barrier",
+                        "predecessor": { "name": "leaves", "instance_map": [[0, 1, 2], [3, 4]] }
+                    },
+                    { "type": "$dep", "predecessor": { "name": "leaves", "indexes": "5" } }
+                ]
+            },
+            {
+                "name": "root",
+                "factor": 1,
+                "function": "noop",
+                "args": [
+                    {
+                        "type": "$barrier",
+                        "predecessor": { "name": "level", "instance_map": [[0, 1]] }
+                    }
+                ]
+            }
+        ]
+    }
+    "#
+}
+
+/// Same QEC-like tree, but the plain coexisting arg is a 1:1 same-factor
+/// `$res` edge instead of a broadcast `$dep` — `level2` reads a VALUE from
+/// `leaves2` at its own offset (`level2[j]` reads `leaves2[j]`) while ALSO
+/// barrier-waiting an irregular mapped subset. Exercises value delivery
+/// (unaffected by routing this predecessor through `instance_map`'s
+/// per-instance mechanism — see `runtime::init::build_predecessor_tables`)
+/// alongside the mixed gating.
+fn mixed_same_pred_1to1_json() -> &'static str {
+    r#"
+    {
+        "nodes": [
+            { "name": "leaves2", "factor": 4, "function": "noop", "args": [] },
+            {
+                "name": "level2",
+                "factor": 4,
+                "function": "noop",
+                "args": [
+                    {
+                        "type": "$barrier",
+                        "predecessor": { "name": "leaves2", "instance_map": [[1], [], [0], [3]] }
+                    },
+                    { "type": "$res", "predecessor": { "name": "leaves2", "indexes": "0" } }
+                ]
+            },
+            {
+                "name": "root2",
+                "factor": 1,
+                "function": "noop",
+                "args": [
+                    {
+                        "type": "$barrier",
+                        "predecessor": { "name": "level2", "instance_map": [[0, 1, 2, 3]] }
+                    }
+                ]
+            }
+        ]
+    }
+    "#
+}
+
+#[test]
+fn mixed_same_pred_broadcast_default_scheduler_w1() {
+    assert_runs_to_completion(
+        mixed_same_pred_broadcast_json(),
+        SchedulerType::WorkStealing,
+        1,
+        4,
+        30,
+        Duration::from_secs(5),
+    );
+}
+
+#[test]
+fn mixed_same_pred_broadcast_default_scheduler_w_gt_1() {
+    assert_runs_to_completion(
+        mixed_same_pred_broadcast_json(),
+        SchedulerType::WorkStealing,
+        4,
+        4,
+        30,
+        Duration::from_secs(5),
+    );
+}
+
+#[test]
+fn mixed_same_pred_broadcast_custom_scheduler_w1() {
+    assert_runs_to_completion(
+        mixed_same_pred_broadcast_json(),
+        SchedulerType::Custom,
+        1,
+        4,
+        30,
+        Duration::from_secs(5),
+    );
+}
+
+#[test]
+fn mixed_same_pred_broadcast_custom_scheduler_w_gt_1() {
+    assert_runs_to_completion(
+        mixed_same_pred_broadcast_json(),
+        SchedulerType::Custom,
+        4,
+        4,
+        30,
+        Duration::from_secs(5),
+    );
+}
+
+#[test]
+fn mixed_same_pred_broadcast_many_slots_many_frames() {
+    assert_runs_to_completion(
+        mixed_same_pred_broadcast_json(),
+        SchedulerType::WorkStealing,
+        1,
+        8,
+        100,
+        Duration::from_secs(10),
+    );
+    assert_runs_to_completion(
+        mixed_same_pred_broadcast_json(),
+        SchedulerType::WorkStealing,
+        4,
+        8,
+        100,
+        Duration::from_secs(10),
+    );
+}
+
+#[test]
+fn mixed_same_pred_broadcast_inline_continuation_on_and_off() {
+    for inline_continuation in [false, true] {
+        assert_runs_to_completion_cfg(
+            mixed_same_pred_broadcast_json(),
+            SchedulerType::WorkStealing,
+            4,
+            4,
+            30,
+            Duration::from_secs(5),
+            inline_continuation,
+        );
+    }
+}
+
+#[test]
+fn mixed_same_pred_1to1_default_scheduler_w1() {
+    assert_runs_to_completion(
+        mixed_same_pred_1to1_json(),
+        SchedulerType::WorkStealing,
+        1,
+        4,
+        30,
+        Duration::from_secs(5),
+    );
+}
+
+#[test]
+fn mixed_same_pred_1to1_default_scheduler_w_gt_1() {
+    assert_runs_to_completion(
+        mixed_same_pred_1to1_json(),
+        SchedulerType::WorkStealing,
+        4,
+        4,
+        30,
+        Duration::from_secs(5),
+    );
+}
+
+#[test]
+fn mixed_same_pred_1to1_custom_scheduler_w1() {
+    assert_runs_to_completion(
+        mixed_same_pred_1to1_json(),
+        SchedulerType::Custom,
+        1,
+        4,
+        30,
+        Duration::from_secs(5),
+    );
+}
+
+#[test]
+fn mixed_same_pred_1to1_custom_scheduler_w_gt_1() {
+    assert_runs_to_completion(
+        mixed_same_pred_1to1_json(),
+        SchedulerType::Custom,
+        4,
+        4,
+        30,
+        Duration::from_secs(5),
+    );
+}
+
+#[test]
+fn mixed_same_pred_1to1_many_slots_many_frames() {
+    assert_runs_to_completion(
+        mixed_same_pred_1to1_json(),
+        SchedulerType::WorkStealing,
+        1,
+        8,
+        100,
+        Duration::from_secs(10),
+    );
+    assert_runs_to_completion(
+        mixed_same_pred_1to1_json(),
+        SchedulerType::WorkStealing,
+        4,
+        8,
+        100,
+        Duration::from_secs(10),
+    );
+}
+
+#[test]
+fn mixed_same_pred_1to1_inline_continuation_on_and_off() {
+    for inline_continuation in [false, true] {
+        assert_runs_to_completion_cfg(
+            mixed_same_pred_1to1_json(),
+            SchedulerType::WorkStealing,
+            4,
+            4,
+            30,
+            Duration::from_secs(5),
+            inline_continuation,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Validation errors surface through `from_json_str`.
 // ---------------------------------------------------------------------------
 

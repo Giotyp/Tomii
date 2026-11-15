@@ -226,6 +226,70 @@ def test_irregular_tree_graph_serializes_cleanly() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Item 2: mixed mapped + plain args on the SAME predecessor. The Python
+# builder places no restriction here either (each `.wait/.dep/.out(...)` call
+# is serialized independently — see `_serialize._arg`); the two args just
+# happen to name the same predecessor node. The Rust runtime's graph
+# validation (`tomii_core::instance_map::validate_and_build`) is what unions
+# the plain arg's per-instance contribution into the mapped forward map — see
+# tomii-core/tests/instance_map.rs's `mixed_same_pred_*` tests for the
+# end-to-end runtime behaviour this round-trips into.
+# --------------------------------------------------------------------------- #
+
+
+def test_mixed_mapped_and_plain_dep_on_same_predecessor_serializes_cleanly() -> None:
+    """The exact QEC-like shape: `level` reads `leaves` through a mapped
+    `$barrier` (irregular groups) AND a plain `$dep` (a single "halo" leaf
+    every level instance also needs)."""
+    app = tm.Graph()
+    leaves = app.node("leaves", func="noop", factor=6)
+    level = app.node(
+        "level",
+        func="noop",
+        factor=2,
+        args=[
+            leaves.wait(map=[[0, 1, 2], [3, 4]]),
+            leaves.dep(5),
+        ],
+    )
+    emitted = serialize_node(level)
+    mapped_pred = emitted["args"][0]["predecessor"]
+    plain_pred = emitted["args"][1]["predecessor"]
+    assert emitted["args"][0]["type"] == "$barrier"
+    assert mapped_pred["name"] == "leaves"
+    assert mapped_pred["instance_map"] == [[0, 1, 2], [3, 4]]
+    assert emitted["args"][1]["type"] == "$dep"
+    assert plain_pred["name"] == "leaves"
+    assert plain_pred["indexes"] == "5"
+    assert "instance_map" not in plain_pred
+
+
+def test_mixed_mapped_and_plain_res_on_same_predecessor_serializes_cleanly() -> None:
+    """A mapped `$barrier` (irregular per-instance gating) coexisting with a
+    plain 1:1 `$res` on the SAME predecessor — the plain arg still delivers a
+    VALUE (unaffected by routing this predecessor through `instance_map`'s
+    per-instance mechanism), while also contributing to the gating."""
+    app = tm.Graph()
+    leaves = app.node("leaves", func="noop", factor=4)
+    level = app.node(
+        "level",
+        func="noop",
+        factor=4,
+        args=[
+            leaves.wait(map=[[1], [], [0], [3]]),
+            leaves.out(0),
+        ],
+    )
+    emitted = serialize_node(level)
+    assert emitted["args"][0]["type"] == "$barrier"
+    assert emitted["args"][0]["predecessor"]["instance_map"] == [[1], [], [0], [3]]
+    assert emitted["args"][1]["type"] == "$res"
+    assert emitted["args"][1]["predecessor"]["indexes"] == "0"
+    graph = serialize_graph(app)
+    assert {n["name"] for n in graph["nodes"]} == {"leaves", "level"}
+
+
+# --------------------------------------------------------------------------- #
 # Zero-threshold instances: an empty map entry (no other predecessor
 # contributing) gives that consumer instance a total dependency threshold of
 # 0. The Python builder places no restriction on this — it is accepted at the

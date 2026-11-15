@@ -218,12 +218,21 @@ Rules, enforced at load time:
   ordinary nonzero-threshold instances) or to every instance.
 - A node with `group_size` set cannot have an `instance_map` predecessor.
 - A node with an `instance_map` predecessor may still have an ordinary
-  (non-mapped) predecessor on a DIFFERENT producer, but only in a shape with
-  a uniform per-instance contribution: a `$barrier`/`$dep` (optionally
-  filtered to a range), a factor-1 producer (broadcasts to every instance),
-  or an exact 1:1 same-factor single-offset edge. Any other shape on a
-  coexisting predecessor is rejected with a load-time error naming the
-  offending predecessor.
+  (non-mapped) argument on the SAME predecessor, or on a different one, but
+  only in a shape with a uniform or exactly positional per-instance
+  contribution: a `$barrier`/`$dep` (optionally filtered to a range), a
+  factor-1 producer (broadcasts to every instance), or an exact 1:1
+  same-factor single-offset/contiguous-range edge. When the plain argument
+  shares the SAME predecessor as a mapped one, its per-instance index set is
+  unioned directly into that predecessor's mapped forward map (a producer
+  instance reachable through both is still counted, and decremented, exactly
+  once) — this is how, for example, an irregular fusion-tree node can
+  `$barrier`-wait an explicit, irregular subset of a predecessor's instances
+  AND ALSO read a VALUE from it through an ordinary 1:1 `$res` edge on that
+  same predecessor. `group_by` on the plain argument, or any other shape (no
+  uniform/positional interpretation — the "ordinal fallback"), is rejected
+  with a load-time error naming the offending predecessor, whether it
+  coexists on the same or a different producer.
 
 The [Python builder guide](/docs/guide/graphs/nodes-and-vars#explicit-per-instance-dependency-maps)
 covers the `map=` parameter and the `tomii.halo`/`tomii.stride` helpers that

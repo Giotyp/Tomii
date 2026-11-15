@@ -142,6 +142,24 @@ Rules:
   dispatched exactly once per frame at frame admission, like a root/initial
   node — not rejected, and not left waiting on a decrement that would never
   arrive.
+- A node may read the SAME predecessor through a mapped arg (`.wait/.dep(map=...)`)
+  AND a plain arg (`.wait()`/`.dep()`/`.out()`) at once, as long as the plain
+  arg's shape is a 1:1 same-factor offset, a contiguous range, or a broadcast
+  (literal barrier, `$dep`, or factor-1 producer) — e.g. an irregular fusion
+  node that `$barrier`-waits an explicit, irregular subset of a predecessor's
+  instances AND reads a value from it through an ordinary 1:1 `.out()` edge:
+
+  ```python
+  # `level` barrier-waits an irregular grouping of `leaves` AND reads a
+  # VALUE from the same predecessor through a plain 1:1 edge.
+  level = app.node("level", func="combine", factor=n, args=[
+      leaves.wait(map=[[1], [0, 2], ...]),
+      leaves.out(),  # level[j] reads leaves[j]
+  ])
+  ```
+
+  `group_by` on the plain arg, or any other (non-uniform, non-positional)
+  shape, is rejected — same as a coexisting predecessor on a different node.
 
 See the [JSON graph format reference](/docs/reference/json-graph-format) for
 the full `instance_map` grammar and validation rules.

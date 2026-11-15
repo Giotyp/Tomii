@@ -315,6 +315,31 @@ pub(crate) fn build_predecessor_tables(
                 .filter(|a| a.predecessor.as_ref().is_some_and(|p| p.id == pred_id_tag))
                 .collect();
 
+            // A predecessor with at least one `instance_map` argument on this
+            // node is routed ENTIRELY through `crate::instance_map`'s
+            // per-instance dependency-counter mechanism, whether or not a
+            // plain (non-mapped) argument on the SAME predecessor coexists
+            // (Item 2: mixed mapped + plain args on one predecessor — the
+            // plain argument's per-instance absolute index set is already
+            // folded into the mapped forward map by
+            // `instance_map::validate_and_build`). Leave `filter`/`group_by`/
+            // `succ_1to1_offset` at their default `None` for this (succ,
+            // pred) pair so `SuccessorArena`'s `mapped` field (built from
+            // `pred_instance_map`) is the ONLY routing data this edge
+            // carries — otherwise a stale 1:1/broadcast table entry would sit
+            // alongside the mapped routing table (harmless today, since
+            // `decrement_and_collect_ready_mapped` checks `mapped_routing()`
+            // first and returns before ever consulting it, but leaving it
+            // populated would be a latent double-counting trap for any
+            // future code path that consults these tables directly).
+            if args_on_pred.iter().any(|a| {
+                a.predecessor
+                    .as_ref()
+                    .is_some_and(|p| p.instance_map.is_some())
+            }) {
+                continue;
+            }
+
             // Mirrors `Graph::barrier_group_by_for_dependency` (the counting side,
             // in graph.rs): a grouped barrier only guarantees its own narrow
             // group_by-wide slice of the predecessor is done before firing a

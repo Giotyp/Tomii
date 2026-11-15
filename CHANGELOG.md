@@ -19,7 +19,11 @@
   no other predecessor contributing) has a total dependency threshold of 0;
   it is dispatched exactly once per frame at frame admission, like a
   root/initial node, rather than through the dependency-counter path (which
-  nothing would ever decrement it through). See the
+  nothing would ever decrement it through). A node may read the SAME
+  predecessor through both a mapped argument and a plain one (1:1 offset,
+  contiguous range, or broadcast) — the plain argument's per-instance index
+  set is unioned into the mapped forward map, so a producer instance reached
+  through either is counted, and decremented, exactly once. See the
   [JSON graph format reference](website/docs/reference/json-graph-format.md)
   and [nodes-and-vars guide](website/docs/guide/graphs/nodes-and-vars.md).
 
