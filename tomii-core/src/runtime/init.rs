@@ -7,9 +7,11 @@
 use super::node_cache::{node_cache_entry, NodeCacheEntry, ResPredCache};
 use crate::graph::*;
 use crate::graph_struct::{node_has_ambiguous_multi_res_args, Predecessor};
+use crate::instance_map::MappedEdgeRouting;
 use crate::scheduler::SchedulerImpl;
 use crate::IdType;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::Arc;
 use tomii_types::CmTypes;
 
 /// Build the node cache from graph nodes, computing all pre-derived flags.
@@ -20,6 +22,7 @@ pub(crate) fn build_node_cache(
     app_graph: &Graph,
     init_objects: &[Vec<tomii_types::CmTypes>],
     scheduler: &SchedulerImpl,
+    pred_instance_map: &[Vec<Option<Arc<MappedEdgeRouting>>>],
 ) -> Vec<NodeCacheEntry> {
     let mut cache: Vec<NodeCacheEntry> = app_graph
         .nodes
@@ -170,6 +173,38 @@ pub(crate) fn build_node_cache(
                     match &arg.type_ {
                         CmTypes::Res(res_nid) => {
                             let pred_node = &app_graph.nodes[*res_nid];
+                            let is_mapped = arg
+                                .predecessor
+                                .as_ref()
+                                .is_some_and(|p| p.instance_map.is_some());
+                            let mapped_forward = if is_mapped {
+                                // `validate_and_build` always populates this table entry
+                                // when ANY arg on `node.args` declares an instance_map on
+                                // this predecessor — the one exception is an instance_map
+                                // declared ONLY on a condition arg (`node.condition.args`),
+                                // which `validate_and_build` never scans (a pre-existing
+                                // gap from phase 1, not introduced here; see
+                                // `crate::instance_map`'s module docs). Panic loudly here
+                                // rather than silently falling back to the ordinary
+                                // (empty-`indexes`) resolution path, which would silently
+                                // deliver nothing instead of the declared values.
+                                let routing = pred_instance_map
+                                    .get(node_id)
+                                    .and_then(|row| row.get(*res_nid))
+                                    .and_then(|opt| opt.clone())
+                                    .unwrap_or_else(|| {
+                                        panic!(
+                                            "node '{}': $res arg declares instance_map on \
+                                             predecessor '{}', but no routing table was built \
+                                             for this edge (instance_map on a condition-only \
+                                             arg is not supported)",
+                                            node.name, pred_node.name
+                                        )
+                                    });
+                                Some(routing)
+                            } else {
+                                None
+                            };
                             v.push(ResPredCache {
                                 node_id: node_id as IdType,
                                 res_node_id: *res_nid as IdType,
@@ -183,6 +218,7 @@ pub(crate) fn build_node_cache(
                                 node_factor: node.factor,
                                 is_dep: false,
                                 node_has_barrier,
+                                mapped_forward,
                             });
                         }
                         CmTypes::Dep(res_nid) => {
@@ -196,6 +232,7 @@ pub(crate) fn build_node_cache(
                                 node_factor: node.factor,
                                 is_dep: true,
                                 node_has_barrier,
+                                mapped_forward: None,
                             });
                         }
                         _ => {}
@@ -227,11 +264,20 @@ pub(crate) fn build_node_cache(
     // comparisons are not confounded by code-layout changes).
     let templates_disabled = std::env::var_os("TOMII_DISABLE_ARG_TEMPLATES").is_some();
     for cache_entry in cache.iter_mut() {
-        let all_width_one = cache_entry
-            .arg_cache
-            .res_predecessors
-            .iter()
-            .all(|rp| rp.is_dep || rp.indexes.len() <= 1 || rp.indexes.len() == rp.node_factor);
+        let all_width_one = cache_entry.arg_cache.res_predecessors.iter().all(|rp| {
+            if let Some(routing) = &rp.mapped_forward {
+                // A mapped $res arg's width varies per CONSUMER INSTANCE, not per
+                // dispatch — so it is build-time-constant (eligible for the
+                // persistent-template path) iff EVERY instance's forward list has
+                // length 1. Any length != 1 anywhere (the "variadic" shape — see
+                // `crate::instance_map`'s module docs) means the splice can change
+                // the arg vector's length, exactly like the ordinary multi-index
+                // collect-all path below.
+                routing.forward.iter().all(|list| list.len() == 1)
+            } else {
+                rp.is_dep || rp.indexes.len() <= 1 || rp.indexes.len() == rp.node_factor
+            }
+        });
         cache_entry.template_stable =
             !templates_disabled && all_width_one && cache_entry.name != "$network";
     }

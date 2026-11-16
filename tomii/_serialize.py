@@ -109,14 +109,19 @@ def _arg(a: Any, consumer_factor: Any = None) -> ArgJson:
         return ArgJson(type="$dep", predecessor=pred)
 
     if isinstance(a, NodeOutput):
-        # NodeOutput.__init__ already rejects `map` for plain $res (NodeDep is
-        # handled above, before this isinstance check — NodeDep IS a NodeOutput
-        # subclass, so order matters here).
-        pred = PredJson(
-            name=a.node.name,
-            indexes=_indexes(a.start, a.end),
-            group_by=_factor(a.group_by),
-        )
+        # NodeDep (a NodeOutput subclass) is handled above, before this
+        # isinstance check, so this branch is plain `$res` only.
+        if a.map is not None:
+            pred = PredJson(
+                name=a.node.name,
+                instance_map=_resolved_instance_map(a, consumer_factor),
+            )
+        else:
+            pred = PredJson(
+                name=a.node.name,
+                indexes=_indexes(a.start, a.end),
+                group_by=_factor(a.group_by),
+            )
         return ArgJson(type="$res", predecessor=pred)
 
     if isinstance(a, NodeBarrier):

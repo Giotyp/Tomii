@@ -282,8 +282,12 @@ impl GraphSpec {
         let instance_map_tables = crate::instance_map::validate_and_build(&self.graph)
             .unwrap_or_else(|e| panic!("invalid instance_map declaration: {e}"));
 
-        let node_cache =
-            crate::runtime::build_node_cache(&self.graph, &self.init_objects, scheduler);
+        let node_cache = crate::runtime::build_node_cache(
+            &self.graph,
+            &self.init_objects,
+            scheduler,
+            &instance_map_tables.pred_instance_map,
+        );
         let (pred_index_filter, pred_group_by, pred_succ_1to1_offset) =
             crate::runtime::build_predecessor_tables(
                 &self.graph,

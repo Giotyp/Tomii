@@ -200,12 +200,42 @@ reduction tree where branches join different numbers of leaves. A
 neighbourhood (halo) stencil is the same idea with overlapping, wrapping
 lists: `tile[j]` depending on `tile[j-1], tile[j], tile[j+1]` (mod `n`).
 
+`instance_map` is also valid on a `$res` argument, delivering values:
+
+```json
+{
+    "type": "$res",
+    "predecessor": {
+        "name": "leaves",
+        "instance_map": [[0, 1, 2], [3, 4], [5, 6, 7, 8]]
+    }
+}
+```
+
+Consumer instance `j` receives the results of the producer instances listed
+in `instance_map[j]`, in ASCENDING ABSOLUTE-INDEX order (not declaration
+order — see the wrap-around halo note below) — a single value when the list
+has exactly one entry, or a list otherwise (the same single-value-vs-list
+convention an ordinary `indexes`-based `$res` edge already uses for a
+single index vs. a multi-index range). Because `instance_map[j]`'s length
+can vary per instance (e.g. the irregular tree above: 3 entries, then 2, then
+4), a `$res` argument whose map has any length other than 1 must be paired
+with a variadic plugin parameter — the graph has no way to check this against
+the compiled plugin function's real arity, exactly the same limitation an
+ordinary multi-index `$res` edge already has.
+
+For a wrap-around halo specifically, note that the union/sort step below
+means the DELIVERED order is ascending, even though the NEIGHBOURHOOD is
+naturally expressed spatially: declaring tile 0's neighbours as
+`[[n-1, 0, 1], ...]` (the "previous, self, next" wraparound) delivers them
+as `[0, 1, n-1]`, not `[n-1, 0, 1]` — write the receiving kernel expecting
+ascending order, or re-sort inside the kernel using the absolute indices if
+spatial order matters there.
+
 Rules, enforced at load time:
 
 - `instance_map` is mutually exclusive with `indexes` and `group_by` on the
   same predecessor object.
-- `instance_map` is only valid on `$barrier`/`$dep` arguments, never `$res`
-  — a mapped edge never delivers a value in this release.
 - The array's length must equal the consumer node's `factor`; each inner
   array lists absolute producer indexes (not relative offsets), each `< `
   the producer's `factor`, with no duplicates within one entry.
@@ -233,6 +263,14 @@ Rules, enforced at load time:
   uniform/positional interpretation — the "ordinal fallback"), is rejected
   with a load-time error naming the offending predecessor, whether it
   coexists on the same or a different producer.
+- A `$res` argument's own delivered values always come from the UNIONED
+  forward map on its predecessor — if another mapped argument (of any type)
+  or a coexisting plain argument shares the same predecessor, the `$res`
+  argument reads the full union, not just the entries it itself declared.
+  This matters only when a `$res` arg intentionally shares a predecessor with
+  a DIFFERENT mapped argument whose declared lists differ from its own; the
+  common case (one mapped argument per predecessor) is unaffected, since the
+  union of one list is that list.
 
 The [Python builder guide](/docs/guide/graphs/nodes-and-vars#explicit-per-instance-dependency-maps)
 covers the `map=` parameter and the `tomii.halo`/`tomii.stride` helpers that

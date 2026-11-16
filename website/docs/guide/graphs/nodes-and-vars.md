@@ -94,17 +94,28 @@ in the [JSON graph format reference](/docs/reference/json-graph-format).
 
 ## Explicit per-instance dependency maps
 
-`n.wait(i)` / `n.dep(i)` express uniform shapes: a single offset, a full
-fan-in, or a `group_by` partition. Some graphs need an irregular shape instead
-— a reduction tree where branches join different numbers of leaves, or a
-neighbourhood (halo) stencil where instance `j` depends on a handful of
-specific, non-contiguous neighbours. `map=` declares that explicitly:
+`n.wait(i)` / `n.dep(i)` / `n.out(i)` express uniform shapes: a single offset,
+a full fan-in, or a `group_by` partition. Some graphs need an irregular shape
+instead — a reduction tree where branches join different numbers of leaves, or
+a neighbourhood (halo) stencil where instance `j` depends on a handful of
+specific, non-contiguous neighbours. `map=` declares that explicitly, on
+`.wait()`/`.dep()` for gating-only edges AND on `.out()` for a value-carrying
+edge:
 
 ```python
 # instance j of `fuse` depends on EXACTLY these producer instances —
 # an irregular reduction tree where leaf counts per branch differ.
 fuse = app.node("fuse", func="combine", factor=3, args=[
     leaves.wait(map=[[0, 1, 2], [3, 4], [5, 6, 7, 8]]),
+])
+
+# `.out(map=...)` delivers VALUES: instance j of `reduce` receives the
+# results of exactly the producer instances `map[j]` lists, in ascending
+# absolute-index order — a single value when `map[j]` has one entry, a list
+# otherwise (pair a non-uniform-length map with a variadic plugin parameter,
+# same convention as an ordinary multi-value `.out()` edge).
+reduce = app.node("reduce", func="sum_children", factor=3, args=[
+    leaves.out(map=[[0, 1, 2], [3, 4], [5, 6, 7, 8]]),
 ])
 ```
 
@@ -129,9 +140,17 @@ coarse = app.node("coarse", func="downsample", factor=n // k, args=[
 
 Rules:
 
-- `map` is only valid on `.wait()` / `.dep()` — a mapped edge never delivers a
-  value (`.out(map=...)` raises `ValueError`); read values through an
-  ordinary `.out()` edge on a different, uniformly-shaped predecessor.
+- `map` is valid on `.wait()`, `.dep()`, and `.out()`. A mapped `.wait()`/
+  `.dep()` edge is gating-only, same as before. A mapped `.out()` edge
+  delivers values: consumer instance `j` reads the producer results listed
+  in `map[j]`, in ascending absolute-index order, as a single value (length-1
+  entries) or a list otherwise. The graph has no way to check a mapped
+  `.out()` edge's length against the receiving plugin function's arity (the
+  function's signature lives in the compiled plugin, not the graph) — this is
+  the same limitation an ordinary multi-value `.out()` edge already has, so a
+  non-uniform-length `map` (including an empty entry for some instance) must
+  be paired with a variadic plugin parameter, exactly as for an ordinary
+  range `.out()` edge today.
 - `map` is mutually exclusive with `group_by`.
 - A callable `map` needs both the consumer's and the producer's `factor` to
   be literal ints at build time; if either is a `Var` that cannot be resolved
@@ -142,12 +161,16 @@ Rules:
   dispatched exactly once per frame at frame admission, like a root/initial
   node — not rejected, and not left waiting on a decrement that would never
   arrive.
-- A node may read the SAME predecessor through a mapped arg (`.wait/.dep(map=...)`)
-  AND a plain arg (`.wait()`/`.dep()`/`.out()`) at once, as long as the plain
-  arg's shape is a 1:1 same-factor offset, a contiguous range, or a broadcast
-  (literal barrier, `$dep`, or factor-1 producer) — e.g. an irregular fusion
-  node that `$barrier`-waits an explicit, irregular subset of a predecessor's
-  instances AND reads a value from it through an ordinary 1:1 `.out()` edge:
+- A node may read the SAME predecessor through a mapped arg
+  (`.wait/.dep/.out(map=...)`, any of the three) AND a plain arg
+  (`.wait()`/`.dep()`/`.out()`) at once, as long as the plain arg's shape is a
+  1:1 same-factor offset, a contiguous range, or a broadcast (literal
+  barrier, `$dep`, or factor-1 producer) — e.g. an irregular fusion node that
+  `$barrier`-waits an explicit, irregular subset of a predecessor's instances
+  AND reads a value from it through an ordinary 1:1 `.out()` edge. (The plain
+  arg's own value, if it is a `.out()`, is read independently of whatever the
+  mapped arg on the same predecessor delivers — each arg resolves its own
+  declared shape.)
 
   ```python
   # `level` barrier-waits an irregular grouping of `leaves` AND reads a

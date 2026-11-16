@@ -11,11 +11,26 @@
 //!
 //! # Scope of this implementation
 //!
-//! - Only `$barrier` and `$dep` arguments may carry an `instance_map` — never
-//!   `$res`. A mapped edge never delivers a value (barrier/dep semantics are
-//!   gating-only already), so this restriction avoids extending the
-//!   value-delivery path (`arg_resolution.rs`) for marginal benefit. See the
-//!   top-level report for the rationale.
+//! - `$barrier`, `$dep`, and `$res` arguments may all carry an `instance_map`.
+//!   A mapped `$res` arg delivers a value: for consumer instance `j`, the
+//!   producer results listed in the (unioned, ascending) forward list are
+//!   fetched in that order — exactly one value when the list has length 1,
+//!   or a `Vec` spliced in place otherwise (see
+//!   [`MappedEdgeRouting::forward`] and
+//!   `runtime::arg_resolution::fetch_mapped_res_results`). This mirrors the
+//!   existing ordinary-`$res` convention exactly: a single declared index
+//!   delivers one value, a list of more than one delivers a `Vec` intended
+//!   for a variadic receiving parameter — and, just like ordinary `$res`,
+//!   the graph has no way to check the real Rust/Python function's arity
+//!   against this at load time (that information lives only in the compiled
+//!   plugin, not in the graph), so a mapped `$res` arg whose per-instance
+//!   list length varies (including an empty list for some instance) is
+//!   accepted unconditionally — it is the author's responsibility to pair a
+//!   non-uniform-length `instance_map` with a variadic receiver, exactly as
+//!   for an ordinary multi-index `$res` edge today. An out-of-range producer
+//!   index or a duplicate within one `instance_map[j]` entry is still
+//!   rejected (or filtered at the point of entry) by the same checks that
+//!   apply to `$barrier`/`$dep` — see [`validate_and_build`].
 //! - A node with `group_size` set may not have an `instance_map` predecessor
 //!   (rejected at validation) — the two partitioning schemes are not
 //!   reconciled in this release.
@@ -77,6 +92,16 @@
 //! is in the (unioned) `instance_map[j]`. On completion of producer instance
 //! `i`, the runtime decrements exactly those listed consumer instances, once
 //! per listing — see `runtime::successor::decrement_and_collect_ready_mapped`.
+//! The SAME union is also retained, forward, as [`MappedEdgeRouting::forward`]
+//! — `forward[j]` lists, in ascending absolute-producer-index order, exactly
+//! the producer instances consumer instance `j` depends on through this edge.
+//! A mapped `$res` argument on this edge reads its values from `forward[j]`,
+//! in that order, at dispatch time (`runtime::node_cache::ResPredCache::mapped_forward`,
+//! `runtime::arg_resolution::fetch_mapped_res_results`) — the gating/threshold
+//! and value-delivery mechanisms share one authoritative per-(succ, pred) list,
+//! so a `$res` arg sharing a predecessor with another mapped or coexisting
+//! plain argument (see above) reads the full unioned list, not a sub-list of
+//! only its own declared entries.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -85,7 +110,9 @@ use crate::graph::Graph;
 use crate::graph_struct::{find_pred_index, Arg, Node, Predecessor};
 use crate::IdType;
 
-/// Reverse producer→consumer routing table for one mapped `(pred, succ)` edge.
+/// Reverse producer→consumer routing table for one mapped `(pred, succ)` edge,
+/// plus the forward list it was inverted from (retained for `$res` value
+/// delivery — see the module docs' "Routing" section).
 ///
 /// `producer_to_consumers[i]` lists every consumer instance that depends on
 /// producer instance `i` through this edge (the union of every mapped
@@ -94,12 +121,23 @@ use crate::IdType;
 #[derive(Debug)]
 pub struct MappedEdgeRouting {
     pub producer_to_consumers: Vec<Vec<u32>>,
+    /// `forward[j]` = the (unioned, ascending) absolute producer instances
+    /// consumer instance `j` depends on through this edge — the exact input
+    /// `MappedEdgeRouting::build` inverted. `producer_to_consumers` answers
+    /// "who do I notify when producer `i` completes?"; `forward` answers "whose
+    /// results does consumer `j` read?" — both views of the same union, kept
+    /// side by side so neither the gating path nor the value-delivery path
+    /// needs to re-derive the other.
+    pub forward: Vec<Vec<u32>>,
 }
 
 impl MappedEdgeRouting {
-    /// Build the reverse routing table from the (already unioned) forward map.
-    /// `pred_factor` sizes the reverse array; `forward[j]` entries are assumed
-    /// already validated to be `< pred_factor` with no duplicates.
+    /// Build the reverse routing table from the (already unioned) forward map,
+    /// retaining the forward map itself (see `forward`'s doc comment). `pred_factor`
+    /// sizes the reverse array; `forward[j]` entries are assumed already validated
+    /// to be `< pred_factor` with no duplicates, and already sorted ascending by
+    /// every caller (`union_instance_maps` / the Item 2 same-predecessor merge) —
+    /// `$res` value delivery relies on that ascending order.
     fn build(forward: &[Vec<usize>], pred_factor: usize) -> Self {
         let mut producer_to_consumers: Vec<Vec<u32>> = vec![Vec::new(); pred_factor];
         for (j, list) in forward.iter().enumerate() {
@@ -109,6 +147,10 @@ impl MappedEdgeRouting {
         }
         Self {
             producer_to_consumers,
+            forward: forward
+                .iter()
+                .map(|list| list.iter().map(|&i| i as u32).collect())
+                .collect(),
         }
     }
 }
@@ -448,24 +490,6 @@ pub fn validate_and_build(graph: &Graph) -> Result<InstanceMapTables, String> {
             continue;
         }
 
-        // $res + instance_map is rejected (see module docs): a mapped edge
-        // never delivers a value in this release.
-        for arg in &node.args {
-            let Some(pred) = &arg.predecessor else {
-                continue;
-            };
-            if pred.instance_map.is_some() && arg.type_.is_result() {
-                return Err(format!(
-                    "node '{}': predecessor '{}' uses instance_map on a $res argument — \
-                     not supported in this release (instance_map is only valid on \
-                     $barrier/$dep arguments; a mapped edge never delivers a value). Use \
-                     $barrier or $dep for the gating dependency and read values through an \
-                     ordinary $res/$ref edge instead.",
-                    node.name, graph.nodes[pred.id as usize].name
-                ));
-            }
-        }
-
         if node.group_size.is_some() {
             return Err(format!(
                 "node '{}': `group_size` is not supported together with an instance_map \
@@ -665,6 +689,20 @@ mod tests {
         }
     }
 
+    /// A mapped `$res` arg — the value-carrying counterpart of `dep_arg`/`barrier_arg`.
+    fn mapped_res_arg(pred_id: IdType, map: Vec<Vec<usize>>) -> Arg {
+        Arg {
+            type_: CmTypes::Res(pred_id as usize),
+            predecessor: Some(Predecessor {
+                id: pred_id,
+                indexes: Vec::new(),
+                group_by: None,
+                instance_map: Some(map),
+            }),
+            init_condition: None,
+        }
+    }
+
     /// A plain (non-mapped) `$dep` arg — used for Item 2 tests (mixed mapped
     /// + plain args on the SAME predecessor), where the plain arg's shape is
     /// gating-only and type-independent of the mapped arg it coexists with.
@@ -842,22 +880,62 @@ mod tests {
     }
 
     #[test]
-    fn rejects_res_arg_with_instance_map() {
+    fn res_arg_with_instance_map_is_accepted_and_forward_list_retained() {
+        // Mirrors the original rejection test's shape, now an acceptance test:
+        // factor-4 producer, single factor-1 consumer instance reading producer 0.
         let mut g = Graph::new();
         g.add_node(make_node(0, 4, vec![]));
-        let bad_res = Arg {
-            type_: CmTypes::Res(0),
-            predecessor: Some(Predecessor {
-                id: 0,
-                indexes: Vec::new(),
-                group_by: None,
-                instance_map: Some(vec![vec![0]]),
-            }),
-            init_condition: None,
-        };
-        g.add_node(make_node(1, 1, vec![bad_res]));
+        g.add_node(make_node(1, 1, vec![mapped_res_arg(0, vec![vec![0]])]));
+        let tables = validate_and_build(&g).unwrap();
+        assert!(tables.has_instance_map[1]);
+        assert_eq!(tables.node_thresholds[1].as_ref().unwrap()[0], 1);
+        let routing = tables.pred_instance_map[1][0].as_ref().unwrap();
+        assert_eq!(routing.forward[0], vec![0]);
+        assert_eq!(routing.producer_to_consumers[0], vec![0]);
+        // No other producer instance is listed.
+        assert_eq!(routing.producer_to_consumers[1], Vec::<u32>::new());
+    }
+
+    #[test]
+    fn mapped_res_arg_non_uniform_length_is_accepted_unconditionally() {
+        // Length 0 (an instance with nothing to read) and length 2 (a "range" shape
+        // for a variadic receiver) both load cleanly, mirroring ordinary multi-index
+        // $res's lack of a load-time variadic check — see module docs.
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 4, vec![]));
+        g.add_node(make_node(
+            1,
+            3,
+            vec![mapped_res_arg(0, vec![vec![], vec![0, 1], vec![2, 3]])],
+        ));
+        let tables = validate_and_build(&g).unwrap();
+        let routing = tables.pred_instance_map[1][0].as_ref().unwrap();
+        assert_eq!(routing.forward[0], Vec::<u32>::new());
+        assert_eq!(routing.forward[1], vec![0, 1]);
+        assert_eq!(routing.forward[2], vec![2, 3]);
+        let thresholds = tables.node_thresholds[1].as_ref().unwrap();
+        assert_eq!(**thresholds, vec![0, 2, 2]);
+        // Instance 0's threshold is 0 (empty map, no coexisting predecessor) —
+        // dispatched at admission, not through the dependency counter.
+        assert_eq!(
+            tables.zero_threshold_instances[1]
+                .as_ref()
+                .unwrap()
+                .as_ref(),
+            &vec![0]
+        );
+    }
+
+    #[test]
+    fn mapped_res_arg_out_of_range_producer_index_is_rejected() {
+        // The SAME bounds check that already applies to $barrier/$dep (see
+        // `property_random_single_pred_maps_threshold_and_routing_agree`) applies to
+        // $res unchanged — this restriction was never specific to the arg type.
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 2, vec![]));
+        g.add_node(make_node(1, 1, vec![mapped_res_arg(0, vec![vec![5]])]));
         let err = validate_and_build(&g).unwrap_err();
-        assert!(err.contains("$res"), "{err}");
+        assert!(err.contains("out of range"), "{err}");
     }
 
     #[test]

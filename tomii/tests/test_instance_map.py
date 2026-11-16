@@ -52,11 +52,51 @@ def test_map_mutually_exclusive_with_group_by() -> None:
         p.wait(map=[[0]], group_by=2)
 
 
-def test_map_rejected_on_res_dependency() -> None:
+def test_map_on_res_dependency_serializes_as_instance_map() -> None:
+    # $res + instance_map is supported (value-carrying mapped edges): `.out(map=...)`
+    # serializes to a `$res` arg with an `instance_map` predecessor, same shape as
+    # `.wait`/`.dep`, no `indexes`/`group_by`.
     app = tm.Graph()
     p = app.node("p", func="noop", factor=4)
-    with pytest.raises(ValueError, match=r"\$res"):
-        p.out(map=[[0]])
+    c = app.node("c", func="noop", factor=2, args=[p.out(map=[[0, 1], [2, 3]])])
+    emitted = serialize_node(c)
+    assert emitted["args"][0]["type"] == "$res"
+    pred = emitted["args"][0]["predecessor"]
+    assert pred["instance_map"] == [[0, 1], [2, 3]]
+    assert "indexes" not in pred
+    assert "group_by" not in pred
+
+
+def test_map_still_mutually_exclusive_with_group_by_on_res() -> None:
+    app = tm.Graph()
+    p = app.node("p", func="noop", factor=4)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        p.out(map=[[0]], group_by=2)
+
+
+def test_map_on_res_with_halo_callable_resolves_before_serializing() -> None:
+    # The callable-map path (`tomii.halo`/`tomii.stride`, resolved once the
+    # consumer's factor is known — see `_resolved_instance_map`) must work for
+    # `.out(map=...)` exactly as it already does for `.wait`/`.dep`.
+    app = tm.Graph()
+    p = app.node("p", func="noop", factor=8)
+    c = app.node("c", func="noop", factor=8, args=[p.out(map=tm.halo(1, wrap=True))])
+    emitted = serialize_node(c)
+    pred = emitted["args"][0]["predecessor"]
+    assert pred["instance_map"][0] == [7, 0, 1]
+    assert pred["instance_map"][7] == [6, 7, 0]
+
+
+def test_map_on_res_non_uniform_length_serializes_unconditionally() -> None:
+    # Length 0 and length > 1 entries both serialize cleanly for `$res` — the
+    # Rust side accepts any length (see `instance_map.rs`'s module docs); the
+    # Python builder never validated map-entry length either.
+    app = tm.Graph()
+    p = app.node("p", func="noop", factor=4)
+    c = app.node("c", func="noop", factor=3, args=[p.out(map=[[], [0, 1], [2, 3]])])
+    emitted = serialize_node(c)
+    pred = emitted["args"][0]["predecessor"]
+    assert pred["instance_map"] == [[], [0, 1], [2, 3]]
 
 
 # --------------------------------------------------------------------------- #

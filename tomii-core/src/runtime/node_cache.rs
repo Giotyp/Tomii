@@ -3,7 +3,9 @@
 //! `worker_resolvable` and `needs_result_store` that drive fast-path decisions in the runtime.
 use crate::debug::print_debug;
 use crate::func_reg::{get_bulk_func, get_func};
+use crate::instance_map::MappedEdgeRouting;
 use crate::{graph_struct::*, IdType};
+use std::sync::Arc;
 use tomii_types::*;
 
 /// Resolve a function pointer by name, panicking in production if not found.
@@ -149,6 +151,18 @@ pub struct ResPredCache {
     /// shared counter cannot reach zero until every declared cell on every
     /// predecessor has completed, so the result is already stored.
     pub node_has_barrier: bool,
+    /// `Some(routing)` when this `$res` argument's predecessor edge carries an
+    /// explicit `instance_map` — `routing.forward[node_index]` lists, in
+    /// ascending absolute-producer-index order, exactly the producer instances
+    /// to fetch (see `crate::instance_map`'s module docs and
+    /// `runtime::arg_resolution::fetch_mapped_res_results`). `None` for the
+    /// overwhelming majority of `$res`/`$dep` args, which use the classic
+    /// `indexes`/`pred_index` resolution in `fetch_res_results` instead. Mapped
+    /// routing takes precedence over every other field on this struct when
+    /// present — `indexes`/`pred_factor`/`node_has_barrier` etc. are irrelevant
+    /// for a mapped edge (every producer index is already absolute and
+    /// explicit; there is no ambiguity for `pred_index`/`group_size` to resolve).
+    pub mapped_forward: Option<Arc<MappedEdgeRouting>>,
 }
 
 #[derive(Clone, Default)]

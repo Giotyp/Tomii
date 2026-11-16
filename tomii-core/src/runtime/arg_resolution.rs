@@ -525,6 +525,47 @@ fn fetch_res_results(
     }
 }
 
+/// Value resolution for a mapped `$res` argument (an `instance_map`-declared
+/// predecessor edge — see `crate::instance_map`'s module docs).
+///
+/// `forward[node_index]` already lists the EXACT, absolute producer instances
+/// to fetch, in ascending order — unlike [`fetch_res_results`]'s three
+/// branches, there is no `pred_index`/`group_size`/`node_has_barrier`
+/// ambiguity to resolve: the mapped edge's routing table is itself the
+/// disambiguation (built once at compile time from the validated,
+/// already-unioned `instance_map` declaration). An empty list (the
+/// "variadic accepts any length incl. 0" case — see module docs) returns
+/// `Some(Vec::new())`, which the caller splices as zero elements, removing
+/// the placeholder slot entirely; a single-entry list returns one value,
+/// spliced in place with no buffer-length change — both callers
+/// (`populate_cached_args_into`/`populate_dynamic_args_into`) already handle
+/// both shapes identically to the existing collect-all `$res` path.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn fetch_mapped_res_results(
+    res_node_id: IdType,
+    forward: &[Vec<u32>],
+    node_index: usize,
+    slot: usize,
+    shared: &Arc<SharedData>,
+    exec_slot: usize,
+    exec_gen: u32,
+    stale: &mut bool,
+) -> Option<Vec<CmTypes>> {
+    let list = forward.get(node_index)?;
+    let mut result_vec = Vec::with_capacity(list.len());
+    for &pred_idx in list {
+        let node_info = NodeInfo::new(res_node_id, slot, pred_idx as usize, 0);
+        if let Some(result) = shared.exec.node_results.get(&node_info) {
+            result_vec.push(result);
+        } else {
+            let result = spin_wait_for_result(shared, &node_info, exec_slot, exec_gen, stale)?;
+            result_vec.push(result);
+        }
+    }
+    Some(result_vec)
+}
+
 /// Hot-path variant of [`collect_arg_result`] for `$res`/`$dep` arguments.
 ///
 /// Uses pre-resolved [`ResPredCache`] metadata (built once at startup) instead of
@@ -553,6 +594,21 @@ fn collect_res_from_cache(
 
     if let Some(custom) = custom_res {
         return Some(vec![(*custom).clone()]);
+    }
+
+    // Mapped $res: bypass the ordinary indexes/pred_index/group_size resolution
+    // entirely — see `fetch_mapped_res_results`'s doc comment.
+    if let Some(routing) = &rp.mapped_forward {
+        return fetch_mapped_res_results(
+            rp.res_node_id,
+            &routing.forward,
+            node_index,
+            slot,
+            shared,
+            exec_slot,
+            exec_gen,
+            stale,
+        );
     }
 
     let pred_eff_gs = rp
@@ -997,5 +1053,301 @@ mod frame_id_tests {
         // A real, in-range slot still resolves normally.
         shared.slot_data.frame_id[0].store(7, Ordering::Relaxed);
         assert_eq!(frame_id_for_slot(shared, 0), 7);
+    }
+}
+
+#[cfg(test)]
+mod mapped_res_value_tests {
+    use super::*;
+    use crate::buffers::NodeInfo;
+    use crate::graph_gen::from_json_str;
+    use crate::runtime::{RuntimeConfig, TomiiRt, TomiiRtBuilder};
+    use crate::scheduler::{create_scheduler, SchedulerConfig, SchedulerType};
+
+    /// Producer `p` (factor 4, no args) feeding consumer `c` (factor 2) through a
+    /// mapped `$res` edge: `c[0]` reads `p[0], p[1]`; `c[1]` reads `p[2], p[3]`.
+    /// Every entry has length 2 — the "variadic" shape (see `crate::instance_map`'s
+    /// module docs) — deliberately, so the splice/width behaviour is exercised
+    /// alongside the uniform-length-1 case below.
+    const MAPPED_RES_GRAPH_WIDTH_2: &str = r#"
+    {
+        "nodes": [
+            { "name": "p", "factor": 4, "function": "noop", "args": [] },
+            {
+                "name": "c",
+                "factor": 2,
+                "function": "noop",
+                "args": [
+                    {
+                        "type": "$res",
+                        "predecessor": { "name": "p", "instance_map": [[0, 1], [2, 3]] }
+                    }
+                ]
+            }
+        ]
+    }
+    "#;
+
+    /// Same shape, but every entry has length exactly 1 — the uniform,
+    /// template-stable-eligible case.
+    const MAPPED_RES_GRAPH_WIDTH_1: &str = r#"
+    {
+        "nodes": [
+            { "name": "p", "factor": 4, "function": "noop", "args": [] },
+            {
+                "name": "c",
+                "factor": 2,
+                "function": "noop",
+                "args": [
+                    {
+                        "type": "$res",
+                        "predecessor": { "name": "p", "instance_map": [[1], [3]] }
+                    }
+                ]
+            }
+        ]
+    }
+    "#;
+
+    fn build_test_rt(json: &str) -> TomiiRt {
+        let spec = from_json_str(json, 2).expect("JSON parse failed");
+        let scheduler = create_scheduler(SchedulerConfig {
+            scheduler_type: SchedulerType::WorkStealing,
+            core_offset: 0,
+            num_workers: 2,
+            record: false,
+            external_recorder: None,
+            base_instant: std::time::Instant::now(),
+            system_threads: 1,
+            receiver_threads: 0,
+            target_batch_size: 1,
+            batch_timeout_us: 10,
+            worker_affinity: None,
+            worker_hook: None,
+        });
+        let compiled = spec.compile(&scheduler);
+        let config = RuntimeConfig {
+            slots: 1,
+            max_frames: 1,
+            max_runtime: Some(5),
+            system_threads: 1,
+            workers: 2,
+            ..RuntimeConfig::default()
+        };
+        TomiiRtBuilder::with_config(compiled, scheduler, config)
+            .build()
+            .expect("build failed")
+    }
+
+    /// Like `build_test_rt`, but with `slots` > 1 — `spin_wait_for_result`'s
+    /// generation-mismatch staleness check is a no-op in `single_slot_mode`
+    /// (`slots == 1`, where there is nowhere else for the slot to have gone),
+    /// so the forced-wrap staleness test below needs a real multi-slot build.
+    fn build_multi_slot_test_rt(json: &str, slots: usize) -> TomiiRt {
+        let spec = from_json_str(json, 2).expect("JSON parse failed");
+        let scheduler = create_scheduler(SchedulerConfig {
+            scheduler_type: SchedulerType::WorkStealing,
+            core_offset: 0,
+            num_workers: 2,
+            record: false,
+            external_recorder: None,
+            base_instant: std::time::Instant::now(),
+            system_threads: 1,
+            receiver_threads: 0,
+            target_batch_size: 1,
+            batch_timeout_us: 10,
+            worker_affinity: None,
+            worker_hook: None,
+        });
+        let compiled = spec.compile(&scheduler);
+        let config = RuntimeConfig {
+            slots,
+            max_frames: slots,
+            max_runtime: Some(5),
+            system_threads: 1,
+            workers: 2,
+            ..RuntimeConfig::default()
+        };
+        TomiiRtBuilder::with_config(compiled, scheduler, config)
+            .build()
+            .expect("build failed")
+    }
+
+    /// M2: a producer with a mapped `$res` consumer must have its results
+    /// stored (`needs_result_store`), exactly like an ordinary `$res` producer —
+    /// `build_node_cache`'s existing `has_res_consumer` check is arg-type/edge-
+    /// kind-agnostic (it only inspects `arg.type_.is_result()` and the
+    /// predecessor id), so this was already correct with zero code changes;
+    /// this test locks that in now that the combination is actually reachable.
+    #[test]
+    fn producer_with_mapped_res_consumer_needs_result_store() {
+        let rt = build_test_rt(MAPPED_RES_GRAPH_WIDTH_2);
+        assert!(
+            rt.shared.graph_cache.node_cache[0].needs_result_store,
+            "producer 'p' feeds a mapped $res consumer; its results must be stored"
+        );
+    }
+
+    /// M3: value delivery for a mapped `$res` arg whose per-instance list has
+    /// length 2 (every consumer instance) — the splice path, same as an
+    /// ordinary multi-index $res "collect-all" edge.
+    #[test]
+    fn mapped_res_width_2_delivers_values_in_ascending_list_order() {
+        let rt = build_test_rt(MAPPED_RES_GRAPH_WIDTH_2);
+        let shared = &rt.shared;
+
+        // Seed producer results directly (no scheduler dispatch needed to test
+        // arg resolution in isolation).
+        for i in 0..4u8 {
+            shared
+                .exec
+                .node_results
+                .set(&NodeInfo::new(0, 0, i as usize, 0), CmTypes::U8(i * 10));
+        }
+
+        let args_cache = &shared.graph_cache.node_cache[1].arg_cache;
+
+        let mut buf0 = Vec::new();
+        let stale0 =
+            populate_cached_args_into(&mut buf0, shared, args_cache, 1, 0, 0, 0, usize::MAX, 0);
+        assert!(!stale0);
+        assert_eq!(buf0, vec![CmTypes::U8(0), CmTypes::U8(10)]);
+
+        let mut buf1 = Vec::new();
+        let stale1 =
+            populate_cached_args_into(&mut buf1, shared, args_cache, 1, 1, 0, 0, usize::MAX, 0);
+        assert!(!stale1);
+        assert_eq!(buf1, vec![CmTypes::U8(20), CmTypes::U8(30)]);
+    }
+
+    /// M3: value delivery for a mapped `$res` arg whose per-instance list has
+    /// length 1 (the common, non-"variadic" case) — single value in place, no
+    /// splice/width change.
+    #[test]
+    fn mapped_res_width_1_delivers_single_value_in_place() {
+        let rt = build_test_rt(MAPPED_RES_GRAPH_WIDTH_1);
+        let shared = &rt.shared;
+
+        for i in 0..4u8 {
+            shared
+                .exec
+                .node_results
+                .set(&NodeInfo::new(0, 0, i as usize, 0), CmTypes::U8(i * 10));
+        }
+
+        let args_cache = &shared.graph_cache.node_cache[1].arg_cache;
+
+        let mut buf0 = Vec::new();
+        populate_cached_args_into(&mut buf0, shared, args_cache, 1, 0, 0, 0, usize::MAX, 0);
+        assert_eq!(buf0, vec![CmTypes::U8(10)]); // c[0] reads p[1]
+
+        let mut buf1 = Vec::new();
+        populate_cached_args_into(&mut buf1, shared, args_cache, 1, 1, 0, 0, usize::MAX, 0);
+        assert_eq!(buf1, vec![CmTypes::U8(30)]); // c[1] reads p[3]
+    }
+
+    /// The `all_width_one`/`template_stable` eligibility check (init.rs) must
+    /// track the ACTUAL per-instance mapped width, not just `rp.indexes`
+    /// (always empty for a mapped arg) — uniform length-1 is eligible, any
+    /// non-1 length anywhere disqualifies it, exactly like the ordinary
+    /// multi-index collect-all path.
+    #[test]
+    fn template_stable_tracks_mapped_width_not_declared_indexes() {
+        let rt_width_1 = build_test_rt(MAPPED_RES_GRAPH_WIDTH_1);
+        assert!(
+            rt_width_1.shared.graph_cache.node_cache[1].template_stable,
+            "every mapped entry has length 1 — must be template-stable eligible"
+        );
+
+        let rt_width_2 = build_test_rt(MAPPED_RES_GRAPH_WIDTH_2);
+        assert!(
+            !rt_width_2.shared.graph_cache.node_cache[1].template_stable,
+            "mapped entries of length 2 vary the arg vector's width — must NOT be \
+             template-stable eligible (would grow the persistent template unboundedly)"
+        );
+    }
+
+    /// M4 (staleness, part 1): ordinary slot reuse. `LockFreeResultMap::reinit_slot`
+    /// unconditionally clears EVERY cell of a slot before it is re-dispatched to a
+    /// new frame — a generic guarantee, not instance_map-specific — so a mapped
+    /// `$res` read issued after reuse must see the NEW frame's values, never a
+    /// leftover from the previous occupant of the same slot/cells.
+    #[test]
+    fn mapped_res_does_not_leak_a_value_across_ordinary_slot_reuse() {
+        let rt = build_test_rt(MAPPED_RES_GRAPH_WIDTH_2);
+        let shared = &rt.shared;
+        let args_cache = &shared.graph_cache.node_cache[1].arg_cache;
+
+        // "Frame A".
+        for i in 0..4u8 {
+            shared
+                .exec
+                .node_results
+                .set(&NodeInfo::new(0, 0, i as usize, 0), CmTypes::U8(i));
+        }
+        let mut buf = Vec::new();
+        populate_cached_args_into(&mut buf, shared, args_cache, 1, 0, 0, 0, usize::MAX, 0);
+        assert_eq!(buf, vec![CmTypes::U8(0), CmTypes::U8(1)]);
+
+        // Slot reuse for "Frame B" — the runtime always fully clears a slot's
+        // result storage before re-dispatching it.
+        shared.exec.node_results.reinit_slot(0);
+        for i in 0..4u8 {
+            shared
+                .exec
+                .node_results
+                .set(&NodeInfo::new(0, 0, i as usize, 0), CmTypes::U8(100 + i));
+        }
+
+        let mut buf2 = Vec::new();
+        populate_cached_args_into(&mut buf2, shared, args_cache, 1, 0, 0, 0, usize::MAX, 0);
+        assert_eq!(
+            buf2,
+            vec![CmTypes::U8(100), CmTypes::U8(101)],
+            "must read frame B's values, not frame A's leftover"
+        );
+    }
+
+    /// M4 (staleness, part 2): a mapped `$res` read still in flight (waiting on a
+    /// producer result that never arrives for THIS attempt) when the slot's
+    /// generation changes — including across the 2^32 wrap boundary, forced
+    /// exactly like
+    /// `slot_management::generation_tests::test_bump_slot_generation_wrap_sweeps_instance_map_stale_entries`
+    /// — must abort as stale rather than hang or (worse) later deliver a value
+    /// that belongs to the superseded attempt. Needs `slots > 1`:
+    /// `spin_wait_for_result`'s generation-mismatch check is a deliberate no-op
+    /// in `single_slot_mode` (nothing else the slot could have become).
+    #[test]
+    fn mapped_res_read_aborts_as_stale_across_a_forced_generation_wrap() {
+        use std::sync::atomic::Ordering;
+
+        let rt = build_multi_slot_test_rt(MAPPED_RES_GRAPH_WIDTH_2, 2);
+        let shared = &rt.shared;
+        let args_cache = &shared.graph_cache.node_cache[1].arg_cache;
+
+        // This hypothetical task was dispatched under generation `u32::MAX`...
+        let exec_gen = u32::MAX;
+        shared.slot_data.generation[0].store(u64::from(exec_gen), Ordering::SeqCst);
+        // ...but before its mapped producer's result ever arrives, the slot is
+        // released and reassigned, wrapping the low-32 generation back to 0
+        // (forced exactly as `bump_slot_generation`'s own wrap tests do).
+        crate::runtime::slot_management::bump_slot_generation(shared, 0);
+        assert_eq!(
+            shared.slot_data.generation[0].load(Ordering::SeqCst) as u32,
+            0,
+            "generation must have wrapped to 0"
+        );
+
+        // No producer result was ever stored for this (now-superseded) attempt —
+        // `fetch_mapped_res_results` must fall through to `spin_wait_for_result`,
+        // observe the mismatch on its very first poll, and abort immediately.
+        let mut buf = Vec::new();
+        let stale =
+            populate_cached_args_into(&mut buf, shared, args_cache, 1, 0, 0, 0, 0, exec_gen);
+        assert!(
+            stale,
+            "a mapped $res read spanning a generation change must be dropped as stale, \
+             never silently deliver a value (or hang) past the wrap"
+        );
     }
 }

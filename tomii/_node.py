@@ -26,7 +26,19 @@ def _validate_map_args(map: Optional[InstanceMap], group_by: Optional[int]) -> N
 
 
 class NodeOutput:
-    """A result dependency on a predecessor node (serializes as ``$res``)."""
+    """A result dependency on a predecessor node (serializes as ``$res``).
+
+    ``map`` (an explicit per-consumer-instance ``instance_map``) is supported
+    here: consumer instance ``j`` reads the producer instances listed in
+    ``map[j]`` (ascending absolute-index order, after the Rust-side union with
+    any other mapped/coexisting argument on the same predecessor — see
+    ``tomii_core::instance_map``'s module docs). A single-entry list delivers
+    one value; any other length (including 0) delivers a list, matching an
+    ordinary multi-index ``.out(...)`` edge's existing behaviour — there is no
+    way to check the receiving function's arity from the graph alone, so a
+    non-uniform-length ``map`` must be paired with a variadic plugin
+    parameter, exactly as for an ordinary multi-value ``.out(...)`` edge today.
+    """
 
     def __init__(
         self,
@@ -38,13 +50,6 @@ class NodeOutput:
         map: Optional[InstanceMap] = None,
     ) -> None:
         _validate_map_args(map, group_by)
-        if map is not None and not isinstance(self, NodeDep):
-            raise ValueError(
-                "`map` (instance_map) is not supported on `$res` dependencies in this "
-                "release — it never delivers a value. Use `.wait(map=...)` or "
-                "`.dep(map=...)` for the gating dependency, and read the value through "
-                "an ordinary `.out(...)` edge instead."
-            )
         self.node = node
         self.start = start
         self.end = end
@@ -143,10 +148,15 @@ class Node:
     ) -> NodeOutput:
         """Return a result dependency on this node.
 
-        ``map`` (an explicit per-consumer-instance ``instance_map``) is not
-        supported here — a ``$res`` edge must deliver a value, and a mapped edge
-        never does in this release. Use ``.wait(map=...)`` or ``.dep(map=...)``
-        for the gating dependency instead.
+        ``map`` declares an explicit per-consumer-instance ``instance_map``:
+        either a list of lists (``map[j]`` = absolute producer instances
+        consumer instance ``j`` depends on) or a callable ``j -> Iterable[int]``
+        evaluated once the consumer node's factor is known (a literal int, or a
+        resolvable ``Var``; an unresolvable factor requires passing a list
+        instead). Consumer instance ``j`` reads the producer values listed in
+        ``map[j]``, in ascending absolute-index order — one value if the list
+        has length 1, a list otherwise (see ``NodeOutput``'s class docstring).
+        See ``tomii.halo`` and ``tomii.stride`` for common shapes.
         """
         return NodeOutput(self, start, end, group_by=group_by, map=map)
 

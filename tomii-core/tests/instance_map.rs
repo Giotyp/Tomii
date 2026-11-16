@@ -968,7 +968,11 @@ fn instance_map_rejects_out_of_range_producer_index() {
 }
 
 #[test]
-fn instance_map_rejects_res_type() {
+fn instance_map_accepts_res_type() {
+    // $res + instance_map is now supported (value-carrying mapped edges) — loads
+    // cleanly where it used to be rejected. Value-delivery correctness is
+    // exercised by the real-plugin e2e tests in `same_pred_multi_arg_values.rs`
+    // and the dedicated mapped-$res value tests elsewhere in this module.
     let json = r#"
     {
         "nodes": [
@@ -987,6 +991,5 @@ fn instance_map_rejects_res_type() {
         ]
     }
     "#;
-    let err = from_json_str(json, 4).err().unwrap();
-    assert!(err.to_string().contains("$res"), "{err}");
+    from_json_str(json, 4).expect("$res on a mapped predecessor should load cleanly");
 }
