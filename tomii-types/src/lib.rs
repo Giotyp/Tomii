@@ -1154,10 +1154,14 @@ impl<T> SlicedContainer<T> {
 
         let first_chunk = start / Self::CHUNK_BITS;
         let last_chunk = (range_end - 1) / Self::CHUNK_BITS;
-        for chunk_idx in first_chunk..=last_chunk {
+        for (off, chunk) in self.write_chunks[first_chunk..=last_chunk]
+            .iter()
+            .enumerate()
+        {
+            let chunk_idx = first_chunk + off;
             let mask = Self::mask_for_chunk(start, range_end, chunk_idx);
             if mask != 0 {
-                self.write_chunks[chunk_idx].fetch_and(!mask, Ordering::Release);
+                chunk.fetch_and(!mask, Ordering::Release);
             }
         }
     }
@@ -1179,9 +1183,13 @@ impl<T> SlicedContainer<T> {
 
         let first_chunk = start / Self::CHUNK_BITS;
         let last_chunk = (range_end - 1) / Self::CHUNK_BITS;
-        for chunk_idx in first_chunk..=last_chunk {
+        for (off, chunk) in self.write_chunks[first_chunk..=last_chunk]
+            .iter()
+            .enumerate()
+        {
+            let chunk_idx = first_chunk + off;
             let mask = Self::mask_for_chunk(start, range_end, chunk_idx);
-            if mask != 0 && (self.write_chunks[chunk_idx].load(Ordering::Acquire) & mask) != 0 {
+            if mask != 0 && (chunk.load(Ordering::Acquire) & mask) != 0 {
                 return true;
             }
         }
@@ -1289,9 +1297,13 @@ impl<T> SlicedContainer<T> {
 
         let first_chunk = start / Self::CHUNK_BITS;
         let last_chunk = (range_end - 1) / Self::CHUNK_BITS;
-        for chunk_idx in first_chunk..=last_chunk {
+        for (off, chunk) in self.write_chunks[first_chunk..=last_chunk]
+            .iter()
+            .enumerate()
+        {
+            let chunk_idx = first_chunk + off;
             let mask = Self::mask_for_chunk(start, range_end, chunk_idx);
-            if mask != 0 && (self.write_chunks[chunk_idx].load(Ordering::Acquire) & mask) != 0 {
+            if mask != 0 && (chunk.load(Ordering::Acquire) & mask) != 0 {
                 return false;
             }
         }
@@ -1335,10 +1347,14 @@ impl<T> SlicedContainer<T> {
         }
         let first_chunk = start / Self::CHUNK_BITS;
         let last_chunk = (range_end - 1) / Self::CHUNK_BITS;
-        for chunk_idx in first_chunk..=last_chunk {
+        for (off, chunk) in self.read_chunks[first_chunk..=last_chunk]
+            .iter()
+            .enumerate()
+        {
+            let chunk_idx = first_chunk + off;
             let mask = Self::mask_for_chunk(start, range_end, chunk_idx);
             if mask != 0 {
-                self.read_chunks[chunk_idx].fetch_and(!mask, Ordering::Release);
+                chunk.fetch_and(!mask, Ordering::Release);
             }
         }
     }
