@@ -413,12 +413,12 @@ fn decrement_and_collect_ready_mapped(
             return;
         }
         // Scratch buffer: the number of (producer cell, consumer) listings
-        // touched by this completion — small in every supported shape (QEC-tree
-        // fuse widths, halo radii), so a per-call allocation is acceptable here
+        // touched by this completion — small in every supported shape (irregular
+        // tree fan-in widths, halo radii), so a per-call allocation is acceptable here
         // (this path is never hit for ordinary, unmapped edges).
         let mut idxs: Vec<u32> = Vec::new();
-        for i in pred_index..end {
-            idxs.extend_from_slice(&routing.producer_to_consumers[i]);
+        for consumers in &routing.producer_to_consumers[pred_index..end] {
+            idxs.extend_from_slice(consumers);
         }
         if idxs.is_empty() {
             ready.clear();

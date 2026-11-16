@@ -209,16 +209,17 @@ impl NodeDependencyEntry {
                     if !self.is_condition {
                         ready.extend(start..end);
                     } else {
-                        for idx in start..end {
+                        for (off, sent) in self.instances_sent[start..end].iter().enumerate() {
+                            let idx = start + off;
                             loop {
-                                let cur = self.instances_sent[idx].load(Ordering::Acquire);
+                                let cur = sent.load(Ordering::Acquire);
                                 let cur_gen = gen_unpack_gen(cur);
                                 let cur_sent = gen_unpack_val(cur) != 0;
                                 if cur_gen == slot_gen && cur_sent {
                                     break;
                                 }
                                 let new_packed = gen_pack(slot_gen, 1);
-                                if self.instances_sent[idx]
+                                if sent
                                     .compare_exchange(
                                         cur,
                                         new_packed,
