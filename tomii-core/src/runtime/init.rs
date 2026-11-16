@@ -7,9 +7,11 @@
 use super::node_cache::{node_cache_entry, NodeCacheEntry, ResPredCache};
 use crate::graph::*;
 use crate::graph_struct::{node_has_ambiguous_multi_res_args, Predecessor};
+use crate::instance_map::MappedEdgeRouting;
 use crate::scheduler::SchedulerImpl;
 use crate::IdType;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::Arc;
 use tomii_types::CmTypes;
 
 /// Build the node cache from graph nodes, computing all pre-derived flags.
@@ -20,6 +22,7 @@ pub(crate) fn build_node_cache(
     app_graph: &Graph,
     init_objects: &[Vec<tomii_types::CmTypes>],
     scheduler: &SchedulerImpl,
+    pred_instance_map: &[Vec<Option<Arc<MappedEdgeRouting>>>],
 ) -> Vec<NodeCacheEntry> {
     let mut cache: Vec<NodeCacheEntry> = app_graph
         .nodes
@@ -96,6 +99,14 @@ pub(crate) fn build_node_cache(
         if !cache_entry.worker_resolvable
             || cache_entry.is_condition
             || cache_entry.name == "$network"
+            // An instance_map predecessor is never eligible for 1:1 fanout-bulk
+            // (it isn't a $res edge — instance_map is barrier/dep-only — but a
+            // node with ONE $res pred of equal factor could still slip through
+            // this check if it ALSO has an unrelated instance_map $dep/$barrier
+            // predecessor; such a node uses the per-instance dependency-counter
+            // mechanism end to end, which fanout-bulk's arrival counter does not
+            // know about). See `crate::instance_map`.
+            || cache_entry.has_instance_map
         {
             continue;
         }
@@ -152,55 +163,127 @@ pub(crate) fn build_node_cache(
 
         // Helper closure: build ResPredCache entries from an arg slice.
         // `skip_cond` mirrors the `skip_conditions` flag used in build_arg_cache.
-        let build_res_preds =
-            |args: &[crate::graph_struct::Arg], skip_cond: bool| -> Vec<ResPredCache> {
-                let mut v = Vec::new();
-                for arg in args {
-                    if skip_cond && arg.is_condition() {
-                        continue;
-                    }
-                    match &arg.type_ {
-                        CmTypes::Res(res_nid) => {
-                            let pred_node = &app_graph.nodes[*res_nid];
-                            v.push(ResPredCache {
-                                node_id: node_id as IdType,
-                                res_node_id: *res_nid as IdType,
-                                indexes: arg
-                                    .predecessor
-                                    .as_ref()
-                                    .map_or_else(Vec::new, |p| p.indexes.clone()),
-                                pred_factor: pred_node.factor,
-                                pred_group_size: pred_node.group_size,
-                                node_group_size: node.group_size,
-                                node_factor: node.factor,
-                                is_dep: false,
-                                node_has_barrier,
-                            });
-                        }
-                        CmTypes::Dep(res_nid) => {
-                            v.push(ResPredCache {
-                                node_id: node_id as IdType,
-                                res_node_id: *res_nid as IdType,
-                                indexes: Vec::new(),
-                                pred_factor: 0,
-                                pred_group_size: None,
-                                node_group_size: None,
-                                node_factor: node.factor,
-                                is_dep: true,
-                                node_has_barrier,
-                            });
-                        }
-                        _ => {}
-                    }
+        // `func_name` is the kernel this `args` slice is dispatched to (`node.func_name`
+        // for the main args, `node.condition.func_name` for condition args) — used to
+        // look up the kernel's published arg spec, when available, for `may_vary_width`.
+        let build_res_preds = |args: &[crate::graph_struct::Arg],
+                               skip_cond: bool,
+                               func_name: &str|
+         -> Vec<ResPredCache> {
+            let mut v = Vec::new();
+            // Position of the LAST `$res` arg, by raw (unfiltered) index — the
+            // structural fallback used when the kernel's arg spec is unavailable
+            // (see below): only that position may legitimately resolve to a width
+            // other than 1, because the macro's own rule is that only a kernel's
+            // LAST parameter may be variadic, and a trailing `$dep` between a
+            // variadic `$res` and the end of `args` never carries a value, so it
+            // doesn't affect which `$res` is "last" in this sense.
+            let last_res_pos = args
+                .iter()
+                .rposition(|a| matches!(a.type_, CmTypes::Res(_)));
+            // When the kernel published an arg spec, `may_vary_width` can be exactly
+            // "at or after the kernel's variadic-tail boundary" — matching
+            // `instance_map::validate_res_arity`'s load-time check exactly, so a
+            // graph that loads successfully can never panic here (see that
+            // function's doc comment and `ResPredCache::may_vary_width`'s doc
+            // comment for the full agreement argument). `positions` mirrors
+            // `validate_res_arity`'s own filtered (condition-args-excluded)
+            // position numbering via the same shared helper, so the two stay in
+            // lockstep by construction.
+            let fixed_boundary = crate::func_reg::get_func_argspec(func_name)
+                .map(crate::instance_map::variadic_fixed_boundary);
+            let positions = crate::instance_map::arg_template_positions(args);
+            for (idx, arg) in args.iter().enumerate() {
+                if skip_cond && arg.is_condition() {
+                    continue;
                 }
-                v
-            };
+                match &arg.type_ {
+                    CmTypes::Res(res_nid) => {
+                        let pred_node = &app_graph.nodes[*res_nid];
+                        let is_mapped = arg
+                            .predecessor
+                            .as_ref()
+                            .is_some_and(|p| p.instance_map.is_some());
+                        let mapped_forward = if is_mapped {
+                            // `validate_and_build` always populates this table entry
+                            // when ANY arg on `node.args` declares an instance_map on
+                            // this predecessor — the one exception is an instance_map
+                            // declared ONLY on a condition arg (`node.condition.args`),
+                            // which `validate_and_build` never scans (a pre-existing
+                            // gap from phase 1, not introduced here; see
+                            // `crate::instance_map`'s module docs). Panic loudly here
+                            // rather than silently falling back to the ordinary
+                            // (empty-`indexes`) resolution path, which would silently
+                            // deliver nothing instead of the declared values.
+                            let routing = pred_instance_map
+                                .get(node_id)
+                                .and_then(|row| row.get(*res_nid))
+                                .and_then(|opt| opt.clone())
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "node '{}': $res arg declares instance_map on \
+                                             predecessor '{}', but no routing table was built \
+                                             for this edge (instance_map on a condition-only \
+                                             arg is not supported)",
+                                        node.name, pred_node.name
+                                    )
+                                });
+                            Some(routing)
+                        } else {
+                            None
+                        };
+                        v.push(ResPredCache {
+                            node_id: node_id as IdType,
+                            res_node_id: *res_nid as IdType,
+                            indexes: arg
+                                .predecessor
+                                .as_ref()
+                                .map_or_else(Vec::new, |p| p.indexes.clone()),
+                            pred_factor: pred_node.factor,
+                            pred_group_size: pred_node.group_size,
+                            node_group_size: node.group_size,
+                            node_factor: node.factor,
+                            is_dep: false,
+                            node_has_barrier,
+                            mapped_forward,
+                            may_vary_width: match fixed_boundary {
+                                Some(fixed) => positions[idx].is_some_and(|p| p >= fixed),
+                                None => Some(idx) == last_res_pos,
+                            },
+                        });
+                    }
+                    CmTypes::Dep(res_nid) => {
+                        v.push(ResPredCache {
+                            node_id: node_id as IdType,
+                            res_node_id: *res_nid as IdType,
+                            indexes: Vec::new(),
+                            pred_factor: 0,
+                            pred_group_size: None,
+                            node_group_size: None,
+                            node_factor: node.factor,
+                            is_dep: true,
+                            node_has_barrier,
+                            mapped_forward: None,
+                            // `is_dep` always short-circuits to a width of
+                            // exactly 1 before this flag is ever consulted
+                            // (see `collect_res_from_cache`) — `true` here
+                            // only documents that a $dep can never trip
+                            // the width guard, not that it is exempt from
+                            // anything.
+                            may_vary_width: true,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            v
+        };
 
-        let main_res_preds = build_res_preds(&node.args, true);
+        let main_res_preds = build_res_preds(&node.args, true, &node.func_name);
         let cond_res_preds = node
             .condition
             .as_ref()
-            .map(|cond| build_res_preds(&cond.args, false));
+            .map(|cond| build_res_preds(&cond.args, false, &cond.func_name));
 
         cache_entry.arg_cache.res_predecessors = main_res_preds;
         if let (Some(nc), Some(cp)) = (cache_entry.node_condition.as_mut(), cond_res_preds) {
@@ -219,11 +302,20 @@ pub(crate) fn build_node_cache(
     // comparisons are not confounded by code-layout changes).
     let templates_disabled = std::env::var_os("TOMII_DISABLE_ARG_TEMPLATES").is_some();
     for cache_entry in cache.iter_mut() {
-        let all_width_one = cache_entry
-            .arg_cache
-            .res_predecessors
-            .iter()
-            .all(|rp| rp.is_dep || rp.indexes.len() <= 1 || rp.indexes.len() == rp.node_factor);
+        let all_width_one = cache_entry.arg_cache.res_predecessors.iter().all(|rp| {
+            if let Some(routing) = &rp.mapped_forward {
+                // A mapped $res arg's width varies per CONSUMER INSTANCE, not per
+                // dispatch — so it is build-time-constant (eligible for the
+                // persistent-template path) iff EVERY instance's forward list has
+                // length 1. Any length != 1 anywhere (the "variadic" shape — see
+                // `crate::instance_map`'s module docs) means the splice can change
+                // the arg vector's length, exactly like the ordinary multi-index
+                // collect-all path below.
+                routing.forward.iter().all(|list| list.len() == 1)
+            } else {
+                rp.is_dep || rp.indexes.len() <= 1 || rp.indexes.len() == rp.node_factor
+            }
+        });
         cache_entry.template_stable =
             !templates_disabled && all_width_one && cache_entry.name != "$network";
     }
@@ -242,6 +334,7 @@ pub(crate) fn build_node_cache(
 #[allow(clippy::type_complexity)]
 pub(crate) fn build_predecessor_tables(
     app_graph: &Graph,
+    has_instance_map: &[bool],
 ) -> (
     Vec<Vec<Option<(usize, usize)>>>,
     Vec<Vec<Option<usize>>>,
@@ -257,6 +350,24 @@ pub(crate) fn build_predecessor_tables(
     for succ_node in &app_graph.nodes {
         let succ_id = succ_node.id as usize;
         let succ_factor = succ_node.factor;
+        // A node with an `instance_map` predecessor routes ALL of its
+        // predecessors — mapped and ordinary alike — through the per-instance
+        // dependency-counter mechanism (`crate::instance_map`), which needs
+        // every instance to independently see the SAME declared absolute
+        // subset of a coexisting ordinary predecessor, regardless of the
+        // node's own factor. That is exactly the existing `succ_factor == 1`
+        // branch of `Predecessor::index_filter` ("a single-instance successor
+        // reads absolute indexes"); force it here instead of the node's real
+        // factor. Does not affect the 1:1 exact-dispatch offset below (that
+        // still needs the REAL factor — mirrors
+        // `instance_map::classify_coexisting_predecessor`'s own check).
+        // Unmapped nodes (the overwhelming majority) are completely
+        // unaffected: `filter_succ_factor == succ_factor` for them.
+        let filter_succ_factor = if has_instance_map.get(succ_id).copied().unwrap_or(false) {
+            1
+        } else {
+            succ_factor
+        };
 
         // Group this successor's args by predecessor ID first. A node can read the
         // SAME predecessor through more than one arg with different index sets
@@ -287,6 +398,31 @@ pub(crate) fn build_predecessor_tables(
                 .iter()
                 .filter(|a| a.predecessor.as_ref().is_some_and(|p| p.id == pred_id_tag))
                 .collect();
+
+            // A predecessor with at least one `instance_map` argument on this
+            // node is routed ENTIRELY through `crate::instance_map`'s
+            // per-instance dependency-counter mechanism, whether or not a
+            // plain (non-mapped) argument on the SAME predecessor coexists
+            // (Item 2: mixed mapped + plain args on one predecessor — the
+            // plain argument's per-instance absolute index set is already
+            // folded into the mapped forward map by
+            // `instance_map::validate_and_build`). Leave `filter`/`group_by`/
+            // `succ_1to1_offset` at their default `None` for this (succ,
+            // pred) pair so `SuccessorArena`'s `mapped` field (built from
+            // `pred_instance_map`) is the ONLY routing data this edge
+            // carries — otherwise a stale 1:1/broadcast table entry would sit
+            // alongside the mapped routing table (harmless today, since
+            // `decrement_and_collect_ready_mapped` checks `mapped_routing()`
+            // first and returns before ever consulting it, but leaving it
+            // populated would be a latent double-counting trap for any
+            // future code path that consults these tables directly).
+            if args_on_pred.iter().any(|a| {
+                a.predecessor
+                    .as_ref()
+                    .is_some_and(|p| p.instance_map.is_some())
+            }) {
+                continue;
+            }
 
             // Mirrors `Graph::barrier_group_by_for_dependency` (the counting side,
             // in graph.rs): a grouped barrier only guarantees its own narrow
@@ -323,9 +459,6 @@ pub(crate) fn build_predecessor_tables(
             // computation, same cost) so that path is unchanged and no slower.
             if let [arg] = args_on_pred[..] {
                 let pred = arg.predecessor.as_ref().unwrap();
-                if let Some(range) = pred.index_filter(pred_factor, succ_factor) {
-                    filter[succ_id][pred_id] = Some(range);
-                }
 
                 // 1:1 non-barrier $res: store offset so we can fire the exact successor
                 // instance that reads this predecessor. Two shapes qualify:
@@ -342,11 +475,28 @@ pub(crate) fn build_predecessor_tables(
                 let contiguous_range_1to1 = range_1to1_enabled
                     && pred.indexes.len() == succ_factor
                     && pred.indexes.windows(2).all(|w| w[1] == w[0] + 1);
-                if !arg.is_barrier()
+                let is_1to1_shape = !arg.is_barrier()
                     && pred.group_by.is_none()
                     && (single_1to1 || contiguous_range_1to1)
-                    && succ_factor > 1
-                {
+                    && succ_factor > 1;
+
+                // The `filter_succ_factor` override (forcing the "absolute subset"
+                // branch of `index_filter`) is for the BROADCAST shapes a mapped
+                // node's coexisting predecessor can take — every instance needs the
+                // SAME absolute subset. A 1:1 edge is the opposite: each instance
+                // needs a DIFFERENT, position-dependent single cell, dispatched below
+                // via `succ_1to1_offset`, not via a filter. Applying the override here
+                // would spuriously filter every edge down to the first instance only.
+                let this_filter_succ_factor = if is_1to1_shape {
+                    succ_factor
+                } else {
+                    filter_succ_factor
+                };
+                if let Some(range) = pred.index_filter(pred_factor, this_filter_succ_factor) {
+                    filter[succ_id][pred_id] = Some(range);
+                }
+
+                if is_1to1_shape {
                     succ_1to1_offset[succ_id][pred_id] = Some(pred.indexes[0]);
                 }
             } else {
@@ -372,18 +522,25 @@ pub(crate) fn build_predecessor_tables(
                 if all_identical {
                     let arg = args_on_pred[0];
                     let pred = first_pred;
-                    if let Some(range) = pred.index_filter(pred_factor, succ_factor) {
-                        filter[succ_id][pred_id] = Some(range);
-                    }
                     let single_1to1 = pred.indexes.len() == 1 && succ_factor == pred_factor;
                     let contiguous_range_1to1 = range_1to1_enabled
                         && pred.indexes.len() == succ_factor
                         && pred.indexes.windows(2).all(|w| w[1] == w[0] + 1);
-                    if !arg.is_barrier()
+                    let is_1to1_shape = !arg.is_barrier()
                         && pred.group_by.is_none()
                         && (single_1to1 || contiguous_range_1to1)
-                        && succ_factor > 1
-                    {
+                        && succ_factor > 1;
+                    // See the single-arg branch above for why the override must not
+                    // apply to a 1:1-shaped edge.
+                    let this_filter_succ_factor = if is_1to1_shape {
+                        succ_factor
+                    } else {
+                        filter_succ_factor
+                    };
+                    if let Some(range) = pred.index_filter(pred_factor, this_filter_succ_factor) {
+                        filter[succ_id][pred_id] = Some(range);
+                    }
+                    if is_1to1_shape {
                         succ_1to1_offset[succ_id][pred_id] = Some(pred.indexes[0]);
                     }
                     continue;
@@ -410,6 +567,7 @@ pub(crate) fn build_predecessor_tables(
                             id: pred_id_tag,
                             indexes: union_indexes,
                             group_by: None,
+                            instance_map: None,
                         };
                         if let Some(range) = union_pred.index_filter(pred_factor, succ_factor) {
                             filter[succ_id][pred_id] = Some(range);
@@ -592,7 +750,10 @@ fn provable_variant(
         return crate::func_reg::get_func_ret_variant(&pred.func_name);
     }
 
-    if ac.rt_idxs_indexes.contains(&arg_idx) || ac.rt_workers_indexes.contains(&arg_idx) {
+    if ac.rt_idxs_indexes.contains(&arg_idx)
+        || ac.rt_workers_indexes.contains(&arg_idx)
+        || ac.rt_frame_indexes.contains(&arg_idx)
+    {
         return Some("Usize");
     }
 

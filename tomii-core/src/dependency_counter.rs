@@ -74,6 +74,36 @@ pub trait DependencyCounter: Send + Sync {
     /// counter (see `runtime::generation::bump_slot_generation`), never on the
     /// common per-frame path, which stays fully lazy.
     fn reset_slot_epoch(&self, slot: usize, new_gen: u32);
+
+    /// Hot-path decrement for a node with an `instance_map` predecessor
+    /// (see [`crate::instance_map`]): decrement each listed consumer instance
+    /// index by `amount` (independently — duplicates in `indices` apply
+    /// multiple independent decrements) and write newly-ready indices into
+    /// `ready` (cleared first). Only ever called for nodes where
+    /// `NodeCacheEntry::has_instance_map` is true.
+    fn decrease_instances_and_get_ready_into(
+        &self,
+        slot: usize,
+        node_id: usize,
+        slot_gen: u32,
+        indices: &[u32],
+        amount: u32,
+        ready: &mut Vec<usize>,
+    );
+
+    /// Hot-path broadcast decrement for a node with an `instance_map`
+    /// predecessor: decrement EVERY consumer instance by `amount` (an ordinary
+    /// barrier/dep/factor-1 predecessor coexisting with a mapped one — see
+    /// `crate::instance_map::classify_coexisting_predecessor`) and write
+    /// newly-ready indices into `ready` (cleared first).
+    fn decrease_broadcast_and_get_ready_into(
+        &self,
+        slot: usize,
+        node_id: usize,
+        slot_gen: u32,
+        amount: u32,
+        ready: &mut Vec<usize>,
+    );
 }
 
 /// Multi-threaded dependency counter — uses atomics for lock-free operation.
@@ -85,6 +115,10 @@ pub trait DependencyCounter: Send + Sync {
 pub struct MultiThreadedCounter {
     /// Per-node dependency tracking with threshold-based spawning.
     node_dep_map: Arc<crate::buffers::NodeDepMap>,
+
+    /// Per-instance dependency tracking for `instance_map` nodes (see
+    /// `crate::instance_map`) — sparse: `None` at every non-mapped node.
+    instance_map_dep: Arc<crate::buffers::InstanceMapDepMap>,
 
     /// Bitset where bit `i` = 1 means slot `i` has been claimed as completed.
     /// `AtomicU64` supports up to 64 slots (enforced by `TomiiRtBuilder::build`).
@@ -99,10 +133,14 @@ impl MultiThreadedCounter {
         _max_factor: usize,
         dependency_count_vec: Vec<usize>,
         nodes: &[crate::graph_struct::Node],
+        instance_map_thresholds: &[Option<Arc<Vec<u32>>>],
     ) -> Self {
         let node_dep_map = crate::buffers::NodeDepMap::new(nodes, slots, &dependency_count_vec);
+        let instance_map_dep =
+            crate::buffers::InstanceMapDepMap::new(slots, instance_map_thresholds);
         Self {
             node_dep_map: Arc::new(node_dep_map),
+            instance_map_dep: Arc::new(instance_map_dep),
             completed_slots: AtomicU64::new(0),
         }
     }
@@ -169,6 +207,34 @@ impl DependencyCounter for MultiThreadedCounter {
     #[inline]
     fn reset_slot_epoch(&self, slot: usize, new_gen: u32) {
         self.node_dep_map.reset_slot_epoch(slot, new_gen);
+        self.instance_map_dep.reset_slot_epoch(slot, new_gen);
+    }
+
+    #[inline]
+    fn decrease_instances_and_get_ready_into(
+        &self,
+        slot: usize,
+        node_id: usize,
+        slot_gen: u32,
+        indices: &[u32],
+        amount: u32,
+        ready: &mut Vec<usize>,
+    ) {
+        self.instance_map_dep
+            .decrease_many_and_get_ready_into(slot, node_id, slot_gen, indices, amount, ready);
+    }
+
+    #[inline]
+    fn decrease_broadcast_and_get_ready_into(
+        &self,
+        slot: usize,
+        node_id: usize,
+        slot_gen: u32,
+        amount: u32,
+        ready: &mut Vec<usize>,
+    ) {
+        self.instance_map_dep
+            .decrease_broadcast_and_get_ready_into(slot, node_id, slot_gen, amount, ready);
     }
 }
 

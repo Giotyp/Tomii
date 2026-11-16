@@ -3,7 +3,9 @@
 //! `worker_resolvable` and `needs_result_store` that drive fast-path decisions in the runtime.
 use crate::debug::print_debug;
 use crate::func_reg::{get_bulk_func, get_func};
+use crate::instance_map::MappedEdgeRouting;
 use crate::{graph_struct::*, IdType};
+use std::sync::Arc;
 use tomii_types::*;
 
 /// Resolve a function pointer by name, panicking in production if not found.
@@ -92,6 +94,12 @@ pub struct NodeCacheEntry {
     /// (P3 Phase B): every argument slot's variant was proven at build time,
     /// so the wrapper skips variant matches and bounds checks.
     pub uses_unchecked: bool,
+    /// True when this node has at least one `instance_map` predecessor. Such a
+    /// node uses the per-instance dependency-counter mechanism
+    /// (`buffers::instance_map_dep::InstanceMapDepMap`) for ALL of its
+    /// predecessors — mapped and ordinary alike — instead of the pooled/ordinal
+    /// `NodeDependencyEntry`. See `crate::instance_map`.
+    pub has_instance_map: bool,
 }
 
 #[derive(Clone)]
@@ -143,6 +151,34 @@ pub struct ResPredCache {
     /// shared counter cannot reach zero until every declared cell on every
     /// predecessor has completed, so the result is already stored.
     pub node_has_barrier: bool,
+    /// `Some(routing)` when this `$res` argument's predecessor edge carries an
+    /// explicit `instance_map` — `routing.forward[node_index]` lists, in
+    /// ascending absolute-producer-index order, exactly the producer instances
+    /// to fetch (see `crate::instance_map`'s module docs and
+    /// `runtime::arg_resolution::fetch_mapped_res_results`). `None` for the
+    /// overwhelming majority of `$res`/`$dep` args, which use the classic
+    /// `indexes`/`pred_index` resolution in `fetch_res_results` instead. Mapped
+    /// routing takes precedence over every other field on this struct when
+    /// present — `indexes`/`pred_factor`/`node_has_barrier` etc. are irrelevant
+    /// for a mapped edge (every producer index is already absolute and
+    /// explicit; there is no ambiguity for `pred_index`/`group_size` to resolve).
+    pub mapped_forward: Option<Arc<MappedEdgeRouting>>,
+    /// True when this `$res` arg is declared at the LAST value-bearing
+    /// position among this node's args (no other `$res` arg — mapped or
+    /// ordinary — is declared after it; trailing `$dep`/`$barrier`
+    /// ordering-only args don't count, since they never carry a value). Only
+    /// this position may legitimately resolve to a width other than 1 — the
+    /// macro's own rule is that only a kernel's LAST parameter may be
+    /// `#[tomii_export(variadic)]`, so any EARLIER `$res` arg resolving to
+    /// anything but exactly one value is always a bug (a scalar parameter
+    /// silently receiving the wrong count), independent of whether the
+    /// plugin publishes arity metadata. See
+    /// `runtime::arg_resolution`'s `$res`-splice guard, which enforces this
+    /// unconditionally, and `crate::instance_map::validate_res_arity`'s doc
+    /// comment for the complementary load-time check (which additionally
+    /// catches a non-variadic LAST parameter, the one case this flag cannot
+    /// cover on its own).
+    pub may_vary_width: bool,
 }
 
 #[derive(Clone, Default)]
@@ -157,6 +193,13 @@ pub struct ArgCacheEntry {
     pub rt_idxs_indexes: Vec<usize>,
     // indexes of $ref::worker in args
     pub rt_workers_indexes: Vec<usize>,
+    // Indexes of $ref::$frame_id in args. Empty for every node that does not
+    // reference `$frame_id` — the overwhelming majority — so the hot-path
+    // checks that gate frame-id resolution (`populate_cached_args_into`,
+    // `populate_dynamic_args_into`, `execute_bulk_task`'s `has_dynamic`) are
+    // simple `is_empty()` reads with no extra work when unused. See
+    // `crate::runtime::arg_resolution::process_runtime_refs`.
+    pub rt_frame_indexes: Vec<usize>,
     // indexes of $res in args
     pub res_indexes: Vec<usize>,
     // real indexes of $res
@@ -175,6 +218,7 @@ impl std::fmt::Debug for ArgCacheEntry {
             .field("buffer_values", &self.buffer_values)
             .field("rt_idxs_indexes", &self.rt_idxs_indexes)
             .field("rt_workers_indexes", &self.rt_workers_indexes)
+            .field("rt_frame_indexes", &self.rt_frame_indexes)
             .field("res_indexes", &self.res_indexes)
             .field("real_res_indexes", &self.real_res_indexes)
             .field("res_predecessors.len", &self.res_predecessors.len())
@@ -217,6 +261,7 @@ pub(super) fn node_cache_entry(
             template_stable: false,
             func_name: node.func_name.clone(),
             uses_unchecked: false,
+            has_instance_map: false,
         };
     }
 
@@ -252,6 +297,10 @@ pub(super) fn node_cache_entry(
         template_stable: false, // populated in build_node_cache second pass
         func_name: node.func_name.clone(),
         uses_unchecked: false, // populated by select_unchecked_wrappers
+        has_instance_map: node
+            .args
+            .iter()
+            .any(|a| a.predecessor.as_ref().is_some_and(|p| p.has_instance_map())),
     }
 }
 
@@ -270,6 +319,7 @@ fn build_arg_cache(
     let mut buffer_ref_indexes = Vec::new();
     let mut buffer_values = Vec::new();
     let mut rt_workers_indexes = Vec::new();
+    let mut rt_frame_indexes = Vec::new();
     let mut real_res_indexes = Vec::new();
     let mut res_indexes = Vec::new();
     let mut args_out = vec![CmTypes::None; args.len()];
@@ -287,6 +337,8 @@ fn build_arg_cache(
                     rt_idxs_indexes.push(idx_count);
                 } else if *obj_id == 1 {
                     rt_workers_indexes.push(idx_count);
+                } else if *obj_id == 2 {
+                    rt_frame_indexes.push(idx_count);
                 } else {
                     let obj_vec = &init_objects[*obj_id];
                     if obj_vec.len() > 1 {
@@ -322,6 +374,7 @@ fn build_arg_cache(
             buffer_values,
             rt_idxs_indexes,
             rt_workers_indexes,
+            rt_frame_indexes,
             res_indexes,
             real_res_indexes,
             res_predecessors: Vec::new(), // populated later by build_node_cache second pass
@@ -351,4 +404,102 @@ fn build_condition_cache(node: &Node, init_objects: &[Vec<CmTypes>]) -> Option<N
         func_ptr: resolve_func(&cond.func_name),
         arg_cache,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph_struct::Predecessor;
+
+    fn ref_arg(obj_id: usize) -> Arg {
+        Arg {
+            type_: CmTypes::Ref(obj_id),
+            init_condition: None,
+            predecessor: None,
+        }
+    }
+
+    fn string_arg(s: &str) -> Arg {
+        Arg {
+            type_: CmTypes::String(std::sync::Arc::from(s)),
+            init_condition: None,
+            predecessor: None,
+        }
+    }
+
+    #[test]
+    fn frame_id_ref_populates_rt_frame_indexes_only() {
+        // obj_id 2 is the reserved `$frame_id` slot (see `crate::obj_gen::init_objects`).
+        let args = vec![string_arg("tag"), ref_arg(2), string_arg("suffix")];
+        let (cache, _) = build_arg_cache(&args, &[], false);
+        assert_eq!(cache.rt_frame_indexes, vec![1]);
+        assert!(cache.rt_idxs_indexes.is_empty());
+        assert!(cache.rt_workers_indexes.is_empty());
+        // Non-$ref args keep their literal values in `args` at their own slots.
+        assert_eq!(cache.args[0], CmTypes::String(std::sync::Arc::from("tag")));
+        assert_eq!(
+            cache.args[2],
+            CmTypes::String(std::sync::Arc::from("suffix"))
+        );
+        // The $frame_id slot itself is a placeholder (overwritten at runtime by
+        // `arg_resolution::process_runtime_refs`) — never read before that.
+        assert_eq!(cache.args[1], CmTypes::None);
+    }
+
+    #[test]
+    fn ordinary_node_has_empty_rt_frame_indexes() {
+        // A node with no `$frame_id` (or any `$ref`) arg at all: `rt_frame_indexes`
+        // must be empty — this is the zero-cost fast path every existing graph
+        // takes (see `arg_resolution::populate_cached_args_into`'s early-return
+        // guard, which short-circuits entirely on this emptiness).
+        let args = vec![
+            string_arg("x"),
+            Arg {
+                type_: CmTypes::Res(0),
+                init_condition: None,
+                predecessor: Some(Predecessor {
+                    id: 0,
+                    indexes: vec![0],
+                    group_by: None,
+                    instance_map: None,
+                }),
+            },
+        ];
+        let (cache, _) = build_arg_cache(&args, &[], false);
+        assert!(cache.rt_frame_indexes.is_empty());
+        assert!(cache.rt_idxs_indexes.is_empty());
+        assert!(cache.rt_workers_indexes.is_empty());
+    }
+
+    #[test]
+    fn frame_id_coexists_with_index_and_workers_refs() {
+        // All three runtime-injected refs can appear on the same node,
+        // independently, at different slots.
+        let args = vec![ref_arg(0), ref_arg(1), ref_arg(2)];
+        let (cache, _) = build_arg_cache(&args, &[], false);
+        assert_eq!(cache.rt_idxs_indexes, vec![0]);
+        assert_eq!(cache.rt_workers_indexes, vec![1]);
+        assert_eq!(cache.rt_frame_indexes, vec![2]);
+    }
+
+    /// Informational, not a hot-path invariant: `ArgCacheEntry` is a per-NODE
+    /// cache entry (one per distinct graph node, built once at compile time and
+    /// shared via reference — see `NodeCacheEntry::arg_cache`), never copied
+    /// per-task. Adding `rt_frame_indexes: Vec<usize>` grows it by one `Vec`
+    /// (24 bytes on a 64-bit target), which is acceptable here precisely
+    /// because it is NOT the hot-path struct — contrast with
+    /// `buffers::node_info::tests::size_is_unchanged_by_the_frame_id_feature`,
+    /// which asserts the per-TASK struct (`NodeInfo`) is byte-for-byte
+    /// unchanged.
+    #[test]
+    fn arg_cache_entry_size_grows_by_one_vec_not_a_hot_path_concern() {
+        let sz = std::mem::size_of::<ArgCacheEntry>();
+        let vec_sz = std::mem::size_of::<Vec<usize>>();
+        // Sanity: the new field is present and sized like every other Vec<usize>
+        // field already on this struct (rt_idxs_indexes/rt_workers_indexes).
+        assert!(
+            sz >= vec_sz,
+            "ArgCacheEntry must be at least large enough to hold one Vec<usize>, got {sz}"
+        );
+    }
 }

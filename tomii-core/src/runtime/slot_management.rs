@@ -15,6 +15,7 @@ use super::shared_data::{SharedData, SlotState, FRAME_SLOT_EMPTY};
 use crate::buffers::*;
 use crate::debug::print_debug;
 use crate::graph::Graph;
+use crate::IdType;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tomii_types::*;
@@ -450,9 +451,14 @@ pub(super) fn release_and_activate_next(
 /// workers. Roots have no `$res` inputs, so bulk execution reads nothing per cell;
 /// `execute_bulk_task` still stores per-instance results for successors. A root with
 /// `factor <= workers` yields one task per instance (bulk_count 1), i.e. unchanged.
-pub(super) fn initial_nodes(graph: &Graph, slots: Vec<usize>, workers: usize) -> Vec<NodeInfo> {
+pub(super) fn initial_nodes(
+    graph: &Graph,
+    slots: Vec<usize>,
+    workers: usize,
+    zero_threshold_instances: &[Option<Arc<Vec<u32>>>],
+) -> Vec<NodeInfo> {
     let mut node_infos = Vec::new();
-    for slot in slots {
+    for slot in &slots {
         for node_id in &graph.initial_nodes {
             let factor = graph.nodes[*node_id as usize].factor;
             if factor == 0 {
@@ -467,14 +473,69 @@ pub(super) fn initial_nodes(graph: &Graph, slots: Vec<usize>, workers: usize) ->
                 if count == 0 {
                     continue;
                 }
-                let mut ni = NodeInfo::new(*node_id, slot, start, 0);
+                let mut ni = NodeInfo::new(*node_id, *slot, start, 0);
                 ni.bulk_count = count;
                 node_infos.push(ni);
                 start += count;
             }
         }
     }
+    for slot in slots {
+        push_zero_threshold_instances(graph, slot, zero_threshold_instances, &mut node_infos);
+    }
     node_infos
+}
+
+/// Dispatch every `instance_map` consumer instance whose total dependency
+/// threshold is 0 (see `crate::instance_map`'s module docs) — exactly once
+/// per frame, at the same admission point as an ordinary root/initial node.
+/// Nothing else will ever decrement these specific instances: no routing
+/// table targets an instance whose (unioned) forward map is empty, so without
+/// this explicit dispatch they would never run.
+///
+/// Contiguous runs of indices (common for a halo/stencil-shaped boundary, or
+/// any map where the empty entries cluster) are coalesced into one bulk
+/// `NodeInfo` each, mirroring the chunking above — correctness does not
+/// depend on this; it only avoids O(factor) individual dispatches when the
+/// zero-threshold set happens to be large and contiguous.
+fn push_zero_threshold_instances(
+    graph: &Graph,
+    slot: usize,
+    zero_threshold_instances: &[Option<Arc<Vec<u32>>>],
+    node_infos: &mut Vec<NodeInfo>,
+) {
+    for (node_id, maybe_zero) in zero_threshold_instances.iter().enumerate() {
+        let Some(zero) = maybe_zero else {
+            continue;
+        };
+        if zero.is_empty() {
+            continue;
+        }
+        debug_assert!(
+            node_id < graph.nodes.len(),
+            "zero_threshold_instances must be sized by node count"
+        );
+        let mut iter = zero.iter().copied();
+        let Some(mut run_start) = iter.next() else {
+            continue;
+        };
+        let mut run_len: usize = 1;
+        let flush = |start: u32, len: usize, node_infos: &mut Vec<NodeInfo>| {
+            let mut ni = NodeInfo::new(node_id as IdType, slot, start as usize, 0);
+            ni.bulk_count = len;
+            node_infos.push(ni);
+        };
+        for idx in iter {
+            if idx == run_start + run_len as u32 {
+                run_len += 1;
+            } else {
+                flush(run_start, run_len, node_infos);
+                run_start = idx;
+                run_len = 1;
+            }
+        }
+        flush(run_start, run_len, node_infos);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -740,6 +801,190 @@ mod generation_tests {
             ready2,
             vec![0],
             "non-wrap bump must leave the in-flight decrement count untouched"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // instance_map per-instance counters (`InstanceMapDepMap`): same 2^32
+    // generation-wrap hazard as `NodeDepMap` above, swept via the SAME
+    // `bump_slot_generation` -> `sweep_slot_generational_entries` ->
+    // `DependencyCounter::reset_slot_epoch` path (see
+    // `dependency_counter::MultiThreadedCounter::reset_slot_epoch`, which calls
+    // both `node_dep_map.reset_slot_epoch` AND `instance_map_dep.reset_slot_epoch`
+    // under the same `new_gen`). These tests exercise that second call directly
+    // through the per-instance decrement API
+    // (`DependencyCounter::decrease_instances_and_get_ready_into`), proving the
+    // wrap-eager-sweep closes the same false-match hazard for per-instance
+    // thresholds that PR #18 closed for pooled `NodeDependencyEntry` counters.
+    // -----------------------------------------------------------------------
+
+    /// `leaves` (factor 4, root) feeds `cons` (factor 2) through an
+    /// `instance_map` predecessor: `cons[0]` depends on `leaves[0,1]`
+    /// (threshold 2), `cons[1]` depends on `leaves[2,3]` (threshold 2) — see
+    /// `crate::instance_map`. Two independent per-instance counters, both with
+    /// the same non-trivial threshold, let the assertions below distinguish
+    /// "freshly reinitialised to the full threshold" from "stale value leaked
+    /// across the wrap" for EITHER instance.
+    const INSTANCE_MAP_GRAPH: &str = r#"
+    {
+        "nodes": [
+            { "name": "leaves", "factor": 4, "function": "noop", "args": [] },
+            {
+                "name": "cons",
+                "factor": 2,
+                "function": "noop",
+                "args": [
+                    {
+                        "type": "$barrier",
+                        "predecessor": { "name": "leaves", "instance_map": [[0, 1], [2, 3]] }
+                    }
+                ]
+            }
+        ]
+    }
+    "#;
+
+    /// Node id of `cons` in [`INSTANCE_MAP_GRAPH`] (ids are assigned in
+    /// declaration order: `leaves` = 0, `cons` = 1).
+    const CONS_NODE_ID: usize = 1;
+
+    /// Build a single-slot runtime for [`INSTANCE_MAP_GRAPH`] without running
+    /// it — tests poke `shared` state directly rather than driving execution.
+    fn build_instance_map_test_rt() -> TomiiRt {
+        let spec = from_json_str(INSTANCE_MAP_GRAPH, 2).expect("JSON parse failed");
+        let scheduler = create_scheduler(SchedulerConfig {
+            scheduler_type: SchedulerType::WorkStealing,
+            core_offset: 0,
+            num_workers: 2,
+            record: false,
+            external_recorder: None,
+            base_instant: std::time::Instant::now(),
+            system_threads: 1,
+            receiver_threads: 0,
+            target_batch_size: 1,
+            batch_timeout_us: 10,
+            worker_affinity: None,
+            worker_hook: None,
+        });
+        let compiled = spec.compile(&scheduler);
+        let config = RuntimeConfig {
+            slots: 1,
+            max_frames: 1,
+            max_runtime: Some(5),
+            system_threads: 1,
+            workers: 2,
+            ..RuntimeConfig::default()
+        };
+        TomiiRtBuilder::with_config(compiled, scheduler, config)
+            .build()
+            .expect("build failed")
+    }
+
+    #[test]
+    fn test_bump_slot_generation_wrap_sweeps_instance_map_stale_entries() {
+        let rt = build_instance_map_test_rt();
+        let shared = &rt.shared;
+        let slot = 0;
+
+        // Simulate instance 0 last touched one decrement ago (1 of its
+        // threshold-2 deps consumed), tagged with the low-32 generation the
+        // upcoming wrap will produce (0) — exactly the collision the bug
+        // describes. Instance 1 is left completely untouched (still at its
+        // lazy lazy-init value for generation 0).
+        let mut ready = Vec::new();
+        shared
+            .exec
+            .resolution_state
+            .decrease_instances_and_get_ready_into(slot, CONS_NODE_ID, 0, &[0], 1, &mut ready);
+        assert!(
+            ready.is_empty(),
+            "1 of 2 deps consumed for instance 0, not ready yet"
+        );
+
+        // Force the counter to the wrap boundary: the next fetch_add's `prev as
+        // u32` is `u32::MAX`, so the post-increment low 32 bits become 0 —
+        // colliding with the stale tag instance 0 was just given above.
+        shared.slot_data.generation[slot].store(u64::from(u32::MAX), Ordering::SeqCst);
+
+        bump_slot_generation(shared, slot);
+
+        // Without the eager sweep, instance 0's stale (gen=0, val=1) tag would
+        // false-match the new generation (also 0, by construction) and a
+        // single further decrement would wrongly fire it ready — needing only
+        // 1 more decrement instead of a fresh 2. With the sweep, the entry was
+        // eagerly reinitialised to the FULL threshold (2) at the new
+        // generation, so one decrement must NOT be enough.
+        let mut ready2 = Vec::new();
+        shared
+            .exec
+            .resolution_state
+            .decrease_instances_and_get_ready_into(slot, CONS_NODE_ID, 0, &[0], 1, &mut ready2);
+        assert!(
+            ready2.is_empty(),
+            "sweep must reset instance 0's counter to the full threshold (2) at the new \
+             generation; firing ready after only 1 post-wrap decrement means the stale \
+             pre-wrap tag leaked across the wrap"
+        );
+        // Finish instance 0 with its second decrement.
+        let mut ready2b = Vec::new();
+        shared
+            .exec
+            .resolution_state
+            .decrease_instances_and_get_ready_into(slot, CONS_NODE_ID, 0, &[0], 1, &mut ready2b);
+        assert_eq!(ready2b, vec![0]);
+
+        // Instance 1 was NEVER touched before the wrap — the sweep must have
+        // reinitialised it too, to the SAME full threshold (2), not left it
+        // dangling at some other (uninitialised AtomicU64-default) state.
+        let mut ready3 = Vec::new();
+        shared
+            .exec
+            .resolution_state
+            .decrease_instances_and_get_ready_into(slot, CONS_NODE_ID, 0, &[1, 1], 1, &mut ready3);
+        assert_eq!(
+            ready3,
+            vec![1],
+            "instance 1's full threshold (2) must need exactly 2 decrements, proving the sweep \
+             reinitialised every per-instance counter, not just the one already touched"
+        );
+    }
+
+    #[test]
+    fn test_bump_slot_generation_non_wrap_does_not_sweep_instance_map() {
+        let rt = build_instance_map_test_rt();
+        let shared = &rt.shared;
+        let slot = 0;
+
+        // Non-wrap starting point: low 32 bits != u32::MAX.
+        shared.slot_data.generation[slot].store(5, Ordering::SeqCst);
+
+        // Pre-set instance 0 away from its init value at an arbitrary gen tag
+        // (123, deliberately independent of the slot-level counter above —
+        // mirrors how the hot path always passes the CURRENT slot generation
+        // explicitly rather than reading it twice): 1 of 2 deps consumed.
+        let mut ready = Vec::new();
+        shared
+            .exec
+            .resolution_state
+            .decrease_instances_and_get_ready_into(slot, CONS_NODE_ID, 123, &[0], 1, &mut ready);
+        assert!(ready.is_empty());
+
+        bump_slot_generation(shared, slot); // 5 -> 6, non-wrap
+
+        assert_eq!(shared.slot_data.generation[slot].load(Ordering::SeqCst), 6);
+
+        // The pending 1-of-2 decrement from before the bump must still need
+        // only 1 more decrement (not a fresh 2) — proving the non-wrap bump
+        // did not sweep InstanceMapDepMap.
+        let mut ready2 = Vec::new();
+        shared
+            .exec
+            .resolution_state
+            .decrease_instances_and_get_ready_into(slot, CONS_NODE_ID, 123, &[0], 1, &mut ready2);
+        assert_eq!(
+            ready2,
+            vec![0],
+            "non-wrap bump must leave the in-flight per-instance decrement count untouched"
         );
     }
 }

@@ -24,6 +24,7 @@ from ._generated import (
     NodeJson,
     PredJson,
 )
+from ._instance_map import resolve_map
 from ._loop import Condition, IndexFunc, Loop
 from ._node import Node, NodeBarrier, NodeDep, NodeOutput
 from ._types import TypedValue, infer_type
@@ -52,33 +53,89 @@ def _indexes(start: Any, end: Any) -> str:
     return f"{start}-{end_str}"
 
 
-def _arg(a: Any) -> ArgJson:
-    """Convert a node argument to an ArgJson model."""
+def _resolved_instance_map(a: Any, consumer_factor: Any) -> "list[list[int]]":
+    """Resolve a `NodeOutput`/`NodeBarrier`/`NodeDep`'s `.map` into an explicit
+    list of lists, given the consumer node's factor (as passed to `Node(...,
+    factor=...)` — an int literal, or a `Var`).
+
+    A callable map needs `consumer_factor` resolved to a literal int at BUILD
+    time (the number of lists to produce); a `Var` factor that isn't a literal
+    cannot be resolved here (its value may only be known once the graph is
+    initialized at runtime) — callers must pass an explicit list of lists
+    instead.
+    """
+    if isinstance(a.map, list):
+        return a.map
+    if isinstance(consumer_factor, Var):
+        raise ValueError(
+            f"node '{a.node.name}': a callable `map=` requires the CONSUMER node's "
+            "factor to be a literal int at build time (got a Var reference); pass "
+            "an explicit list of lists instead."
+        )
+    factor = consumer_factor if consumer_factor is not None else 1
+    producer_factor = a.node.factor
+    if isinstance(producer_factor, Var):
+        raise ValueError(
+            f"node '{a.node.name}': a callable `map=` (e.g. tomii.halo/tomii.stride) "
+            "needs the PRODUCER node's factor to be a literal int at build time (got "
+            "a Var reference); pass an explicit list of lists instead."
+        )
+    producer_factor = producer_factor if producer_factor is not None else 1
+    return resolve_map(a.map, factor, producer_factor)
+
+
+def _arg(a: Any, consumer_factor: Any = None) -> ArgJson:
+    """Convert a node argument to an ArgJson model.
+
+    `consumer_factor` is the OWNING node's own factor (as declared on
+    `Node(..., factor=...)`) — needed only to resolve a callable `.map=` (see
+    `_resolved_instance_map`); every other argument shape ignores it.
+    """
     if isinstance(a, Var):
         return ArgJson(type="$ref", value=a.name)
 
     if isinstance(a, NodeDep):
-        pred = PredJson(
-            name=a.node.name,
-            indexes=_indexes(a.start, a.end),
-            group_by=_factor(a.group_by),
-        )
+        if a.map is not None:
+            pred = PredJson(
+                name=a.node.name,
+                instance_map=_resolved_instance_map(a, consumer_factor),
+            )
+        else:
+            pred = PredJson(
+                name=a.node.name,
+                indexes=_indexes(a.start, a.end),
+                group_by=_factor(a.group_by),
+            )
         return ArgJson(type="$dep", predecessor=pred)
 
     if isinstance(a, NodeOutput):
-        pred = PredJson(
-            name=a.node.name,
-            indexes=_indexes(a.start, a.end),
-            group_by=_factor(a.group_by),
-        )
+        # NodeDep (a NodeOutput subclass) is handled above, before this
+        # isinstance check, so this branch is plain `$res` only.
+        if a.map is not None:
+            pred = PredJson(
+                name=a.node.name,
+                instance_map=_resolved_instance_map(a, consumer_factor),
+            )
+        else:
+            pred = PredJson(
+                name=a.node.name,
+                indexes=_indexes(a.start, a.end),
+                group_by=_factor(a.group_by),
+            )
         return ArgJson(type="$res", predecessor=pred)
 
     if isinstance(a, NodeBarrier):
-        pred = PredJson(
-            name=a.node.name,
-            indexes=_indexes(a.start, a.end),
-            group_by=_factor(a.group_by),
-        )
+        if a.map is not None:
+            pred = PredJson(
+                name=a.node.name,
+                instance_map=_resolved_instance_map(a, consumer_factor),
+            )
+        else:
+            pred = PredJson(
+                name=a.node.name,
+                indexes=_indexes(a.start, a.end),
+                group_by=_factor(a.group_by),
+            )
         return ArgJson(type="$barrier", predecessor=pred)
 
     if isinstance(a, TypedValue):
@@ -125,7 +182,7 @@ def _node(n: Node) -> NodeJson:
             value=_condition_value(cond.value),
             value_type=cond.value_type,
             function=cond.func,
-            args=[_arg(a) for a in cond.args],
+            args=[_arg(a, n.factor) for a in cond.args],
         )
 
     return NodeJson(
@@ -133,8 +190,8 @@ def _node(n: Node) -> NodeJson:
         factor=_factor(n.factor),
         function=n.func,
         loop=loop,
-        loop_args=[_arg(a) for a in n.loop_args] if n.loop_args else None,
-        args=[_arg(a) for a in n.args],
+        loop_args=[_arg(a, n.factor) for a in n.loop_args] if n.loop_args else None,
+        args=[_arg(a, n.factor) for a in n.args],
         group_size=_factor(n.group_size) if n.group_size is not None else None,
         condition=condition,
         priority=n.priority,
@@ -206,9 +263,13 @@ def _network(config: "dict[str, Any]") -> NetworkConfigJson:
 # --------------------------------------------------------------------------- #
 
 
-def serialize_arg(arg: Any) -> "dict[str, Any]":
-    """Convert a single argument to its JSON DSL dict representation."""
-    return _arg(arg).model_dump(by_alias=True, exclude_none=True)
+def serialize_arg(arg: Any, consumer_factor: Any = None) -> "dict[str, Any]":
+    """Convert a single argument to its JSON DSL dict representation.
+
+    `consumer_factor` is only needed to resolve a callable `.map=` on `arg`
+    (the owning node's own factor) — every other argument shape ignores it.
+    """
+    return _arg(arg, consumer_factor).model_dump(by_alias=True, exclude_none=True)
 
 
 def serialize_var(var: Var) -> "dict[str, Any]":

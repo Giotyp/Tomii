@@ -13,13 +13,29 @@ pub fn init_objects(
     let mut init_objects: Vec<Vec<CmTypes>> = Vec::new();
     let mut obj_id_map: RapidHashMap<String, usize> = RapidHashMap::new();
 
-    // Keep index 0 for $index, 1 for $workers -- resolved at runtime
-    let mut obj_counter: u16 = 2;
+    // Keep index 0 for $index, 1 for $workers, 2 for $frame_id -- all three
+    // resolved at runtime (see `runtime::node_cache::build_arg_cache`'s
+    // `rt_idxs_indexes`/`rt_workers_indexes`/`rt_frame_indexes` and
+    // `runtime::arg_resolution`'s `process_runtime_refs`). $frame_id delivers
+    // the id of the frame the consuming task belongs to — the same id network
+    // admission and frame slots use (`SlotData::frame_id`, written by
+    // `runtime::slot_management::assign_frame_to_available_slot` for the
+    // network/initial-activation path). For non-network graphs it is the
+    // monotonically increasing frame counter
+    // `runtime::slot_lifecycle::restart_slot_nonnetwork` assigns on each new
+    // frame (`next_frame_id = completed + currently_active`, starting at 0) —
+    // the same `SlotData::frame_id` storage, just a different writer.
+    let mut obj_counter: u16 = 3;
     obj_id_map.insert("$index".to_string(), 0);
     obj_id_map.insert("$workers".to_string(), 1);
-    // Initialize $index and $workers
+    obj_id_map.insert("$frame_id".to_string(), 2);
+    // Initialize $index, $workers, and $frame_id placeholders (the actual
+    // per-task value is injected at runtime; these entries exist only to keep
+    // `init_objects`/`obj_id_map` indices aligned for ordinary user objects,
+    // which start at `obj_counter` = 3).
     init_objects.push(vec![CmTypes::Usize(0)]);
     init_objects.push(vec![CmTypes::Usize(1)]);
+    init_objects.push(vec![CmTypes::Usize(0)]);
 
     for init in initializations_json.iter() {
         let name = &init.name;

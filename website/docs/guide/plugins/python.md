@@ -34,6 +34,12 @@ untouched, so calling it directly from Python is unaffected
 (`tomii/_export.py`). `variadic=True` marks fan-in sinks that receive a list
 of predecessor results.
 
+Unlike a Rust plugin, a Python kernel's own arity is not individually
+published to the runtime (every Python kernel of a given variadic-ness
+shares one bridge entry point), so a scalar-vs-variadic mismatch for a
+Python kernel is caught by a runtime guard at dispatch time rather than at
+load time — the same correctness guarantee, enforced one step later.
+
 ## Wiring and building
 
 `py_node` is the Python-kernel analogue of `node()` — you pass the function

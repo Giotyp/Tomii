@@ -911,8 +911,7 @@ impl TimeBuffer {
     pub fn get_summary(&self) -> RapidHashMap<usize, (usize, Duration, Duration)> {
         let mut summary = RapidHashMap::new();
 
-        for slot_id in 0..self.slots {
-            let slot_stats = &self.slot_statistics[slot_id];
+        for (slot_id, slot_stats) in self.slot_statistics[..self.slots].iter().enumerate() {
             if !slot_stats.is_empty() {
                 let total_cycles = slot_stats.len();
                 let total_times: Vec<Duration> = slot_stats.iter().map(|s| s.total_time).collect();

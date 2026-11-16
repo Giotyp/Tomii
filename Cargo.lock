@@ -1220,6 +1220,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+ "tomii-types",
 ]
 
 [[package]]

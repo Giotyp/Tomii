@@ -2211,6 +2211,46 @@ mod tests {
         assert!(registry.contains("\"kern\" => Some(\"F64\")"));
     }
 
+    /// `#[tomii_export(variadic)]`'s last-param `Vec<T>` must be reclassified
+    /// to `CmParamKind::SliceCmTypes`, which `entry_argspec` renders as the
+    /// literal `"..."` marker in the LAST slot — the exact signal
+    /// `runtime::init::select_unchecked_wrappers` and
+    /// `instance_map::validate_res_arity` both consult (via
+    /// `spec.last() == Some("...")`) to tell a variadic receiving parameter
+    /// apart from a scalar one. A non-variadic export with the same
+    /// parameter shapes must NOT carry that marker anywhere in its spec.
+    #[test]
+    fn test_variadic_argspec_ends_with_ellipsis_marker() {
+        let src = r#"
+            #[tomii_export(variadic)]
+            pub fn sum_variadic(tag: &str, n: usize, values: Vec<f64>) -> f64 { todo!() }
+
+            #[tomii_export]
+            pub fn sum_fixed(tag: &str, n: usize, value: f64) -> f64 { todo!() }
+        "#;
+        let file: File = parse_str(src).unwrap();
+        let entries = collect_entries(&file);
+
+        let variadic_entry = entries
+            .iter()
+            .find(|e| e.registry_key == "sum_variadic")
+            .expect("sum_variadic entry");
+        let spec = entry_argspec(variadic_entry).expect("Rust entry has a spec");
+        assert_eq!(spec, vec!["String", "Usize", "..."]);
+        assert_eq!(spec.last().copied(), Some("..."));
+
+        let fixed_entry = entries
+            .iter()
+            .find(|e| e.registry_key == "sum_fixed")
+            .expect("sum_fixed entry");
+        let fixed_spec = entry_argspec(fixed_entry).expect("Rust entry has a spec");
+        assert_eq!(fixed_spec, vec!["String", "Usize", "F64"]);
+        assert!(
+            !fixed_spec.contains(&"..."),
+            "a non-variadic export must never carry the variadic marker: {fixed_spec:?}"
+        );
+    }
+
     #[test]
     fn test_unchecked_twin_skipped_for_c_entries() {
         // C entries have no unchecked twin (pointer/array kinds).

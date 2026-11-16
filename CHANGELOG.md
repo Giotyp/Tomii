@@ -1,5 +1,104 @@
 # Changelog
 
+## Unreleased
+
+### New features
+
+- **Explicit per-instance dependency maps (`instance_map`)**: a predecessor
+  object on a `$barrier`/`$dep` argument may now declare, per consumer
+  instance, the exact absolute set of producer instances it depends on
+  (`"instance_map": [[0, 1, 2], [3, 4], ...]`), instead of the uniform
+  `indexes`/`group_by` convention. This expresses irregular fan-in shapes
+  (a reduction tree whose branches join different numbers of leaves) and
+  neighbourhood (halo) stencils (`tile[j]` depending on `tile[j-1..j+1]`,
+  optionally wrapping) without one node definition per fusion unit. Also
+  valid on `$res` — a mapped `$res` argument DELIVERS values: consumer
+  instance `j` receives the results of the producer instances listed in
+  `instance_map[j]`, in ascending absolute-index order (not spatial/
+  declaration order), as a single value for a length-1 entry or a list
+  otherwise — the same single-value-vs-list convention an ordinary
+  multi-index `$res` edge already has (and now the same arity validation —
+  see below). Python builder: `n.wait(map=...)` /
+  `n.dep(map=...)` / `n.out(map=...)`, plus `tomii.halo(radius, wrap=True)`
+  and `tomii.stride(k)` helpers for the common shapes. Not supported together
+  with a node's own `group_size`. A consumer instance with an empty map entry (and
+  no other predecessor contributing) has a total dependency threshold of 0;
+  it is dispatched exactly once per frame at frame admission, like a
+  root/initial node, rather than through the dependency-counter path (which
+  nothing would ever decrement it through). A node may read the SAME
+  predecessor through both a mapped argument and a plain one (1:1 offset,
+  contiguous range, or broadcast) — the plain argument's per-instance index
+  set is unioned into the mapped forward map, so a producer instance reached
+  through either is counted, and decremented, exactly once. See the
+  [JSON graph format reference](website/docs/reference/json-graph-format.md)
+  and [nodes-and-vars guide](website/docs/guide/graphs/nodes-and-vars.md).
+
+- **`$frame_id` built-in argument**: a node arg may now reference `{"type":
+  "$ref", "value": "$frame_id"}` (Python: `TypedValue('$ref', '$frame_id')`,
+  the same idiom as `$index`/`$workers`) to receive the id of the frame the
+  consuming task belongs to — the same id network admission and frame slots
+  use (`SlotData::frame_id`); for non-network graphs, a monotonically
+  increasing counter starting at 0, one value per admitted frame. Resolved
+  at graph-compile time into a per-node cache flag
+  (`ArgCacheEntry::rt_frame_indexes`), so graphs that never reference
+  `$frame_id` take the identical hot path as before — zero added work, and
+  no change to the per-task `NodeInfo` struct's size or layout.
+
+### Fixes
+
+- **Variadic `$res`/`$dep` kernel macro**: a `#[tomii_export(variadic)]`
+  kernel whose variadic argument is followed, on the same node, by trailing
+  mapped `$barrier`/`$dep` args (ordering-only — see `instance_map` above)
+  previously panicked, because those trailing slots always resolve to
+  `CmTypes::None` placeholders and the generated collection loop iterated
+  the whole slice unconditionally. The loop now filters `CmTypes::None` out
+  before collecting, so the kernel sees exactly its own declared values.
+
+- **Multiple variable-width `$res` arguments in one kernel's variadic
+  tail**: load-time validation (`instance_map::validate_res_arity`) already
+  accepted any number of `$res` args — mapped or ordinary — at or after a
+  kernel's variadic boundary, but dispatch (`ResPredCache::may_vary_width`)
+  only ever let the node's single structurally LAST `$res` arg vary in
+  width. A node whose variadic tail was fed by two or more such args (e.g.
+  an irregular-tree fusion node joining several lower producers through
+  separate mapped `$res` edges) loaded successfully and then panicked every
+  worker at its first dispatch — an earlier arg's non-1-width splice
+  silently shifted every later arg's precomputed buffer position. Fixed in
+  two parts: (1) `may_vary_width` is now computed, when the kernel's
+  argspec is published, directly from the SAME variadic-boundary arithmetic
+  `validate_res_arity` uses (any `$res` arg at or after the boundary may
+  vary — not just the literal last one), so the two can never disagree
+  again; it still falls back to the old "structurally last arg only" rule
+  when no argspec is published (old plugins, Python-registered kernels).
+  (2) `populate_cached_args_into`/`populate_dynamic_args_into` now splice
+  `$res` values back-to-front (descending declared-argument position)
+  instead of front-to-back, so a splice that changes the buffer's length
+  only ever disturbs positions already written — the actual fix that makes
+  several simultaneously variable-width arguments resolve correctly. Nodes
+  whose `$res` args are all width-1 (the common case) are unaffected either
+  way — they never take the splice branch. The misleading panic text
+  (claiming the plugin never published arity metadata, and naming nodes
+  only by id) now reports whether `get_func_argspec` actually returned
+  `Some`/`None` for that kernel and uses node/predecessor names. See
+  `tomii-core/src/instance_map.rs`'s module docs, the
+  [JSON graph format reference](website/docs/reference/json-graph-format.md),
+  [nodes-and-vars guide](website/docs/guide/graphs/nodes-and-vars.md), and the
+  [Rust plugins guide](website/docs/guide/plugins/rust.md)'s "Multiple edges
+  feeding the same variadic parameter" section.
+
+- **Worker-task panic now fails the run fast**: a panic in a worker task
+  (a kernel body, or an internal runtime panic such as the `$res` arity
+  guard above) used to either idle the whole run out to `--max-runtime` and
+  exit **successfully** (`--custom` scheduler: the panicking thread's
+  `JoinHandle::join()` result was silently discarded at shutdown) or abort
+  the process uncontrolled (default scheduler, via Rayon's own internal
+  panic handler). `runtime::task_execution::execute_task` — the single
+  dispatch choke point for both schedulers — now catches the panic,
+  signals shutdown immediately, and the run returns
+  `RuntimeError::WorkerPanicked(message)` instead of `Ok(())`; the `main`
+  binary already turns any `RuntimeError` into a nonzero exit with the
+  message on stderr.
+
 ## v1.2.0 — 2026-07-10
 
 ### Terminology: "stream" → "frame"

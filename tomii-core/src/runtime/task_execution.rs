@@ -237,8 +237,108 @@ pub(super) fn worker_resolve_successors(
 /// Returns `Some(NodeInfo)` when an inline continuation was produced by
 /// `worker_resolve_successors` (i.e. the completing worker will immediately execute the
 /// returned successor); `None` otherwise.
+///
+/// Wraps [`execute_task_inner`] in [`std::panic::catch_unwind`]. This is the single choke
+/// point reached by every task dispatch under both the default (Rayon) and `--custom`
+/// schedulers — `scheduling::send_to_scheduler`'s boxed-task closure and
+/// `scheduling::run_node_desc`'s typed-spawn path both call `execute_task` directly — so
+/// catching here covers a kernel panic, an argument-resolution panic (e.g. the `$res`
+/// arity guard in `arg_resolution::assert_res_width_is_sound`), or any other worker-thread
+/// panic uniformly, without duplicating the wrapper per scheduler.
+///
+/// On panic: records the message in `shared.task_panic` (see
+/// [`super::shared_data::TaskPanicState`]) — which also sets `shared.shutdown_flag`, so
+/// resolution threads and `spin_wait_for_result` unwind promptly — and returns `None`
+/// (no inline continuation; the caller's dispatch loop simply stops). `TomiiRt::run_impl`'s
+/// wait loop checks `task_panic` and fails the run with `RuntimeError::WorkerPanicked`
+/// instead of idling to `max_runtime` and returning `Ok(())`.
+///
+/// Letting the panic unwind only this one task (rather than the whole worker thread) keeps
+/// every OTHER in-flight task's Rayon/channel bookkeeping consistent — we are intentionally
+/// shutting the whole run down right after, so nothing relies on this task's post-panic
+/// state again.
 #[inline(always)]
 pub(super) fn execute_task(
+    shared: &Arc<SharedData>,
+    sctx: &SchedCtx<'_>,
+    func: CmPtr,
+    node_info: &NodeInfo,
+    pre_built_args: Option<Vec<CmTypes>>,
+    spawn_ns: u128,
+) -> Option<NodeInfo> {
+    ensure_panic_capture_hook();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        execute_task_inner(shared, sctx, func, node_info, pre_built_args, spawn_ns)
+    })) {
+        Ok(result) => result,
+        Err(payload) => {
+            shared
+                .task_panic
+                .record(panic_message(&payload), &shared.shutdown_flag);
+            None
+        }
+    }
+}
+
+thread_local! {
+    /// The most recent panic's formatted message on THIS thread, written by the
+    /// hook [`ensure_panic_capture_hook`] installs. Read-and-cleared by
+    /// [`panic_message`] immediately after `catch_unwind` returns `Err` — the hook
+    /// runs synchronously on the panicking thread, before unwinding begins, so
+    /// this is always populated by the time `catch_unwind` returns on that same
+    /// thread (no cross-thread synchronization needed).
+    static LAST_PANIC_MESSAGE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+static PANIC_HOOK_INSTALLED: std::sync::Once = std::sync::Once::new();
+
+/// Install (once per process) a panic hook that mirrors the default hook's own
+/// formatted output into [`LAST_PANIC_MESSAGE`] before chaining to whatever hook
+/// was previously installed (so normal stderr printing — or any caller-installed
+/// hook — is unaffected).
+///
+/// This exists because `catch_unwind`'s `Err` payload (`Box<dyn Any + Send>`) is
+/// **not** reliably downcastable to `&str`/`String` for every panic shape that
+/// reaches this call path: a panic surfacing through this runtime's layered
+/// `#[inline(always)]`/generic dispatch (`execute_task` → `execute_task_inner` →
+/// `execute_single_task`/`execute_bulk_task` → the kernel's `CmPtr` call) was
+/// observed to produce a payload that matched neither `downcast_ref::<&str>()`
+/// nor `downcast_ref::<String>()`, even though `std::panic::PanicHookInfo`'s own
+/// `Display` (what the default hook prints to stderr) always renders the
+/// message correctly — so the hook's `to_string()` is the robust source of
+/// truth here, not the payload.
+#[inline]
+fn ensure_panic_capture_hook() {
+    PANIC_HOOK_INSTALLED.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            LAST_PANIC_MESSAGE.with(|cell| *cell.borrow_mut() = Some(info.to_string()));
+            previous(info);
+        }));
+    });
+}
+
+/// Resolve a `catch_unwind` panic to a human-readable message: prefer the hook-
+/// captured message (see [`ensure_panic_capture_hook`]); fall back to a direct
+/// payload downcast (covers the case where some OTHER code already replaced the
+/// panic hook without chaining to this one); and finally a placeholder so a
+/// panic is never lost silently.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(msg) = LAST_PANIC_MESSAGE.with(|cell| cell.borrow_mut().take()) {
+        return msg;
+    }
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "worker task panicked with a non-string payload".to_string()
+    }
+}
+
+#[inline(always)]
+fn execute_task_inner(
     shared: &Arc<SharedData>,
     sctx: &SchedCtx<'_>,
     func: CmPtr,
@@ -356,9 +456,18 @@ fn execute_bulk_task(
     } else {
         0
     };
+    // Hoisted once per bulk dispatch (constant across every cell in the range),
+    // same pattern as `workers` above. Only touches `frame_id[slot]` (one
+    // Relaxed atomic load) when this node declares a `$frame_id` arg.
+    let frame_id = if !args_cache.rt_frame_indexes.is_empty() {
+        shared.slot_data.frame_id[node_info.slot].load(std::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    };
     let has_dynamic = !args_cache.buffer_ref_indexes.is_empty()
         || !args_cache.rt_idxs_indexes.is_empty()
         || !args_cache.rt_workers_indexes.is_empty()
+        || !args_cache.rt_frame_indexes.is_empty()
         || !args_cache.res_indexes.is_empty();
 
     ARG_BUF.with(|buf_cell| {
@@ -436,6 +545,7 @@ fn execute_bulk_task(
                         exec_slot,
                         exec_gen,
                         workers,
+                        frame_id,
                     );
                     if stale {
                         bulk_stale = true;
@@ -528,6 +638,12 @@ fn execute_single_task(
                 } else {
                     0
                 };
+                let frame_id = if !args_cache.rt_frame_indexes.is_empty() {
+                    shared.slot_data.frame_id[node_info.slot]
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                } else {
+                    0
+                };
                 // template_stable guarantees every $res is width-1, so the
                 // splice arm inside populate_dynamic_args_into is unreachable
                 // and the buffer length stays constant across tasks.
@@ -541,6 +657,7 @@ fn execute_single_task(
                     exec_slot,
                     exec_gen,
                     workers,
+                    frame_id,
                 );
                 if stale {
                     return None::<CmTypes>;
@@ -603,5 +720,131 @@ fn execute_single_task(
     } else {
         let _ = sctx.exec.batch_queue_tx.send(node_info.clone());
         None
+    }
+}
+
+#[cfg(test)]
+mod panic_fail_fast_tests {
+    //! Regression tests for the worker-panic fail-fast fix (see `execute_task`'s
+    //! doc comment and `shared_data::TaskPanicState`).
+    //!
+    //! Uses a genuinely in-process (same binary, no FFI/dylib boundary) panicking
+    //! kernel, patched directly into a built `NodeCacheEntry::func_ptr` — deliberately
+    //! NOT a real `--dylib`-loaded plugin kernel: a panic that unwinds out of a
+    //! dynamically-loaded `.so` hits Rust's own cross-dylib "foreign exception" abort
+    //! guard before it ever reaches `execute_task`'s `catch_unwind`, which would make
+    //! such a test pass identically with or without this fix (see
+    //! `tomii-core/tests/worker_panic_fail_fast.rs`'s module doc for that black-box,
+    //! mechanism-agnostic complement, which this test's fix actually targets — the
+    //! ORIGINAL bug report's panic, `instance_map`'s `$res` arity guard, is pure Rust
+    //! code inside `tomii-core` itself, not a plugin kernel, so it never crosses an
+    //! FFI boundary either).
+    use super::*;
+    use crate::graph_gen::from_json_str;
+    use crate::runtime::{RuntimeConfig, TomiiRt, TomiiRtBuilder};
+    use crate::scheduler::{create_scheduler, SchedulerConfig, SchedulerType};
+    use std::time::{Duration, Instant};
+
+    const GRAPH: &str = r#"
+    {
+        "nodes": [
+            { "name": "boom", "factor": 1, "function": "noop", "args": [] }
+        ]
+    }
+    "#;
+
+    const PANIC_MESSAGE: &str = "intentional in-process test panic from panic_fail_fast_tests";
+
+    /// Plain Rust `fn` matching the `CmPtr` contract — panics unconditionally.
+    fn panicking_kernel(_: &[CmTypes]) -> CmTypes {
+        panic!("{PANIC_MESSAGE}");
+    }
+
+    fn build_rt(scheduler_type: SchedulerType, workers: usize) -> TomiiRt {
+        let spec = from_json_str(GRAPH, 1).expect("JSON parse failed");
+        let scheduler = create_scheduler(SchedulerConfig {
+            scheduler_type,
+            core_offset: 0,
+            num_workers: workers,
+            record: false,
+            external_recorder: None,
+            base_instant: std::time::Instant::now(),
+            system_threads: 1,
+            receiver_threads: 0,
+            target_batch_size: 1,
+            batch_timeout_us: 10,
+            worker_affinity: None,
+            worker_hook: None,
+        });
+        let compiled = spec.compile(&scheduler);
+        let config = RuntimeConfig {
+            slots: 1,
+            max_frames: 1,
+            // Generous relative to this test's own fail-fast budget below — proves
+            // the run does NOT idle out to it.
+            max_runtime: Some(10),
+            system_threads: 1,
+            workers,
+            ..RuntimeConfig::default()
+        };
+        let rt = TomiiRtBuilder::with_config(compiled, scheduler, config)
+            .build()
+            .expect("build failed");
+        // Patch the node's kernel function pointer in place. `Arc::get_mut` can't be
+        // used here: for the Custom scheduler, `TomiiRtBuilder::build()` already
+        // installed a `Weak<SharedData>` inside the node-executor closure
+        // (`has_typed_spawn() == true` — see `runtime::mod`'s builder), and
+        // `Arc::get_mut` conservatively refuses whenever ANY `Weak` exists, even one
+        // that (as here) is never upgraded before this point.
+        //
+        // SAFETY: no other thread exists yet — worker/resolution threads are spawned
+        // only inside `rt.run()`, called by the caller AFTER this returns — so there
+        // is no concurrent access to race with. The lingering `Weak` referenced above
+        // is never upgraded before `run()` starts a worker, so nothing else reads
+        // `SharedData` concurrently with this write. Same-crate test: `SharedData` and
+        // `NodeCacheEntry::func_ptr` are visible from this submodule of `runtime`.
+        unsafe {
+            let shared_mut = &mut *(Arc::as_ptr(&rt.shared) as *mut SharedData);
+            shared_mut.graph_cache.node_cache[0].func_ptr = panicking_kernel;
+        }
+        rt
+    }
+
+    /// Bound on `rt.run()`'s own wall-clock time — must be far below the 10s
+    /// `max_runtime` configured above, proving the panic was detected promptly
+    /// rather than idling out.
+    const FAIL_FAST_BUDGET: Duration = Duration::from_secs(5);
+
+    fn assert_fails_fast(mut rt: TomiiRt, tag: &str) {
+        let start = Instant::now();
+        let result = rt.run();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < FAIL_FAST_BUDGET,
+            "{tag}: expected run() to fail fast (within {FAIL_FAST_BUDGET:?}), took {elapsed:?} \
+             — close to the 10s max_runtime suggests the panic was not detected promptly"
+        );
+        match result {
+            Err(crate::RuntimeError::WorkerPanicked(msg)) => {
+                assert!(
+                    msg.contains(PANIC_MESSAGE),
+                    "{tag}: expected the panic message in the error, got: {msg}"
+                );
+            }
+            other => panic!("{tag}: expected Err(WorkerPanicked(..)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worker_panic_fails_the_run_fast_default_scheduler() {
+        let rt = build_rt(SchedulerType::WorkStealing, 2);
+        assert_fails_fast(rt, "default scheduler");
+    }
+
+    #[test]
+    fn worker_panic_fails_the_run_fast_custom_scheduler() {
+        let rt = build_rt(SchedulerType::Custom, 2);
+        assert_fails_fast(rt, "custom scheduler");
     }
 }

@@ -17,6 +17,66 @@ use tomii_types::*;
 
 use super::node_cache::{ArgCacheEntry, ResPredCache};
 
+/// Runtime guard: a `$res` argument that is NOT at or after the node's
+/// variadic-tail boundary (`rp.may_vary_width == false` — see
+/// `node_cache::ResPredCache::may_vary_width`'s doc comment) must resolve to
+/// exactly one value, because only the kernel's LAST parameter may be
+/// `#[tomii_export(variadic)]`; any other position silently receiving a
+/// different count would desync every later positional slot the generated
+/// wrapper reads.
+///
+/// When the node's kernel published an argument spec, `may_vary_width` is
+/// computed from the real variadic boundary (`init::build_node_cache`), and
+/// `instance_map::validate_res_arity` already rejected this exact shape at
+/// load time — so this branch is UNREACHABLE for such a node, and firing
+/// here indicates a validation/dispatch disagreement bug, not a graph
+/// authoring mistake. When no spec was published (old plugin,
+/// Python-registered kernel, etc.) `validate_res_arity` skips the node
+/// entirely and this guard — conservatively restricted to "only the
+/// structurally-last `$res` arg may vary" — is the ONLY enforcement; firing
+/// here means the graph really does feed more than one value into a scalar
+/// parameter. `width` is already computed by the caller, so this check is
+/// O(1) and adds no cost to the (overwhelming majority) `width == 1` fast
+/// path — it only runs on the pre-existing splice branch.
+#[inline(always)]
+fn assert_res_width_is_sound(shared: &Arc<SharedData>, rp: &ResPredCache, width: usize) {
+    if width != 1 && !rp.may_vary_width {
+        let node = &shared.graph.nodes[rp.node_id as usize];
+        let pred = &shared.graph.nodes[rp.res_node_id as usize];
+        let argspec_published = crate::func_reg::get_func_argspec(&node.func_name).is_some();
+        panic!(
+            "node '{node_name}' (id {node_id}): $res argument (predecessor '{pred_name}', id \
+             {pred_id}) resolved to {width} value(s) at dispatch, but this argument is not at \
+             or after the kernel's trailing `#[tomii_export(variadic)]` parameter — a scalar \
+             parameter must receive exactly one value. {detail}",
+            node_name = node.name,
+            node_id = rp.node_id,
+            pred_name = pred.name,
+            pred_id = rp.res_node_id,
+            detail = if argspec_published {
+                format!(
+                    "`get_func_argspec(\"{}\")` returned `Some` for this kernel, so \
+                     `instance_map::validate_res_arity` should already have rejected this \
+                     shape at load time — this is a load-time-validation/runtime-dispatch \
+                     disagreement bug in the runtime itself, not a graph authoring mistake. \
+                     Please report it.",
+                    node.func_name
+                )
+            } else {
+                format!(
+                    "`get_func_argspec(\"{}\")` returned `None` for this kernel (an old \
+                     plugin, a Python-registered kernel, or any other kernel whose \
+                     variadic-ness is unpublished), so `instance_map::validate_res_arity` \
+                     could not check this edge at load time and fell back to this runtime \
+                     guard, which only ever allows the node's structurally LAST `$res` \
+                     argument to vary — this is a genuine graph/kernel arity mismatch.",
+                    node.func_name
+                )
+            }
+        );
+    }
+}
+
 #[inline(always)]
 fn process_buffer_refs(arg_vec: &mut [CmTypes], cache: &ArgCacheEntry, node_index: usize) {
     for (i, idx) in cache.buffer_ref_indexes.iter().enumerate() {
@@ -30,6 +90,7 @@ fn process_runtime_refs(
     cache: &ArgCacheEntry,
     node_index: usize,
     workers: usize,
+    frame_id: usize,
 ) {
     // Process both types of runtime refs in a single iteration if possible
     if cache.rt_idxs_indexes.len() == cache.rt_workers_indexes.len() {
@@ -50,14 +111,44 @@ fn process_runtime_refs(
             arg_vec[*idx] = CmTypes::Usize(workers);
         }
     }
+    // `$frame_id`: a third, independent runtime-injected ref. Empty for every
+    // node that does not reference it (the overwhelming majority), so this
+    // loop is a single `is_empty()`-equivalent no-op iteration — no extra work
+    // on the hot path for graphs that never use `$frame_id`.
+    for idx in cache.rt_frame_indexes.iter() {
+        arg_vec[*idx] = CmTypes::Usize(frame_id);
+    }
 }
 
 /// Patch only the instance-dependent slots of an already-filled arg buffer.
 ///
 /// Called per-instance inside `execute_bulk_task` after the static template has been
 /// `extend`ed into `buf` once in the prologue (Tier 1 hoist). Only overwrites
-/// `buffer_ref_indexes`, `rt_idxs_indexes`, `rt_workers_indexes`, and `res_indexes`
-/// positions — static slots (including `Any`/`AnyHeld` arcs) are left untouched.
+/// `buffer_ref_indexes`, `rt_idxs_indexes`, `rt_workers_indexes`, `rt_frame_indexes`,
+/// and `res_indexes` positions — static slots (including `Any`/`AnyHeld` arcs) are
+/// left untouched.
+///
+/// `workers` and `frame_id` are hoisted by the caller (constant across every cell
+/// in one bulk dispatch — same pattern for both: `shared.config.workers` /
+/// `shared.slot_data.frame_id[slot]` resolve once per bulk task, not once per cell).
+///
+/// **Splice order.** `res_indexes` holds each `$res`/`$dep` argument's position in
+/// `args_cache.args`'s static template, ascending in declared order (one entry per
+/// value-bearing arg — see `crate::instance_map::arg_template_positions`, which computes
+/// the same positions at load time). A `$res` whose delivered width is 1 is a plain
+/// in-place write (`buf[res_idx] = value`), which never changes `buf`'s length. A width
+/// other than 1 (only possible at or after the kernel's variadic-tail boundary — see
+/// `node_cache::ResPredCache::may_vary_width`) uses `Vec::splice`, which DOES shift every
+/// later index in `buf`. The loop below therefore processes `res_idx` positions in
+/// DESCENDING order (`.rev()`): a splice at a given position only ever disturbs indexes
+/// strictly after it, which — processing highest-to-lowest — have already been handled.
+/// This is what makes multiple variable-width `$res` arguments in one kernel's variadic
+/// tail resolve correctly (each arg's own declared value order is preserved, and no
+/// earlier arg's precomputed `res_idx` is invalidated by a later-in-buffer splice);
+/// before this fix, ascending order meant the FIRST non-1-width splice silently
+/// desynchronized every subsequent `res_idx` in the same call. Width-1-only nodes (the
+/// overwhelming majority, see `init::build_node_cache`'s `all_width_one`) never take the
+/// splice branch at all, so this reordering costs nothing on that path.
 ///
 /// Returns `true` if a stale-task was detected.
 #[inline(always)]
@@ -72,15 +163,20 @@ pub(super) fn populate_dynamic_args_into(
     exec_slot: usize,
     exec_gen: u32,
     workers: usize,
+    frame_id: usize,
 ) -> bool {
     process_buffer_refs(buf, args_cache, node_index);
-    process_runtime_refs(buf, args_cache, node_index, workers);
+    process_runtime_refs(buf, args_cache, node_index, workers, frame_id);
 
     let mut stale = false;
+    // Reverse (highest `res_idx` first): see this function's doc comment — a splice at
+    // one position shifts every later position in `buf`, so processing descending
+    // positions means each splice only ever disturbs positions already handled.
     for (res_idx, rp) in args_cache
         .res_indexes
         .iter()
         .zip(args_cache.res_predecessors.iter())
+        .rev()
     {
         if stale {
             break;
@@ -92,6 +188,7 @@ pub(super) fn populate_dynamic_args_into(
             if result.len() == 1 {
                 buf[*res_idx] = result.remove(0);
             } else {
+                assert_res_width_is_sound(shared, rp, result.len());
                 buf.splice(*res_idx..*res_idx + 1, result);
             }
         }
@@ -103,6 +200,11 @@ pub(super) fn populate_dynamic_args_into(
 ///
 /// Returns `true` if a stale-task was detected (slot generation changed mid-resolution).
 /// The caller must drop the task without processing it or decrementing dependency counters.
+///
+/// **Splice order**: see [`populate_dynamic_args_into`]'s doc comment — the `$res` splice
+/// loop below processes `res_idx` positions in the same descending order, for the same
+/// reason (this is the non-`template_stable` path, taken whenever at least one `$res`
+/// argument's width can vary).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn populate_cached_args_into(
@@ -121,6 +223,7 @@ pub(super) fn populate_cached_args_into(
     if args_cache.buffer_ref_indexes.is_empty()
         && args_cache.rt_idxs_indexes.is_empty()
         && args_cache.rt_workers_indexes.is_empty()
+        && args_cache.rt_frame_indexes.is_empty()
         && args_cache.res_indexes.is_empty()
     {
         return false;
@@ -131,15 +234,24 @@ pub(super) fn populate_cached_args_into(
     } else {
         0
     };
+    // Only touches `shared.slot_data.frame_id[slot]` (one Relaxed atomic load)
+    // when this node actually declares a `$frame_id` arg — zero extra work on
+    // the hot path otherwise.
+    let frame_id = if !args_cache.rt_frame_indexes.is_empty() {
+        shared.slot_data.frame_id[slot].load(std::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    };
 
     process_buffer_refs(buf, args_cache, node_index);
-    process_runtime_refs(buf, args_cache, node_index, workers);
+    process_runtime_refs(buf, args_cache, node_index, workers, frame_id);
 
     let mut stale = false;
     for (res_idx, rp) in args_cache
         .res_indexes
         .iter()
         .zip(args_cache.res_predecessors.iter())
+        .rev()
     {
         if stale {
             break;
@@ -151,6 +263,7 @@ pub(super) fn populate_cached_args_into(
             if result.len() == 1 {
                 buf[*res_idx] = result.remove(0);
             } else {
+                assert_res_width_is_sound(shared, rp, result.len());
                 buf.splice(*res_idx..*res_idx + 1, result);
             }
         }
@@ -196,12 +309,41 @@ pub(super) fn parse_args(
 }
 
 #[inline(always)]
-fn handle_special_ref(obj_id: usize, node_index: usize, workers: usize) -> Option<Vec<CmTypes>> {
+fn handle_special_ref(
+    obj_id: usize,
+    node_index: usize,
+    workers: usize,
+    frame_id: usize,
+) -> Option<Vec<CmTypes>> {
     match obj_id {
         0 => Some(vec![CmTypes::Usize(node_index)]),
         1 => Some(vec![CmTypes::Usize(workers)]),
+        2 => Some(vec![CmTypes::Usize(frame_id)]),
         _ => None,
     }
+}
+
+/// Bounds-checked `$frame_id` lookup for the slow/uncached arg-resolution path
+/// (`collect_arg_result`, used by condition-arg evaluation, post-node args, and
+/// network index-function args).
+///
+/// `SlotData::frame_id` is sized exactly `config.slots`; `schedule_post_nodes`
+/// deliberately dispatches post-nodes on a sentinel "virtual" slot beyond that
+/// range (`config.slots + config.system_threads`) that was never assigned a
+/// frame. Rather than indexing out of bounds there, this returns
+/// [`usize::MAX`] — the SAME "no frame" sentinel `release_and_activate_next`
+/// stores on an ordinary slot when it is released (see `slot_management.rs`).
+/// The hot per-task path (`populate_cached_args_into`/`populate_dynamic_args_into`)
+/// never needs this: `NodeInfo::slot` there is always a real, in-range slot, so
+/// it indexes `frame_id` directly with no bounds check.
+#[inline]
+fn frame_id_for_slot(shared: &SharedData, slot: usize) -> usize {
+    shared
+        .slot_data
+        .frame_id
+        .get(slot)
+        .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(usize::MAX)
 }
 
 #[inline(always)]
@@ -473,6 +615,47 @@ fn fetch_res_results(
     }
 }
 
+/// Value resolution for a mapped `$res` argument (an `instance_map`-declared
+/// predecessor edge — see `crate::instance_map`'s module docs).
+///
+/// `forward[node_index]` already lists the EXACT, absolute producer instances
+/// to fetch, in ascending order — unlike [`fetch_res_results`]'s three
+/// branches, there is no `pred_index`/`group_size`/`node_has_barrier`
+/// ambiguity to resolve: the mapped edge's routing table is itself the
+/// disambiguation (built once at compile time from the validated,
+/// already-unioned `instance_map` declaration). An empty list (the
+/// "variadic accepts any length incl. 0" case — see module docs) returns
+/// `Some(Vec::new())`, which the caller splices as zero elements, removing
+/// the placeholder slot entirely; a single-entry list returns one value,
+/// spliced in place with no buffer-length change — both callers
+/// (`populate_cached_args_into`/`populate_dynamic_args_into`) already handle
+/// both shapes identically to the existing collect-all `$res` path.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn fetch_mapped_res_results(
+    res_node_id: IdType,
+    forward: &[Vec<u32>],
+    node_index: usize,
+    slot: usize,
+    shared: &Arc<SharedData>,
+    exec_slot: usize,
+    exec_gen: u32,
+    stale: &mut bool,
+) -> Option<Vec<CmTypes>> {
+    let list = forward.get(node_index)?;
+    let mut result_vec = Vec::with_capacity(list.len());
+    for &pred_idx in list {
+        let node_info = NodeInfo::new(res_node_id, slot, pred_idx as usize, 0);
+        if let Some(result) = shared.exec.node_results.get(&node_info) {
+            result_vec.push(result);
+        } else {
+            let result = spin_wait_for_result(shared, &node_info, exec_slot, exec_gen, stale)?;
+            result_vec.push(result);
+        }
+    }
+    Some(result_vec)
+}
+
 /// Hot-path variant of [`collect_arg_result`] for `$res`/`$dep` arguments.
 ///
 /// Uses pre-resolved [`ResPredCache`] metadata (built once at startup) instead of
@@ -501,6 +684,21 @@ fn collect_res_from_cache(
 
     if let Some(custom) = custom_res {
         return Some(vec![(*custom).clone()]);
+    }
+
+    // Mapped $res: bypass the ordinary indexes/pred_index/group_size resolution
+    // entirely — see `fetch_mapped_res_results`'s doc comment.
+    if let Some(routing) = &rp.mapped_forward {
+        return fetch_mapped_res_results(
+            rp.res_node_id,
+            &routing.forward,
+            node_index,
+            slot,
+            shared,
+            exec_slot,
+            exec_gen,
+            stale,
+        );
     }
 
     let pred_eff_gs = rp
@@ -543,7 +741,15 @@ pub(super) fn collect_arg_result(
     match &arg.type_ {
         CmTypes::Ref(obj_id) => {
             let obj_id = *obj_id;
-            if let Some(result) = handle_special_ref(obj_id, node_index, shared.config.workers) {
+            // This is the slow/uncached path (condition args, loop args, network
+            // index-function args) — not the per-task hot path, so an
+            // unconditional (bounds-checked) frame_id load here is fine; see
+            // `frame_id_for_slot`'s doc comment for why it must be bounds-checked
+            // on this path specifically (post-node sentinel slot).
+            let frame_id = frame_id_for_slot(shared, slot);
+            if let Some(result) =
+                handle_special_ref(obj_id, node_index, shared.config.workers, frame_id)
+            {
                 return Some(result);
             }
 
@@ -753,5 +959,614 @@ mod dep_idx_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod frame_id_tests {
+    use super::*;
+    use crate::graph_gen::from_json_str;
+    use crate::runtime::{RuntimeConfig, TomiiRt, TomiiRtBuilder};
+    use crate::scheduler::{create_scheduler, SchedulerConfig, SchedulerType};
+    use std::sync::atomic::Ordering;
+
+    /// A single root node (`tagged`) whose only arg is `{"type": "$ref", "value":
+    /// "$frame_id"}` — the Python-builder-equivalent idiom is
+    /// `TypedValue('$ref', '$frame_id')` (mirrors `$index`/`$workers`; see
+    /// `tomii/_schema.py`'s `special_refs`).
+    const FRAME_ID_GRAPH: &str = r#"
+    {
+        "nodes": [
+            { "name": "tagged", "factor": 1, "function": "noop",
+              "args": [ { "type": "$ref", "value": "$frame_id" } ] }
+        ]
+    }
+    "#;
+
+    /// A node with no `$frame_id` (or any `$ref`) arg at all — the zero-cost
+    /// baseline every existing graph (including the MIMO benchmark this
+    /// feature is A/B-measured against) takes.
+    const NO_FRAME_ID_GRAPH: &str = r#"
+    {
+        "nodes": [
+            { "name": "plain", "factor": 1, "function": "noop", "args": [] }
+        ]
+    }
+    "#;
+
+    fn build_test_rt(json: &str) -> TomiiRt {
+        let spec = from_json_str(json, 2).expect("JSON parse failed");
+        let scheduler = create_scheduler(SchedulerConfig {
+            scheduler_type: SchedulerType::WorkStealing,
+            core_offset: 0,
+            num_workers: 2,
+            record: false,
+            external_recorder: None,
+            base_instant: std::time::Instant::now(),
+            system_threads: 1,
+            receiver_threads: 0,
+            target_batch_size: 1,
+            batch_timeout_us: 10,
+            worker_affinity: None,
+            worker_hook: None,
+        });
+        let compiled = spec.compile(&scheduler);
+        let config = RuntimeConfig {
+            slots: 1,
+            max_frames: 1,
+            max_runtime: Some(5),
+            system_threads: 1,
+            workers: 2,
+            ..RuntimeConfig::default()
+        };
+        TomiiRtBuilder::with_config(compiled, scheduler, config)
+            .build()
+            .expect("build failed")
+    }
+
+    #[test]
+    fn frame_id_is_delivered_into_the_arg_buffer_at_its_declared_slot() {
+        let rt = build_test_rt(FRAME_ID_GRAPH);
+        let shared = &rt.shared;
+        let node_id: usize = 0; // "tagged" is the only (and first) node
+
+        let node_cache = &shared.graph_cache.node_cache[node_id];
+        let args_cache = &node_cache.arg_cache;
+        assert_eq!(
+            args_cache.rt_frame_indexes,
+            vec![0],
+            "the sole $frame_id arg must occupy buffer slot 0"
+        );
+
+        // Simulate the slot currently belonging to frame 42 (exactly what
+        // `assign_frame_to_available_slot`/network admission writes into
+        // `SlotData::frame_id` for a real frame).
+        shared.slot_data.frame_id[0].store(42, Ordering::Relaxed);
+
+        let mut buf = Vec::new();
+        let stale = populate_cached_args_into(
+            &mut buf,
+            shared,
+            args_cache,
+            node_id as crate::IdType,
+            0, // node_index
+            0, // slot
+            0, // pred_index
+            usize::MAX,
+            0,
+        );
+        assert!(!stale);
+        assert_eq!(buf.len(), 1);
+        assert_eq!(
+            buf[0],
+            CmTypes::Usize(42),
+            "the $frame_id arg must deliver the CURRENT frame id for its slot, not a stale \
+             placeholder or a different slot's id"
+        );
+
+        // A new frame takes the slot (generational reuse): the SAME arg must
+        // now deliver the NEW frame id, never the old one — no stale read
+        // across frame/slot reuse.
+        shared.slot_data.frame_id[0].store(43, Ordering::Relaxed);
+        buf.clear();
+        let stale2 = populate_cached_args_into(
+            &mut buf,
+            shared,
+            args_cache,
+            node_id as crate::IdType,
+            0,
+            0,
+            0,
+            usize::MAX,
+            0,
+        );
+        assert!(!stale2);
+        assert_eq!(
+            buf[0],
+            CmTypes::Usize(43),
+            "$frame_id must track slot reuse across frames, not cache the first value"
+        );
+    }
+
+    #[test]
+    fn no_frame_id_arg_takes_the_zero_cost_early_return_path() {
+        let rt = build_test_rt(NO_FRAME_ID_GRAPH);
+        let shared = &rt.shared;
+        let node_id: usize = 0;
+        let node_cache = &shared.graph_cache.node_cache[node_id];
+        let args_cache = &node_cache.arg_cache;
+
+        assert!(
+            args_cache.rt_frame_indexes.is_empty(),
+            "a node with no $frame_id arg must have an empty rt_frame_indexes — this emptiness \
+             is exactly what gates the early-return fast path below"
+        );
+        assert!(args_cache.buffer_ref_indexes.is_empty());
+        assert!(args_cache.rt_idxs_indexes.is_empty());
+        assert!(args_cache.rt_workers_indexes.is_empty());
+        assert!(args_cache.res_indexes.is_empty());
+
+        // Poison the slot's frame_id to a value that would be visibly wrong if
+        // (incorrectly) injected anywhere — proves the early-return path never
+        // touches `slot_data.frame_id` at all for this node.
+        shared.slot_data.frame_id[0].store(usize::MAX, Ordering::Relaxed);
+
+        let mut buf = Vec::new();
+        let stale = populate_cached_args_into(
+            &mut buf,
+            shared,
+            args_cache,
+            node_id as crate::IdType,
+            0,
+            0,
+            0,
+            usize::MAX,
+            0,
+        );
+        assert!(!stale);
+        assert!(
+            buf.is_empty(),
+            "node has zero declared args; the static template extend is the only write"
+        );
+    }
+
+    #[test]
+    fn frame_id_for_slot_returns_sentinel_for_out_of_range_slot() {
+        // The post-node "virtual" slot (config.slots + config.system_threads)
+        // is deliberately out of SlotData::frame_id's range (sized exactly
+        // config.slots) — see `collect_arg_result`'s doc comment. Must return
+        // the established "no frame" sentinel, never panic.
+        let rt = build_test_rt(NO_FRAME_ID_GRAPH);
+        let shared = &rt.shared;
+        let out_of_range = shared.slot_data.frame_id.len() + 5;
+        assert_eq!(frame_id_for_slot(shared, out_of_range), usize::MAX);
+        // A real, in-range slot still resolves normally.
+        shared.slot_data.frame_id[0].store(7, Ordering::Relaxed);
+        assert_eq!(frame_id_for_slot(shared, 0), 7);
+    }
+}
+
+#[cfg(test)]
+mod mapped_res_value_tests {
+    use super::*;
+    use crate::buffers::NodeInfo;
+    use crate::graph_gen::from_json_str;
+    use crate::runtime::{RuntimeConfig, TomiiRt, TomiiRtBuilder};
+    use crate::scheduler::{create_scheduler, SchedulerConfig, SchedulerType};
+
+    /// Producer `p` (factor 4, no args) feeding consumer `c` (factor 2) through a
+    /// mapped `$res` edge: `c[0]` reads `p[0], p[1]`; `c[1]` reads `p[2], p[3]`.
+    /// Every entry has length 2 — the "variadic" shape (see `crate::instance_map`'s
+    /// module docs) — deliberately, so the splice/width behaviour is exercised
+    /// alongside the uniform-length-1 case below.
+    const MAPPED_RES_GRAPH_WIDTH_2: &str = r#"
+    {
+        "nodes": [
+            { "name": "p", "factor": 4, "function": "noop", "args": [] },
+            {
+                "name": "c",
+                "factor": 2,
+                "function": "noop",
+                "args": [
+                    {
+                        "type": "$res",
+                        "predecessor": { "name": "p", "instance_map": [[0, 1], [2, 3]] }
+                    }
+                ]
+            }
+        ]
+    }
+    "#;
+
+    /// Same shape, but every entry has length exactly 1 — the uniform,
+    /// template-stable-eligible case.
+    const MAPPED_RES_GRAPH_WIDTH_1: &str = r#"
+    {
+        "nodes": [
+            { "name": "p", "factor": 4, "function": "noop", "args": [] },
+            {
+                "name": "c",
+                "factor": 2,
+                "function": "noop",
+                "args": [
+                    {
+                        "type": "$res",
+                        "predecessor": { "name": "p", "instance_map": [[1], [3]] }
+                    }
+                ]
+            }
+        ]
+    }
+    "#;
+
+    fn build_test_rt(json: &str) -> TomiiRt {
+        let spec = from_json_str(json, 2).expect("JSON parse failed");
+        let scheduler = create_scheduler(SchedulerConfig {
+            scheduler_type: SchedulerType::WorkStealing,
+            core_offset: 0,
+            num_workers: 2,
+            record: false,
+            external_recorder: None,
+            base_instant: std::time::Instant::now(),
+            system_threads: 1,
+            receiver_threads: 0,
+            target_batch_size: 1,
+            batch_timeout_us: 10,
+            worker_affinity: None,
+            worker_hook: None,
+        });
+        let compiled = spec.compile(&scheduler);
+        let config = RuntimeConfig {
+            slots: 1,
+            max_frames: 1,
+            max_runtime: Some(5),
+            system_threads: 1,
+            workers: 2,
+            ..RuntimeConfig::default()
+        };
+        TomiiRtBuilder::with_config(compiled, scheduler, config)
+            .build()
+            .expect("build failed")
+    }
+
+    /// Like `build_test_rt`, but with `slots` > 1 — `spin_wait_for_result`'s
+    /// generation-mismatch staleness check is a no-op in `single_slot_mode`
+    /// (`slots == 1`, where there is nowhere else for the slot to have gone),
+    /// so the forced-wrap staleness test below needs a real multi-slot build.
+    fn build_multi_slot_test_rt(json: &str, slots: usize) -> TomiiRt {
+        let spec = from_json_str(json, 2).expect("JSON parse failed");
+        let scheduler = create_scheduler(SchedulerConfig {
+            scheduler_type: SchedulerType::WorkStealing,
+            core_offset: 0,
+            num_workers: 2,
+            record: false,
+            external_recorder: None,
+            base_instant: std::time::Instant::now(),
+            system_threads: 1,
+            receiver_threads: 0,
+            target_batch_size: 1,
+            batch_timeout_us: 10,
+            worker_affinity: None,
+            worker_hook: None,
+        });
+        let compiled = spec.compile(&scheduler);
+        let config = RuntimeConfig {
+            slots,
+            max_frames: slots,
+            max_runtime: Some(5),
+            system_threads: 1,
+            workers: 2,
+            ..RuntimeConfig::default()
+        };
+        TomiiRtBuilder::with_config(compiled, scheduler, config)
+            .build()
+            .expect("build failed")
+    }
+
+    /// M2: a producer with a mapped `$res` consumer must have its results
+    /// stored (`needs_result_store`), exactly like an ordinary `$res` producer —
+    /// `build_node_cache`'s existing `has_res_consumer` check is arg-type/edge-
+    /// kind-agnostic (it only inspects `arg.type_.is_result()` and the
+    /// predecessor id), so this was already correct with zero code changes;
+    /// this test locks that in now that the combination is actually reachable.
+    #[test]
+    fn producer_with_mapped_res_consumer_needs_result_store() {
+        let rt = build_test_rt(MAPPED_RES_GRAPH_WIDTH_2);
+        assert!(
+            rt.shared.graph_cache.node_cache[0].needs_result_store,
+            "producer 'p' feeds a mapped $res consumer; its results must be stored"
+        );
+    }
+
+    /// M3: value delivery for a mapped `$res` arg whose per-instance list has
+    /// length 2 (every consumer instance) — the splice path, same as an
+    /// ordinary multi-index $res "collect-all" edge.
+    #[test]
+    fn mapped_res_width_2_delivers_values_in_ascending_list_order() {
+        let rt = build_test_rt(MAPPED_RES_GRAPH_WIDTH_2);
+        let shared = &rt.shared;
+
+        // Seed producer results directly (no scheduler dispatch needed to test
+        // arg resolution in isolation).
+        for i in 0..4u8 {
+            shared
+                .exec
+                .node_results
+                .set(&NodeInfo::new(0, 0, i as usize, 0), CmTypes::U8(i * 10));
+        }
+
+        let args_cache = &shared.graph_cache.node_cache[1].arg_cache;
+
+        let mut buf0 = Vec::new();
+        let stale0 =
+            populate_cached_args_into(&mut buf0, shared, args_cache, 1, 0, 0, 0, usize::MAX, 0);
+        assert!(!stale0);
+        assert_eq!(buf0, vec![CmTypes::U8(0), CmTypes::U8(10)]);
+
+        let mut buf1 = Vec::new();
+        let stale1 =
+            populate_cached_args_into(&mut buf1, shared, args_cache, 1, 1, 0, 0, usize::MAX, 0);
+        assert!(!stale1);
+        assert_eq!(buf1, vec![CmTypes::U8(20), CmTypes::U8(30)]);
+    }
+
+    /// M3: value delivery for a mapped `$res` arg whose per-instance list has
+    /// length 1 (the common, non-"variadic" case) — single value in place, no
+    /// splice/width change.
+    #[test]
+    fn mapped_res_width_1_delivers_single_value_in_place() {
+        let rt = build_test_rt(MAPPED_RES_GRAPH_WIDTH_1);
+        let shared = &rt.shared;
+
+        for i in 0..4u8 {
+            shared
+                .exec
+                .node_results
+                .set(&NodeInfo::new(0, 0, i as usize, 0), CmTypes::U8(i * 10));
+        }
+
+        let args_cache = &shared.graph_cache.node_cache[1].arg_cache;
+
+        let mut buf0 = Vec::new();
+        populate_cached_args_into(&mut buf0, shared, args_cache, 1, 0, 0, 0, usize::MAX, 0);
+        assert_eq!(buf0, vec![CmTypes::U8(10)]); // c[0] reads p[1]
+
+        let mut buf1 = Vec::new();
+        populate_cached_args_into(&mut buf1, shared, args_cache, 1, 1, 0, 0, usize::MAX, 0);
+        assert_eq!(buf1, vec![CmTypes::U8(30)]); // c[1] reads p[3]
+    }
+
+    /// The `all_width_one`/`template_stable` eligibility check (init.rs) must
+    /// track the ACTUAL per-instance mapped width, not just `rp.indexes`
+    /// (always empty for a mapped arg) — uniform length-1 is eligible, any
+    /// non-1 length anywhere disqualifies it, exactly like the ordinary
+    /// multi-index collect-all path.
+    #[test]
+    fn template_stable_tracks_mapped_width_not_declared_indexes() {
+        let rt_width_1 = build_test_rt(MAPPED_RES_GRAPH_WIDTH_1);
+        assert!(
+            rt_width_1.shared.graph_cache.node_cache[1].template_stable,
+            "every mapped entry has length 1 — must be template-stable eligible"
+        );
+
+        let rt_width_2 = build_test_rt(MAPPED_RES_GRAPH_WIDTH_2);
+        assert!(
+            !rt_width_2.shared.graph_cache.node_cache[1].template_stable,
+            "mapped entries of length 2 vary the arg vector's width — must NOT be \
+             template-stable eligible (would grow the persistent template unboundedly)"
+        );
+    }
+
+    /// M4 (staleness, part 1): ordinary slot reuse. `LockFreeResultMap::reinit_slot`
+    /// unconditionally clears EVERY cell of a slot before it is re-dispatched to a
+    /// new frame — a generic guarantee, not instance_map-specific — so a mapped
+    /// `$res` read issued after reuse must see the NEW frame's values, never a
+    /// leftover from the previous occupant of the same slot/cells.
+    #[test]
+    fn mapped_res_does_not_leak_a_value_across_ordinary_slot_reuse() {
+        let rt = build_test_rt(MAPPED_RES_GRAPH_WIDTH_2);
+        let shared = &rt.shared;
+        let args_cache = &shared.graph_cache.node_cache[1].arg_cache;
+
+        // "Frame A".
+        for i in 0..4u8 {
+            shared
+                .exec
+                .node_results
+                .set(&NodeInfo::new(0, 0, i as usize, 0), CmTypes::U8(i));
+        }
+        let mut buf = Vec::new();
+        populate_cached_args_into(&mut buf, shared, args_cache, 1, 0, 0, 0, usize::MAX, 0);
+        assert_eq!(buf, vec![CmTypes::U8(0), CmTypes::U8(1)]);
+
+        // Slot reuse for "Frame B" — the runtime always fully clears a slot's
+        // result storage before re-dispatching it.
+        shared.exec.node_results.reinit_slot(0);
+        for i in 0..4u8 {
+            shared
+                .exec
+                .node_results
+                .set(&NodeInfo::new(0, 0, i as usize, 0), CmTypes::U8(100 + i));
+        }
+
+        let mut buf2 = Vec::new();
+        populate_cached_args_into(&mut buf2, shared, args_cache, 1, 0, 0, 0, usize::MAX, 0);
+        assert_eq!(
+            buf2,
+            vec![CmTypes::U8(100), CmTypes::U8(101)],
+            "must read frame B's values, not frame A's leftover"
+        );
+    }
+
+    /// M4 (staleness, part 2): a mapped `$res` read still in flight (waiting on a
+    /// producer result that never arrives for THIS attempt) when the slot's
+    /// generation changes — including across the 2^32 wrap boundary, forced
+    /// exactly like
+    /// `slot_management::generation_tests::test_bump_slot_generation_wrap_sweeps_instance_map_stale_entries`
+    /// — must abort as stale rather than hang or (worse) later deliver a value
+    /// that belongs to the superseded attempt. Needs `slots > 1`:
+    /// `spin_wait_for_result`'s generation-mismatch check is a deliberate no-op
+    /// in `single_slot_mode` (nothing else the slot could have become).
+    #[test]
+    fn mapped_res_read_aborts_as_stale_across_a_forced_generation_wrap() {
+        use std::sync::atomic::Ordering;
+
+        let rt = build_multi_slot_test_rt(MAPPED_RES_GRAPH_WIDTH_2, 2);
+        let shared = &rt.shared;
+        let args_cache = &shared.graph_cache.node_cache[1].arg_cache;
+
+        // This hypothetical task was dispatched under generation `u32::MAX`...
+        let exec_gen = u32::MAX;
+        shared.slot_data.generation[0].store(u64::from(exec_gen), Ordering::SeqCst);
+        // ...but before its mapped producer's result ever arrives, the slot is
+        // released and reassigned, wrapping the low-32 generation back to 0
+        // (forced exactly as `bump_slot_generation`'s own wrap tests do).
+        crate::runtime::slot_management::bump_slot_generation(shared, 0);
+        assert_eq!(
+            shared.slot_data.generation[0].load(Ordering::SeqCst) as u32,
+            0,
+            "generation must have wrapped to 0"
+        );
+
+        // No producer result was ever stored for this (now-superseded) attempt —
+        // `fetch_mapped_res_results` must fall through to `spin_wait_for_result`,
+        // observe the mismatch on its very first poll, and abort immediately.
+        let mut buf = Vec::new();
+        let stale =
+            populate_cached_args_into(&mut buf, shared, args_cache, 1, 0, 0, 0, 0, exec_gen);
+        assert!(
+            stale,
+            "a mapped $res read spanning a generation change must be dropped as stale, \
+             never silently deliver a value (or hang) past the wrap"
+        );
+    }
+
+    /// Two producers `p0` (factor 3) and `p1` (factor 3) feed consumer `c`
+    /// (factor 2) through TWO separate mapped `$res` args, declared in that
+    /// order (`p0`'s arg first, `p1`'s second):
+    /// - `c[0]`: `p0.map = [0, 1]` (width 2), `p1.map = []` (width 0).
+    /// - `c[1]`: `p0.map = [2]` (width 1), `p1.map = [0, 1, 2]` (width 3).
+    ///
+    /// Neither producer's arg is forced to `may_vary_width: true` by
+    /// `init::build_node_cache` on its own (this crate's own `cargo test`
+    /// build has no real plugin, so `get_func_argspec` always returns `None`
+    /// — see `instance_map::tests::validate_res_arity_is_a_noop_without_published_kernel_metadata`
+    /// — and the structural fallback only ever allows the node's single
+    /// LAST `$res` arg to vary). This test force-sets BOTH entries'
+    /// `may_vary_width` to simulate a published argspec that puts both args
+    /// in the kernel's variadic tail (the shape `init::build_node_cache`
+    /// now produces when a real plugin's spec is available — see that
+    /// function's doc comment) — isolating the SPLICE-ORDER fix in
+    /// `populate_cached_args_into`/`populate_dynamic_args_into` from the
+    /// metadata plumbing, which is covered end-to-end by
+    /// `tests/res_arity_validation.rs`-style real-plugin tests instead.
+    ///
+    /// `c[0]`'s expected buffer `[p0[0], p0[1]]` (width-0 `p1` contributes
+    /// nothing) is exactly the shape that silently corrupts under the
+    /// PRE-FIX ascending splice order: processing `p0` (index 0, width 2)
+    /// first grows the buffer and shifts `p1`'s precomputed slot by +1,
+    /// so `p1`'s width-0 splice then deletes the END of `p0`'s own value
+    /// instead of contributing nothing. `c[1]`'s `[p0[2], p1[0], p1[1],
+    /// p1[2]]` exercises the width-1/width-3 combination with the SAME
+    /// two-arg declared order, including every value's own internal order
+    /// (ascending list order, per `MappedEdgeRouting::forward`).
+    #[test]
+    fn multiple_variable_width_tail_res_args_splice_independently() {
+        const GRAPH: &str = r#"
+        {
+            "nodes": [
+                { "name": "p0", "factor": 3, "function": "noop", "args": [] },
+                { "name": "p1", "factor": 3, "function": "noop", "args": [] },
+                {
+                    "name": "c",
+                    "factor": 2,
+                    "function": "noop",
+                    "args": [
+                        {
+                            "type": "$res",
+                            "predecessor": { "name": "p0", "instance_map": [[0, 1], [2]] }
+                        },
+                        {
+                            "type": "$res",
+                            "predecessor": { "name": "p1", "instance_map": [[], [0, 1, 2]] }
+                        }
+                    ]
+                }
+            ]
+        }
+        "#;
+        let mut rt = build_test_rt(GRAPH);
+        {
+            // Force-enable the multi-tail-vary dispatch path (see doc comment
+            // above) — same-crate test, `shared` is a private field of
+            // `TomiiRt` visible from this submodule of `runtime`.
+            let shared_mut = Arc::get_mut(&mut rt.shared).expect("sole Arc owner in this test");
+            for rp in &mut shared_mut.graph_cache.node_cache[2]
+                .arg_cache
+                .res_predecessors
+            {
+                rp.may_vary_width = true;
+            }
+        }
+        let shared = &rt.shared;
+
+        for i in 0..3u8 {
+            shared
+                .exec
+                .node_results
+                .set(&NodeInfo::new(0, 0, i as usize, 0), CmTypes::U8(i)); // p0
+            shared.exec.node_results.set(
+                &NodeInfo::new(1, 0, i as usize, 0),
+                CmTypes::U8(100 + i), // p1
+            );
+        }
+
+        let args_cache = &shared.graph_cache.node_cache[2].arg_cache;
+
+        let mut buf0 = Vec::new();
+        let stale0 =
+            populate_cached_args_into(&mut buf0, shared, args_cache, 2, 0, 0, 0, usize::MAX, 0);
+        assert!(!stale0);
+        assert_eq!(
+            buf0,
+            vec![CmTypes::U8(0), CmTypes::U8(1)],
+            "c[0]: p0 width 2 then p1 width 0 — p1 must contribute nothing, not \
+             truncate p0's own values"
+        );
+
+        let mut buf1 = Vec::new();
+        let stale1 =
+            populate_cached_args_into(&mut buf1, shared, args_cache, 2, 1, 0, 0, usize::MAX, 0);
+        assert!(!stale1);
+        assert_eq!(
+            buf1,
+            vec![
+                CmTypes::U8(2),
+                CmTypes::U8(100),
+                CmTypes::U8(101),
+                CmTypes::U8(102)
+            ],
+            "c[1]: p0 width 1 (in place) then p1 width 3, each value in its own \
+             ascending list order, concatenated in declared arg order"
+        );
+
+        // `populate_dynamic_args_into` (the bulk-dispatch path) must agree exactly —
+        // same splice-order fix, same expected results.
+        let mut buf0b = Vec::new();
+        buf0b.extend(args_cache.args.iter().cloned());
+        let stale0b = populate_dynamic_args_into(
+            &mut buf0b,
+            shared,
+            args_cache,
+            0,          // node_index
+            0,          // slot
+            0,          // pred_index
+            usize::MAX, // exec_slot (sentinel: never matches, skips staleness)
+            0,          // exec_gen
+            0,          // workers
+            0,          // frame_id
+        );
+        assert!(!stale0b);
+        assert_eq!(buf0b, buf0);
     }
 }

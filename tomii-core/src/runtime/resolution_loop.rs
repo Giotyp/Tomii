@@ -349,7 +349,12 @@ pub(super) fn perform_initial_preparation(
             })
             .collect();
 
-        let compute_nodes = initial_nodes(&shared.graph, assigned_slots, shared.config.workers);
+        let compute_nodes = initial_nodes(
+            &shared.graph,
+            assigned_slots,
+            shared.config.workers,
+            &shared.graph_cache.zero_threshold_instances,
+        );
         if !compute_nodes.is_empty() {
             let sctx = shared.sched_ctx();
             dispatch_nodes(shared, &sctx, &compute_nodes, thread_core, thread_slot);

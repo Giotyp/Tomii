@@ -72,8 +72,56 @@ fn parse_predecessor(
             format!("Unknown predecessor node '{}'", pred_name).into()
         })?;
 
+    // instance_map is mutually exclusive with `indexes`/`group_by` — the classic
+    // relative-offset/range/group_by convention. Validate that here (purely local
+    // to this predecessor declaration); the cross-node checks (map length vs.
+    // consumer factor, index bounds vs. producer factor, coexistence rules) run
+    // once the full graph is assembled — see `crate::instance_map::validate_graph`.
+    if let Some(instance_map) = &pred_json.instance_map {
+        if pred_json.indexes.as_deref().is_some_and(|s| !s.is_empty()) {
+            return Err(format!(
+                "predecessor '{}': `instance_map` is mutually exclusive with `indexes`",
+                pred_name
+            )
+            .into());
+        }
+        if pred_json.group_by.is_some() {
+            return Err(format!(
+                "predecessor '{}': `instance_map` is mutually exclusive with `group_by`",
+                pred_name
+            )
+            .into());
+        }
+        for (j, list) in instance_map.iter().enumerate() {
+            let mut seen = std::collections::HashSet::new();
+            for &idx in list {
+                if !seen.insert(idx) {
+                    return Err(format!(
+                        "predecessor '{}': instance_map[{}] lists producer index {} more \
+                         than once",
+                        pred_name, j, idx
+                    )
+                    .into());
+                }
+            }
+        }
+        return Ok(Predecessor {
+            id: pred_id,
+            indexes: Vec::new(),
+            group_by: None,
+            instance_map: Some(instance_map.clone()),
+        });
+    }
+
     let mut index_vec = Vec::new();
-    let indexes = &pred_json.indexes;
+    let indexes = pred_json.indexes.as_deref().unwrap_or("");
+    if indexes.is_empty() {
+        return Err(format!(
+            "predecessor '{}': `indexes` is required unless `instance_map` is set",
+            pred_name
+        )
+        .into());
+    }
 
     // 1st case: exact indexes ',' separated
     if indexes.contains(',') {
@@ -150,13 +198,11 @@ fn parse_predecessor(
         match indexes.parse::<isize>() {
             Ok(val) => index_vec.push(val),
             Err(_) => {
-                let obj_id =
-                    obj_id_map
-                        .get(indexes.as_str())
-                        .ok_or_else(|| -> crate::TomiiError {
-                            format!("Invalid index '{}' in predecessor '{}'", indexes, pred_name)
-                                .into()
-                        })?;
+                let obj_id = obj_id_map
+                    .get(indexes)
+                    .ok_or_else(|| -> crate::TomiiError {
+                        format!("Invalid index '{}' in predecessor '{}'", indexes, pred_name).into()
+                    })?;
                 let ref_val = &init_objects[*obj_id];
                 let val =
                     ref_val[0]
@@ -183,6 +229,7 @@ fn parse_predecessor(
         id: pred_id,
         indexes: index_vec,
         group_by,
+        instance_map: None,
     })
 }
 
@@ -228,10 +275,30 @@ impl GraphSpec {
     /// on `self.graph` *before* calling `compile` — the compilation step rebuilds all
     /// derived tables from the final topology.
     pub fn compile(self, scheduler: &crate::scheduler::SchedulerImpl) -> GraphCompiled {
-        let node_cache =
-            crate::runtime::build_node_cache(&self.graph, &self.init_objects, scheduler);
+        // Re-derives the instance_map routing/threshold tables from the topology
+        // (pure function — see `crate::instance_map`). Already validated once in
+        // `from_json_str`; a failure here means the caller built a `GraphSpec` by
+        // hand and skipped that validation, which is a programming error.
+        let instance_map_tables = crate::instance_map::validate_and_build(&self.graph)
+            .unwrap_or_else(|e| panic!("invalid instance_map declaration: {e}"));
+        // Re-run the arity check too (mirrors the dual `validate_and_build`
+        // call above — see its own comment: already validated once in
+        // `from_json_str`, a failure here means the caller built a
+        // `GraphSpec` by hand and skipped that validation).
+        crate::instance_map::validate_res_arity(&self.graph, &instance_map_tables)
+            .unwrap_or_else(|e| panic!("invalid $res argument arity: {e}"));
+
+        let node_cache = crate::runtime::build_node_cache(
+            &self.graph,
+            &self.init_objects,
+            scheduler,
+            &instance_map_tables.pred_instance_map,
+        );
         let (pred_index_filter, pred_group_by, pred_succ_1to1_offset) =
-            crate::runtime::build_predecessor_tables(&self.graph);
+            crate::runtime::build_predecessor_tables(
+                &self.graph,
+                &instance_map_tables.has_instance_map,
+            );
         let successor_arena = crate::runtime::SuccessorArena::build(
             &self.graph.successors,
             self.graph.nodes.len(),
@@ -239,6 +306,8 @@ impl GraphSpec {
             &pred_index_filter,
             &pred_group_by,
             &pred_succ_1to1_offset,
+            &instance_map_tables.pred_instance_map,
+            &instance_map_tables.has_instance_map,
         );
 
         // Includes initial (root) nodes; must match build_slot_counters (this value
@@ -271,6 +340,8 @@ impl GraphSpec {
             dependency_count_vec,
             max_factor,
             num_nodes,
+            instance_map_thresholds: instance_map_tables.node_thresholds,
+            zero_threshold_instances: instance_map_tables.zero_threshold_instances,
         }
     }
 }
@@ -307,6 +378,18 @@ pub struct GraphCompiled {
     pub max_factor: usize,
     /// Number of nodes; used to size the resolution state.
     pub num_nodes: usize,
+    /// `[node] -> Some(per-instance thresholds)` for nodes with at least one
+    /// `instance_map` predecessor; `None` for every other node (the vast
+    /// majority — unaffected). Consumed by `MultiThreadedCounter::new` to
+    /// build the per-instance dependency-counter entries.
+    pub instance_map_thresholds: Vec<Option<std::sync::Arc<Vec<u32>>>>,
+    /// `[node] -> Some(zero-threshold instance indices)` for `instance_map`
+    /// nodes with at least one consumer instance whose total threshold is 0;
+    /// `None` for every other node (the vast majority — unaffected).
+    /// Dispatched once per frame at admission, like a root — see
+    /// `crate::instance_map`'s module docs and
+    /// `runtime::slot_management::initial_nodes`.
+    pub zero_threshold_instances: Vec<Option<std::sync::Arc<Vec<u32>>>>,
 }
 
 pub fn from_json(graph_json: &str, workers: usize) -> Result<GraphSpec, crate::TomiiError> {
@@ -381,6 +464,19 @@ pub fn from_json_str(contents: &str, workers: usize) -> Result<GraphSpec, crate:
     }
 
     graph.warn_ineffective_group_by();
+
+    // Validate every `instance_map` declaration now that every node (and its
+    // factor) is known. `GraphSpec::compile` re-derives the same tables from
+    // `self.graph` (pure function of the topology) — see
+    // `crate::instance_map::validate_and_build`.
+    let instance_map_tables = crate::instance_map::validate_and_build(&graph)
+        .map_err(|e| -> crate::TomiiError { e.into() })?;
+    // Arity check for every `$res` arg (mapped AND ordinary) against the
+    // receiving kernel's published arity, when available — see
+    // `crate::instance_map::validate_res_arity`'s doc comment. Must run after
+    // `validate_and_build` (reads its routing tables for mapped edges).
+    crate::instance_map::validate_res_arity(&graph, &instance_map_tables)
+        .map_err(|e| -> crate::TomiiError { e.into() })?;
 
     Ok(GraphSpec {
         graph,
