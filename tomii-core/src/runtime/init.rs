@@ -166,7 +166,18 @@ pub(crate) fn build_node_cache(
         let build_res_preds =
             |args: &[crate::graph_struct::Arg], skip_cond: bool| -> Vec<ResPredCache> {
                 let mut v = Vec::new();
-                for arg in args {
+                // Position (within `args`, declared order) of the LAST `$res`
+                // arg — only that position may legitimately resolve to a
+                // width other than 1 (see `ResPredCache::may_vary_width`'s
+                // doc comment: the macro's own rule is that only a kernel's
+                // LAST parameter may be variadic, and a trailing `$dep`
+                // between a variadic `$res` and the end of `args` never
+                // carries a value, so it doesn't affect which `$res` is
+                // "last" in this sense).
+                let last_res_pos = args
+                    .iter()
+                    .rposition(|a| matches!(a.type_, CmTypes::Res(_)));
+                for (idx, arg) in args.iter().enumerate() {
                     if skip_cond && arg.is_condition() {
                         continue;
                     }
@@ -219,6 +230,7 @@ pub(crate) fn build_node_cache(
                                 is_dep: false,
                                 node_has_barrier,
                                 mapped_forward,
+                                may_vary_width: Some(idx) == last_res_pos,
                             });
                         }
                         CmTypes::Dep(res_nid) => {
@@ -233,6 +245,13 @@ pub(crate) fn build_node_cache(
                                 is_dep: true,
                                 node_has_barrier,
                                 mapped_forward: None,
+                                // `is_dep` always short-circuits to a width of
+                                // exactly 1 before this flag is ever consulted
+                                // (see `collect_res_from_cache`) — `true` here
+                                // only documents that a $dep can never trip
+                                // the width guard, not that it is exempt from
+                                // anything.
+                                may_vary_width: true,
                             });
                         }
                         _ => {}

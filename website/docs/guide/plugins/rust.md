@@ -49,6 +49,12 @@ pub fn write_to_file(file_path: &str, buffers: Vec<DMatrix<Complex32>>) { ... }
 This pairs with a range dependency in the graph:
 `mat_mul.out(end=num_nodes)` delivers all 200 results as `buffers`.
 
+Only the LAST parameter may be `Vec<T>`/variadic; every earlier parameter is
+scalar and must receive exactly one value. The graph loader checks this: a
+scalar parameter wired to a multi-value `.out()` edge (an ordinary range or a
+non-uniform-length `map=`) is rejected at load with an error naming the node,
+the argument, and the delivered count, instead of silently misbehaving.
+
 ## What the converter generates
 
 At build time, `tomii-converter` reads the annotated source and generates two

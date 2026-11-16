@@ -20,20 +20,73 @@
 //!   `runtime::arg_resolution::fetch_mapped_res_results`). This mirrors the
 //!   existing ordinary-`$res` convention exactly: a single declared index
 //!   delivers one value, a list of more than one delivers a `Vec` intended
-//!   for a variadic receiving parameter — and, just like ordinary `$res`,
-//!   the graph has no way to check the real Rust/Python function's arity
-//!   against this at load time (that information lives only in the compiled
-//!   plugin, not in the graph), so a mapped `$res` arg whose per-instance
-//!   list length varies (including an empty list for some instance) is
-//!   accepted unconditionally — it is the author's responsibility to pair a
-//!   non-uniform-length `instance_map` with a variadic receiver, exactly as
-//!   for an ordinary multi-index `$res` edge today. An out-of-range producer
+//!   for a variadic receiving parameter. [`validate_and_build`] itself never
+//!   rejects a non-uniform-length `instance_map` (including an empty list for
+//!   some instance) — building the routing table is independent of the
+//!   receiving kernel's arity. The arity check against the real Rust/Python
+//!   function is a SEPARATE pass, [`validate_res_arity`] (see "Arity
+//!   validation" below): it runs when the receiving kernel's variadic-ness is
+//!   known (the plugin published per-argument metadata) and rejects a scalar
+//!   parameter that would receive anything other than exactly one value for
+//!   any instance; it is a no-op (skipped) when that metadata is absent, in
+//!   which case the runtime's `$res`-splice guard (see below) is the
+//!   remaining enforcement. An out-of-range producer
 //!   index or a duplicate within one `instance_map[j]` entry is still
 //!   rejected (or filtered at the point of entry) by the same checks that
 //!   apply to `$barrier`/`$dep` — see [`validate_and_build`].
 //! - A node with `group_size` set may not have an `instance_map` predecessor
 //!   (rejected at validation) — the two partitioning schemes are not
 //!   reconciled in this release.
+//!
+//! # Arity validation ($res value delivery vs. the receiving kernel's arity)
+//!
+//! A `$res` arg (mapped or ordinary) delivers a *value*, not just a gating
+//! signal — and the number of values it delivers per consumer instance can
+//! be 0, 1, or more (see [`MappedEdgeRouting::forward`] for the mapped case;
+//! an ordinary multi-index `$res` edge delivers a uniform count across every
+//! instance instead). The receiving kernel parameter is either scalar (one
+//! `CmTypes` slot, read positionally) or the kernel's trailing
+//! `#[tomii_export(variadic)]` `Vec<T>` parameter (any count, including 0).
+//! [`validate_res_arity`] checks every `$res` arg (mapped AND ordinary)
+//! against that arity **when it is available**: both the static (`build.rs`,
+//! `func_reg`) and dynamic-registration (`__tomii_exports`) plugin-loading
+//! paths already publish, per exported kernel, a per-argument-slot spec
+//! (`crate::func_reg::get_func_argspec`) whose *last* entry is the literal
+//! `"..."` marker iff the kernel is variadic — the exact mechanism
+//! `runtime::init::select_unchecked_wrappers` already consults. No new
+//! metadata or plugin-ABI version bump was needed: a scalar-vs-variadic
+//! arity check is already fully determined by `spec.len()` and
+//! `spec.last()`. A plugin that predates this check, a Python-registered
+//! kernel, or any other kernel for which `get_func_argspec` returns `None`
+//! skips the load-time check entirely (backward compatible — such a plugin
+//! still loads) and falls back to the runtime guard in
+//! `runtime::arg_resolution`'s `$res`-splice path, which rejects (panics,
+//! O(1), on the already-measured `result.len()`) any non-last-value-bearing
+//! `$res` argument that resolves to anything other than exactly one value —
+//! "non-last" being exactly the structural invariant the macro itself
+//! enforces (only the kernel's LAST parameter may be variadic), so it is
+//! sound without needing the plugin's metadata at all. The remaining gap —
+//! a kernel whose *trailing* parameter is itself scalar (not variadic) and
+//! receives a variable count — is caught only when metadata is available;
+//! see [`validate_res_arity`]'s doc comment.
+//!
+//! Python-registered kernels (`@tomii.export`, `tomii/_export.py`) fall into
+//! the metadata-absent case unconditionally, by construction rather than by
+//! omission: every Python kernel's graph-node `function` name is always one
+//! of exactly two shared Rust bridge symbols, `"py_call_any"` (scalar sink)
+//! or `"py_call_void"` (variadic sink — selected by the Python decorator's
+//! own `variadic=True`, mirroring `#[tomii_export(variadic)]`); see
+//! `tomii/_python_bridge/src/lib.rs`. Neither bridge function is itself
+//! `#[tomii_export]`-annotated (they are hand-written `CmPtr`-shaped
+//! functions that forward a raw `&[CmTypes]` slice into the wrapped Python
+//! callable), so neither publishes a per-argument-slot spec, and
+//! `get_func_argspec` correctly returns `None` for both — a per-Python-
+//! kernel spec wouldn't be meaningful here anyway, since one bridge symbol
+//! stands in for every Python function sharing that variadic-ness. The
+//! runtime guard remains the enforcement for Python kernels, and it needs no
+//! adjustment to cover them: it is driven entirely by the GRAPH's declared
+//! arg shapes (`crate::graph_struct`), independent of which language the
+//! kernel is implemented in.
 //! - A consumer instance whose TOTAL threshold (summed across every
 //!   predecessor, mapped or not) is zero — an empty `instance_map[j]` entry
 //!   on every mapped predecessor, with no coexisting predecessor
@@ -109,6 +162,7 @@ use std::sync::Arc;
 use crate::graph::Graph;
 use crate::graph_struct::{find_pred_index, Arg, Node, Predecessor};
 use crate::IdType;
+use tomii_types::CmTypes;
 
 /// Reverse producer→consumer routing table for one mapped `(pred, succ)` edge,
 /// plus the forward list it was inverted from (retained for `$res` value
@@ -626,6 +680,154 @@ pub fn validate_and_build(graph: &Graph) -> Result<InstanceMapTables, String> {
         has_instance_map,
         zero_threshold_instances,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Arity validation — $res value delivery vs. the receiving kernel's arity.
+// See the module docs' "Arity validation" section.
+// ---------------------------------------------------------------------------
+
+/// Position, within the flattened argument template the runtime hands to the
+/// plugin wrapper, of every arg in `args` — mirroring
+/// `runtime::node_cache::build_arg_cache`'s `idx_count` counter exactly:
+/// every non-condition arg (including a `$barrier`, whose slot carries no
+/// value) occupies one positional slot, in declared order; an
+/// `init_condition`-guarded arg is skipped entirely (never materializes a
+/// slot) and maps to `None` here. This is the SAME positional convention
+/// `runtime::init::provable_variant`/`select_unchecked_wrappers` already rely
+/// on when matching a plugin's per-argument-slot spec against a node's
+/// declared args.
+fn arg_template_positions(args: &[Arg]) -> Vec<Option<usize>> {
+    let mut idx_count = 0usize;
+    args.iter()
+        .map(|arg| {
+            if arg.is_condition() {
+                None
+            } else {
+                let pos = idx_count;
+                idx_count += 1;
+                Some(pos)
+            }
+        })
+        .collect()
+}
+
+/// Validate every `$res` argument in `graph` (mapped AND ordinary) against
+/// the arity of the kernel function it is delivered to, wherever that arity
+/// is knowable — see the module docs' "Arity validation" section for the
+/// full design and the metadata source.
+///
+/// For a node whose kernel's per-argument spec is unavailable
+/// (`crate::func_reg::get_func_argspec` returns `None` — an old plugin, a
+/// Python-registered kernel, or any other kernel with no published spec),
+/// this function skips that node's checks entirely: it cannot know which
+/// parameter position is scalar vs. variadic, so it defers to the runtime
+/// guard in `runtime::arg_resolution` instead of risking a false rejection.
+///
+/// For a node whose spec IS available: every `$res` arg at a position before
+/// the kernel's fixed/variadic boundary (`spec.len() - 1` when the kernel is
+/// variadic, else `spec.len()`) is a SCALAR parameter and must resolve to
+/// exactly one value for EVERY consumer instance — a mapped `$res` arg's
+/// per-instance width is `routing.forward[j].len()` (see
+/// [`MappedEdgeRouting::forward`]); an ordinary `$res` arg's width is uniform
+/// across every instance, mirroring `runtime::init::build_node_cache`'s
+/// `all_width_one` computation exactly (`indexes.len() <= 1` or
+/// `indexes.len() == node.factor` delivers 1; any other multi-index list
+/// delivers `indexes.len()`, uniformly, to every instance). A `$res` arg at
+/// or beyond the variadic boundary is unconstrained — any count, including
+/// 0, is valid; that is the whole point of a variadic receiver.
+///
+/// Must run AFTER [`validate_and_build`] has succeeded (it reads the routing
+/// tables that function builds for every mapped edge) — both call sites
+/// (`graph_gen::from_json_str`, `graph_gen::GraphSpec::compile`) already
+/// sequence the two calls this way.
+pub fn validate_res_arity(graph: &Graph, tables: &InstanceMapTables) -> Result<(), String> {
+    for node in &graph.nodes {
+        if node.func_name.is_empty() {
+            // Virtual nodes (e.g. the synthetic root added by the JSON parser)
+            // call no kernel — nothing to check.
+            continue;
+        }
+        let Some(spec) = crate::func_reg::get_func_argspec(&node.func_name) else {
+            // No published arity metadata for this kernel — see doc comment
+            // above. The runtime guard (`runtime::arg_resolution`) remains
+            // the enforcement for this node.
+            continue;
+        };
+        let has_variadic = spec.last().copied() == Some("...");
+        let fixed = spec.len() - usize::from(has_variadic);
+
+        let positions = arg_template_positions(&node.args);
+        for (arg, pos) in node.args.iter().zip(positions.iter()) {
+            let Some(pos) = *pos else { continue };
+            if pos >= fixed {
+                // At or beyond the variadic boundary (or simply beyond the
+                // kernel's declared parameter count, which the generated
+                // wrapper already ignores harmlessly) — any count is valid.
+                continue;
+            }
+            if !matches!(arg.type_, CmTypes::Res(_)) {
+                // Only a `$res` arg delivers a value whose count can vary;
+                // `$dep`/`$barrier` are gating-only and always resolve to
+                // exactly one (`None`-valued) slot or no slot at all.
+                continue;
+            }
+            let Some(pred) = &arg.predecessor else {
+                continue;
+            };
+            let pred_name = &graph.nodes[pred.id as usize].name;
+
+            if pred.instance_map.is_some() {
+                let routing = tables
+                    .pred_instance_map
+                    .get(node.id as usize)
+                    .and_then(|row| row.get(pred.id as usize))
+                    .and_then(|opt| opt.as_ref())
+                    .ok_or_else(|| {
+                        format!(
+                            "node '{}': instance_map routing missing for predecessor '{pred_name}' \
+                             (internal error — validate_res_arity must run after validate_and_build)",
+                            node.name
+                        )
+                    })?;
+                for (j, list) in routing.forward.iter().enumerate() {
+                    if list.len() != 1 {
+                        return Err(format!(
+                            "node '{}': argument #{pos} (predecessor '{pred_name}', via \
+                             instance_map) delivers {} value(s) to consumer instance {j}, but \
+                             the kernel parameter at this position is scalar — it is not the \
+                             kernel's trailing `#[tomii_export(variadic)]` `Vec<T>` parameter, \
+                             so it must receive exactly one value for every instance. Either \
+                             make this the kernel's trailing variadic parameter, or adjust the \
+                             instance_map so every consumer instance maps to exactly one \
+                             producer instance.",
+                            node.name,
+                            list.len()
+                        ));
+                    }
+                }
+            } else {
+                let width = if pred.indexes.len() <= 1 || pred.indexes.len() == node.factor {
+                    1
+                } else {
+                    pred.indexes.len()
+                };
+                if width != 1 {
+                    return Err(format!(
+                        "node '{}': argument #{pos} (predecessor '{pred_name}') delivers {width} \
+                         values (a {}-index range) to every consumer instance, but the kernel \
+                         parameter at this position is scalar — it is not the kernel's trailing \
+                         `#[tomii_export(variadic)]` `Vec<T>` parameter, so it must receive \
+                         exactly one value. Either make this the kernel's trailing variadic \
+                         parameter, or declare a single index (or a 1:1-length range) instead.",
+                        node.name,
+                        pred.indexes.len()
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1461,5 +1663,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Arity validation ($res value delivery vs. the receiving kernel's arity)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn arg_template_positions_skips_condition_args_but_counts_barriers() {
+        // Mirrors `runtime::node_cache::build_arg_cache`'s `idx_count`
+        // exactly: an `init_condition`-guarded arg never materializes a
+        // slot (`None`); every other arg — including a `$barrier`, whose
+        // slot carries no value — occupies the next sequential position.
+        let mut cond_literal = res_arg(0, vec![0]);
+        cond_literal.init_condition = Some(crate::graph_struct::InitCondition {
+            operation: crate::graph_struct::CondOp::Eq,
+            eval_value: CmTypes::Bool(true),
+        });
+        let args = vec![
+            res_arg(0, vec![0]),       // position 0
+            cond_literal,              // skipped entirely
+            barrier_arg(0, vec![0]),   // position 1
+            dep_arg(0, vec![vec![0]]), // position 2
+        ];
+        let positions = arg_template_positions(&args);
+        assert_eq!(positions, vec![Some(0), None, Some(1), Some(2)]);
+    }
+
+    #[test]
+    fn validate_res_arity_is_a_noop_without_published_kernel_metadata() {
+        // This crate's own `cargo test` build resolves every plugin function
+        // through the `func_reg` stub (see `lib.rs`'s `not(build_rs_ran)`
+        // module), which always returns `None` from `get_func_argspec` —
+        // exactly the metadata-absent case `validate_res_arity` must treat as
+        // "skip, defer to the runtime guard" (see the module docs' "Arity
+        // validation" section). A graph shape that WOULD be rejected once a
+        // real plugin publishes its kernel's scalar arity — see
+        // `tomii-core/tests/res_arity_validation.rs` for that e2e case —
+        // must load cleanly here.
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 4, vec![]));
+        let mut bad_node = make_node(1, 1, vec![res_arg(0, vec![0, 1, 2])]); // 3 values, no metadata to check against
+        bad_node.func_name = "definitely_not_a_registered_kernel".to_string();
+        g.add_node(bad_node);
+        let tables = validate_and_build(&g).unwrap();
+        validate_res_arity(&g, &tables).expect(
+            "metadata-absent fallback: validate_res_arity must not reject when \
+             get_func_argspec returns None",
+        );
+    }
+
+    #[test]
+    fn validate_res_arity_skips_virtual_nodes_with_no_func_name() {
+        // The synthetic root `graph_gen::from_json_str` adds (and any other
+        // node with an empty `func_name`) calls no kernel — must never be
+        // looked up in the registry at all, let alone rejected.
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 4, vec![])); // func_name defaults to "" via make_node
+        let tables = validate_and_build(&g).unwrap();
+        validate_res_arity(&g, &tables).unwrap();
     }
 }

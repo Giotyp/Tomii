@@ -16,9 +16,9 @@
   instance `j` receives the results of the producer instances listed in
   `instance_map[j]`, in ascending absolute-index order (not spatial/
   declaration order), as a single value for a length-1 entry or a list
-  otherwise — the same single-value-vs-list convention, and the same lack of
-  a load-time arity check against the receiving plugin function, an ordinary
-  multi-index `$res` edge already has. Python builder: `n.wait(map=...)` /
+  otherwise — the same single-value-vs-list convention an ordinary
+  multi-index `$res` edge already has (and now the same arity validation —
+  see below). Python builder: `n.wait(map=...)` /
   `n.dep(map=...)` / `n.out(map=...)`, plus `tomii.halo(radius, wrap=True)`
   and `tomii.stride(k)` helpers for the common shapes. Not supported together
   with a node's own `group_size`. A consumer instance with an empty map entry (and

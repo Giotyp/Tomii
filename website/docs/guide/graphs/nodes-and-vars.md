@@ -78,7 +78,11 @@ All three take `(start=0, end=None, *, group_by=None)`:
 - `n.out()` — instance `i` of the consumer depends on instance `i` of the
   producer (1:1 mapping).
 - `n.out(0, num_nodes)` — a range: the consumer receives all instances
-  `0..num_nodes` (fan-in). The consuming plugin function must be variadic.
+  `0..num_nodes` (fan-in). The consuming plugin function must be variadic;
+  pairing a multi-value range with a scalar parameter is rejected at load
+  time whenever the plugin's arity is known (see
+  [Explicit per-instance dependency maps](#explicit-per-instance-dependency-maps)
+  below for the exact rule, which applies here too).
 - `group_by=k` splits a range dependency into groups of `k`; see
   [Control flow](/docs/guide/graphs/control-flow#barriers-and-grouped-barriers).
 
@@ -144,13 +148,18 @@ Rules:
   `.dep()` edge is gating-only, same as before. A mapped `.out()` edge
   delivers values: consumer instance `j` reads the producer results listed
   in `map[j]`, in ascending absolute-index order, as a single value (length-1
-  entries) or a list otherwise. The graph has no way to check a mapped
-  `.out()` edge's length against the receiving plugin function's arity (the
-  function's signature lives in the compiled plugin, not the graph) — this is
-  the same limitation an ordinary multi-value `.out()` edge already has, so a
-  non-uniform-length `map` (including an empty entry for some instance) must
-  be paired with a variadic plugin parameter, exactly as for an ordinary
-  range `.out()` edge today.
+  entries) or a list otherwise, so a non-uniform-length `map` (including an
+  empty entry for some instance) must be paired with a variadic plugin
+  parameter, exactly as for an ordinary range `.out()` edge. This is checked
+  at load time whenever the plugin publishes the receiving function's arity:
+  a scalar parameter fed more than one value for ANY consumer instance is
+  rejected with a load error naming the node, the argument, the instance,
+  and the delivered count — it is not accepted unconditionally. When that
+  metadata isn't published (an older plugin build, or any kernel the plugin
+  doesn't describe), the runtime instead guards the same mismatch at
+  dispatch time, unless the scalar argument happens to be the kernel's own
+  trailing parameter — the one case that still needs load-time metadata to
+  catch, since only a kernel's LAST parameter may legitimately be variadic.
 - `map` is mutually exclusive with `group_by`.
 - A callable `map` needs both the consumer's and the producer's `factor` to
   be literal ints at build time; if either is a `Var` that cannot be resolved

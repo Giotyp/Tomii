@@ -17,6 +17,36 @@ use tomii_types::*;
 
 use super::node_cache::{ArgCacheEntry, ResPredCache};
 
+/// Runtime guard: a `$res` argument that is NOT the node's trailing
+/// value-bearing position (`rp.may_vary_width == false` — see
+/// `node_cache::ResPredCache::may_vary_width`'s doc comment) must resolve to
+/// exactly one value, because only the kernel's LAST parameter may be
+/// `#[tomii_export(variadic)]`; any other position silently receiving a
+/// different count would desync every later positional slot the generated
+/// wrapper reads. This is the enforcement for the case
+/// `crate::instance_map::validate_res_arity` cannot cover at load time — no
+/// published kernel arity metadata (old plugin, Python-registered kernel,
+/// etc.) — and is sound without that metadata precisely because it only
+/// ever restricts the non-last position, never the last one (so it can
+/// never reject a legitimate variadic delivery). `width` is already computed
+/// by the caller, so this check is O(1) and adds no cost to the (overwhelming
+/// majority) `width == 1` fast path — it only runs on the pre-existing
+/// splice branch.
+#[inline(always)]
+fn assert_res_width_is_sound(rp: &ResPredCache, width: usize) {
+    if width != 1 && !rp.may_vary_width {
+        panic!(
+            "node id {}: $res argument (predecessor node id {}) resolved to {width} value(s) at \
+             dispatch, but this argument is not the kernel's trailing variadic parameter — a \
+             scalar parameter must receive exactly one value. This is a graph/kernel arity \
+             mismatch that `instance_map::validate_res_arity` would have caught at load time had \
+             the plugin published per-kernel arity metadata (`get_func_argspec` returned `None` \
+             for this kernel).",
+            rp.node_id, rp.res_node_id
+        );
+    }
+}
+
 #[inline(always)]
 fn process_buffer_refs(arg_vec: &mut [CmTypes], cache: &ArgCacheEntry, node_index: usize) {
     for (i, idx) in cache.buffer_ref_indexes.iter().enumerate() {
@@ -106,6 +136,7 @@ pub(super) fn populate_dynamic_args_into(
             if result.len() == 1 {
                 buf[*res_idx] = result.remove(0);
             } else {
+                assert_res_width_is_sound(rp, result.len());
                 buf.splice(*res_idx..*res_idx + 1, result);
             }
         }
@@ -174,6 +205,7 @@ pub(super) fn populate_cached_args_into(
             if result.len() == 1 {
                 buf[*res_idx] = result.remove(0);
             } else {
+                assert_res_width_is_sound(rp, result.len());
                 buf.splice(*res_idx..*res_idx + 1, result);
             }
         }

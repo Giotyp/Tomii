@@ -163,6 +163,22 @@ pub struct ResPredCache {
     /// for a mapped edge (every producer index is already absolute and
     /// explicit; there is no ambiguity for `pred_index`/`group_size` to resolve).
     pub mapped_forward: Option<Arc<MappedEdgeRouting>>,
+    /// True when this `$res` arg is declared at the LAST value-bearing
+    /// position among this node's args (no other `$res` arg — mapped or
+    /// ordinary — is declared after it; trailing `$dep`/`$barrier`
+    /// ordering-only args don't count, since they never carry a value). Only
+    /// this position may legitimately resolve to a width other than 1 — the
+    /// macro's own rule is that only a kernel's LAST parameter may be
+    /// `#[tomii_export(variadic)]`, so any EARLIER `$res` arg resolving to
+    /// anything but exactly one value is always a bug (a scalar parameter
+    /// silently receiving the wrong count), independent of whether the
+    /// plugin publishes arity metadata. See
+    /// `runtime::arg_resolution`'s `$res`-splice guard, which enforces this
+    /// unconditionally, and `crate::instance_map::validate_res_arity`'s doc
+    /// comment for the complementary load-time check (which additionally
+    /// catches a non-variadic LAST parameter, the one case this flag cannot
+    /// cover on its own).
+    pub may_vary_width: bool,
 }
 
 #[derive(Clone, Default)]

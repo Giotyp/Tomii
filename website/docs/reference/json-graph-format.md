@@ -220,9 +220,20 @@ convention an ordinary `indexes`-based `$res` edge already uses for a
 single index vs. a multi-index range). Because `instance_map[j]`'s length
 can vary per instance (e.g. the irregular tree above: 3 entries, then 2, then
 4), a `$res` argument whose map has any length other than 1 must be paired
-with a variadic plugin parameter — the graph has no way to check this against
-the compiled plugin function's real arity, exactly the same limitation an
-ordinary multi-index `$res` edge already has.
+with a variadic plugin parameter — just like an ordinary multi-index `$res`
+edge.
+
+This is checked at load time whenever the plugin publishes the receiving
+function's arity (every `#[tomii_export]`/`@tomii.export`-generated kernel
+does): a scalar parameter fed more than one value, for any consumer
+instance, is rejected with an error naming the node, the argument, the
+instance, and the delivered count, instead of silently misbehaving. When
+that metadata isn't available (an older plugin build, or any kernel the
+plugin doesn't describe), the check is deferred to a runtime guard that
+rejects the same mismatch the first time it would occur, as long as the
+scalar argument isn't the kernel's own trailing (potentially variadic)
+parameter — which is the one case load-time metadata is still needed to
+catch.
 
 For a wrap-around halo specifically, note that the union/sort step below
 means the DELIVERED order is ascending, even though the NEIGHBOURHOOD is

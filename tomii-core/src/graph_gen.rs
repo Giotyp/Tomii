@@ -281,6 +281,12 @@ impl GraphSpec {
         // hand and skipped that validation, which is a programming error.
         let instance_map_tables = crate::instance_map::validate_and_build(&self.graph)
             .unwrap_or_else(|e| panic!("invalid instance_map declaration: {e}"));
+        // Re-run the arity check too (mirrors the dual `validate_and_build`
+        // call above — see its own comment: already validated once in
+        // `from_json_str`, a failure here means the caller built a
+        // `GraphSpec` by hand and skipped that validation).
+        crate::instance_map::validate_res_arity(&self.graph, &instance_map_tables)
+            .unwrap_or_else(|e| panic!("invalid $res argument arity: {e}"));
 
         let node_cache = crate::runtime::build_node_cache(
             &self.graph,
@@ -463,7 +469,13 @@ pub fn from_json_str(contents: &str, workers: usize) -> Result<GraphSpec, crate:
     // factor) is known. `GraphSpec::compile` re-derives the same tables from
     // `self.graph` (pure function of the topology) — see
     // `crate::instance_map::validate_and_build`.
-    crate::instance_map::validate_and_build(&graph)
+    let instance_map_tables = crate::instance_map::validate_and_build(&graph)
+        .map_err(|e| -> crate::TomiiError { e.into() })?;
+    // Arity check for every `$res` arg (mapped AND ordinary) against the
+    // receiving kernel's published arity, when available — see
+    // `crate::instance_map::validate_res_arity`'s doc comment. Must run after
+    // `validate_and_build` (reads its routing tables for mapped edges).
+    crate::instance_map::validate_res_arity(&graph, &instance_map_tables)
         .map_err(|e| -> crate::TomiiError { e.into() })?;
 
     Ok(GraphSpec {
