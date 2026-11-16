@@ -150,16 +150,23 @@ Rules:
   in `map[j]`, in ascending absolute-index order, as a single value (length-1
   entries) or a list otherwise, so a non-uniform-length `map` (including an
   empty entry for some instance) must be paired with a variadic plugin
-  parameter, exactly as for an ordinary range `.out()` edge. This is checked
-  at load time whenever the plugin publishes the receiving function's arity:
-  a scalar parameter fed more than one value for ANY consumer instance is
-  rejected with a load error naming the node, the argument, the instance,
-  and the delivered count — it is not accepted unconditionally. When that
-  metadata isn't published (an older plugin build, or any kernel the plugin
-  doesn't describe), the runtime instead guards the same mismatch at
-  dispatch time, unless the scalar argument happens to be the kernel's own
-  trailing parameter — the one case that still needs load-time metadata to
-  catch, since only a kernel's LAST parameter may legitimately be variadic.
+  parameter, exactly as for an ordinary range `.out()` edge. **The variadic
+  tail may be fed by more than one `.out()`/`.out(map=...)` edge** — every
+  value-carrying argument at or after the kernel's trailing `Vec<T>`
+  parameter is concatenated into that one `Vec`, in declared arg order (each
+  edge's own values keep their documented order within that). This is
+  checked at load time whenever the plugin publishes the receiving
+  function's arity: any argument BEFORE the variadic boundary must resolve
+  to exactly one value for EVERY consumer instance — fed more than one value
+  for any instance, it is rejected with a load error naming the node, the
+  argument, the instance, and the delivered count; an argument AT OR AFTER
+  the boundary may vary freely, including differently from every other
+  tail argument on the same node. When that metadata isn't published (an
+  older plugin build, or any kernel the plugin doesn't describe), the
+  runtime instead guards the same mismatch at dispatch time — conservatively
+  restricted, in that case, to allowing only the node's single structurally
+  LAST `.out()`/`$res` argument to vary, since without the kernel's arity
+  there is no other way to know where the variadic boundary falls.
 - `map` is mutually exclusive with `group_by`.
 - A callable `map` needs both the consumer's and the producer's `factor` to
   be literal ints at build time; if either is a `Var` that cannot be resolved

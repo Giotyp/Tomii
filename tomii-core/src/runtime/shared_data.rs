@@ -373,6 +373,50 @@ impl Telemetry {
     }
 }
 
+/// Captures the first worker-task panic observed during a run.
+///
+/// Set once, from `runtime::task_execution::execute_task`'s `catch_unwind`
+/// wrapper — the single choke point reached by every task dispatch, under
+/// both the default (Rayon) and `--custom` schedulers (`run_node_desc` and
+/// `send_to_scheduler` both call `execute_task` directly). Consulted by
+/// `TomiiRt::run_impl`'s wait loop so a panicking worker fails the run fast
+/// (`RuntimeError::WorkerPanicked`) instead of idling until `max_runtime` and
+/// exiting with `Ok(())`. `record` also sets the passed-in `shutdown_flag`,
+/// so resolution threads (which already poll it) and `spin_wait_for_result`
+/// unwind promptly instead of waiting on a result that will never arrive.
+#[derive(Default)]
+pub struct TaskPanicState {
+    /// `true` once any task has panicked. Checked with `Acquire` by the wait
+    /// loop; set with `SeqCst` by `record` (see its doc comment for why a
+    /// stronger ordering is used on the rare, cold panic path).
+    pub occurred: AtomicBool,
+    /// The first captured panic message. `None` until `occurred` is `true`;
+    /// guaranteed non-`None` once `occurred` is observed `true` (`record`
+    /// writes the message before flipping the flag... see `record`).
+    pub message: parking_lot::Mutex<Option<String>>,
+}
+
+impl TaskPanicState {
+    /// Record a panic's message if none has been recorded yet, and set
+    /// `shutdown_flag` unconditionally so every thread polling it exits
+    /// promptly. Idempotent and safe to call concurrently from multiple
+    /// workers racing a near-simultaneous panic — only the first message is
+    /// kept, `SeqCst` on `occurred` is the single source of truth for "am I
+    /// the first", and the message is written (holding the lock) *before*
+    /// `occurred` is flipped, so a reader that observes `occurred == true`
+    /// is guaranteed to see a populated `message`.
+    pub fn record(&self, message: String, shutdown_flag: &AtomicBool) {
+        let mut slot = self.message.lock();
+        if slot.is_none() {
+            *slot = Some(message);
+        }
+        drop(slot);
+        self.occurred
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        shutdown_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 // Shared data across all Τομί threads - immutable or internally synchronized
 pub struct SharedData {
     /// Immutable graph definition — kept flat for unchanged access pattern.
@@ -383,6 +427,8 @@ pub struct SharedData {
     /// Runtime shutdown signal — set by the main thread on max_runtime or frame completion.
     /// Read by resolution threads to exit their loops. Always present (not network-specific).
     pub shutdown_flag: Arc<AtomicBool>,
+    /// First worker-task panic observed this run, if any. See [`TaskPanicState`].
+    pub task_panic: Arc<TaskPanicState>,
     #[cfg(feature = "network")]
     pub net: NetworkInfra,
     pub exec: ExecCtx,

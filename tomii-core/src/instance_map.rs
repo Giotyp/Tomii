@@ -47,6 +47,26 @@
 //! instance instead). The receiving kernel parameter is either scalar (one
 //! `CmTypes` slot, read positionally) or the kernel's trailing
 //! `#[tomii_export(variadic)]` `Vec<T>` parameter (any count, including 0).
+//!
+//! **The variadic tail may be fed by more than one `$res` argument.** A
+//! kernel has at most one variadic (trailing `Vec<T>`) parameter, but the
+//! GRAPH may wire multiple `$res` edges — mapped, ordinary, or a mix — at or
+//! after that parameter's position; every one of them contributes its own
+//! values into the SAME `Vec`, concatenated in declared arg order (each
+//! edge's own values keep their documented per-instance order within that
+//! — ascending absolute producer index for a mapped edge, declaration order
+//! for an ordinary range). Dispatch places each edge's values into the
+//! argument buffer back-to-front across the whole node (descending
+//! declared-argument position — see
+//! `runtime::arg_resolution::populate_cached_args_into`'s doc comment),
+//! which is what makes several simultaneously variable-width arguments
+//! resolve correctly: each buffer splice only ever shifts a position that
+//! has ALREADY been written, never one still to be visited. A kernel that
+//! needs to know where one edge's contribution ends and the next begins
+//! cannot infer it from the `Vec` alone — pass a companion scalar argument
+//! carrying each edge's width (see `website/docs/guide/plugins/rust.md`'s
+//! "Multiple edges feeding the same variadic parameter" section).
+//!
 //! [`validate_res_arity`] checks every `$res` arg (mapped AND ordinary)
 //! against that arity **when it is available**: both the static (`build.rs`,
 //! `func_reg`) and dynamic-registration (`__tomii_exports`) plugin-loading
@@ -54,21 +74,34 @@
 //! (`crate::func_reg::get_func_argspec`) whose *last* entry is the literal
 //! `"..."` marker iff the kernel is variadic — the exact mechanism
 //! `runtime::init::select_unchecked_wrappers` already consults. No new
-//! metadata or plugin-ABI version bump was needed: a scalar-vs-variadic
-//! arity check is already fully determined by `spec.len()` and
-//! `spec.last()`. A plugin that predates this check, a Python-registered
-//! kernel, or any other kernel for which `get_func_argspec` returns `None`
-//! skips the load-time check entirely (backward compatible — such a plugin
-//! still loads) and falls back to the runtime guard in
-//! `runtime::arg_resolution`'s `$res`-splice path, which rejects (panics,
-//! O(1), on the already-measured `result.len()`) any non-last-value-bearing
-//! `$res` argument that resolves to anything other than exactly one value —
+//! metadata or plugin-ABI version bump was needed: the variadic BOUNDARY
+//! (the number of fixed/scalar parameter slots before it —
+//! [`variadic_fixed_boundary`]) is already fully determined by `spec.len()`
+//! and `spec.last()`; every `$res` argument at or after that boundary may
+//! vary (any count, including 0, independently of every other tail
+//! argument on the same node); every argument before it must resolve to
+//! exactly one value for EVERY consumer instance.
+//!
+//! This load-time rule and the dispatch-time guard
+//! (`runtime::node_cache::ResPredCache::may_vary_width`, computed in
+//! `runtime::init::build_node_cache` from this SAME boundary when a spec is
+//! published) agree exactly by construction — a graph that loads
+//! successfully can never panic at dispatch over an arity mismatch the
+//! load-time check could have caught. A plugin that predates this check, a
+//! Python-registered kernel, or any other kernel for which
+//! `get_func_argspec` returns `None` skips the load-time check entirely
+//! (backward compatible — such a plugin still loads) and falls back to the
+//! runtime guard in `runtime::arg_resolution`'s `$res`-splice path
+//! (`assert_res_width_is_sound`), which rejects (panics, O(1), on the
+//! already-measured `result.len()`) any non-last-value-bearing `$res`
+//! argument that resolves to anything other than exactly one value —
 //! "non-last" being exactly the structural invariant the macro itself
 //! enforces (only the kernel's LAST parameter may be variadic), so it is
-//! sound without needing the plugin's metadata at all. The remaining gap —
-//! a kernel whose *trailing* parameter is itself scalar (not variadic) and
-//! receives a variable count — is caught only when metadata is available;
-//! see [`validate_res_arity`]'s doc comment.
+//! sound without needing the plugin's metadata at all, though strictly more
+//! conservative than the metadata-available case: without the kernel's
+//! published arity there is no way to know whether a node's SECOND-to-last
+//! `$res` argument also lies within the variadic tail, so only the single
+//! structurally last one is ever permitted to vary.
 //!
 //! Python-registered kernels (`@tomii.export`, `tomii/_export.py`) fall into
 //! the metadata-absent case unconditionally, by construction rather than by
@@ -697,7 +730,21 @@ pub fn validate_and_build(graph: &Graph) -> Result<InstanceMapTables, String> {
 /// `runtime::init::provable_variant`/`select_unchecked_wrappers` already rely
 /// on when matching a plugin's per-argument-slot spec against a node's
 /// declared args.
-fn arg_template_positions(args: &[Arg]) -> Vec<Option<usize>> {
+/// Number of FIXED (non-variadic) parameter slots in a published kernel
+/// argument spec — every position `>= fixed` is at or after the kernel's
+/// trailing `#[tomii_export(variadic)]` `Vec<T>` parameter, if it has one.
+/// `spec`'s last entry is the literal `"..."` marker iff the kernel is
+/// variadic (see `runtime::init::select_unchecked_wrappers`, the pre-existing
+/// mechanism this also drives). Shared by [`validate_res_arity`] (load-time
+/// check) and `runtime::init::build_node_cache` (dispatch-time
+/// `ResPredCache::may_vary_width`) so the two stay in agreement by
+/// construction rather than by keeping two copies of this arithmetic in sync.
+pub(crate) fn variadic_fixed_boundary(spec: &[&str]) -> usize {
+    let has_variadic = spec.last().copied() == Some("...");
+    spec.len() - usize::from(has_variadic)
+}
+
+pub(crate) fn arg_template_positions(args: &[Arg]) -> Vec<Option<usize>> {
     let mut idx_count = 0usize;
     args.iter()
         .map(|arg| {
@@ -754,76 +801,109 @@ pub fn validate_res_arity(graph: &Graph, tables: &InstanceMapTables) -> Result<(
             // the enforcement for this node.
             continue;
         };
-        let has_variadic = spec.last().copied() == Some("...");
-        let fixed = spec.len() - usize::from(has_variadic);
+        validate_node_res_arity_against_boundary(
+            graph,
+            tables,
+            node,
+            variadic_fixed_boundary(spec),
+        )?;
+    }
+    Ok(())
+}
 
-        let positions = arg_template_positions(&node.args);
-        for (arg, pos) in node.args.iter().zip(positions.iter()) {
-            let Some(pos) = *pos else { continue };
-            if pos >= fixed {
-                // At or beyond the variadic boundary (or simply beyond the
-                // kernel's declared parameter count, which the generated
-                // wrapper already ignores harmlessly) — any count is valid.
-                continue;
-            }
-            if !matches!(arg.type_, CmTypes::Res(_)) {
-                // Only a `$res` arg delivers a value whose count can vary;
-                // `$dep`/`$barrier` are gating-only and always resolve to
-                // exactly one (`None`-valued) slot or no slot at all.
-                continue;
-            }
-            let Some(pred) = &arg.predecessor else {
-                continue;
-            };
-            let pred_name = &graph.nodes[pred.id as usize].name;
+/// Per-node arity check against an already-resolved `fixed` boundary (the
+/// number of fixed/scalar parameter slots — see [`variadic_fixed_boundary`]).
+///
+/// Extracted from [`validate_res_arity`] so the boundary-agreement logic
+/// (ANY `$res` arg at or after `fixed` may vary, every one before it must be
+/// exactly width 1) can be unit-tested directly with a synthetic `fixed`,
+/// without needing a real plugin's published metadata — this crate's own
+/// `cargo test` build always resolves `get_func_argspec` to `None` (see
+/// `tests::validate_res_arity_is_a_noop_without_published_kernel_metadata`),
+/// so `validate_res_arity` itself can only be exercised end-to-end with a
+/// real plugin (`tomii-core/tests/res_arity_validation.rs`).
+///
+/// This is also, by construction, the exact rule
+/// `runtime::init::build_node_cache` uses to compute
+/// `ResPredCache::may_vary_width` when a spec is published — see that
+/// function's doc comment — so load-time acceptance and dispatch-time
+/// support can never disagree for a node whose kernel publishes a spec.
+fn validate_node_res_arity_against_boundary(
+    graph: &Graph,
+    tables: &InstanceMapTables,
+    node: &Node,
+    fixed: usize,
+) -> Result<(), String> {
+    let positions = arg_template_positions(&node.args);
+    for (arg, pos) in node.args.iter().zip(positions.iter()) {
+        let Some(pos) = *pos else { continue };
+        if pos >= fixed {
+            // At or beyond the variadic boundary (or simply beyond the
+            // kernel's declared parameter count, which the generated
+            // wrapper already ignores harmlessly) — any count is valid,
+            // including 0, and including more than one `$res` arg sharing
+            // this tail (each contributes its own values, concatenated in
+            // declared order — see `runtime::arg_resolution`'s splice-order
+            // doc comment).
+            continue;
+        }
+        if !matches!(arg.type_, CmTypes::Res(_)) {
+            // Only a `$res` arg delivers a value whose count can vary;
+            // `$dep`/`$barrier` are gating-only and always resolve to
+            // exactly one (`None`-valued) slot or no slot at all.
+            continue;
+        }
+        let Some(pred) = &arg.predecessor else {
+            continue;
+        };
+        let pred_name = &graph.nodes[pred.id as usize].name;
 
-            if pred.instance_map.is_some() {
-                let routing = tables
-                    .pred_instance_map
-                    .get(node.id as usize)
-                    .and_then(|row| row.get(pred.id as usize))
-                    .and_then(|opt| opt.as_ref())
-                    .ok_or_else(|| {
-                        format!(
-                            "node '{}': instance_map routing missing for predecessor '{pred_name}' \
-                             (internal error — validate_res_arity must run after validate_and_build)",
-                            node.name
-                        )
-                    })?;
-                for (j, list) in routing.forward.iter().enumerate() {
-                    if list.len() != 1 {
-                        return Err(format!(
-                            "node '{}': argument #{pos} (predecessor '{pred_name}', via \
-                             instance_map) delivers {} value(s) to consumer instance {j}, but \
-                             the kernel parameter at this position is scalar — it is not the \
-                             kernel's trailing `#[tomii_export(variadic)]` `Vec<T>` parameter, \
-                             so it must receive exactly one value for every instance. Either \
-                             make this the kernel's trailing variadic parameter, or adjust the \
-                             instance_map so every consumer instance maps to exactly one \
-                             producer instance.",
-                            node.name,
-                            list.len()
-                        ));
-                    }
-                }
-            } else {
-                let width = if pred.indexes.len() <= 1 || pred.indexes.len() == node.factor {
-                    1
-                } else {
-                    pred.indexes.len()
-                };
-                if width != 1 {
+        if pred.instance_map.is_some() {
+            let routing = tables
+                .pred_instance_map
+                .get(node.id as usize)
+                .and_then(|row| row.get(pred.id as usize))
+                .and_then(|opt| opt.as_ref())
+                .ok_or_else(|| {
+                    format!(
+                        "node '{}': instance_map routing missing for predecessor '{pred_name}' \
+                         (internal error — validate_res_arity must run after validate_and_build)",
+                        node.name
+                    )
+                })?;
+            for (j, list) in routing.forward.iter().enumerate() {
+                if list.len() != 1 {
                     return Err(format!(
-                        "node '{}': argument #{pos} (predecessor '{pred_name}') delivers {width} \
-                         values (a {}-index range) to every consumer instance, but the kernel \
-                         parameter at this position is scalar — it is not the kernel's trailing \
-                         `#[tomii_export(variadic)]` `Vec<T>` parameter, so it must receive \
-                         exactly one value. Either make this the kernel's trailing variadic \
-                         parameter, or declare a single index (or a 1:1-length range) instead.",
+                        "node '{}': argument #{pos} (predecessor '{pred_name}', via \
+                         instance_map) delivers {} value(s) to consumer instance {j}, but \
+                         the kernel parameter at this position is scalar — it is not the \
+                         kernel's trailing `#[tomii_export(variadic)]` `Vec<T>` parameter, \
+                         so it must receive exactly one value for every instance. Either \
+                         make this the kernel's trailing variadic parameter, or adjust the \
+                         instance_map so every consumer instance maps to exactly one \
+                         producer instance.",
                         node.name,
-                        pred.indexes.len()
+                        list.len()
                     ));
                 }
+            }
+        } else {
+            let width = if pred.indexes.len() <= 1 || pred.indexes.len() == node.factor {
+                1
+            } else {
+                pred.indexes.len()
+            };
+            if width != 1 {
+                return Err(format!(
+                    "node '{}': argument #{pos} (predecessor '{pred_name}') delivers {width} \
+                     values (a {}-index range) to every consumer instance, but the kernel \
+                     parameter at this position is scalar — it is not the kernel's trailing \
+                     `#[tomii_export(variadic)]` `Vec<T>` parameter, so it must receive \
+                     exactly one value. Either make this the kernel's trailing variadic \
+                     parameter, or declare a single index (or a 1:1-length range) instead.",
+                    node.name,
+                    pred.indexes.len()
+                ));
             }
         }
     }
@@ -1722,5 +1802,130 @@ mod tests {
         g.add_node(make_node(0, 4, vec![])); // func_name defaults to "" via make_node
         let tables = validate_and_build(&g).unwrap();
         validate_res_arity(&g, &tables).unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // `validate_node_res_arity_against_boundary` — the per-node, pure boundary
+    // check extracted from `validate_res_arity` (see its doc comment). Tested
+    // directly with a synthetic `fixed` because this crate's own `cargo test`
+    // build always resolves `get_func_argspec` to `None` (see
+    // `validate_res_arity_is_a_noop_without_published_kernel_metadata` above),
+    // so `validate_res_arity` itself can never reach its load-accepts/rejects
+    // branches in an in-crate unit test — only this extracted function can be
+    // unit-tested for that agreement; the full load-time behaviour (including
+    // the `get_func_argspec` lookup) is covered end-to-end by
+    // `tomii-core/tests/res_arity_validation.rs` against a real plugin.
+    // -----------------------------------------------------------------------
+
+    /// Two mapped `$res` args, BOTH at or after the variadic boundary
+    /// (`fixed = 0`: every position is "tail"), with non-uniform per-instance
+    /// widths — including 0 — on BOTH producers simultaneously. This is
+    /// exactly the shape the original bug rejected the agreement on: the
+    /// load-time check must accept it, matching the dispatcher's
+    /// (post-fix) `may_vary_width`/reverse-splice support for multiple
+    /// simultaneously-varying tail args (see
+    /// `runtime::arg_resolution::mapped_res_value_tests::multiple_variable_width_tail_res_args_splice_independently`
+    /// for the corresponding dispatch-level test).
+    #[test]
+    fn accepts_multiple_variable_width_tail_res_args() {
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 3, vec![])); // p0
+        g.add_node(make_node(1, 3, vec![])); // p1
+        g.add_node(make_node(
+            2,
+            2,
+            vec![
+                mapped_res_arg(0, vec![vec![0, 1], vec![2]]), // widths 2, 1
+                mapped_res_arg(1, vec![vec![], vec![0, 1, 2]]), // widths 0, 3
+            ],
+        ));
+        let tables = validate_and_build(&g).unwrap();
+        validate_node_res_arity_against_boundary(&g, &tables, &g.nodes[2], 0).expect(
+            "both $res args sit at/after a fixed=0 boundary — any width, including \
+             varying simultaneously on both producers, must be accepted",
+        );
+    }
+
+    /// Same two-mapped-`$res`-arg node as above, but `fixed = 1`: the FIRST
+    /// arg (position 0, predecessor `p0`) is now a SCALAR position and must
+    /// resolve to exactly one value for every instance — it does not
+    /// (instance 0 has width 2) — so this must be rejected, naming the node,
+    /// the predecessor, and the scalar/variadic mismatch, even though the
+    /// SECOND arg (position 1, at/after the boundary) is allowed to vary.
+    #[test]
+    fn rejects_mapped_res_arg_at_a_scalar_position_even_with_a_variadic_tail_after_it() {
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 3, vec![])); // p0
+        g.add_node(make_node(1, 3, vec![])); // p1
+        g.add_node(make_node(
+            2,
+            2,
+            vec![
+                mapped_res_arg(0, vec![vec![0, 1], vec![2]]), // position 0 — now scalar
+                mapped_res_arg(1, vec![vec![], vec![0, 1, 2]]), // position 1 — still tail
+            ],
+        ));
+        let tables = validate_and_build(&g).unwrap();
+        let err = validate_node_res_arity_against_boundary(&g, &tables, &g.nodes[2], 1)
+            .expect_err("position 0 is scalar (fixed=1) and varies in width — must be rejected");
+        assert!(
+            err.contains("n2") && err.contains("argument #0") && err.contains("scalar"),
+            "expected the error to name the node and argument position and explain the \
+             scalar/variadic mismatch; got: {err}"
+        );
+    }
+
+    /// An ORDINARY (non-mapped) multi-index `$res` arg at a scalar position
+    /// must still be rejected exactly as before this fix — the boundary
+    /// check applies identically to mapped and ordinary edges (only the
+    /// per-instance width computation differs; see the module doc's "Arity
+    /// validation" section).
+    #[test]
+    fn rejects_ordinary_multi_index_res_arg_at_a_scalar_position() {
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 4, vec![])); // p0, factor 4
+                                             // factor 1 consumer, indexes.len() == 3 != node.factor (1) and != 1 → width 3
+        g.add_node(make_node(1, 1, vec![res_arg(0, vec![0, 1, 2])]));
+        let tables = validate_and_build(&g).unwrap();
+        // `fixed = 1`: position 0 is BELOW the boundary, i.e. scalar.
+        let err = validate_node_res_arity_against_boundary(&g, &tables, &g.nodes[1], 1)
+            .expect_err("a 3-index ordinary $res at a scalar (fixed=1) position must be rejected");
+        assert!(
+            err.contains("n1") && err.contains("3 values") && err.contains("scalar"),
+            "expected the error to name the node, the delivered value count, and the \
+             scalar/variadic mismatch; got: {err}"
+        );
+    }
+
+    /// Per-instance width is computed independently for EVERY instance, not
+    /// just instance 0 — a mapped `$res` arg at a scalar position whose
+    /// FIRST instance happens to have width 1 but a LATER instance does not
+    /// must still be rejected (catches an off-by-one that only checks
+    /// `routing.forward[0]`).
+    #[test]
+    fn rejects_mapped_res_arg_when_a_later_instance_varies_even_if_the_first_does_not() {
+        let mut g = Graph::new();
+        g.add_node(make_node(0, 4, vec![])); // p0
+        g.add_node(make_node(
+            1,
+            3,
+            vec![mapped_res_arg(0, vec![vec![0], vec![1], vec![2, 3]])], // instance 2 has width 2
+        ));
+        let tables = validate_and_build(&g).unwrap();
+        // `fixed = 1`: the node's only arg sits at position 0, below the boundary.
+        let err = validate_node_res_arity_against_boundary(&g, &tables, &g.nodes[1], 1)
+            .expect_err("instance 2's width-2 delivery at a scalar position must be rejected");
+        assert!(
+            err.contains("instance 2"),
+            "expected the error to name the offending consumer instance; got: {err}"
+        );
+    }
+
+    #[test]
+    fn variadic_fixed_boundary_detects_the_trailing_ellipsis_marker() {
+        assert_eq!(variadic_fixed_boundary(&["Usize", "Usize", "..."]), 2);
+        assert_eq!(variadic_fixed_boundary(&["Usize", "Usize"]), 2);
+        assert_eq!(variadic_fixed_boundary(&["..."]), 0);
+        assert_eq!(variadic_fixed_boundary(&[]), 0);
     }
 }

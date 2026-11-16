@@ -55,6 +55,31 @@ scalar parameter wired to a multi-value `.out()` edge (an ordinary range or a
 non-uniform-length `map=`) is rejected at load with an error naming the node,
 the argument, and the delivered count, instead of silently misbehaving.
 
+**Multiple edges feeding the same variadic parameter.** A node's variadic tail
+isn't limited to one `.out()` edge — any number of `.out()`/`.out(map=...)`
+edges declared at or after the kernel's variadic parameter all feed into that
+SAME `Vec<T>`, concatenated in DECLARED ARG ORDER. Within one edge, its own
+values keep their documented order (ascending absolute producer index for a
+mapped edge; declaration order for a range). For example:
+
+```rust
+#[tomii_export(variadic)]
+pub fn fuse_level(state: usize, level: usize, children: Vec<usize>) { ... }
+```
+
+wired to two mapped predecessors in the graph —
+`fuse_l1.out(map=...)` then `fuse_l2.out(map=...)` — delivers `children` as
+`fuse_l1`'s mapped values followed by `fuse_l2`'s, for every instance,
+independent of how many values EACH edge contributes per instance (including
+0). The kernel itself cannot see where one edge's values end and the next
+begin — if your kernel needs to distinguish them, pass a companion scalar
+argument carrying each edge's width (from the graph, a literal, or a prior
+scalar parameter), or design the kernel to treat the whole tail uniformly
+(e.g. summing all of it). This is enforced identically at load time: any
+`$res`/`.out()` argument before the variadic boundary must still resolve to
+exactly one value for every instance; only argument(s) at or after the
+boundary may vary.
+
 ## What the converter generates
 
 At build time, `tomii-converter` reads the annotated source and generates two

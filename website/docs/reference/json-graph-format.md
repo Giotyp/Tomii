@@ -223,17 +223,28 @@ can vary per instance (e.g. the irregular tree above: 3 entries, then 2, then
 with a variadic plugin parameter — just like an ordinary multi-index `$res`
 edge.
 
+**More than one `$res` argument may share the kernel's variadic tail.** The
+variadic parameter isn't limited to receiving values from a single edge —
+every `$res` argument declared at or after the kernel's trailing `Vec<T>`
+parameter feeds the SAME `Vec`, concatenated in declared arg order (each
+edge keeps its own documented per-instance order within that). An argument
+BEFORE the variadic boundary (a genuinely scalar parameter) must still
+resolve to exactly one value for every consumer instance.
+
 This is checked at load time whenever the plugin publishes the receiving
 function's arity (every `#[tomii_export]`/`@tomii.export`-generated kernel
-does): a scalar parameter fed more than one value, for any consumer
-instance, is rejected with an error naming the node, the argument, the
-instance, and the delivered count, instead of silently misbehaving. When
-that metadata isn't available (an older plugin build, or any kernel the
-plugin doesn't describe), the check is deferred to a runtime guard that
-rejects the same mismatch the first time it would occur, as long as the
-scalar argument isn't the kernel's own trailing (potentially variadic)
-parameter — which is the one case load-time metadata is still needed to
-catch.
+does): a scalar parameter (any argument before the variadic boundary) fed
+more than one value, for any consumer instance, is rejected with an error
+naming the node, the argument, the instance, and the delivered count,
+instead of silently misbehaving; an argument at or after the boundary is
+accepted with any per-instance count, including varying independently on
+multiple arguments at once. When that metadata isn't available (an older
+plugin build, or any kernel the plugin doesn't describe), the check is
+deferred to a runtime guard that rejects the same mismatch the first time
+it would occur — conservatively restricted, in that case, to allowing only
+the node's single structurally LAST `$res` argument to vary, since without
+the kernel's published arity there is no other way to know where the
+variadic boundary falls, or whether more than one argument lies within it.
 
 For a wrap-around halo specifically, note that the union/sort step below
 means the DELIVERED order is ascending, even though the NEIGHBOURHOOD is

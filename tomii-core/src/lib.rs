@@ -51,12 +51,22 @@ impl std::error::Error for BuildError {}
 pub enum RuntimeError {
     /// A worker or receiver thread failed to spawn.
     SpawnFailed(std::io::Error),
+    /// A worker task (kernel call or argument resolution) panicked. Caught by
+    /// `runtime::task_execution::execute_task`'s `catch_unwind` wrapper — the
+    /// single choke point shared by both the default (Rayon) and `--custom`
+    /// schedulers — and surfaced here instead of letting the run idle to
+    /// `max_runtime` and exit successfully. The `String` is the panic's
+    /// formatted message (see `execute_task`'s `panic_message` helper).
+    WorkerPanicked(String),
 }
 
 impl std::fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RuntimeError::SpawnFailed(e) => write!(f, "thread spawn failed: {e}"),
+            RuntimeError::WorkerPanicked(msg) => {
+                write!(f, "a worker task panicked, aborting run: {msg}")
+            }
         }
     }
 }
@@ -65,6 +75,7 @@ impl std::error::Error for RuntimeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             RuntimeError::SpawnFailed(e) => Some(e),
+            RuntimeError::WorkerPanicked(_) => None,
         }
     }
 }

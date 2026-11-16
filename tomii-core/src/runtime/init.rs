@@ -163,108 +163,127 @@ pub(crate) fn build_node_cache(
 
         // Helper closure: build ResPredCache entries from an arg slice.
         // `skip_cond` mirrors the `skip_conditions` flag used in build_arg_cache.
-        let build_res_preds =
-            |args: &[crate::graph_struct::Arg], skip_cond: bool| -> Vec<ResPredCache> {
-                let mut v = Vec::new();
-                // Position (within `args`, declared order) of the LAST `$res`
-                // arg — only that position may legitimately resolve to a
-                // width other than 1 (see `ResPredCache::may_vary_width`'s
-                // doc comment: the macro's own rule is that only a kernel's
-                // LAST parameter may be variadic, and a trailing `$dep`
-                // between a variadic `$res` and the end of `args` never
-                // carries a value, so it doesn't affect which `$res` is
-                // "last" in this sense).
-                let last_res_pos = args
-                    .iter()
-                    .rposition(|a| matches!(a.type_, CmTypes::Res(_)));
-                for (idx, arg) in args.iter().enumerate() {
-                    if skip_cond && arg.is_condition() {
-                        continue;
-                    }
-                    match &arg.type_ {
-                        CmTypes::Res(res_nid) => {
-                            let pred_node = &app_graph.nodes[*res_nid];
-                            let is_mapped = arg
-                                .predecessor
-                                .as_ref()
-                                .is_some_and(|p| p.instance_map.is_some());
-                            let mapped_forward = if is_mapped {
-                                // `validate_and_build` always populates this table entry
-                                // when ANY arg on `node.args` declares an instance_map on
-                                // this predecessor — the one exception is an instance_map
-                                // declared ONLY on a condition arg (`node.condition.args`),
-                                // which `validate_and_build` never scans (a pre-existing
-                                // gap from phase 1, not introduced here; see
-                                // `crate::instance_map`'s module docs). Panic loudly here
-                                // rather than silently falling back to the ordinary
-                                // (empty-`indexes`) resolution path, which would silently
-                                // deliver nothing instead of the declared values.
-                                let routing = pred_instance_map
-                                    .get(node_id)
-                                    .and_then(|row| row.get(*res_nid))
-                                    .and_then(|opt| opt.clone())
-                                    .unwrap_or_else(|| {
-                                        panic!(
-                                            "node '{}': $res arg declares instance_map on \
+        // `func_name` is the kernel this `args` slice is dispatched to (`node.func_name`
+        // for the main args, `node.condition.func_name` for condition args) — used to
+        // look up the kernel's published arg spec, when available, for `may_vary_width`.
+        let build_res_preds = |args: &[crate::graph_struct::Arg],
+                               skip_cond: bool,
+                               func_name: &str|
+         -> Vec<ResPredCache> {
+            let mut v = Vec::new();
+            // Position of the LAST `$res` arg, by raw (unfiltered) index — the
+            // structural fallback used when the kernel's arg spec is unavailable
+            // (see below): only that position may legitimately resolve to a width
+            // other than 1, because the macro's own rule is that only a kernel's
+            // LAST parameter may be variadic, and a trailing `$dep` between a
+            // variadic `$res` and the end of `args` never carries a value, so it
+            // doesn't affect which `$res` is "last" in this sense.
+            let last_res_pos = args
+                .iter()
+                .rposition(|a| matches!(a.type_, CmTypes::Res(_)));
+            // When the kernel published an arg spec, `may_vary_width` can be exactly
+            // "at or after the kernel's variadic-tail boundary" — matching
+            // `instance_map::validate_res_arity`'s load-time check exactly, so a
+            // graph that loads successfully can never panic here (see that
+            // function's doc comment and `ResPredCache::may_vary_width`'s doc
+            // comment for the full agreement argument). `positions` mirrors
+            // `validate_res_arity`'s own filtered (condition-args-excluded)
+            // position numbering via the same shared helper, so the two stay in
+            // lockstep by construction.
+            let fixed_boundary = crate::func_reg::get_func_argspec(func_name)
+                .map(crate::instance_map::variadic_fixed_boundary);
+            let positions = crate::instance_map::arg_template_positions(args);
+            for (idx, arg) in args.iter().enumerate() {
+                if skip_cond && arg.is_condition() {
+                    continue;
+                }
+                match &arg.type_ {
+                    CmTypes::Res(res_nid) => {
+                        let pred_node = &app_graph.nodes[*res_nid];
+                        let is_mapped = arg
+                            .predecessor
+                            .as_ref()
+                            .is_some_and(|p| p.instance_map.is_some());
+                        let mapped_forward = if is_mapped {
+                            // `validate_and_build` always populates this table entry
+                            // when ANY arg on `node.args` declares an instance_map on
+                            // this predecessor — the one exception is an instance_map
+                            // declared ONLY on a condition arg (`node.condition.args`),
+                            // which `validate_and_build` never scans (a pre-existing
+                            // gap from phase 1, not introduced here; see
+                            // `crate::instance_map`'s module docs). Panic loudly here
+                            // rather than silently falling back to the ordinary
+                            // (empty-`indexes`) resolution path, which would silently
+                            // deliver nothing instead of the declared values.
+                            let routing = pred_instance_map
+                                .get(node_id)
+                                .and_then(|row| row.get(*res_nid))
+                                .and_then(|opt| opt.clone())
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "node '{}': $res arg declares instance_map on \
                                              predecessor '{}', but no routing table was built \
                                              for this edge (instance_map on a condition-only \
                                              arg is not supported)",
-                                            node.name, pred_node.name
-                                        )
-                                    });
-                                Some(routing)
-                            } else {
-                                None
-                            };
-                            v.push(ResPredCache {
-                                node_id: node_id as IdType,
-                                res_node_id: *res_nid as IdType,
-                                indexes: arg
-                                    .predecessor
-                                    .as_ref()
-                                    .map_or_else(Vec::new, |p| p.indexes.clone()),
-                                pred_factor: pred_node.factor,
-                                pred_group_size: pred_node.group_size,
-                                node_group_size: node.group_size,
-                                node_factor: node.factor,
-                                is_dep: false,
-                                node_has_barrier,
-                                mapped_forward,
-                                may_vary_width: Some(idx) == last_res_pos,
-                            });
-                        }
-                        CmTypes::Dep(res_nid) => {
-                            v.push(ResPredCache {
-                                node_id: node_id as IdType,
-                                res_node_id: *res_nid as IdType,
-                                indexes: Vec::new(),
-                                pred_factor: 0,
-                                pred_group_size: None,
-                                node_group_size: None,
-                                node_factor: node.factor,
-                                is_dep: true,
-                                node_has_barrier,
-                                mapped_forward: None,
-                                // `is_dep` always short-circuits to a width of
-                                // exactly 1 before this flag is ever consulted
-                                // (see `collect_res_from_cache`) — `true` here
-                                // only documents that a $dep can never trip
-                                // the width guard, not that it is exempt from
-                                // anything.
-                                may_vary_width: true,
-                            });
-                        }
-                        _ => {}
+                                        node.name, pred_node.name
+                                    )
+                                });
+                            Some(routing)
+                        } else {
+                            None
+                        };
+                        v.push(ResPredCache {
+                            node_id: node_id as IdType,
+                            res_node_id: *res_nid as IdType,
+                            indexes: arg
+                                .predecessor
+                                .as_ref()
+                                .map_or_else(Vec::new, |p| p.indexes.clone()),
+                            pred_factor: pred_node.factor,
+                            pred_group_size: pred_node.group_size,
+                            node_group_size: node.group_size,
+                            node_factor: node.factor,
+                            is_dep: false,
+                            node_has_barrier,
+                            mapped_forward,
+                            may_vary_width: match fixed_boundary {
+                                Some(fixed) => positions[idx].is_some_and(|p| p >= fixed),
+                                None => Some(idx) == last_res_pos,
+                            },
+                        });
                     }
+                    CmTypes::Dep(res_nid) => {
+                        v.push(ResPredCache {
+                            node_id: node_id as IdType,
+                            res_node_id: *res_nid as IdType,
+                            indexes: Vec::new(),
+                            pred_factor: 0,
+                            pred_group_size: None,
+                            node_group_size: None,
+                            node_factor: node.factor,
+                            is_dep: true,
+                            node_has_barrier,
+                            mapped_forward: None,
+                            // `is_dep` always short-circuits to a width of
+                            // exactly 1 before this flag is ever consulted
+                            // (see `collect_res_from_cache`) — `true` here
+                            // only documents that a $dep can never trip
+                            // the width guard, not that it is exempt from
+                            // anything.
+                            may_vary_width: true,
+                        });
+                    }
+                    _ => {}
                 }
-                v
-            };
+            }
+            v
+        };
 
-        let main_res_preds = build_res_preds(&node.args, true);
+        let main_res_preds = build_res_preds(&node.args, true, &node.func_name);
         let cond_res_preds = node
             .condition
             .as_ref()
-            .map(|cond| build_res_preds(&cond.args, false));
+            .map(|cond| build_res_preds(&cond.args, false, &cond.func_name));
 
         cache_entry.arg_cache.res_predecessors = main_res_preds;
         if let (Some(nc), Some(cp)) = (cache_entry.node_condition.as_mut(), cond_res_preds) {

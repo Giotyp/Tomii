@@ -17,32 +17,62 @@ use tomii_types::*;
 
 use super::node_cache::{ArgCacheEntry, ResPredCache};
 
-/// Runtime guard: a `$res` argument that is NOT the node's trailing
-/// value-bearing position (`rp.may_vary_width == false` — see
+/// Runtime guard: a `$res` argument that is NOT at or after the node's
+/// variadic-tail boundary (`rp.may_vary_width == false` — see
 /// `node_cache::ResPredCache::may_vary_width`'s doc comment) must resolve to
 /// exactly one value, because only the kernel's LAST parameter may be
 /// `#[tomii_export(variadic)]`; any other position silently receiving a
 /// different count would desync every later positional slot the generated
-/// wrapper reads. This is the enforcement for the case
-/// `crate::instance_map::validate_res_arity` cannot cover at load time — no
-/// published kernel arity metadata (old plugin, Python-registered kernel,
-/// etc.) — and is sound without that metadata precisely because it only
-/// ever restricts the non-last position, never the last one (so it can
-/// never reject a legitimate variadic delivery). `width` is already computed
-/// by the caller, so this check is O(1) and adds no cost to the (overwhelming
-/// majority) `width == 1` fast path — it only runs on the pre-existing
-/// splice branch.
+/// wrapper reads.
+///
+/// When the node's kernel published an argument spec, `may_vary_width` is
+/// computed from the real variadic boundary (`init::build_node_cache`), and
+/// `instance_map::validate_res_arity` already rejected this exact shape at
+/// load time — so this branch is UNREACHABLE for such a node, and firing
+/// here indicates a validation/dispatch disagreement bug, not a graph
+/// authoring mistake. When no spec was published (old plugin,
+/// Python-registered kernel, etc.) `validate_res_arity` skips the node
+/// entirely and this guard — conservatively restricted to "only the
+/// structurally-last `$res` arg may vary" — is the ONLY enforcement; firing
+/// here means the graph really does feed more than one value into a scalar
+/// parameter. `width` is already computed by the caller, so this check is
+/// O(1) and adds no cost to the (overwhelming majority) `width == 1` fast
+/// path — it only runs on the pre-existing splice branch.
 #[inline(always)]
-fn assert_res_width_is_sound(rp: &ResPredCache, width: usize) {
+fn assert_res_width_is_sound(shared: &Arc<SharedData>, rp: &ResPredCache, width: usize) {
     if width != 1 && !rp.may_vary_width {
+        let node = &shared.graph.nodes[rp.node_id as usize];
+        let pred = &shared.graph.nodes[rp.res_node_id as usize];
+        let argspec_published = crate::func_reg::get_func_argspec(&node.func_name).is_some();
         panic!(
-            "node id {}: $res argument (predecessor node id {}) resolved to {width} value(s) at \
-             dispatch, but this argument is not the kernel's trailing variadic parameter — a \
-             scalar parameter must receive exactly one value. This is a graph/kernel arity \
-             mismatch that `instance_map::validate_res_arity` would have caught at load time had \
-             the plugin published per-kernel arity metadata (`get_func_argspec` returned `None` \
-             for this kernel).",
-            rp.node_id, rp.res_node_id
+            "node '{node_name}' (id {node_id}): $res argument (predecessor '{pred_name}', id \
+             {pred_id}) resolved to {width} value(s) at dispatch, but this argument is not at \
+             or after the kernel's trailing `#[tomii_export(variadic)]` parameter — a scalar \
+             parameter must receive exactly one value. {detail}",
+            node_name = node.name,
+            node_id = rp.node_id,
+            pred_name = pred.name,
+            pred_id = rp.res_node_id,
+            detail = if argspec_published {
+                format!(
+                    "`get_func_argspec(\"{}\")` returned `Some` for this kernel, so \
+                     `instance_map::validate_res_arity` should already have rejected this \
+                     shape at load time — this is a load-time-validation/runtime-dispatch \
+                     disagreement bug in the runtime itself, not a graph authoring mistake. \
+                     Please report it.",
+                    node.func_name
+                )
+            } else {
+                format!(
+                    "`get_func_argspec(\"{}\")` returned `None` for this kernel (an old \
+                     plugin, a Python-registered kernel, or any other kernel whose \
+                     variadic-ness is unpublished), so `instance_map::validate_res_arity` \
+                     could not check this edge at load time and fell back to this runtime \
+                     guard, which only ever allows the node's structurally LAST `$res` \
+                     argument to vary — this is a genuine graph/kernel arity mismatch.",
+                    node.func_name
+                )
+            }
         );
     }
 }
@@ -102,6 +132,24 @@ fn process_runtime_refs(
 /// in one bulk dispatch — same pattern for both: `shared.config.workers` /
 /// `shared.slot_data.frame_id[slot]` resolve once per bulk task, not once per cell).
 ///
+/// **Splice order.** `res_indexes` holds each `$res`/`$dep` argument's position in
+/// `args_cache.args`'s static template, ascending in declared order (one entry per
+/// value-bearing arg — see `crate::instance_map::arg_template_positions`, which computes
+/// the same positions at load time). A `$res` whose delivered width is 1 is a plain
+/// in-place write (`buf[res_idx] = value`), which never changes `buf`'s length. A width
+/// other than 1 (only possible at or after the kernel's variadic-tail boundary — see
+/// `node_cache::ResPredCache::may_vary_width`) uses `Vec::splice`, which DOES shift every
+/// later index in `buf`. The loop below therefore processes `res_idx` positions in
+/// DESCENDING order (`.rev()`): a splice at a given position only ever disturbs indexes
+/// strictly after it, which — processing highest-to-lowest — have already been handled.
+/// This is what makes multiple variable-width `$res` arguments in one kernel's variadic
+/// tail resolve correctly (each arg's own declared value order is preserved, and no
+/// earlier arg's precomputed `res_idx` is invalidated by a later-in-buffer splice);
+/// before this fix, ascending order meant the FIRST non-1-width splice silently
+/// desynchronized every subsequent `res_idx` in the same call. Width-1-only nodes (the
+/// overwhelming majority, see `init::build_node_cache`'s `all_width_one`) never take the
+/// splice branch at all, so this reordering costs nothing on that path.
+///
 /// Returns `true` if a stale-task was detected.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
@@ -121,10 +169,14 @@ pub(super) fn populate_dynamic_args_into(
     process_runtime_refs(buf, args_cache, node_index, workers, frame_id);
 
     let mut stale = false;
+    // Reverse (highest `res_idx` first): see this function's doc comment — a splice at
+    // one position shifts every later position in `buf`, so processing descending
+    // positions means each splice only ever disturbs positions already handled.
     for (res_idx, rp) in args_cache
         .res_indexes
         .iter()
         .zip(args_cache.res_predecessors.iter())
+        .rev()
     {
         if stale {
             break;
@@ -136,7 +188,7 @@ pub(super) fn populate_dynamic_args_into(
             if result.len() == 1 {
                 buf[*res_idx] = result.remove(0);
             } else {
-                assert_res_width_is_sound(rp, result.len());
+                assert_res_width_is_sound(shared, rp, result.len());
                 buf.splice(*res_idx..*res_idx + 1, result);
             }
         }
@@ -148,6 +200,11 @@ pub(super) fn populate_dynamic_args_into(
 ///
 /// Returns `true` if a stale-task was detected (slot generation changed mid-resolution).
 /// The caller must drop the task without processing it or decrementing dependency counters.
+///
+/// **Splice order**: see [`populate_dynamic_args_into`]'s doc comment — the `$res` splice
+/// loop below processes `res_idx` positions in the same descending order, for the same
+/// reason (this is the non-`template_stable` path, taken whenever at least one `$res`
+/// argument's width can vary).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn populate_cached_args_into(
@@ -194,6 +251,7 @@ pub(super) fn populate_cached_args_into(
         .res_indexes
         .iter()
         .zip(args_cache.res_predecessors.iter())
+        .rev()
     {
         if stale {
             break;
@@ -205,7 +263,7 @@ pub(super) fn populate_cached_args_into(
             if result.len() == 1 {
                 buf[*res_idx] = result.remove(0);
             } else {
-                assert_res_width_is_sound(rp, result.len());
+                assert_res_width_is_sound(shared, rp, result.len());
                 buf.splice(*res_idx..*res_idx + 1, result);
             }
         }
@@ -1381,5 +1439,134 @@ mod mapped_res_value_tests {
             "a mapped $res read spanning a generation change must be dropped as stale, \
              never silently deliver a value (or hang) past the wrap"
         );
+    }
+
+    /// Two producers `p0` (factor 3) and `p1` (factor 3) feed consumer `c`
+    /// (factor 2) through TWO separate mapped `$res` args, declared in that
+    /// order (`p0`'s arg first, `p1`'s second):
+    /// - `c[0]`: `p0.map = [0, 1]` (width 2), `p1.map = []` (width 0).
+    /// - `c[1]`: `p0.map = [2]` (width 1), `p1.map = [0, 1, 2]` (width 3).
+    ///
+    /// Neither producer's arg is forced to `may_vary_width: true` by
+    /// `init::build_node_cache` on its own (this crate's own `cargo test`
+    /// build has no real plugin, so `get_func_argspec` always returns `None`
+    /// — see `instance_map::tests::validate_res_arity_is_a_noop_without_published_kernel_metadata`
+    /// — and the structural fallback only ever allows the node's single
+    /// LAST `$res` arg to vary). This test force-sets BOTH entries'
+    /// `may_vary_width` to simulate a published argspec that puts both args
+    /// in the kernel's variadic tail (the shape `init::build_node_cache`
+    /// now produces when a real plugin's spec is available — see that
+    /// function's doc comment) — isolating the SPLICE-ORDER fix in
+    /// `populate_cached_args_into`/`populate_dynamic_args_into` from the
+    /// metadata plumbing, which is covered end-to-end by
+    /// `tests/res_arity_validation.rs`-style real-plugin tests instead.
+    ///
+    /// `c[0]`'s expected buffer `[p0[0], p0[1]]` (width-0 `p1` contributes
+    /// nothing) is exactly the shape that silently corrupts under the
+    /// PRE-FIX ascending splice order: processing `p0` (index 0, width 2)
+    /// first grows the buffer and shifts `p1`'s precomputed slot by +1,
+    /// so `p1`'s width-0 splice then deletes the END of `p0`'s own value
+    /// instead of contributing nothing. `c[1]`'s `[p0[2], p1[0], p1[1],
+    /// p1[2]]` exercises the width-1/width-3 combination with the SAME
+    /// two-arg declared order, including every value's own internal order
+    /// (ascending list order, per `MappedEdgeRouting::forward`).
+    #[test]
+    fn multiple_variable_width_tail_res_args_splice_independently() {
+        const GRAPH: &str = r#"
+        {
+            "nodes": [
+                { "name": "p0", "factor": 3, "function": "noop", "args": [] },
+                { "name": "p1", "factor": 3, "function": "noop", "args": [] },
+                {
+                    "name": "c",
+                    "factor": 2,
+                    "function": "noop",
+                    "args": [
+                        {
+                            "type": "$res",
+                            "predecessor": { "name": "p0", "instance_map": [[0, 1], [2]] }
+                        },
+                        {
+                            "type": "$res",
+                            "predecessor": { "name": "p1", "instance_map": [[], [0, 1, 2]] }
+                        }
+                    ]
+                }
+            ]
+        }
+        "#;
+        let mut rt = build_test_rt(GRAPH);
+        {
+            // Force-enable the multi-tail-vary dispatch path (see doc comment
+            // above) — same-crate test, `shared` is a private field of
+            // `TomiiRt` visible from this submodule of `runtime`.
+            let shared_mut = Arc::get_mut(&mut rt.shared).expect("sole Arc owner in this test");
+            for rp in &mut shared_mut.graph_cache.node_cache[2]
+                .arg_cache
+                .res_predecessors
+            {
+                rp.may_vary_width = true;
+            }
+        }
+        let shared = &rt.shared;
+
+        for i in 0..3u8 {
+            shared
+                .exec
+                .node_results
+                .set(&NodeInfo::new(0, 0, i as usize, 0), CmTypes::U8(i)); // p0
+            shared.exec.node_results.set(
+                &NodeInfo::new(1, 0, i as usize, 0),
+                CmTypes::U8(100 + i), // p1
+            );
+        }
+
+        let args_cache = &shared.graph_cache.node_cache[2].arg_cache;
+
+        let mut buf0 = Vec::new();
+        let stale0 =
+            populate_cached_args_into(&mut buf0, shared, args_cache, 2, 0, 0, 0, usize::MAX, 0);
+        assert!(!stale0);
+        assert_eq!(
+            buf0,
+            vec![CmTypes::U8(0), CmTypes::U8(1)],
+            "c[0]: p0 width 2 then p1 width 0 — p1 must contribute nothing, not \
+             truncate p0's own values"
+        );
+
+        let mut buf1 = Vec::new();
+        let stale1 =
+            populate_cached_args_into(&mut buf1, shared, args_cache, 2, 1, 0, 0, usize::MAX, 0);
+        assert!(!stale1);
+        assert_eq!(
+            buf1,
+            vec![
+                CmTypes::U8(2),
+                CmTypes::U8(100),
+                CmTypes::U8(101),
+                CmTypes::U8(102)
+            ],
+            "c[1]: p0 width 1 (in place) then p1 width 3, each value in its own \
+             ascending list order, concatenated in declared arg order"
+        );
+
+        // `populate_dynamic_args_into` (the bulk-dispatch path) must agree exactly —
+        // same splice-order fix, same expected results.
+        let mut buf0b = Vec::new();
+        buf0b.extend(args_cache.args.iter().cloned());
+        let stale0b = populate_dynamic_args_into(
+            &mut buf0b,
+            shared,
+            args_cache,
+            0,          // node_index
+            0,          // slot
+            0,          // pred_index
+            usize::MAX, // exec_slot (sentinel: never matches, skips staleness)
+            0,          // exec_gen
+            0,          // workers
+            0,          // frame_id
+        );
+        assert!(!stale0b);
+        assert_eq!(buf0b, buf0);
     }
 }

@@ -67,7 +67,7 @@ pub(crate) use shared_data::SharedData;
 pub(crate) use shared_data::FRAME_SLOT_EMPTY;
 pub use shared_data::{BatchConfig, RuntimeConfig, SpinWaitConfig};
 pub(crate) use shared_data::{
-    BatchQueueRx, BatchQueueTx, ExecCtx, GraphCache, SlotData, SlotState, Telemetry,
+    BatchQueueRx, BatchQueueTx, ExecCtx, GraphCache, SlotData, SlotState, TaskPanicState, Telemetry,
 };
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -493,6 +493,7 @@ impl TomiiRtBuilder {
                 last_assigned: Arc::new(AtomicUsize::new(0)),
             },
             shutdown_flag: Arc::new(AtomicBool::new(false)),
+            task_panic: Arc::new(TaskPanicState::default()),
             #[cfg(feature = "network")]
             net: NetworkInfra {
                 frame_packets: AtomicUsize::new(0),
@@ -751,7 +752,14 @@ impl TomiiRt {
                     .config
                     .max_runtime
                     .is_some_and(|max| start_time.elapsed().as_secs() > max);
-                if max_runtime_exceeded {
+                // Fail fast: a worker task panicked (see `task_execution::execute_task`'s
+                // `catch_unwind` wrapper and `TaskPanicState`). Checked first so a panic
+                // overrides every other reason to keep waiting — nothing further will
+                // complete once `shutdown_flag` has already been set by `record`.
+                if self.shared.task_panic.occurred.load(Ordering::Acquire) {
+                    tracing::info!("worker task panicked, exiting");
+                    finish = true;
+                } else if max_runtime_exceeded {
                     tracing::info!("Max runtime reached, exiting");
                     finish = true;
                 } else if completed {
@@ -854,6 +862,23 @@ impl TomiiRt {
             self.shared.telemetry.with_timing(|tb| {
                 let _ = tb.finish_slot_processing(system_slot);
             });
+        }
+
+        // Surface a worker-task panic as a hard error, even in the no-`max_runtime`/
+        // no-predicate branch above (where the `while` loop that checks `task_panic`
+        // never runs at all — that branch instead relies on `record`'s `shutdown_flag`
+        // side effect to make resolution threads exit on their own so the joins above
+        // return promptly). Checked last, after every thread has already been joined,
+        // so the message reflects the final (first-recorded) panic.
+        if self.shared.task_panic.occurred.load(Ordering::Acquire) {
+            let message = self
+                .shared
+                .task_panic
+                .message
+                .lock()
+                .clone()
+                .unwrap_or_else(|| "worker task panicked (no message captured)".to_string());
+            return Err(crate::RuntimeError::WorkerPanicked(message));
         }
 
         Ok(())

@@ -54,6 +54,51 @@
   the whole slice unconditionally. The loop now filters `CmTypes::None` out
   before collecting, so the kernel sees exactly its own declared values.
 
+- **Multiple variable-width `$res` arguments in one kernel's variadic
+  tail**: load-time validation (`instance_map::validate_res_arity`) already
+  accepted any number of `$res` args — mapped or ordinary — at or after a
+  kernel's variadic boundary, but dispatch (`ResPredCache::may_vary_width`)
+  only ever let the node's single structurally LAST `$res` arg vary in
+  width. A node whose variadic tail was fed by two or more such args (e.g.
+  an irregular-tree fusion node joining several lower producers through
+  separate mapped `$res` edges) loaded successfully and then panicked every
+  worker at its first dispatch — an earlier arg's non-1-width splice
+  silently shifted every later arg's precomputed buffer position. Fixed in
+  two parts: (1) `may_vary_width` is now computed, when the kernel's
+  argspec is published, directly from the SAME variadic-boundary arithmetic
+  `validate_res_arity` uses (any `$res` arg at or after the boundary may
+  vary — not just the literal last one), so the two can never disagree
+  again; it still falls back to the old "structurally last arg only" rule
+  when no argspec is published (old plugins, Python-registered kernels).
+  (2) `populate_cached_args_into`/`populate_dynamic_args_into` now splice
+  `$res` values back-to-front (descending declared-argument position)
+  instead of front-to-back, so a splice that changes the buffer's length
+  only ever disturbs positions already written — the actual fix that makes
+  several simultaneously variable-width arguments resolve correctly. Nodes
+  whose `$res` args are all width-1 (the common case) are unaffected either
+  way — they never take the splice branch. The misleading panic text
+  (claiming the plugin never published arity metadata, and naming nodes
+  only by id) now reports whether `get_func_argspec` actually returned
+  `Some`/`None` for that kernel and uses node/predecessor names. See
+  `tomii-core/src/instance_map.rs`'s module docs, the
+  [JSON graph format reference](website/docs/reference/json-graph-format.md),
+  [nodes-and-vars guide](website/docs/guide/graphs/nodes-and-vars.md), and the
+  [Rust plugins guide](website/docs/guide/plugins/rust.md)'s "Multiple edges
+  feeding the same variadic parameter" section.
+
+- **Worker-task panic now fails the run fast**: a panic in a worker task
+  (a kernel body, or an internal runtime panic such as the `$res` arity
+  guard above) used to either idle the whole run out to `--max-runtime` and
+  exit **successfully** (`--custom` scheduler: the panicking thread's
+  `JoinHandle::join()` result was silently discarded at shutdown) or abort
+  the process uncontrolled (default scheduler, via Rayon's own internal
+  panic handler). `runtime::task_execution::execute_task` — the single
+  dispatch choke point for both schedulers — now catches the panic,
+  signals shutdown immediately, and the run returns
+  `RuntimeError::WorkerPanicked(message)` instead of `Ok(())`; the `main`
+  binary already turns any `RuntimeError` into a nonzero exit with the
+  message on stderr.
+
 ## v1.2.0 — 2026-07-10
 
 ### Terminology: "stream" → "frame"
