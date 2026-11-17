@@ -30,7 +30,11 @@ pub type IdType = u16;
 pub type TomiiError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// Errors that can occur while building the Τομί runtime.
+///
+/// `#[non_exhaustive]`: downstream `match`es must carry a `_` arm, so future
+/// variants can be added in a minor release without breaking consumers.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum BuildError {
     /// A configuration invariant was violated (slots, capacity, etc.).
     InvalidConfig(String),
@@ -47,7 +51,11 @@ impl std::fmt::Display for BuildError {
 impl std::error::Error for BuildError {}
 
 /// Errors that can occur while running the Τομί runtime.
+///
+/// `#[non_exhaustive]`: downstream `match`es must carry a `_` arm, so future
+/// variants can be added in a minor release without breaking consumers.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum RuntimeError {
     /// A worker or receiver thread failed to spawn.
     SpawnFailed(std::io::Error),

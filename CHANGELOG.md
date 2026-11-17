@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## v1.3.0 — 2026-11-17
+
+### Notable / behaviour changes
+
+- `RuntimeError` and `BuildError` are now `#[non_exhaustive]`: downstream
+  `match`es must include a `_` arm, so future error variants can be added
+  without a breaking release.
+- New `RuntimeError::WorkerPanicked(String)` variant — and a worker-task panic
+  (a kernel body, or an internal runtime panic such as the `$res` arity guard)
+  now **fails the run** with that error instead of idling to `max_runtime` and
+  exiting successfully.
+- `$res` arity is validated at load: a graph whose variadic tail is fed by two
+  or more variable-width `$res` arguments — which previously loaded and then
+  panicked every frame — is now rejected up front with a clear message.
+
 ### New features
 
 - **Explicit per-instance dependency maps (`instance_map`)**: a predecessor
